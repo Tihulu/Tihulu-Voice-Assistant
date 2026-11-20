@@ -14,7 +14,7 @@
 
 Changes: independently constructible GTK window and GLib/asyncio bridge; idempotent turn/playback cancellation; awaited device cleanup; stale progress suppression; response-locale-only voice validation. New tests exercise actual GTK widgets using synthetic backends and native process cleanup using a short-lived Python fixture. Physical audio and model inference are separate gates.
 
-Candidate CI and review status must be read from the actual native-controls PR. Test definitions are not proof of execution; see TEST_EVIDENCE.md.
+Observed for `feat/native-voice-controls` commit `beaac21`: local Xvfb reproduction exposed a single-test-harness defect (a Gtk.Application exports its D-Bus interface at its application id and cannot export it twice in one process), fixed and re-verified locally, then GitHub CI run 44674465300 succeeded for `test (3.10)`, `test (3.12)` and `gtk`. Core suite: 45 cases per interpreter; native GTK suite: 11 cases. See TEST_EVIDENCE.md. Physical COSMIC and audio acceptance remain HOLD.
 
 ## Remaining product gates
 
