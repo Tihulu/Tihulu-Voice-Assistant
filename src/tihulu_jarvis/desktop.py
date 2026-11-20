@@ -10,7 +10,7 @@ from pathlib import Path
 from . import market, profiles, settings
 from .voice import audio
 from .voice.jan import Jan
-from .voice.m1 import Hold
+from .voice.m1 import Hold, SpeechRequest
 from .voice.session import Session
 
 
@@ -115,7 +115,8 @@ def create_window(app, loop):
             models.append(self.models)
             self.models.connect("changed", self.select_model)
             self.url.connect("changed", lambda *_:self.forget_inventory())
-            self.labels, self.pickers = {}, []
+            self.labels, self.pickers, self.previews = {}, [], {}
+            self.preview_locales = {}
             for key, caption in [("stt","STT · Whisper (.bin)"),("tr","Piper · Türkçe"),("en","Piper · English"),("de","Piper · Deutsch")]:
                 row = Gtk.Box(spacing=8)
                 models.append(row)
@@ -123,6 +124,13 @@ def create_window(app, loop):
                 self.pickers.append(btn)
                 self.labels[key] = Gtk.Label(xalign=0, wrap=True)
                 row.append(self.labels[key])
+                if key != "stt":
+                    # A preview speaks a fixed sample in the selected locale only.
+                    hear = self.button(row, tr("Preview","Dinle","Anhören"), lambda k=key:self.preview(k))
+                    self.previews[hear] = key
+            self.test_chat_button = self.button(models, tr("Test selected model","Seçilen modeli dene","Ausgewähltes Modell testen"), self.test_chat)
+            self.test_note = Gtk.Label(xalign=0, wrap=True)
+            models.append(self.test_note)
             self.update_labels()
             self.store = profiles.Store(profiles.profile_dir())
             self.policy_rows = {}
@@ -336,8 +344,14 @@ def create_window(app, loop):
             self.finish_btn.set_sensitive(self.stage=="listening" and self.finish is not None)
             self.cancel.set_sensitive(self.busy)
             self.hard.set_sensitive(self.busy)
-            for w in (self.reload,self.url,self.models,*self.pickers):
+            for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,*self.previews):
                 w.set_sensitive(not self.busy)
+            if not self.busy:
+                self.test_chat_button.set_sensitive(connected)
+                for widget, lang in self.previews.items():
+                    # A preview speaks only the locale that is actually selected.
+                    widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
+                                         and audio.tools_ready("piper","aplay"))
 
         def save(self):
             try:
@@ -559,6 +573,42 @@ def create_window(app, loop):
                     d.destroy()
             dialog.connect("response",response)
             dialog.show()
+
+        def preview(self, lang):
+            if self.busy or self.cfg["llm"] not in self.inventory:
+                return
+            sample = {"tr": "Bu bir ses önizlemesidir.",
+                      "en": "This is a voice preview.",
+                      "de": "Das ist eine Stimmprobe."}[lang]
+            speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"][lang], lang).id)
+            async def run(epoch):
+                def progress(stage):
+                    if epoch == self.session.epoch:
+                        self.set_state(stage)
+                await audio.speak(speech, progress)
+            self.submit(run)
+
+        def test_chat(self):
+            if self.busy or self.cfg["llm"] not in self.inventory:
+                return
+            self.test_note.set_text(tr("Testing…","Sınanıyor…","Test läuft…"))
+            async def run(epoch):
+                # A disposable session: a test never enters the conversation.
+                probe = Session()
+                # A disposable session shares this turn's epoch, so cancellation
+                # and staleness checks still apply; its history is never merged.
+                probe.epoch = epoch
+                # A short, anchor-bearing probe so the reply language is provable.
+                text = tr("Hello there! In one short sentence, what can you do?",
+                          "Merhaba! Tek cümleyle cevapla: neler yapabilirsin?",
+                          "Hallo! Antworte in einem kurzen Satz: was kannst du?")
+                reply, _ = await probe.reply(text, self.backend_for_test(), epoch)
+                self.session.check(epoch)
+                self.test_note.set_text("%s · %s" % (reply.strip()[:240], probe.context.response_language or "unknown"))
+            self.submit(run)
+
+        def backend_for_test(self):
+            return Jan(self.cfg["endpoint"], self.cfg["llm"])
 
         def submit(self, work):
             if self.busy:

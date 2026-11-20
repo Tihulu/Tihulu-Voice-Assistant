@@ -723,3 +723,93 @@ class MarketInventoryTests(MarketUITests):
         self.click(self.ui.market_find)
         self.until(lambda: self.ui.market.card("fixture-qwen").version == version)
         self.assertEqual(self.ui.market.card("fixture-qwen").state, "REGISTERED")
+
+
+class PreviewTests(MarketUITests):
+    """Safe test chat and per-locale voice preview over synthetic backends."""
+
+    def preview_of(self, lang):
+        for widget, key in self.ui.previews.items():
+            if key == lang:
+                return widget
+        raise AssertionError("missing preview control: " + lang)
+
+    def test_test_chat_answers_without_touching_the_conversation(self):
+        self.connect_model()
+        self.text("Merhaba!")
+        history = self.ui.session.history
+        self.backend.answers.append("Kısa bir test yanıtı.")
+        self.click(self.ui.test_chat_button)
+        self.until(lambda: not self.ui.busy)
+        self.assertIn("Kısa bir test yanıtı", self.ui.test_note.get_text())
+        note = self.ui.test_note.get_text()
+        self.assertTrue(note.startswith("Kısa bir test yanıtı. · "), note)
+        self.assertIn(note.rsplit(" · ", 1)[1], ("tr", "en", "de"))
+        # A probe answer must never become conversation memory.
+        self.assertEqual(self.ui.session.history, history)
+        self.assertEqual(len(self.bubbles()), 2)
+        prompts = [m for messages in self.backend.requests for m in messages
+                   if m.role == "user"]
+        probes = ("what can you do", "neler yapabilirsin", "was kannst du")
+        self.assertTrue(any(any(probe in m.content for probe in probes) for m in prompts))
+        self.assertEqual(len(self.ui.session.history), 2)
+
+    def test_test_chat_requires_a_selected_model(self):
+        self.assertFalse(self.ui.test_chat_button.get_sensitive())
+        self.ui.inventory = ("fixture-chat",)
+        self.ui.cfg["llm"] = "fixture-chat"
+        self.ui.refresh()
+        self.assertTrue(self.ui.test_chat_button.get_sensitive())
+
+    def test_preview_speaks_only_the_selected_locale(self):
+        self.connect_model()
+        samples = {"tr": "Bu bir ses önizlemesidir.", "en": "This is a voice preview.",
+                   "de": "Das ist eine Stimmprobe."}
+        for lang in samples:
+            path = Path(self.profile_home) / (lang + ".onnx")
+            path.write_bytes(b"synthetic voice fixture\n")
+            path.with_name(path.name + ".json").write_text(
+                json.dumps({"language": {"code": lang}}), encoding="utf-8")
+            self.ui.register_choice(lang, str(path))
+        self.ui.refresh()
+        self.assertEqual(sorted(self.ui.previews.values()), ["de", "en", "tr"])
+        for widget, lang in self.ui.previews.items():
+            self.assertTrue(widget.get_sensitive(), lang)
+            self.backend.speeches.clear()
+            self.click(widget)
+            self.until(lambda: bool(self.backend.speeches))
+            spoken = self.backend.speeches[-1]
+            self.assertEqual((spoken.language, spoken.text), (lang, samples[lang]))
+            self.ui.interrupt(True)
+            # Cancellation must await the playback cleanup, not abandon it.
+            self.backend.playback_release.set()
+            self.until(lambda: not self.ui.busy)
+            self.assertTrue(self.backend.playback_cleaned)
+            self.assertEqual(self.ui.session.history, ())
+
+    def test_preview_is_unavailable_without_a_voice_or_playback_tools(self):
+        self.connect_model()
+        with patch.object(desktop.audio, "tools_ready", return_value=False):
+            self.ui.refresh()
+            self.assertFalse(any(w.get_sensitive() for w in self.ui.previews))
+        self.assertFalse(any(w.get_sensitive() for w in self.ui.previews))
+        self.assertFalse(self.ui.talk.get_sensitive())
+
+    def test_preview_uses_the_selected_voice_and_keeps_memory(self):
+        self.connect_model()
+        for lang in ("tr",):
+            path = Path(self.profile_home) / (lang + ".onnx")
+            path.write_bytes(b"synthetic voice fixture\n")
+            path.with_name(path.name + ".json").write_text(
+                json.dumps({"language": {"code": lang}}), encoding="utf-8")
+            self.ui.register_choice(lang, str(path))
+        self.ui.cfg["voices"]["tr"] = str(Path(self.profile_home) / "tr.onnx")
+        self.ui.refresh()
+        history = self.ui.session.history
+        self.backend.playback_stage = "synthesizing"
+        self.click(self.preview_of("tr"))
+        self.until(lambda: self.backend.speeches and self.ui.stage == "synthesizing")
+        speech = self.backend.speeches[-1]
+        self.assertEqual((speech.language, speech.text), ("tr", "Bu bir ses önizlemesidir."))
+        self.assertEqual(self.ui.session.history, history)
+        self.assertEqual(self.bubbles(), [])
