@@ -952,3 +952,48 @@ class DownloadFlowTests(MarketFixture):
         self.assertFalse(card.owned_by_jarvis)
         self.assertFalse(Path(self.market_home, "artifacts", "fixture-download").exists())
         self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))
+
+
+class EndpointModeTests(MarketFixture):
+    """The active mode decides which endpoints the client will even try."""
+
+    def remote_profile(self, mode="LOCAL_ONLY", providers=()):
+        self.ui.store.save(profiles.replace(
+            self.ui.store.load(self.ui.cfg["profile"]), version=2, based_on_mode=mode,
+            allowed_providers=tuple(providers)))
+        self.ui.activate_profile(self.ui.cfg["profile"], quiet=True)
+
+    def test_local_only_refuses_a_remote_address_before_any_request(self):
+        self.remote_profile("LOCAL_ONLY")
+        self.ui.url.set_text("https://provider.example/v1")
+        requests = list(self.backend.requests)
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "local_only_forbids_non_loopback")
+        self.assertEqual(self.backend.requests, requests)
+        self.assertEqual(self.ui.inventory, ())
+
+    def test_local_only_still_uses_its_loopback_endpoint(self):
+        self.remote_profile("LOCAL_ONLY")
+        self.ui.url.set_text("http://127.0.0.1:9876/v1")
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy and self.ui.inventory == ("fixture-chat",))
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.assertEqual(self.ui.cfg["endpoint"], "http://127.0.0.1:9876/v1")
+
+    def test_a_cloud_mode_without_providers_does_not_claim_a_transport(self):
+        self.remote_profile("CLOUD_CHAT")
+        self.ui.url.set_text("https://provider.example/v1")
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "cloud_transport_not_available")
+        self.assertEqual(self.backend.requests, [])
+
+    def test_a_named_provider_must_be_approved(self):
+        self.remote_profile("CLOUD_CHAT", providers=("fixture-provider",))
+        self.ui.url.set_text("http://127.0.0.1:9876/v1")
+        requests = list(self.backend.requests)
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "approved_provider_required")
+        self.assertEqual(self.backend.requests, requests)
