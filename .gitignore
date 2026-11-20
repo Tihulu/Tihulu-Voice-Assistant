@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.token
+secrets/
+credentials/
+local-settings/
+private/
+*.log
+
+# Recorded media and local model stores
+recordings/
+audio-captures/
+*.wav
+*.flac
+*.mp3
+models/
+model-cache/
+*.gguf
+*.onnx
+*.safetensors
+*.bin
+
+# Platform/editor artifacts
+.DS_Store
+.idea/
+.vscode/
