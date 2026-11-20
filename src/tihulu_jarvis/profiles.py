@@ -301,6 +301,18 @@ MODE_TEXT = {
 ENDPOINT_LIMIT = 4096
 
 
+def require_tool(profile, action, scope=(), now=0.0):
+    """Refuse an action the active profile explicitly denies, at the moment it
+    is attempted — not only when a control was enabled."""
+    decision, reason = decide(profile.rules(), action, scope, now)
+    if decision == ASK and reason == "approval_expired":
+        raise Hold("approval_expired")
+    # Only an absent rule is not a forbiddance; law and unknown actions never pass.
+    if decision == DENY and reason != "no_rule_matches":
+        raise Hold("profile_forbids_" + action if reason == "rule" else reason)
+    return decision, reason
+
+
 def enforce_endpoint(profile, endpoint):
     """The active mode decides what kind of endpoint may be used at all.
 
@@ -442,7 +454,8 @@ class Store:
             raise Hold("profile_unreadable") from None
 
     def ids(self):
-        return tuple(sorted(p.name[:-5] for p in self.root.glob("*.json")))
+        # A fixed-width slice would corrupt any name containing a dot.
+        return tuple(sorted(p.stem for p in self.root.glob("*.json")))
 
     def versions(self, profile_id):
         stem = self._path(profile_id).stem

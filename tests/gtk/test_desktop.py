@@ -591,6 +591,12 @@ class MarketFixture(DesktopFixture):
                 return candidate
         raise AssertionError("missing card: " + model_id)
 
+    def preview_of(self, lang):
+        for widget, key in self.ui.previews.items():
+            if key == lang:
+                return widget
+        raise AssertionError("missing preview control: " + lang)
+
 class MarketUITests(MarketFixture):
     """Market cards, compatibility and truthful registration."""
 
@@ -733,12 +739,6 @@ class MarketInventoryTests(MarketFixture):
 class PreviewTests(MarketFixture):
     """Safe test chat and per-locale voice preview over synthetic backends."""
 
-    def preview_of(self, lang):
-        for widget, key in self.ui.previews.items():
-            if key == lang:
-                return widget
-        raise AssertionError("missing preview control: " + lang)
-
     def test_test_chat_answers_without_touching_the_conversation(self):
         self.connect_model()
         self.text("Merhaba!")
@@ -771,8 +771,7 @@ class PreviewTests(MarketFixture):
         samples = {"tr": "Bu bir ses önizlemesidir.", "en": "This is a voice preview.",
                    "de": "Das ist eine Stimmprobe."}
         for lang in samples:
-            path = Path(self.profile_home) / (lang + ".onnx")
-            path.write_bytes(b"synthetic voice fixture\n")
+            path = self.weights(lang + ".onnx")
             path.with_name(path.name + ".json").write_text(
                 json.dumps({"language": {"code": lang}}), encoding="utf-8")
             self.ui.register_choice(lang, str(path))
@@ -803,12 +802,11 @@ class PreviewTests(MarketFixture):
     def test_preview_uses_the_selected_voice_and_keeps_memory(self):
         self.connect_model()
         for lang in ("tr",):
-            path = Path(self.profile_home) / (lang + ".onnx")
-            path.write_bytes(b"synthetic voice fixture\n")
+            path = self.weights(lang + ".onnx")
             path.with_name(path.name + ".json").write_text(
                 json.dumps({"language": {"code": lang}}), encoding="utf-8")
             self.ui.register_choice(lang, str(path))
-        self.ui.cfg["voices"]["tr"] = str(Path(self.profile_home) / "tr.onnx")
+        self.ui.cfg["voices"]["tr"] = str(path)
         self.ui.refresh()
         history = self.ui.session.history
         self.backend.playback_stage = "synthesizing"
@@ -997,3 +995,57 @@ class EndpointModeTests(MarketFixture):
         self.until(lambda: not self.ui.busy)
         self.assertEqual(self.ui.status.get_text(), "approved_provider_required")
         self.assertEqual(self.backend.requests, requests)
+
+
+class ActionEnforcementUITests(MarketFixture):
+    """A denied action is refused at the moment it runs, not when enabled."""
+
+    def rewrite_rules(self, rules):
+        profile = self.ui.store.load(self.ui.cfg["profile"]).checked()
+        updated = profiles.replace(profile, version=profile.version + 1, tool_rules=tuple(rules))
+        self.ui.store.save(updated)
+        self.ui.activate_profile(updated.id, quiet=True)
+        self.ui.refresh()
+        return updated
+
+    def deny_audio(self):
+        profile = self.ui.store.load(self.ui.cfg["profile"]).checked()
+        return self.rewrite_rules(
+            tuple(r for r in profile.rules() if r.action != "local_audio_device")
+            + (profiles.Rule("local_audio_device", ("push_to_talk",), profiles.DENY),))
+
+    def test_talk_is_disabled_by_a_denied_audio_rule(self):
+        self.deny_audio()
+        self.connect_model()
+        self.assertFalse(self.ui.talk.get_sensitive())
+        # Even a forced click reaches the handler and is refused with the reason.
+        async def denied(epoch):
+            self.ui.require_tools(("local_audio_device", ("push_to_talk",)))
+        self.ui.submit(denied)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "profile_forbids_local_audio_device")
+        self.assertEqual(self.ui.stage, "ready")
+
+    def test_preview_is_refused_when_the_rule_denies_audio(self):
+        self.connect_model()
+        path = self.weights("tr.onnx")
+        path.with_name(path.name + ".json").write_text(
+            json.dumps({"language": {"code": "tr"}}), encoding="utf-8")
+        self.ui.register_choice("tr", str(path))
+        self.ui.refresh()
+        self.assertTrue(self.preview_of("tr").get_sensitive())
+        self.deny_audio()
+        self.ui.refresh()
+        self.assertFalse(self.preview_of("tr").get_sensitive())
+        self.assertFalse(self.backend.speeches)
+        self.assertFalse(self.ui.talk.get_sensitive())
+
+    def test_removing_the_denial_restores_the_control(self):
+        profile = self.deny_audio()
+        self.connect_model()
+        self.assertFalse(self.ui.talk.get_sensitive())
+        self.rewrite_rules(tuple(r for r in profile.rules() if r.action != "local_audio_device")
+                           + (profiles.Rule("local_audio_device", ("push_to_talk",),
+                                            profiles.ALLOW, approval="owner-consent",
+                                            expires_at=1e12),))
+        self.assertTrue(self.ui.talk.get_sensitive())
