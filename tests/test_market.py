@@ -439,8 +439,9 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
             self.source(checksum="").checked()
         with self.assertRaisesRegex(Hold, "invalid_source_reference"):
             self.source(reference="/home/owner/weights").checked()
-        with self.assertRaisesRegex(Hold, "source_size_not_stated"):
-            self.source(size=0).checked()
+        # An unstated size stays unknown; the transport limit still bounds it.
+        self.assertEqual(self.source(size=0).size, 0)
+        self.assertEqual(human_size(0), "unknown/not tested")
 
     def test_transport_credentials_are_not_accepted(self):
         with self.assertRaisesRegex(Hold, "invalid_approval_reference"):
