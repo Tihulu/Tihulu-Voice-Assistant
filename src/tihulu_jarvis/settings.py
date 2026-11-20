@@ -12,7 +12,7 @@ LOCALES = ("tr", "en", "de")
 
 
 def empty():
-    return {"endpoint": "", "llm": "", "stt": "", "voices": {}}
+    return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": ""}
 
 
 def config_path():
@@ -30,6 +30,9 @@ def checked(obj):
         if not isinstance(v, str) or len(v) > 4096:
             raise Hold("invalid_local_settings")
         out[k] = v
+    if not isinstance(obj.get("profile", ""), str) or len(obj.get("profile", "")) > 64:
+        raise Hold("invalid_local_settings")
+    out["profile"] = obj.get("profile", "")
     voices = obj.get("voices", {})
     if not isinstance(voices, dict) or any(k not in LOCALES or not isinstance(v, str) or len(v)>4096 for k,v in voices.items()):
         raise Hold("invalid_local_settings")
