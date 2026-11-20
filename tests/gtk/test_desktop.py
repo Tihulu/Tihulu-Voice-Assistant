@@ -204,6 +204,14 @@ class DesktopFixture(unittest.TestCase):
         self.assertTrue(widget.get_sensitive())
         widget.emit("clicked")
 
+    def assert_no_failed_turn(self):
+        """A turn that ended without a Hold reason must not be silently generic."""
+        task = self.ui.session.active
+        if task is not None and task.done() and not task.cancelled():
+            problem = task.exception()
+            if problem is not None:
+                raise AssertionError("owned turn failed: %r" % (problem,))
+
     def connect_model(self):
         self.click(self.ui.reload)
         self.until(lambda: not self.ui.busy)
@@ -218,6 +226,7 @@ class DesktopFixture(unittest.TestCase):
     def begin_voice(self):
         self.click(self.ui.talk)
         self.until(lambda: self.ui.stage == "listening")
+        self.assert_no_failed_turn()
         self.assertFalse(self.ui.send.get_sensitive())
         self.assertFalse(self.ui.reload.get_sensitive())
 
