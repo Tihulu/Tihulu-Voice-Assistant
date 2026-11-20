@@ -190,6 +190,17 @@ async def from_models(client, languages=(), now=0.0):
     return tuple(cards)
 
 
+def register_installed(card):
+    """Register an item that already exists and is verified by its own endpoint.
+
+    The download lifecycle stays linear; this never applies to an item that
+    is still awaiting a transfer.
+    """
+    if card.state != DISCOVERED or not card.installed or card.local_or_cloud != "local":
+        raise Hold("lifecycle_transition_rejected:" + card.state + "->REGISTERED")
+    return replace(card, state=REGISTERED, registered=True)
+
+
 def advance(card, state):
     """Lifecycle transitions are explicit and auditable."""
     if state not in ALLOWED_NEXT[card.state]:

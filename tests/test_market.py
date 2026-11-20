@@ -8,7 +8,8 @@ import unittest
 from pathlib import Path
 
 from tihulu_jarvis.market import (ACTIVE, ALLOWED_NEXT, CATEGORIES, TERMINAL, ModelCard,
-                                  Registry, advance, digest, from_file, from_models)
+                                  Registry, advance, digest, from_file, from_models,
+                                  register_installed)
 from tihulu_jarvis.voice.m1 import Hold
 
 
@@ -72,6 +73,16 @@ class CardTests(unittest.TestCase):
         cancelled = advance(card(), "CANCELLED")
         with self.assertRaisesRegex(Hold, "lifecycle_transition_rejected"):
             advance(cancelled, "REVIEWED")
+
+    def test_registering_an_already_installed_item_never_replaces_a_download(self):
+        discovered = card(category="llm", installed=True, local_or_cloud="local")
+        self.assertEqual(register_installed(discovered).state, "REGISTERED")
+        for bad, reason in ((card(category="llm", installed=False), "DISCOVERED->REGISTERED"),
+                            (card(category="llm", installed=True, local_or_cloud="cloud"), "DISCOVERED->REGISTERED")):
+            with self.assertRaisesRegex(Hold, "lifecycle_transition_rejected:" + reason):
+                register_installed(bad)
+        with self.assertRaisesRegex(Hold, "lifecycle_transition_rejected"):
+            register_installed(advance(card(), "REVIEWED"))
 
     def test_a_failed_download_leaves_nothing_registered(self):
         current = card()

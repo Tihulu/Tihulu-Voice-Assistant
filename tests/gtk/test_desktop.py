@@ -651,3 +651,75 @@ class MarketUITests(DesktopFixture):
         self.assertEqual(card.version, "unknown")
         self.assertEqual(card.license_id, "unknown")
         self.assertFalse(card.requires_gpu)
+
+
+class MarketInventoryTests(MarketUITests):
+    """Jan-backed discovery is a fixture server; nothing reaches a network."""
+
+    def test_discovered_jan_models_are_listed_as_installed(self):
+        self.backend.inventory = ("fixture-qwen", "fixture-llama")
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.ui.market_filter.set_active(1)  # the llm category
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy and len(self.ui.market.cards()) == 2)
+        rows = [c for c in self.ui.market.cards() if c.category == "llm"]
+        self.assertEqual([c.model_id for c in rows], ["fixture-qwen", "fixture-llama"])
+        self.assertTrue(all(c.installed for c in rows))
+        self.assertTrue(all(not c.registered for c in rows))
+        self.assertEqual(rows[0].provider, "jan")
+        self.assertEqual(rows[0].state, "DISCOVERED")
+        self.assertIn("unknown/not tested", rows[0].health_status)
+        labels = self.rows()
+        self.assertEqual(len(labels), 2)
+        self.assertIn("jan", labels[0])
+
+    def test_selecting_a_discovered_model_registers_and_applies_it(self):
+        self.backend.inventory = ("fixture-qwen", "fixture-llama")
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy and len(self.ui.market.cards()) == 2)
+        self.ui.market_filter.set_active(1)
+        self.pick_card("fixture-qwen")
+        self.click(self.ui.market_use)
+        self.until(lambda: not self.ui.busy and self.ui.cfg["llm"] == "fixture-qwen")
+        self.assertEqual(self.ui.cfg["llm"], "fixture-qwen")
+        card = self.ui.market.card("fixture-qwen")
+        self.assertEqual(card.state, "REGISTERED")
+        self.assertTrue(card.registered)
+        profile = self.ui.store.load(self.ui.cfg["profile"])
+        self.assertEqual((profile.llm_model_id, profile.version), ("fixture-qwen", 2))
+        self.assertEqual(self.ui.profile_note.get_text().count("LOCAL_ONLY"), 1)
+        # An active model is one the endpoint actually serves.
+        self.assertEqual(self.ui.inventory, ("fixture-qwen", "fixture-llama"))
+        self.assertTrue(self.ui.send.get_sensitive())
+
+    def test_a_model_the_endpoint_does_not_serve_is_refused(self):
+        self.backend.inventory = ("fixture-qwen",)
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy and len(self.ui.market.cards()) == 1)
+        self.backend.inventory = ("fixture-llama",)
+        self.ui.url.set_text("http://127.0.0.1:9877")
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy and self.ui.inventory == ("fixture-llama",))
+        self.ui.market_filter.set_active(1)
+        self.pick_card("fixture-qwen")
+        self.click(self.ui.market_use)
+        self.until(lambda: self.ui.status.get_text() == "model_not_in_inventory")
+        self.assertEqual(self.ui.cfg["llm"], "fixture-chat")
+        self.assertEqual(self.ui.market.card("fixture-qwen").state, "DISCOVERED")
+
+    def test_rediscovery_never_upgrades_a_registered_card(self):
+        self.backend.inventory = ("fixture-qwen",)
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy and len(self.ui.market.cards()) == 1)
+        self.ui.inventory = ("fixture-qwen",)
+        self.ui.market_filter.set_active(1)
+        self.pick_card("fixture-qwen")
+        self.click(self.ui.market_use)
+        self.until(lambda: self.ui.cfg["llm"] == "fixture-qwen")
+        version = self.ui.market.card("fixture-qwen").version
+        self.click(self.ui.market_find)
+        self.until(lambda: self.ui.market.card("fixture-qwen").version == version)
+        self.assertEqual(self.ui.market.card("fixture-qwen").state, "REGISTERED")
