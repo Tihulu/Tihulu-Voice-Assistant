@@ -5,6 +5,7 @@ Run separately under dbus-run-session and Xvfb. Missing GTK/display is a
 failure, not a skip. No microphone, installed models or Jan service is used.
 """
 import asyncio
+import gc
 import json
 import sys
 import tempfile
@@ -19,6 +20,10 @@ from tihulu_jarvis import desktop, settings
 from tihulu_jarvis.voice.m1 import Hold
 
 Gio, GLib, Gtk = desktop._gtk()
+
+# A Gtk.Application exports a fixed D-Bus interface at its application id, and that
+# export cannot be taken twice in one process. One application serves every test.
+APP_ID = "io.github.Tihulu.Jarvis.Test"
 
 
 class Backend:
@@ -83,12 +88,33 @@ class Backend:
 
 
 class DesktopTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(cls.loop)
+        cls.app = Gtk.Application(application_id=APP_ID, flags=Gio.ApplicationFlags.NON_UNIQUE)
+        cls.app.register(None)
+        assert cls.app.get_is_registered() is True
+
+    @classmethod
+    def tearDownClass(cls):
+        pending = asyncio.all_tasks(cls.loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            cls.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        cls.loop.run_until_complete(cls.loop.shutdown_asyncgens())
+        cls.loop.close()
+        asyncio.set_event_loop(None)
+        cls.app = None
+        gc.collect()  # Release the application's D-Bus export before exit.
+
     def setUp(self):
+        self.ui = None
+        self.bridge = None
         self.stack = ExitStack()
         self.addCleanup(self.stack.close)
         tmp = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
-        self.loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self.loop)
         self.backend = Backend()
         cfg = settings.empty()
         cfg.update(endpoint="http://127.0.0.1:9876", llm="fixture-chat",
@@ -110,36 +136,39 @@ class DesktopTests(unittest.TestCase):
         self.stack.enter_context(patch.object(
             sys, "excepthook", side_effect=lambda *args: self.callback_errors.append(args[1])))
         self.loop.set_exception_handler(lambda loop, ctx: self.callback_errors.append(ctx.get("exception", ctx.get("message"))))
-        self.app = Gtk.Application(application_id="io.github.Tihulu.Jarvis.Test",
-                                   flags=Gio.ApplicationFlags.NON_UNIQUE)
-        self.app.register(None)
         self.bridge = desktop.gtk_asyncio(self.loop)
         self.bridge.__enter__()
+        self.addCleanup(self.close_bridge)
         self.ui = desktop.create_window(self.app, self.loop)
         self.until(lambda: self.ui.win.get_mapped())
+
+    def close_bridge(self):
+        if self.bridge is not None:
+            bridge, self.bridge = self.bridge, None
+            bridge.__exit__(None, None, None)
 
     def tearDown(self):
         try:
             for event in (self.backend.capture_release, self.backend.playback_release,
                           self.backend.chat_release):
                 event.set()
-            if self.ui.busy:
+            if self.ui is not None and self.ui.busy:
                 self.ui.interrupt(True)
-            self.until(lambda: not self.ui.busy)
-            self.ui.win.close()
-            self.until(lambda: not self.app.get_windows())
+                self.until(lambda: not self.ui.busy)
+            if self.ui is not None:
+                self.ui.win.close()
+                self.until(lambda: not self.app.get_windows())
             self.assertFalse(self.callback_errors, self.callback_errors)
             self.assertFalse(asyncio.all_tasks(self.loop), "Owned task outlived the window")
-        finally:
-            self.bridge.__exit__(None, None, None)
+            self.close_bridge()
             pending = asyncio.all_tasks(self.loop)
             for task in pending:
                 task.cancel()
             if pending:
                 self.loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-            self.loop.run_until_complete(self.loop.shutdown_asyncgens())
-            self.loop.close()
-            asyncio.set_event_loop(None)
+        except Exception:
+            self.close_bridge()
+            raise
 
     def until(self, predicate):
         """Condition-based GLib wait, with a bounded failure deadline."""
