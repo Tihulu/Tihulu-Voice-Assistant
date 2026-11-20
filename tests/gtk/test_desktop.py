@@ -225,7 +225,18 @@ class DesktopFixture(unittest.TestCase):
 
     def begin_voice(self):
         self.click(self.ui.talk)
-        self.until(lambda: self.ui.stage == "listening")
+        try:
+            self.until(lambda: self.ui.stage == "listening")
+        except AssertionError:
+            task = self.ui.session.active
+            detail = "stage=%r busy=%r callbacks=%r note=%r" % (
+                self.ui.stage, self.ui.busy, self.callback_errors,
+                getattr(self.ui, "profile_note", None) and self.ui.profile_note.get_text())
+            if task is not None and not task.done():
+                detail += " stack=" + "".join(task.get_stack()).strip()
+            if task is not None and task.done() and not task.cancelled():
+                detail += " exception=%r" % (task.exception(),)
+            raise AssertionError("voice did not start: " + detail)
         self.assert_no_failed_turn()
         self.assertFalse(self.ui.send.get_sensitive())
         self.assertFalse(self.ui.reload.get_sensitive())
