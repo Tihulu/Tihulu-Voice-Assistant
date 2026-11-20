@@ -105,3 +105,83 @@ class TransportTests(unittest.IsolatedAsyncioTestCase):
             written, body = await self.fetch_into(url)
             self.assertEqual(hashlib.sha256(body).hexdigest(),
                              hashlib.sha256(PAYLOAD).hexdigest())
+
+
+class ResumeTests(unittest.IsolatedAsyncioTestCase):
+    async def serve_on(self, ranges=True):
+        state = {"served": 0}
+
+        async def route(reader, writer):
+            try:
+                request = await reader.readuntil(b"\r\n\r\n")
+                line = request.split(b"\r\n", 1)[0]
+                want = 0
+                for field in request.split(b"\r\n"):
+                    if field.lower().startswith(b"range:"):
+                        want = int(field.split(b"=")[1].split(b"-")[0])
+                honoured = want and ranges
+                body = PAYLOAD[want:] if honoured else PAYLOAD
+                status = b"HTTP/1.1 206 Partial Content" if honoured else b"HTTP/1.1 200 OK"
+                extra = (b"Content-Range: bytes %d-%d/%d\r\n"
+                         % (want, len(PAYLOAD) - 1, len(PAYLOAD))) if want and ranges else b""
+                writer.write(status + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\n"
+                             + extra + b"Content-Type: application/octet-stream\r\n\r\n" + body)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(route, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        return "http://127.0.0.1:%d/weights.bin" % port, server
+
+    async def test_a_resumed_transfer_reassembles_the_payload(self):
+        url, server = await self.serve_on()
+        async with server:
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "weights.bin"
+                seen = []
+                first = await loopback_fetch(url)(str(target), seen.append, start=0)
+                partial = target.read_bytes()
+                with open(target, "wb") as f:
+                    f.write(partial[:5])
+                written = await loopback_fetch(url)(str(target), seen.append, start=5)
+                self.assertEqual(written, len(PAYLOAD))
+                self.assertEqual(target.read_bytes(), PAYLOAD)
+                self.assertEqual(seen[-1], len(PAYLOAD))
+
+    async def test_a_source_without_range_restarts_from_zero(self):
+        url, server = await self.serve_on(ranges=False)
+        async with server:
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "weights.bin"
+                with open(target, "wb") as f:
+                    f.write(PAYLOAD[:5])
+                written = await loopback_fetch(url)(str(target), lambda count: None, start=5)
+                self.assertEqual(written, len(PAYLOAD))
+                self.assertEqual(target.read_bytes(), PAYLOAD)
+
+    async def test_a_range_mismatch_is_refused(self):
+        async def wrong_range(reader, writer):
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                body = PAYLOAD[9:]
+                writer.write(b"HTTP/1.1 206 Partial Content\r\nContent-Length: "
+                             + str(len(body)).encode() + b"\r\nContent-Range: bytes 9"
+                             + b"-%d/%d\r\nContent-Type: application/octet-stream\r\n\r\n"
+                             % (len(PAYLOAD) - 1, len(PAYLOAD)) + body)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(wrong_range, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        async with server:
+            with tempfile.TemporaryDirectory() as tmp:
+                target = Path(tmp) / "weights.bin"
+                with open(target, "wb") as f:
+                    f.write(PAYLOAD[:5])
+                with self.assertRaisesRegex(Hold, "transfer_range_not_honoured"):
+                    await loopback_fetch("http://127.0.0.1:%d/weights.bin" % port)(
+                        str(target), lambda count: None, start=5)

@@ -4,11 +4,13 @@
 import asyncio
 import hashlib
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from tihulu_jarvis import market
+from tihulu_jarvis.transfer_http import loopback_fetch
 from tihulu_jarvis.market import (ACTIVE, ALLOWED_NEXT, CATEGORIES, TERMINAL, Catalog,
                                   ModelCard, Registry, Source, Transfer, advance, digest,
                                   from_file, from_models, human_size, parse_catalog,
@@ -529,3 +531,100 @@ class CatalogTests(unittest.TestCase):
                 {"model_id": "path-entry", "display_name": "P", "category": "stt",
                  "source_ref": "/home/owner/weights.bin", "source_checksum": "0" * 64,
                  "source_size": 1}]))
+
+
+class ResumeTransferTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Registry(self.tmp)
+
+    def active_card(self, **kw):
+        current = card(**kw)
+        for state in ("REVIEWED", "APPROVED", "QUEUED", "DOWNLOADING", "VERIFIED",
+                      "REGISTERED", "TESTABLE", ACTIVE):
+            current = advance(current, state)
+        return current
+
+    async def serve_on(self, ranges=True):
+        async def route(reader, writer):
+            try:
+                request = await reader.readuntil(b"\r\n\r\n")
+                want = 0
+                for field in request.split(b"\r\n"):
+                    if field.lower().startswith(b"range:"):
+                        want = int(field.split(b"=")[1].split(b"-")[0])
+                honoured = want and ranges
+                body = b"weights"[want:] if honoured else b"weights"
+                status = b"HTTP/1.1 206 Partial Content" if honoured else b"HTTP/1.1 200 OK"
+                extra = (b"Content-Range: bytes %d-%d/%d\r\n" % (want, len(b"weights") - 1,
+                                                                 len(b"weights"))) if honoured else b""
+                writer.write(status + b"\r\nContent-Length: " + str(len(body)).encode() + b"\r\n"
+                             + extra + b"Content-Type: application/octet-stream\r\n\r\n" + body)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        server = await asyncio.start_server(route, "127.0.0.1", 0)
+        return "http://127.0.0.1:%d/weights.bin" % server.sockets[0].getsockname()[1], server
+
+    def source_for(self, url):
+        return Source(url, hashlib.sha256(b"weights").hexdigest(), len(b"weights"),
+                     "1.0", "MIT", "owner-1", 1e12)
+
+    async def test_a_partial_transfer_resumes_and_registers(self):
+        url, server = await self.serve_on()
+        async with server:
+            item = card(category="llm", state="DISCOVERED")
+            self.store.save_card(item)
+            started, stalled = asyncio.Event(), asyncio.Event()
+
+            async def stalling(path, note):
+                with open(path, "wb") as f:
+                    f.write(b"we")
+                note(2)
+                started.set()
+                await stalled.wait()
+                return 2
+
+            transfer = Transfer(self.store, item, self.source_for(url), stalling, root=self.tmp)
+            task = asyncio.get_running_loop().create_task(transfer.run())
+            await asyncio.wait_for(started.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 2)
+            stalled.set()  # only now let the fixture handler finish
+            partial = Path(transfer.root) / ("partial-fixture-model")
+            self.assertTrue(partial.is_file())
+            kept = partial.stat().st_size
+            card_after = self.store.card("fixture-model")
+            self.assertEqual(card_after.state, "CANCELLED")
+            # The card stays cancelled until the resumed transfer verifies it.
+            resumed = Transfer(self.store, card_after, self.source_for(url), loopback_fetch(url),
+                               root=transfer.root)
+            done = await asyncio.wait_for(resumed.resume(lambda count: None, start=kept), 5)
+            self.assertEqual(done.state, "REGISTERED")
+            self.assertEqual(done.disk_size_bytes, len(b"weights"))
+            self.assertFalse(partial.exists())
+            artifact = Path(transfer.registry.root, "artifacts", "fixture-model")
+            self.assertEqual(artifact.read_bytes(), b"weights")
+
+    async def test_a_resume_without_a_matching_partial_is_refused(self):
+        url, server = await self.serve_on()
+        async with server:
+            item = card(category="llm", state="CANCELLED")
+            self.store.save_card(item)
+            transfer = Transfer(self.store, item, self.source_for(url), loopback_fetch(url),
+                                root=self.tmp)
+            with self.assertRaisesRegex(Hold, "transfer_resume_offset_unverified"):
+                await transfer.resume(lambda count: None, start=3)
+
+    async def test_a_resume_of_an_installed_model_is_refused(self):
+        url, server = await self.serve_on()
+        async with server:
+            item = self.active_card(category="llm", installed=True)
+            self.store.save_card(item)
+            transfer = Transfer(self.store, item, self.source_for(url), loopback_fetch(url),
+                                root=self.tmp)
+            with self.assertRaisesRegex(Hold, "model_already_registered"):
+                await transfer.resume(lambda count: None, start=3)

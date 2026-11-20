@@ -521,6 +521,66 @@ class Transfer:
         self.state = self.card.state
         return self.registry.save_card(self.card)
 
+    async def resume(self, progress=None, start=0):
+        """Continue an interrupted transfer from a verified byte offset.
+
+        The card's lifecycle is not advanced here: an interrupted item stays
+        cancelled until the resumed transfer verifies and registers it.
+        """
+        if self.card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
+            raise Hold("model_already_registered")
+        fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
+        os.close(fd)
+        self.temp = Path(name)
+        try:
+            os.chmod(self.temp, 0o600)
+            if start:
+                partial = self.root / ("partial-" + self.card.model_id)
+                if not partial.is_file() or partial.stat().st_size != start:
+                    raise Hold("transfer_resume_offset_unverified")
+                self.temp.write_bytes(partial.read_bytes())
+            written = await self.fetch(str(self.temp), lambda count: progress(count) if progress else None, start)
+            if start and written <= start:
+                raise Hold("transfer_resume_made_no_progress")
+            checksum, _ = digest(self.temp)
+            if checksum != self.source.checksum:
+                self.card = replace(self.card, state="FAILED")
+                self.state = self.card.state
+                raise Hold("transfer_checksum_mismatch")
+            # A resumed transfer registers directly; the interrupted item's
+            # lifecycle was not advanced for the retry itself.
+            target = self.registry.root / "artifacts" / self.card.model_id
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.replace(self.temp, target)
+            self.temp = None
+            os.chmod(target, 0o600)
+            # The resumed bytes are the artifact now; the partial is no longer needed.
+            (self.root / ("partial-" + self.card.model_id)).unlink(missing_ok=True)
+            registered = replace(self.card, state="REGISTERED", registered=True, installed=True,
+                                 owned_by_jarvis=True, disk_size_bytes=written,
+                                 storage_ref="sha256-" + checksum[:32],
+                                 version=self.source.version if self.source.version != "unknown" else self.card.version,
+                                 license_id=self.source.license_id, trust_level="curated")
+            self.registry.save_card(registered)
+            self.card = registered
+            self.state = registered.state
+            return registered
+        except asyncio.CancelledError:
+            if self.state not in TERMINAL:
+                self._persist("CANCELLED")
+            raise
+        except Hold:
+            if self.state not in TERMINAL:
+                self._persist("FAILED")
+            raise
+        finally:
+            if self.temp is not None:
+                # Keep a cancelled partial so a later resume can continue from it.
+                if self.state == "CANCELLED" and self.temp.stat().st_size > 0:
+                    self.temp.replace(self.root / ("partial-" + self.card.model_id))
+                else:
+                    Path(self.temp).unlink(missing_ok=True)
+
     async def run(self, progress=None):
         if self.card.state != DISCOVERED:
             # Nothing already installed is ever overwritten by a transfer.
@@ -577,7 +637,11 @@ class Transfer:
             raise
         finally:
             if self.temp is not None:
-                Path(self.temp).unlink(missing_ok=True)
+                if self.state == "CANCELLED" and self.temp.stat().st_size > 0:
+                    # Keep the partial so a later resume can continue from it.
+                    self.temp.replace(self.root / ("partial-" + self.card.model_id))
+                else:
+                    Path(self.temp).unlink(missing_ok=True)
 
     def cancel(self):
         raise Hold("transfer_cancelled_by_owner")
