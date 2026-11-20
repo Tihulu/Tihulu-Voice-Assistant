@@ -9,6 +9,7 @@ import signal
 import struct
 import tempfile
 import wave
+from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -36,6 +37,22 @@ def voice_for(value, lang):
     except (KeyError, ValueError, TypeError, OSError):
         raise Hold("voice_locale_unverified") from None
     return Voice(str(p), lang)
+
+
+class SelectedVoices(Mapping):
+    """Snapshot selections, validating only the requested response locale."""
+
+    def __init__(self, choices):
+        self._choices = dict(choices)
+
+    def __getitem__(self, lang):
+        return voice_for(self._choices[lang], lang)
+
+    def __iter__(self):
+        return iter(self._choices)
+
+    def __len__(self):
+        return len(self._choices)
 
 
 def tools_ready(*names):
