@@ -2,7 +2,8 @@ name: Core and native GTK tests
 on:
   pull_request:
     branches: [main, 'feat/m1-portable-core', 'feat/modes-and-profiles', 'feat/profile-ui',
-               'feat/market-ui', 'feat/mode-endpoint', 'feat/action-enforcement']
+               'feat/market-ui', 'feat/mode-endpoint', 'feat/action-enforcement',
+               'feat/loopback-transport']
 permissions:
   contents: read
 jobs:
