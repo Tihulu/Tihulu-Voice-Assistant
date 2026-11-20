@@ -11,11 +11,14 @@ class Session:
     def __init__(self):
         self.epoch, self.history, self.context = 0, (), LanguageContext()
         self.active = None
+        self._invalidated = False
 
     def invalidate(self, clear=False):
-        self.epoch += 1
-        if self.active is not None:
-            self.active.cancel()
+        if not self._invalidated:
+            self._invalidated = True
+            self.epoch += 1
+            if self.active is not None and not self.active.done():
+                self.active.cancel()
         if clear:
             self.history, self.context = (), LanguageContext()
 
@@ -23,6 +26,7 @@ class Session:
         if self.active is not None and not self.active.done():
             raise Hold("operation_busy")
         self.epoch += 1
+        self._invalidated = False
         self.active = (loop or asyncio.get_running_loop()).create_task(run(self.epoch))
         return self.active
 

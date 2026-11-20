@@ -245,6 +245,68 @@ def sanitized(profile):
     return replace(out, shell_rules=(Rule("host_shell", (), DENY),)).checked()
 
 
+def profile_dir():
+    base = os.environ.get("XDG_DATA_HOME")
+    folder = Path(base) if base and Path(base).is_absolute() else Path.home() / ".local" / "share"
+    return folder / "tihulu-jarvis" / "profiles"
+
+
+def template(key):
+    """Permission-light starting point. Accepting one is the owner's decision."""
+    specs = {
+        "private-assistant": ("Private Assistant", "LOCAL_ONLY",
+                              (Rule("local_audio_device", ("push_to_talk",), ALLOW,
+                                    approval="owner-consent", expires_at=1e12),)),
+        "daily-assistant": ("Daily Assistant", "LOCAL_ONLY",
+                            (Rule("local_audio_device", ("push_to_talk",), ALLOW,
+                                  approval="owner-consent", expires_at=1e12),
+                             Rule("wake_word", ("always",), DENY))),
+        "research-assistant": ("Research Assistant", "CLOUD_CHAT",
+                               (Rule("external_network", ("provider",), ALLOW),
+                                Rule("filesystem_read", ("notes",), ALLOW),
+                                Rule("host_shell", ("bridge",), DENY))),
+        "coding-agent": ("Coding Agent", "SECURE_HYBRID",
+                         (Rule("host_shell", ("jan-qwen",), ALLOW,
+                               approval="owner-consent", expires_at=1e12),
+                          Rule("filesystem_write", ("project",), ALLOW),
+                          Rule("publish_artifact", ("repo",), ASK))),
+        "custom-developer": ("Custom Developer", "CUSTOM",
+                             (Rule("host_shell", ("bridge",), DENY),
+                              Rule("filesystem_read", ("project",), ALLOW))),
+    }
+    if key not in specs:
+        raise Hold("unknown_profile_template")
+    name, mode, rules = specs[key]
+    return Profile(id=key, name=name, based_on_mode=mode, version=1,
+                  tool_rules=tuple(r for r in rules if r.action not in ("host_shell",)),
+                  shell_rules=tuple(r for r in rules if r.action == "host_shell"),
+                  network_rules=tuple(r for r in rules if r.action == "external_network"),
+                  filesystem_rules=tuple(r for r in rules if r.action.startswith("filesystem_")),
+                  cloud_disclosure_rules=tuple(r for r in rules if r.action == "publish_artifact"),
+                  voice_activation="push_to_talk" if key in ("private-assistant", "daily-assistant") else "off",
+                  background_processing_enabled=False).checked()
+
+
+TEMPLATES = ("private-assistant", "daily-assistant", "research-assistant",
+             "coding-agent", "custom-developer")
+
+MODE_TEXT = {
+    "LOCAL_ONLY": "Local models only; no cloud inference or disclosure; host shell denied.",
+    "CLOUD_CHAT": "Approved cloud reasoning; no privileged local tools, even if a model asks.",
+    "SECURE_HYBRID": "Cloud reasoning plus an authorized local worker behind the policy bridge.",
+    "CUSTOM": "Your configuration inside the global envelope; presets are never weakened.",
+}
+
+
+def ensure_default(store):
+    """Create the permission-light default only when no profile exists."""
+    if store.ids():
+        return None
+    profile = template("private-assistant")
+    store.save(profile)
+    return profile
+
+
 class Store:
     """Profile storage with version history. No arbitrary cap is imposed."""
 
