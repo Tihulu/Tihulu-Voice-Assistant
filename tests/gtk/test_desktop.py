@@ -1140,3 +1140,85 @@ class DownloadTransportTests(MarketFixture):
         self.pick_card("fixture-download")
         self.assertFalse(self.ui.market_fetch.get_sensitive())
         self.assertFalse(card.approved_source())
+
+
+class DownloadQueueTests(DownloadTransportTests):
+    """Queue state, progress and cancellation, with the real loopback transport."""
+
+    def download_rows(self):
+        out = []
+        item = self.ui.download_list.get_first_child()
+        while item is not None:
+            out.append(item.get_child().get_text())
+            item = item.get_next_sibling()
+        return out
+
+    def pick_download(self, model_id):
+        for item, entry in self.ui.download_entries.items():
+            if entry["id"] == model_id:
+                self.ui.download_list.select_row(item)
+                return entry
+        raise AssertionError("missing queue entry: " + model_id)
+
+    def test_completed_download_shows_state_and_size(self):
+        url, payload = self.loopback_server()
+        self.begin_download(url, hashlib.sha256(payload).hexdigest(), len(payload))
+        self.click(self.ui.market_fetch)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(self.download_rows()), 1)
+        line = self.download_rows()[0]
+        self.assertIn("fixture-download · REGISTERED", line)
+        self.assertIn("%d of %s bytes" % (len(payload), market.human_size(len(payload))), line)
+        entry = self.pick_download("fixture-download")
+        self.assertEqual((entry["state"], entry["received"]), ("REGISTERED", len(payload)))
+        self.assertFalse(self.ui.download_cancel.get_sensitive())
+
+    def test_unknown_size_is_reported_as_unknown(self):
+        url, payload = self.loopback_server()
+        card = self.discovered_with_terms(url, hashlib.sha256(payload).hexdigest(), 0)
+        self.ui.market_filter.set_active(0)
+        self.pick_card("fixture-download")
+        self.click(self.ui.market_fetch)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.market.card("fixture-download").state, "REGISTERED")
+        self.assertIn("0 of unknown/not tested bytes", self.download_rows()[0])
+
+    def test_cancellation_removes_the_partial_and_marks_the_entry(self):
+        url, payload = self.loopback_server()
+
+        release = asyncio.Event()
+
+        async def stall(reader, writer):
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: "
+                             + str(len(payload)).encode()
+                             + b"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                             + payload[:4])
+                await writer.drain()
+                await release.wait()
+            finally:
+                writer.close()
+
+        starting = self.loop.create_task(asyncio.start_server(stall, "127.0.0.1", 0))
+        self.until(lambda: starting.done())
+        server = starting.result()
+        stalled = "http://127.0.0.1:%d/weights.bin" % server.sockets[0].getsockname()[1]
+        self.addCleanup(server.close)
+        self.addCleanup(release.set)
+        self.begin_download(stalled, hashlib.sha256(payload).hexdigest(), len(payload))
+        self.click(self.ui.market_fetch)
+        self.until(lambda: any(e["state"] == "DOWNLOADING" for e in self.ui.downloads))
+        entry = self.pick_download("fixture-download")
+        self.until(lambda: self.ui.download_cancel.get_sensitive())
+        self.click(self.ui.download_cancel)
+        self.assertTrue(entry["note"] != "")
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(entry["state"], "CANCELLED")
+        self.assertIn("Cancelled.", entry["note"])
+        self.assertEqual(self.ui.market.card("fixture-download").state, "CANCELLED")
+        self.assertFalse(Path(self.market_home, "artifacts", "fixture-download").exists())
+        self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))
+        self.assertIn("CANCELLED", self.download_rows()[0])
+        release.set()
+        self.loop.run_until_complete(asyncio.sleep(0.05))  # let the fixture handler finish

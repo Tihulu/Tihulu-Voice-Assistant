@@ -136,9 +136,12 @@ def create_window(app, loop):
             self.policy_rows = {}
             self.market = market.Registry(market.market_dir())
             self.market_row_ids = {}
+            self.downloads = []
+            self.download_entries = {}
             # No download transport ships with this release; a future,
             # separately authorized transport is plugged in here.
             self.transport = None
+            self.build_downloads_page()
             self.build_profiles_page()
             self.build_market_page()
             try:
@@ -575,11 +578,89 @@ def create_window(app, loop):
             if transport is None:
                 raise Hold("download_transport_not_available")
             transfer = market.Transfer(self.market, card, source, transport)
+            entry = {"id": model_id, "state": "QUEUED", "received": 0, "total": source.size,
+                     "note": ""}
+            self.downloads.append(entry)
+
+            def progress(count):
+                entry["received"] = count
+                entry["state"] = "DOWNLOADING"
+                self.build_downloads_page()
             try:
-                await transfer.run(lambda count: None)
+                result = await transfer.run(progress)
+                entry["state"] = result.state
+                entry["note"] = tr("Registered.","Kaydedildi.","Registriert.")
             finally:
-                self.session.check(epoch)
+                if transfer.state == "CANCELLED":
+                    entry["state"], entry["note"] = "CANCELLED", tr(
+                        "Cancelled.", "İptal edildi.", "Abgebrochen.")
+                elif transfer.state in market.TERMINAL:
+                    # A failed transfer is reported by the reason in the status line.
+                    entry["state"], entry["note"] = transfer.state, ""
+                elif transfer.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
+                    entry["state"], entry["note"] = transfer.state, tr(
+                        "Registered.", "Kaydedildi.", "Registriert.")
+                try:
+                    # A cancelled turn has nothing to check; cleanup still runs.
+                    self.session.check(epoch)
+                except Hold:
+                    pass
+                self.build_downloads_page()
                 self.build_market_page()
+
+        def build_downloads_page(self):
+            self.download_entries = {}
+            if getattr(self, "download_list", None) is not None:
+                child = self.download_list.get_first_child()
+                while child is not None:
+                    nxt = child.get_next_sibling()
+                    self.download_list.remove(child)
+                    child = nxt
+            else:
+                page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+                view = Gtk.ScrolledWindow(vexpand=True)
+                view.set_child(page)
+                self.stack.add_titled(view, "downloads", tr("Downloads","İndirmeler","Downloads"))
+                self.download_note = Gtk.Label(xalign=0, wrap=True)
+                page.append(self.download_note)
+                self.download_list = Gtk.ListBox()
+                self.download_list.connect("row-selected", lambda *_: self.refresh_download_buttons())
+                page.append(self.download_list)
+                row = Gtk.Box(spacing=8)
+                page.append(row)
+                self.download_cancel = self.button(row, tr("Cancel selected","Seçileni iptal et","Auswahl abbrechen"), self.cancel_download)
+            for entry in list(self.downloads):
+                label = Gtk.Label(label=self.download_line(entry), xalign=0, wrap=True)
+                item = Gtk.ListBoxRow()
+                item.set_child(label)
+                self.download_list.append(item)
+                self.download_entries[item] = entry
+            self.download_note.set_text(tr(
+                "Only approved, verified transfers. Nothing is downloaded without an approved source and checksum.",
+                "Yalnızca onaylı ve doğrulanmış aktarımlar. Onaylı kaynak ve sağlama toplamı olmadan hiçbir şey indirilmez.",
+                "Nur genehmigte, geprüfte Übertragungen. Ohne genehmigte Quelle und Prüfsumme wird nichts geladen."))
+            self.refresh_download_buttons()
+
+        def download_line(self, entry):
+            total = market.human_size(entry["total"]) if entry["total"] else "unknown/not tested"
+            part = "%s · %s · %d of %s bytes" % (entry["id"], entry["state"], entry["received"], total)
+            return part + (" · " + entry["note"] if entry["note"] else "")
+
+        def in_flight(self):
+            return any(entry["state"] in ("QUEUED", "DOWNLOADING") for entry in self.downloads)
+
+        def refresh_download_buttons(self):
+            # Cancelling the queue is available while a transfer runs; it is not new work.
+            self.download_cancel.set_sensitive(self.in_flight())
+
+        def cancel_download(self):
+            if not self.in_flight():
+                return
+            for entry in self.downloads:
+                if entry["state"] in ("QUEUED", "DOWNLOADING"):
+                    entry["note"] = tr("Cancelling…","İptal ediliyor…","Wird abgebrochen…")
+            self.interrupt(False)
+            self.build_downloads_page()
 
         def forget_selected_card(self):
             model_id = self.selected_card()
