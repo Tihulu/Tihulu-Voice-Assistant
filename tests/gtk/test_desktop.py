@@ -17,7 +17,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-from tihulu_jarvis import desktop, profiles, settings
+from tihulu_jarvis import desktop, market, profiles, settings
 from tihulu_jarvis.profiles import Profile, Rule
 from tihulu_jarvis.voice.m1 import Hold
 
@@ -553,3 +553,101 @@ class ProfileUITests(DesktopFixture):
         self.assertTrue(self.ui.send.get_sensitive())
         self.text("naber nasilsin")
         self.assertEqual(len(self.ui.session.history), len(history) + 2)
+
+
+class MarketUITests(DesktopFixture):
+    """Real market widgets over an isolated registry and read-only fixtures."""
+
+    def setUp(self):
+        self.profile_home = tempfile.mkdtemp()
+        self.market_home = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.profile_home, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(self.market_home, ignore_errors=True))
+        patch.object(profiles, "profile_dir", return_value=Path(self.profile_home)).start()
+        patch.object(market, "market_dir", return_value=Path(self.market_home)).start()
+        self.addCleanup(patch.stopall)
+        super().setUp()
+
+    def weights(self, name, payload=b"synthetic weights fixture\n"):
+        path = Path(self.market_home) / "weights" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(payload)
+        return path
+
+    def rows(self):
+        out = []
+        item = self.ui.market_list.get_first_child()
+        while item is not None:
+            out.append(item.get_child().get_text())
+            item = item.get_next_sibling()
+        return out
+
+    def pick_card(self, model_id):
+        for item, candidate in self.ui.market_row_ids.items():
+            if candidate == model_id:
+                self.ui.market_list.select_row(item)
+                return candidate
+        raise AssertionError("missing card: " + model_id)
+
+    def test_picking_a_file_registers_a_truthful_card(self):
+        path = self.weights("fixture-whisper.bin")
+        card = self.ui.register_choice("stt", str(path))
+        self.assertEqual((card.category, card.engine, card.artifact_format), ("stt", "whisper.cpp", "ggml"))
+        self.assertEqual(card.compatibility_status, "compatible")
+        self.assertEqual(card.health_status, "unknown/not tested")
+        self.assertEqual(card.trust_level, "owner")
+        self.assertFalse(card.owned_by_jarvis)
+        self.assertEqual(self.ui.market.cards()[0].model_id, "fixture-whisper.bin")
+        row = self.rows()[0]
+        for expected in ("fixture-whisper.bin", "whisper.cpp", "ggml", "compatible", "REGISTERED"):
+            self.assertIn(expected, row)
+        # The registry never carries the owner's path; the desktop keeps it locally.
+        registry = (Path(self.market_home) / "registry.json").read_text(encoding="utf-8")
+        self.assertNotIn(str(path), registry)
+        self.assertNotIn("/home/", registry)
+        self.assertEqual(self.ui.cfg["market_refs"][card.storage_ref], str(path))
+
+    def test_incompatible_format_is_refused_before_use(self):
+        voice = self.weights("tr_fixture.onnx")
+        voice.with_name(voice.name + ".json").write_text('{"language":{"code":"tr_TR"}}', encoding="utf-8")
+        card = self.ui.register_choice("tr", str(voice))
+        self.assertEqual(card.compatibility_status, "compatible")
+        self.ui.market_filter.set_active(2)  # the tts category
+        self.pick_card(card.model_id)
+        self.click(self.ui.market_use)
+        self.until(lambda: self.ui.cfg["voices"].get("tr") == str(voice))
+        self.assertEqual(self.ui.cfg["voices"]["tr"], str(voice))
+        # A .bin offered as a voice is not silently accepted.
+        wrong = self.weights("tr_wrong.bin")
+        with self.assertRaises(Hold):
+            self.ui.register_choice("tr", str(wrong))
+
+    def test_selecting_an_stt_card_applies_the_choice(self):
+        path = self.weights("fixture-whisper.bin")
+        card = self.ui.register_choice("stt", str(path))
+        self.pick_card(card.model_id)
+        self.assertTrue(self.ui.market_use.get_sensitive())
+        self.click(self.ui.market_use)
+        self.until(lambda: self.ui.cfg["stt"] == str(path))
+        self.assertEqual(self.ui.cfg["stt"], str(path))
+        # Selection is an explicit activation in the lifecycle, not a silent one.
+        self.assertEqual(self.ui.market.card(card.model_id).state, market.ACTIVE)
+
+    def test_unregister_keeps_the_owner_file(self):
+        path = self.weights("fixture-whisper.bin")
+        card = self.ui.register_choice("stt", str(path))
+        self.pick_card(card.model_id)
+        self.click(self.ui.market_forget)
+        self.until(lambda: self.ui.market.cards() == ())
+        self.assertTrue(path.is_file())
+        self.assertNotIn(card.storage_ref, self.ui.cfg.get("market_refs", {}))
+        self.assertEqual(self.rows(), [])
+
+    def test_unknown_card_fields_stay_unknown(self):
+        path = self.weights("fixture-unknown.bin")
+        card = self.ui.register_choice("stt", str(path))
+        self.assertEqual(card.model_id, "fixture-unknown.bin")
+        self.assertEqual(card.health_status, "unknown/not tested")
+        self.assertEqual(card.version, "unknown")
+        self.assertEqual(card.license_id, "unknown")
+        self.assertFalse(card.requires_gpu)

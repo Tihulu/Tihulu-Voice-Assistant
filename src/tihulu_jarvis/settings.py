@@ -12,7 +12,8 @@ LOCALES = ("tr", "en", "de")
 
 
 def empty():
-    return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": ""}
+    return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": "",
+            "market_refs": {}}
 
 
 def config_path():
@@ -33,6 +34,16 @@ def checked(obj):
     if not isinstance(obj.get("profile", ""), str) or len(obj.get("profile", "")) > 64:
         raise Hold("invalid_local_settings")
     out["profile"] = obj.get("profile", "")
+    refs = obj.get("market_refs", {})
+    if not isinstance(refs, dict) or len(refs) > 256:
+        raise Hold("invalid_local_settings")
+    clean = {}
+    for ref, path in refs.items():
+        # Digest references are opaque; the paired paths stay on this machine.
+        if not isinstance(ref, str) or not isinstance(path, str) or len(ref) > 64 or len(path) > 4096:
+            raise Hold("invalid_local_settings")
+        clean[ref] = path
+    out["market_refs"] = clean
     voices = obj.get("voices", {})
     if not isinstance(voices, dict) or any(k not in LOCALES or not isinstance(v, str) or len(v)>4096 for k,v in voices.items()):
         raise Hold("invalid_local_settings")
