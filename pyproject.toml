@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "tihulu-jarvis"
+version = "0.1.0.dev0"
+description = "Local multilingual desktop voice assistant"
+requires-python = ">=3.10"
+license = "AGPL-3.0-only"
+license-files = ["LICENSE"]
+dependencies = []
+
+[project.scripts]
+tihulu-jarvis = "tihulu_jarvis.desktop:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.data-files]
+"share/applications" = ["data/io.github.Tihulu.Jarvis.desktop"]
+"share/icons/hicolor/scalable/apps" = ["data/io.github.Tihulu.Jarvis.svg"]
