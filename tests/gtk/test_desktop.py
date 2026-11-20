@@ -1412,8 +1412,8 @@ class StorageViewTests(MarketFixture):
         self.assertIn("shared 1", self.report())
 
 
-class DownloadFlowTests(MarketFixture):
-    """The download flow with a fixture transport; no network is touched."""
+class DownloadFixture(MarketFixture):
+    """Helpers for the download, queue and resume tests."""
 
     def discovered(self, model_id="fixture-download", **kw):
         values = {"model_id": model_id, "display_name": model_id, "category": "llm",
@@ -1433,6 +1433,69 @@ class DownloadFlowTests(MarketFixture):
             f.write(b"weights")
         note(len(b"weights"))
         return len(b"weights")
+
+
+    def loopback_server(self, payload=b"synthetic weights fixture over loopback\n"):
+        """Serve the fixture on the same event loop the client drives."""
+        async def serve(reader, writer):
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: "
+                             + str(len(payload)).encode()
+                             + b"\r\nContent-Type: application/octet-stream\r\n\r\n" + payload)
+                await writer.drain()
+            except (asyncio.IncompleteReadError, ConnectionError):
+                return  # the client stopped reading; the test does not need it
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        starting = self.loop.create_task(asyncio.start_server(serve, "127.0.0.1", 0))
+        self.until(lambda: starting.done())
+        server = starting.result()
+        port = server.sockets[0].getsockname()[1]
+
+        def stop():
+            server.close()
+            self.loop.run_until_complete(server.wait_closed())
+        self.addCleanup(stop)
+        return "http://127.0.0.1:%d/weights.bin" % port, payload
+
+    def discovered_with_terms(self, url, checksum, size, approval="owner-approval"):
+        card = market.ModelCard(
+            model_id="fixture-download", display_name="Fixture Download", category="stt",
+            engine="whisper.cpp", artifact_format="ggml", installed=True,
+            trust_level="curated", state="DISCOVERED", source_ref=url,
+            source_checksum=checksum, source_size=size, source_version="1.0",
+            license_id="MIT", network_approval=approval, approval_expires_at=1e12).checked()
+        self.ui.market.save_card(card)
+        self.ui.build_market_page()
+        return card
+
+    def begin_download(self, url, checksum, size, approval="owner-approval"):
+        self.discovered_with_terms(url, checksum, size, approval)
+        self.ui.market_filter.set_active(0)
+        self.pick_card("fixture-download")
+
+    def download_rows(self):
+        out = []
+        item = self.ui.download_list.get_first_child()
+        while item is not None:
+            out.append(item.get_child().get_text())
+            item = item.get_next_sibling()
+        return out
+
+    def pick_download(self, model_id):
+        for item, entry in self.ui.download_entries.items():
+            if entry["id"] == model_id:
+                self.ui.download_list.select_row(item)
+                return entry
+        raise AssertionError("missing queue entry: " + model_id)
+
+
+
+class DownloadFlowTests(DownloadFixture):
+    """Approved sources download through the real transport."""
 
     def test_download_is_unavailable_without_a_transport(self):
         self.discovered()
@@ -1488,247 +1551,7 @@ class DownloadFlowTests(MarketFixture):
         self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))
 
 
-class CatalogUITests(MarketFixture):
-    """Curated catalog discovery over an owner-supplied file; nothing is fetched."""
 
-    document = {
-        "source_name": "fixture catalog",
-        "entries": [
-            {"model_id": "fixture-whisper-large", "display_name": "Fixture Whisper Large",
-             "category": "stt", "engine": "whisper.cpp", "artifact_format": "ggml",
-             "languages": ["tr", "en", "de"], "license_id": "MIT",
-             "source_ref": "catalog:fixture-whisper-large",
-             "source_checksum": hashlib.sha256(b"stt-weights").hexdigest(),
-             "source_size": 11, "source_version": "v3", "publisher": "fixture-publisher"},
-            {"model_id": "fixture-tr-voice", "display_name": "Fixture TR Voice",
-             "category": "tts", "engine": "piper", "artifact_format": "onnx",
-             "languages": ["tr"], "license_id": "CC-BY-4.0",
-             "source_ref": "catalog:fixture-tr-voice",
-             "source_checksum": hashlib.sha256(b"voice-weights").hexdigest(),
-             "source_size": 13, "publisher": "fixture-publisher"},
-        ],
-    }
-
-    def catalog_rows(self):
-        out = []
-        item = self.ui.catalog_list.get_first_child()
-        while item is not None:
-            out.append(item.get_child().get_text())
-            item = item.get_next_sibling()
-        return out
-
-    def pick_entry(self, model_id):
-        for item, entry in self.ui.catalog_rows.items():
-            if entry.model_id == model_id:
-                self.ui.catalog_list.select_row(item)
-                return entry
-        raise AssertionError("missing catalog entry: " + model_id)
-
-    def test_missing_catalog_is_stated_not_guessed(self):
-        note = self.ui.catalog_note.get_text()
-        self.assertTrue(any(marker in note for marker in
-                            ("No catalog yet.", "Henüz katalog yok", "Noch kein Katalog")), note)
-        self.assertEqual(self.catalog_rows(), [])
-        self.assertFalse(self.ui.catalog_add.get_sensitive())
-
-    def test_catalog_discovers_entries_and_registers_them(self):
-        self.ui.load_catalog_text(json.dumps(self.document))
-        self.assertEqual(len(self.catalog_rows()), 2)
-        self.assertIn("whisper.cpp", self.catalog_rows()[0])
-        self.pick_entry("fixture-whisper-large")
-        self.click(self.ui.catalog_add)
-        self.until(lambda: any(c.model_id == "fixture-whisper-large" for c in self.ui.market.cards()))
-        card = self.ui.market.card("fixture-whisper-large")
-        self.assertEqual(card.state, "DISCOVERED")
-        self.assertFalse(card.approved_source())  # terms published, approval not given
-        # The stored catalog is the owner's file, never fetched.
-        text = Path(market.catalog_path()).read_text(encoding="utf-8")
-        self.assertIn("fixture catalog", text)
-        self.assertNotIn("/home/", text)
-
-    def test_approval_enables_the_download_control(self):
-        self.ui.load_catalog_text(json.dumps(self.document))
-        self.pick_entry("fixture-whisper-large")
-        self.click(self.ui.catalog_add)
-        self.until(lambda: self.ui.market.cards())
-        self.pick_card("fixture-whisper-large")
-        self.assertFalse(self.ui.market_fetch.get_sensitive())
-        self.pick_entry("fixture-whisper-large")
-        self.click(self.ui.catalog_approve)
-        self.until(lambda: self.ui.market.card("fixture-whisper-large").network_approval
-                   == "owner-approved-download")
-        self.pick_card("fixture-whisper-large")
-        self.assertFalse(self.ui.market_fetch.get_sensitive())  # still no transport
-        self.ui.refresh_market_buttons()
-        self.assertFalse(self.ui.market_fetch.get_sensitive())
-        card = self.ui.market.card("fixture-whisper-large")
-        self.assertTrue(card.approved_source())
-
-    def test_catalog_search_and_filter_are_narrow(self):
-        self.ui.load_catalog_text(json.dumps(self.document))
-        self.ui.catalog_search.set_text("voice")
-        self.ui.refresh_catalog()
-        self.assertEqual(len(self.catalog_rows()), 1)
-        self.assertIn("piper", self.catalog_rows()[0])
-        self.ui.catalog_search.set_text("")
-        self.ui.catalog_filter.set_active(3)  # the tts category
-        self.ui.refresh_catalog()
-        self.assertEqual(len(self.catalog_rows()), 1)
-        self.assertIn("piper", self.catalog_rows()[0])
-        self.ui.catalog_filter.set_active(1)  # the stt category
-        self.ui.refresh_catalog()
-        self.assertEqual(len(self.catalog_rows()), 1)
-        self.assertIn("whisper.cpp", self.catalog_rows()[0])
-
-    def test_unreadable_catalog_is_a_bounded_reason(self):
-        with self.assertRaises(Hold):
-            self.ui.load_catalog_text("{not json")
-        # A malformed import is refused; the previous catalog and its note stand.
-        self.assertEqual(self.ui.catalog.entries, ())
-        note = self.ui.catalog_note.get_text()
-        self.assertTrue(any(marker in note for marker in
-                            ("No catalog yet.", "Henüz katalog yok", "Noch kein Katalog")), note)
-class EndpointModeTests(MarketFixture):
-    """The active mode decides which endpoints the client will even try."""
-
-    def remote_profile(self, mode="LOCAL_ONLY", providers=()):
-        self.ui.store.save(profiles.replace(
-            self.ui.store.load(self.ui.cfg["profile"]), version=2, based_on_mode=mode,
-            allowed_providers=tuple(providers)))
-        self.ui.activate_profile(self.ui.cfg["profile"], quiet=True)
-
-    def test_local_only_refuses_a_remote_address_before_any_request(self):
-        self.remote_profile("LOCAL_ONLY")
-        self.ui.url.set_text("https://provider.example/v1")
-        requests = list(self.backend.requests)
-        self.click(self.ui.reload)
-        self.until(lambda: not self.ui.busy)
-        self.assertEqual(self.ui.status.get_text(), "local_only_forbids_non_loopback")
-        self.assertEqual(self.backend.requests, requests)
-        self.assertEqual(self.ui.inventory, ())
-
-    def test_local_only_still_uses_its_loopback_endpoint(self):
-        self.remote_profile("LOCAL_ONLY")
-        self.ui.url.set_text("http://127.0.0.1:9876/v1")
-        self.click(self.ui.reload)
-        self.until(lambda: not self.ui.busy and self.ui.inventory == ("fixture-chat",))
-        self.assertTrue(self.ui.send.get_sensitive())
-        self.assertEqual(self.ui.cfg["endpoint"], "http://127.0.0.1:9876/v1")
-
-    def test_a_cloud_mode_without_providers_does_not_claim_a_transport(self):
-        self.remote_profile("CLOUD_CHAT")
-        self.ui.url.set_text("https://provider.example/v1")
-        self.click(self.ui.reload)
-        self.until(lambda: not self.ui.busy)
-        self.assertEqual(self.ui.status.get_text(), "cloud_transport_not_available")
-        self.assertEqual(self.backend.requests, [])
-
-    def test_a_named_provider_must_be_approved(self):
-        self.remote_profile("CLOUD_CHAT", providers=("fixture-provider",))
-        self.ui.url.set_text("http://127.0.0.1:9876/v1")
-        requests = list(self.backend.requests)
-        self.click(self.ui.reload)
-        self.until(lambda: not self.ui.busy)
-        self.assertEqual(self.ui.status.get_text(), "approved_provider_required")
-        self.assertEqual(self.backend.requests, requests)
-
-
-class ActionEnforcementUITests(MarketFixture):
-    """A denied action is refused at the moment it runs, not when enabled."""
-
-    def rewrite_rules(self, rules):
-        profile = self.ui.store.load(self.ui.cfg["profile"]).checked()
-        updated = profiles.replace(profile, version=profile.version + 1, tool_rules=tuple(rules))
-        self.ui.store.save(updated)
-        self.ui.activate_profile(updated.id, quiet=True)
-        self.ui.refresh()
-        return updated
-
-    def deny_audio(self):
-        profile = self.ui.store.load(self.ui.cfg["profile"]).checked()
-        return self.rewrite_rules(
-            tuple(r for r in profile.rules() if r.action != "local_audio_device")
-            + (profiles.Rule("local_audio_device", ("push_to_talk",), profiles.DENY),))
-
-    def test_talk_is_disabled_by_a_denied_audio_rule(self):
-        self.deny_audio()
-        self.connect_model()
-        self.assertFalse(self.ui.talk.get_sensitive())
-        # Even a forced click reaches the handler and is refused with the reason.
-        async def denied(epoch):
-            self.ui.require_tools(("local_audio_device", ("push_to_talk",)))
-        self.ui.submit(denied)
-        self.until(lambda: not self.ui.busy)
-        self.assertEqual(self.ui.status.get_text(), "profile_forbids_local_audio_device")
-        self.assertEqual(self.ui.stage, "ready")
-
-    def test_preview_is_refused_when_the_rule_denies_audio(self):
-        self.connect_model()
-        path = self.weights("tr.onnx")
-        path.with_name(path.name + ".json").write_text(
-            json.dumps({"language": {"code": "tr"}}), encoding="utf-8")
-        self.ui.register_choice("tr", str(path))
-        self.ui.refresh()
-        self.assertTrue(self.preview_of("tr").get_sensitive())
-        self.deny_audio()
-        self.ui.refresh()
-        self.assertFalse(self.preview_of("tr").get_sensitive())
-        self.assertFalse(self.backend.speeches)
-        self.assertFalse(self.ui.talk.get_sensitive())
-
-    def test_removing_the_denial_restores_the_control(self):
-        profile = self.deny_audio()
-        self.connect_model()
-        self.assertFalse(self.ui.talk.get_sensitive())
-        self.rewrite_rules(tuple(r for r in profile.rules() if r.action != "local_audio_device")
-                           + (profiles.Rule("local_audio_device", ("push_to_talk",),
-                                            profiles.ALLOW, approval="owner-consent",
-                                            expires_at=1e12),))
-        self.assertTrue(self.ui.talk.get_sensitive())
-
-
-class DownloadTransportTests(MarketFixture):
-    """The download flow runs through the real loopback transport and fixture."""
-
-    def loopback_server(self, payload=b"synthetic weights fixture over loopback\n"):
-        """Serve the fixture on the same event loop the client drives."""
-        async def serve(reader, writer):
-            try:
-                await reader.readuntil(b"\r\n\r\n")
-                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: "
-                             + str(len(payload)).encode()
-                             + b"\r\nContent-Type: application/octet-stream\r\n\r\n" + payload)
-                await writer.drain()
-            finally:
-                writer.close()
-                await writer.wait_closed()
-
-        starting = self.loop.create_task(asyncio.start_server(serve, "127.0.0.1", 0))
-        self.until(lambda: starting.done())
-        server = starting.result()
-        port = server.sockets[0].getsockname()[1]
-
-        def stop():
-            server.close()
-            self.loop.run_until_complete(server.wait_closed())
-        self.addCleanup(stop)
-        return "http://127.0.0.1:%d/weights.bin" % port, payload
-
-    def discovered_with_terms(self, url, checksum, size, approval="owner-approval"):
-        card = market.ModelCard(
-            model_id="fixture-download", display_name="Fixture Download", category="stt",
-            engine="whisper.cpp", artifact_format="ggml", installed=True,
-            trust_level="curated", state="DISCOVERED", source_ref=url,
-            source_checksum=checksum, source_size=size, source_version="1.0",
-            license_id="MIT", network_approval=approval, approval_expires_at=1e12).checked()
-        self.ui.market.save_card(card)
-        self.ui.build_market_page()
-        return card
-
-    def begin_download(self, url, checksum, size, approval="owner-approval"):
-        self.discovered_with_terms(url, checksum, size, approval)
-        self.ui.market_filter.set_active(0)
-        self.pick_card("fixture-download")
 
     def test_download_runs_through_the_real_transport_and_registers(self):
         url, payload = self.loopback_server()
@@ -1773,23 +1596,11 @@ class DownloadTransportTests(MarketFixture):
         self.assertFalse(card.approved_source())
 
 
-class DownloadQueueTests(DownloadTransportTests):
-    """Queue state, progress and cancellation, with the real loopback transport."""
 
-    def download_rows(self):
-        out = []
-        item = self.ui.download_list.get_first_child()
-        while item is not None:
-            out.append(item.get_child().get_text())
-            item = item.get_next_sibling()
-        return out
 
-    def pick_download(self, model_id):
-        for item, entry in self.ui.download_entries.items():
-            if entry["id"] == model_id:
-                self.ui.download_list.select_row(item)
-                return entry
-        raise AssertionError("missing queue entry: " + model_id)
+
+class DownloadQueueTests(DownloadFixture):
+    """Queue state, progress and cancellation."""
 
     def test_completed_download_shows_state_and_size(self):
         url, payload = self.loopback_server()
@@ -1822,12 +1633,17 @@ class DownloadQueueTests(DownloadTransportTests):
         async def stall(reader, writer):
             try:
                 await reader.readuntil(b"\r\n\r\n")
+            except (asyncio.IncompleteReadError, ConnectionError):
+                return
                 writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: "
                              + str(len(payload)).encode()
                              + b"\r\nContent-Type: application/octet-stream\r\n\r\n"
                              + payload[:4])
                 await writer.drain()
+                # No byte arrives before the owner cancels: nothing to keep.
                 await release.wait()
+                writer.write(payload)
+                await writer.drain()
             finally:
                 writer.close()
 
@@ -1836,7 +1652,8 @@ class DownloadQueueTests(DownloadTransportTests):
         server = starting.result()
         stalled = "http://127.0.0.1:%d/weights.bin" % server.sockets[0].getsockname()[1]
         self.addCleanup(server.close)
-        self.addCleanup(release.set)
+        self.addCleanup(lambda: (release.set(),
+                                 self.loop.run_until_complete(asyncio.sleep(0.05))))
         self.begin_download(stalled, hashlib.sha256(payload).hexdigest(), len(payload))
         self.click(self.ui.market_fetch)
         self.until(lambda: any(e["state"] == "DOWNLOADING" for e in self.ui.downloads))
@@ -1852,4 +1669,129 @@ class DownloadQueueTests(DownloadTransportTests):
         self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))
         self.assertIn("CANCELLED", self.download_rows()[0])
         release.set()
-        self.loop.run_until_complete(asyncio.sleep(0.05))  # let the fixture handler finish
+        self.loop.run_until_complete(asyncio.sleep(0.05))
+
+
+
+class ResumeQueueTests(DownloadFixture):
+    """A cancelled transfer keeps its partial and can resume from it."""
+
+    payload = b"synthetic weights fixture over loopback\n"
+
+    def range_server(self, stall_first=True):
+        """A fixture that answers 206 for a Range and optionally stalls mid-body."""
+        release = asyncio.Event()
+        served = {}
+
+        async def route(reader, writer):
+            try:
+                request = await reader.readuntil(b"\r\n\r\n")
+                want = 0
+                for field in request.split(b"\r\n"):
+                    if field.lower().startswith(b"range:"):
+                        want = int(field.split(b"=")[1].split(b"-")[0])
+                served["offset"] = want
+                body = self.payload[want:]
+                if stall_first and not want:
+                    # Answer the whole body but stall after the first bytes.
+                    writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: "
+                                 + str(len(self.payload)).encode()
+                                 + b"\r\nContent-Type: application/octet-stream\r\n\r\n"
+                                 + self.payload[:4])
+                    await writer.drain()
+                    await release.wait()
+                    writer.write(self.payload[4:])
+                    await writer.drain()
+                    return
+                status = b"HTTP/1.1 206 Partial Content" if want else b"HTTP/1.1 200 OK"
+                extra = (b"Content-Range: bytes %d-%d/%d\r\n"
+                         % (want, len(self.payload) - 1, len(self.payload))) if want else b""
+                writer.write(status + b"\r\nContent-Length: " + str(len(body)).encode()
+                             + b"\r\n" + extra + b"Content-Type: application/octet-stream\r\n\r\n"
+                             + body)
+                await writer.drain()
+            finally:
+                writer.close()
+
+        starting = self.loop.create_task(asyncio.start_server(route, "127.0.0.1", 0))
+        self.until(lambda: starting.done())
+        server = starting.result()
+        port = server.sockets[0].getsockname()[1]
+        self.addCleanup(server.close)
+        self.addCleanup(lambda: (release.set(),
+                                 self.loop.run_until_complete(asyncio.sleep(0.05))))
+        return "http://127.0.0.1:%d/weights.bin" % port, release, served
+
+    def begin_resumable(self, url, checksum, size, approval="owner-approval"):
+        self.discovered_with_terms(url, checksum, size, approval)
+        self.ui.market_filter.set_active(0)
+        self.pick_card("fixture-download")
+
+    def partial_file(self):
+        return Path(self.market_home, "transfers", "partial-fixture-download")
+
+    def test_a_cancelled_transfer_keeps_a_resumable_partial(self):
+        url, release, served = self.range_server()
+        self.begin_resumable(url, hashlib.sha256(self.payload).hexdigest(), len(self.payload))
+        self.click(self.ui.market_fetch)
+        self.until(lambda: any(e["state"] == "DOWNLOADING" and e["received"] > 0
+                               for e in self.ui.downloads))
+        entry = self.pick_download("fixture-download")
+        self.assertTrue(self.ui.download_cancel.get_sensitive())
+        self.click(self.ui.download_cancel)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(entry["state"], "RESUMABLE")
+        self.assertGreater(entry["resume"], 0)
+        self.assertTrue(self.partial_file().is_file())
+        self.assertFalse(Path(self.market_home, "artifacts", "fixture-download").exists())
+        self.assertTrue(self.ui.download_resume.get_sensitive())
+        self.assertTrue(self.ui.download_discard.get_sensitive())
+        self.assertIn("RESUMABLE", self.download_rows()[0])
+        release.set()
+        self.loop.run_until_complete(asyncio.sleep(0.05))
+        release.set()
+
+    def test_resume_completes_the_registration(self):
+        url, release, served = self.range_server()
+        self.begin_resumable(url, hashlib.sha256(self.payload).hexdigest(), len(self.payload))
+        self.click(self.ui.market_fetch)
+        self.until(lambda: any(e["state"] == "DOWNLOADING" and e["received"] > 0
+                               for e in self.ui.downloads))
+        entry = self.pick_download("fixture-download")
+        self.click(self.ui.download_cancel)
+        self.until(lambda: entry["state"] == "RESUMABLE" and not self.ui.busy)
+        start = entry["resume"]
+        release.set()
+        self.click(self.ui.download_resume)
+        self.until(lambda: entry["state"] != "RESUMABLE" or served["offset"] > 0)
+        self.until(lambda: not self.ui.busy)
+        card = self.ui.market.card("fixture-download")
+        self.assertEqual(card.state, "REGISTERED")
+        self.assertEqual(card.disk_size_bytes, len(self.payload))
+        target = Path(self.market_home, "artifacts", "fixture-download")
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.read_bytes(), self.payload)
+        self.assertFalse(self.partial_file().exists())
+        self.assertEqual(served["offset"], start)
+        self.assertIn("REGISTERED", self.download_rows()[0])
+        release.set()
+        self.loop.run_until_complete(asyncio.sleep(0.05))
+
+    def test_discard_removes_the_partial_and_leaves_nothing_installed(self):
+        url, release, served = self.range_server()
+        self.begin_resumable(url, hashlib.sha256(self.payload).hexdigest(), len(self.payload))
+        self.click(self.ui.market_fetch)
+        self.until(lambda: any(e["state"] == "DOWNLOADING" and e["received"] > 0
+                               for e in self.ui.downloads))
+        entry = self.pick_download("fixture-download")
+        self.click(self.ui.download_cancel)
+        self.until(lambda: entry["state"] == "RESUMABLE" and not self.ui.busy)
+        self.assertTrue(self.partial_file().is_file())
+        release.set()
+        self.click(self.ui.download_discard)
+        self.until(lambda: entry["state"] == "CANCELLED")
+        self.assertFalse(self.partial_file().exists())
+        self.assertFalse(Path(self.market_home, "artifacts", "fixture-download").exists())
+        self.assertEqual(self.ui.market.card("fixture-download").state, "CANCELLED")
+        self.assertFalse(self.ui.download_resume.get_sensitive())
+        self.assertIn("CANCELLED", self.download_rows()[0])

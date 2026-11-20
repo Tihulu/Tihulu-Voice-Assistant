@@ -726,21 +726,34 @@ def create_window(app, loop):
                 raise Hold("download_transport_not_available")
             transfer = market.Transfer(self.market, card, source, transport)
             entry = {"id": model_id, "state": "QUEUED", "received": 0, "total": source.size,
-                     "note": ""}
+                     "note": "", "resume": 0}
             self.downloads.append(entry)
+
+            def started():
+                entry["state"] = "DOWNLOADING"
+                self.build_downloads_page()
 
             def progress(count):
                 entry["received"] = count
                 entry["state"] = "DOWNLOADING"
                 self.build_downloads_page()
             try:
+                self.session.check(epoch)
+                started()
                 result = await transfer.run(progress)
                 entry["state"] = result.state
                 entry["note"] = tr("Registered.","Kaydedildi.","Registriert.")
             finally:
                 if transfer.state == "CANCELLED":
-                    entry["state"], entry["note"] = "CANCELLED", tr(
-                        "Cancelled.", "İptal edildi.", "Abgebrochen.")
+                    partial = Path(self.market.root, "transfers", "partial-" + model_id)
+                    if partial.is_file() and partial.stat().st_size > 0:
+                        entry["state"], entry["resume"] = "RESUMABLE", partial.stat().st_size
+                        entry["note"] = tr("Partial kept; resume continues from here.",
+                                           "Kısmi tutuldu; sürdürme buradan devam eder.",
+                                           "Teil erhalten; Fortsetzung ab hier.")
+                    else:
+                        entry["state"], entry["note"] = "CANCELLED", tr(
+                            "Cancelled.", "İptal edildi.", "Abgebrochen.")
                 elif transfer.state in market.TERMINAL:
                     # A failed transfer is reported by the reason in the status line.
                     entry["state"], entry["note"] = transfer.state, ""
@@ -775,7 +788,9 @@ def create_window(app, loop):
                 page.append(self.download_list)
                 row = Gtk.Box(spacing=8)
                 page.append(row)
-                self.download_cancel = self.button(row, tr("Cancel selected","Seçileni iptal et","Auswahl abbrechen"), self.cancel_download)
+                self.download_cancel = self.button(row, tr("Cancel","İptal et","Abbrechen"), self.cancel_download)
+                self.download_resume = self.button(row, tr("Resume","Sürdür","Fortsetzen"), self.resume_download)
+                self.download_discard = self.button(row, tr("Discard partial","Kısmını at","Teil verwerfen"), self.discard_download)
             for entry in list(self.downloads):
                 label = Gtk.Label(label=self.download_line(entry), xalign=0, wrap=True)
                 item = Gtk.ListBoxRow()
@@ -796,9 +811,20 @@ def create_window(app, loop):
         def in_flight(self):
             return any(entry["state"] in ("QUEUED", "DOWNLOADING") for entry in self.downloads)
 
+        def resumable(self):
+            return any(entry["state"] == "RESUMABLE" for entry in self.downloads)
+
+        def resumable_entry(self):
+            for entry in self.downloads:
+                if entry["state"] == "RESUMABLE":
+                    return entry
+            return None
+
         def refresh_download_buttons(self):
-            # Cancelling the queue is available while a transfer runs; it is not new work.
+            # Cancelling is available while a transfer runs; it is not new work.
             self.download_cancel.set_sensitive(self.in_flight())
+            self.download_resume.set_sensitive(self.resumable())
+            self.download_discard.set_sensitive(self.resumable())
 
         def cancel_download(self):
             if not self.in_flight():
@@ -808,6 +834,52 @@ def create_window(app, loop):
                     entry["note"] = tr("Cancelling…","İptal ediliyor…","Wird abgebrochen…")
             self.interrupt(False)
             self.build_downloads_page()
+
+        def discard_download(self):
+            entry = self.resumable_entry()
+            if entry is None or self.busy:
+                return
+            Path(self.market.root, "transfers", "partial-" + entry["id"]).unlink(missing_ok=True)
+            entry["state"], entry["resume"], entry["note"] = "CANCELLED", 0, tr(
+                "Partial discarded.", "Kısmi atıldı.", "Teil verworfen.")
+            self.build_downloads_page()
+
+        def resume_download(self):
+            entry = self.resumable_entry()
+            if entry is None or self.busy:
+                return
+            start = entry["resume"]
+
+            async def run(epoch):
+                card = self.market.card(entry["id"])
+                source = market.source_of(card)
+                transport = self.transport or market.transport_for(source.reference)
+                if transport is None:
+                    raise Hold("download_transport_not_available")
+                entry["state"], entry["note"] = "DOWNLOADING", tr("Resuming…","Sürdürülüyor…",
+                                                                 "Fortsetzung…")
+                transfer = market.Transfer(self.market, card, source, transport)
+                try:
+                    result = await transfer.resume(self.download_progress(entry, start), start)
+                    entry["state"], entry["note"] = result.state, tr(
+                        "Registered.", "Kaydedildi.", "Registriert.")
+                finally:
+                    if transfer.state == "CANCELLED":
+                        partial = Path(self.market.root, "transfers",
+                                       "partial-" + entry["id"])
+                        if partial.is_file():
+                            entry["state"], entry["resume"] = "RESUMABLE", partial.stat().st_size
+                    self.session.check(epoch)
+                    self.build_downloads_page()
+                    self.build_market_page()
+            self.submit(run)
+
+        def download_progress(self, entry, offset):
+            def progress(count):
+                entry["received"] = count
+                entry["state"] = "DOWNLOADING"
+                self.build_downloads_page()
+            return progress
 
         def forget_selected_card(self):
             model_id = self.selected_card()
