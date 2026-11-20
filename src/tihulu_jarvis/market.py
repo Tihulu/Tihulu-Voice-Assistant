@@ -59,6 +59,70 @@ def market_dir():
     return folder / "tihulu-jarvis" / "market"
 
 
+def human_size(total):
+    """Human-readable size. Unknown sizes are reported as unknown, not as 0."""
+    units = ("B", "KiB", "MiB", "GiB", "TiB")
+    if total <= 0:
+        return "unknown/not tested"
+    value = float(total)
+    for unit in units:
+        if value < 1024 or unit == units[-1]:
+            return "%.1f %s" % (value, unit) if unit != "B" else "%d B" % int(value)
+        value /= 1024
+    return "%.1f TiB" % value
+
+
+@dataclass(frozen=True)
+class Usage:
+    """Aggregate what the registry actually knows. Nothing is estimated here."""
+
+    cards: int = 0
+    by_category: tuple = ()
+    by_state: tuple = ()
+    disk_bytes: int = 0
+    unknown_size: int = 0
+    shared: int = 0
+    owned: int = 0
+    imported: int = 0
+    requires_gpu: int = 0
+    memory_bytes: int = 0
+    unknown_memory: int = 0
+
+    def report(self):
+        return ("%d cards · %s · disk %s · shared %d · jarvis-owned %d · imported %d · "
+                "gpu %d · memory %s" % (
+                    self.cards, ", ".join("%s %d" % pair for pair in self.by_category),
+                    human_size(self.disk_bytes) if self.disk_bytes else "unknown/not tested",
+                    self.shared, self.owned, self.imported, self.requires_gpu,
+                    human_size(self.memory_bytes) if self.memory_bytes else "unknown/not tested"))
+
+
+def usage(cards):
+    per_category, per_state, disk, gpu, memory = {}, {}, 0, 0, 0
+    shared = owned = imported = unknown_size = unknown_memory = 0
+    for card in cards:
+        per_category[card.category] = per_category.get(card.category, 0) + 1
+        per_state[card.state] = per_state.get(card.state, 0) + 1
+        if card.disk_size_bytes:
+            disk += card.disk_size_bytes
+        else:
+            unknown_size += 1
+        if card.memory_estimate:
+            memory += card.memory_estimate
+        else:
+            unknown_memory += 1
+        if card.shared_storage_owner:
+            shared += 1
+        elif card.owned_by_jarvis:
+            owned += 1
+        else:
+            imported += 1
+        if card.requires_gpu:
+            gpu += 1
+    return Usage(len(cards), tuple(sorted(per_category.items())), tuple(sorted(per_state.items())),
+                 disk, unknown_size, shared, owned, imported, gpu, memory, unknown_memory)
+
+
 @dataclass(frozen=True)
 class ModelCard:
     """A card describes what is actually known. Nothing is inferred."""
@@ -81,7 +145,8 @@ class ModelCard:
     shared_storage_owner: str = ""
     storage_ref: str = ""        # opaque reference, never a raw path in exports
     owned_by_jarvis: bool = False
-    disk_size_bytes: int = 0
+    disk_size_bytes: int = 0        # 0 means the size is unknown, not zero
+    memory_estimate: int = 0        # bytes; 0 means not estimated
     requires_gpu: bool = False
     license_id: str = "unknown"
     state: str = "DISCOVERED"
@@ -109,7 +174,9 @@ class ModelCard:
             raise Hold("invalid_card_field")
         if any(lang != lang.lower() or not lang.isalpha() for lang in self.languages):
             raise Hold("unsupported_language_tag")
-        if self.disk_size_bytes < 0 or self.disk_size_bytes > DIGEST_LIMIT:
+        if not 0 <= self.disk_size_bytes <= DIGEST_LIMIT:
+            raise Hold("invalid_size")
+        if not 0 <= self.memory_estimate <= DIGEST_LIMIT:
             raise Hold("invalid_size")
         if self.storage_ref and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.storage_ref):
             raise Hold("invalid_storage_reference")
