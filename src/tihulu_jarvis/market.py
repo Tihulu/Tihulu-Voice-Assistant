@@ -329,6 +329,135 @@ class Source:
                                                 or self.approval_expires_at > now)
 
 
+CATALOG_LIMIT = 131072
+
+
+@dataclass(frozen=True)
+class Entry:
+    """One curated catalog line. It carries terms, never credentials or paths."""
+
+    model_id: str
+    display_name: str
+    category: str
+    engine: str = "unknown"
+    artifact_format: str = "other"
+    languages: tuple = ()
+    license_id: str = "unknown"
+    source_ref: str = ""
+    source_checksum: str = ""
+    source_size: int = 0
+    source_version: str = "unknown"
+    requires_gpu: bool = False
+    disk_size_bytes: int = 0
+    trust_level: str = "curated"
+    publisher: str = "unknown"
+
+    def checked(self):
+        if not re.fullmatch(r"[A-Za-z0-9:._-]{1,256}", self.source_ref):
+            raise Hold("invalid_source_reference")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.source_checksum):
+            raise Hold("checksum_required_before_download")
+        if not 0 < self.source_size <= DIGEST_LIMIT:
+            raise Hold("source_size_not_stated")
+        if any(lang != lang.lower() or not lang.isalpha() for lang in self.languages):
+            raise Hold("unsupported_language_tag")
+        return ModelCard(
+            model_id=self.model_id, display_name=self.display_name, category=self.category,
+            engine=self.engine, artifact_format=self.artifact_format, languages=self.languages,
+            license_id=self.license_id, installed=False, registered=False,
+            trust_level=self.trust_level, disk_size_bytes=self.disk_size_bytes,
+            requires_gpu=self.requires_gpu, state="DISCOVERED", source_ref=self.source_ref,
+            source_checksum=self.source_checksum, source_size=self.source_size,
+            source_version=self.source_version, provider=self.publisher).checked()
+
+    def terms(self, approval="", expires_at=0.0):
+        """Published terms. The owner's approval is supplied separately."""
+        return Source(self.source_ref, self.source_checksum, self.source_size,
+                      self.source_version, self.license_id, approval, expires_at)
+
+
+@dataclass(frozen=True)
+class Catalog:
+    """An owner-supplied curated catalog. It is never fetched."""
+
+    entries: tuple = ()
+    source_name: str = "unknown"
+
+    def checked(self):
+        seen = set()
+        for entry in self.entries:
+            entry.checked()
+            if entry.model_id in seen:
+                raise Hold("duplicate_catalog_entry")
+            seen.add(entry.model_id)
+        return self
+
+    def search(self, category="", language="", engine="", text=""):
+        """Filter by the fields the owner can see; nothing is ranked or guessed."""
+        out = []
+        for entry in self.entries:
+            if category and entry.category != category:
+                continue
+            if language and language not in entry.languages:
+                continue
+            if engine and engine and entry.engine != engine:
+                continue
+            if text and not (text.casefold() in entry.display_name.casefold()
+                             or text.casefold() in entry.model_id.casefold()):
+                continue
+            out.append(entry)
+        return tuple(out)
+
+    def card(self, model_id):
+        for entry in self.entries:
+            if entry.model_id == model_id:
+                return entry.checked()
+        raise Hold("catalog_entry_not_found")
+
+    def cards(self):
+        return tuple(entry.checked() for entry in self.entries)
+
+
+def parse_catalog(text, source_name="owner-supplied"):
+    """Parse and validate a curated catalog document."""
+    if len(text) > CATALOG_LIMIT:
+        raise Hold("catalog_too_large")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise Hold("invalid_catalog") from None
+    raw = data.get("entries", []) if isinstance(data, dict) else None
+    if not isinstance(raw, list) or len(raw) > 512:
+        raise Hold("invalid_catalog")
+    entries = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise Hold("invalid_catalog")
+        try:
+            entry = Entry(
+                model_id=item["model_id"], display_name=item["display_name"],
+                category=item["category"], engine=item.get("engine", "unknown"),
+                artifact_format=item.get("artifact_format", "other"),
+                languages=tuple(item.get("languages", ())), license_id=item.get("license_id", "unknown"),
+                source_ref=item["source_ref"], source_checksum=item["source_checksum"],
+                source_size=item.get("source_size", 0),
+                source_version=item.get("source_version", "unknown"),
+                requires_gpu=bool(item.get("requires_gpu", False)),
+                disk_size_bytes=item.get("disk_size_bytes", 0),
+                trust_level=item.get("trust_level", "curated"),
+                publisher=item.get("publisher", "unknown"))
+        except (KeyError, TypeError, ValueError):
+            raise Hold("invalid_catalog") from None
+        entry.checked()  # validate; the entry is stored, not its derived card
+        entries.append(entry)
+    return Catalog(tuple(entries), str(data.get("source_name", source_name))[:64]).checked()
+
+
+def catalog_path():
+    """The catalog lives with the rest of the market data, under the owner's XDG dir."""
+    return market_dir() / "catalog.json"
+
+
 def source_of(card):
     """Build the approved download terms recorded on a card."""
     if not card.approved_source():

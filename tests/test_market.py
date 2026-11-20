@@ -3,13 +3,16 @@
 """AI Market policy and lifecycle tests. No network, device or model is used."""
 import asyncio
 import hashlib
+import json
 import tempfile
 import unittest
 from pathlib import Path
 
-from tihulu_jarvis.market import (ACTIVE, ALLOWED_NEXT, CATEGORIES, TERMINAL, ModelCard,
-                                  Registry, Source, Transfer, advance, digest, from_file,
-                                  from_models, human_size, register_installed, usage)
+from tihulu_jarvis import market
+from tihulu_jarvis.market import (ACTIVE, ALLOWED_NEXT, CATEGORIES, TERMINAL, Catalog,
+                                  ModelCard, Registry, Source, Transfer, advance, digest,
+                                  from_file, from_models, human_size, parse_catalog,
+                                  register_installed, usage, CATALOG_LIMIT)
 from tihulu_jarvis.voice.m1 import Hold
 
 
@@ -442,3 +445,86 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
     def test_transport_credentials_are_not_accepted(self):
         with self.assertRaisesRegex(Hold, "invalid_approval_reference"):
             self.source(network_approval="secret/key").checked()
+
+
+class CatalogTests(unittest.TestCase):
+    def document(self, **kw):
+        values = {"entries": [
+            {"model_id": "fixture-whisper-large", "display_name": "Fixture Whisper Large",
+             "category": "stt", "engine": "whisper.cpp", "artifact_format": "ggml",
+             "languages": ["tr", "en", "de"], "license_id": "MIT",
+             "source_ref": "catalog:fixture-whisper-large",
+             "source_checksum": hashlib.sha256(b"stt-weights").hexdigest(),
+             "source_size": 11, "source_version": "v3", "publisher": "fixture-publisher"},
+            {"model_id": "fixture-tr-voice", "display_name": "Fixture TR Voice",
+             "category": "tts", "engine": "piper", "artifact_format": "onnx",
+             "languages": ["tr"], "license_id": "CC-BY-4.0",
+             "source_ref": "catalog:fixture-tr-voice",
+             "source_checksum": hashlib.sha256(b"voice-weights").hexdigest(),
+             "source_size": 13, "publisher": "fixture-publisher"},
+        ]}
+        values.update(kw)
+        return json.dumps(values)
+
+    def test_catalog_entries_carry_terms_and_no_paths(self):
+        catalog = parse_catalog(self.document(), source_name="owner list")
+        self.assertEqual(len(catalog.entries), 2)
+        entry = catalog.entries[0]
+        card = entry.checked()
+        self.assertEqual((card.category, card.engine, card.artifact_format), ("stt", "whisper.cpp", "ggml"))
+        self.assertEqual(card.languages, ("tr", "en", "de"))
+        self.assertEqual(card.state, "DISCOVERED")
+        self.assertFalse(card.installed)
+        self.assertEqual(card.trust_level, "curated")
+        # A catalog publishes terms; the owner's approval is a separate act.
+        self.assertFalse(card.approved_source())
+        terms = entry.terms("owner-approval", 1e12)
+        self.assertEqual(terms.checksum, hashlib.sha256(b"stt-weights").hexdigest())
+        self.assertEqual(terms.size, 11)
+        self.assertTrue(terms.authorized(0.0))
+        self.assertFalse(terms.authorized(1e12 + 1))
+        approved = market.replace(card, network_approval="owner-approval", approval_expires_at=1e12)
+        self.assertTrue(approved.approved_source())
+        self.assertFalse(market.replace(card, network_approval="", ).approved_source())
+        self.assertIn("unknown", card.health_status)
+
+    def test_search_filters_without_ranking_or_guessing(self):
+        catalog = parse_catalog(self.document())
+        self.assertEqual([e.model_id for e in catalog.search()], ["fixture-whisper-large", "fixture-tr-voice"])
+        self.assertEqual([e.model_id for e in catalog.search(category="tts")], ["fixture-tr-voice"])
+        self.assertEqual([e.model_id for e in catalog.search(language="de")], ["fixture-whisper-large"])
+        self.assertEqual([e.model_id for e in catalog.search(engine="piper")], ["fixture-tr-voice"])
+        self.assertEqual([e.model_id for e in catalog.search(text="whisper")], ["fixture-whisper-large"])
+        self.assertEqual(catalog.search(text="nothing-matches"), ())
+        with self.assertRaisesRegex(Hold, "catalog_entry_not_found"):
+            catalog.card("missing")
+
+    def test_malformed_catalog_entries_are_rejected(self):
+        with self.assertRaisesRegex(Hold, "invalid_catalog"):
+            parse_catalog(self.document(entries=[{"model_id": "x"}]))
+        # An empty owner catalog is legitimate; it simply offers nothing.
+        self.assertEqual(parse_catalog(self.document(entries=[])).search(), ())
+        with self.assertRaisesRegex(Hold, "catalog_too_large"):
+            parse_catalog("[" + "x" * (CATALOG_LIMIT + 1) + "]")
+        with self.assertRaisesRegex(Hold, "invalid_catalog"):
+            parse_catalog(json.dumps({"entries": "not-a-list"}))
+
+    def test_entries_without_terms_cannot_start_a_download(self):
+        text = json.dumps({"entries": [{"model_id": "no-terms", "display_name": "No terms",
+                                       "category": "stt", "source_ref": "catalog:no-terms",
+                                       "source_checksum": "", "source_size": 0}]})
+        with self.assertRaisesRegex(Hold, "checksum_required_before_download"):
+            parse_catalog(text)
+
+    def test_duplicate_ids_and_paths_in_references_are_rejected(self):
+        with self.assertRaisesRegex(Hold, "duplicate_catalog_entry"):
+            parse_catalog(self.document(entries=[
+                {"model_id": "dup", "display_name": "A", "category": "stt", "source_ref": "catalog:a",
+                 "source_checksum": "0" * 64, "source_size": 1},
+                {"model_id": "dup", "display_name": "B", "category": "stt", "source_ref": "catalog:b",
+                 "source_checksum": "1" * 64, "source_size": 2}]))
+        with self.assertRaisesRegex(Hold, "invalid_source_reference"):
+            parse_catalog(self.document(entries=[
+                {"model_id": "path-entry", "display_name": "P", "category": "stt",
+                 "source_ref": "/home/owner/weights.bin", "source_checksum": "0" * 64,
+                 "source_size": 1}]))

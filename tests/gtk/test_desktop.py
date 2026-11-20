@@ -952,3 +952,105 @@ class DownloadFlowTests(MarketFixture):
         self.assertFalse(card.owned_by_jarvis)
         self.assertFalse(Path(self.market_home, "artifacts", "fixture-download").exists())
         self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))
+
+
+class CatalogUITests(MarketFixture):
+    """Curated catalog discovery over an owner-supplied file; nothing is fetched."""
+
+    document = {
+        "source_name": "fixture catalog",
+        "entries": [
+            {"model_id": "fixture-whisper-large", "display_name": "Fixture Whisper Large",
+             "category": "stt", "engine": "whisper.cpp", "artifact_format": "ggml",
+             "languages": ["tr", "en", "de"], "license_id": "MIT",
+             "source_ref": "catalog:fixture-whisper-large",
+             "source_checksum": hashlib.sha256(b"stt-weights").hexdigest(),
+             "source_size": 11, "source_version": "v3", "publisher": "fixture-publisher"},
+            {"model_id": "fixture-tr-voice", "display_name": "Fixture TR Voice",
+             "category": "tts", "engine": "piper", "artifact_format": "onnx",
+             "languages": ["tr"], "license_id": "CC-BY-4.0",
+             "source_ref": "catalog:fixture-tr-voice",
+             "source_checksum": hashlib.sha256(b"voice-weights").hexdigest(),
+             "source_size": 13, "publisher": "fixture-publisher"},
+        ],
+    }
+
+    def catalog_rows(self):
+        out = []
+        item = self.ui.catalog_list.get_first_child()
+        while item is not None:
+            out.append(item.get_child().get_text())
+            item = item.get_next_sibling()
+        return out
+
+    def pick_entry(self, model_id):
+        for item, entry in self.ui.catalog_rows.items():
+            if entry.model_id == model_id:
+                self.ui.catalog_list.select_row(item)
+                return entry
+        raise AssertionError("missing catalog entry: " + model_id)
+
+    def test_missing_catalog_is_stated_not_guessed(self):
+        note = self.ui.catalog_note.get_text()
+        self.assertTrue(any(marker in note for marker in
+                            ("No catalog yet.", "Henüz katalog yok", "Noch kein Katalog")), note)
+        self.assertEqual(self.catalog_rows(), [])
+        self.assertFalse(self.ui.catalog_add.get_sensitive())
+
+    def test_catalog_discovers_entries_and_registers_them(self):
+        self.ui.load_catalog_text(json.dumps(self.document))
+        self.assertEqual(len(self.catalog_rows()), 2)
+        self.assertIn("whisper.cpp", self.catalog_rows()[0])
+        self.pick_entry("fixture-whisper-large")
+        self.click(self.ui.catalog_add)
+        self.until(lambda: any(c.model_id == "fixture-whisper-large" for c in self.ui.market.cards()))
+        card = self.ui.market.card("fixture-whisper-large")
+        self.assertEqual(card.state, "DISCOVERED")
+        self.assertFalse(card.approved_source())  # terms published, approval not given
+        # The stored catalog is the owner's file, never fetched.
+        text = Path(market.catalog_path()).read_text(encoding="utf-8")
+        self.assertIn("fixture catalog", text)
+        self.assertNotIn("/home/", text)
+
+    def test_approval_enables_the_download_control(self):
+        self.ui.load_catalog_text(json.dumps(self.document))
+        self.pick_entry("fixture-whisper-large")
+        self.click(self.ui.catalog_add)
+        self.until(lambda: self.ui.market.cards())
+        self.pick_card("fixture-whisper-large")
+        self.assertFalse(self.ui.market_fetch.get_sensitive())
+        self.pick_entry("fixture-whisper-large")
+        self.click(self.ui.catalog_approve)
+        self.until(lambda: self.ui.market.card("fixture-whisper-large").network_approval
+                   == "owner-approved-download")
+        self.pick_card("fixture-whisper-large")
+        self.assertFalse(self.ui.market_fetch.get_sensitive())  # still no transport
+        self.ui.refresh_market_buttons()
+        self.assertFalse(self.ui.market_fetch.get_sensitive())
+        card = self.ui.market.card("fixture-whisper-large")
+        self.assertTrue(card.approved_source())
+
+    def test_catalog_search_and_filter_are_narrow(self):
+        self.ui.load_catalog_text(json.dumps(self.document))
+        self.ui.catalog_search.set_text("voice")
+        self.ui.refresh_catalog()
+        self.assertEqual(len(self.catalog_rows()), 1)
+        self.assertIn("piper", self.catalog_rows()[0])
+        self.ui.catalog_search.set_text("")
+        self.ui.catalog_filter.set_active(3)  # the tts category
+        self.ui.refresh_catalog()
+        self.assertEqual(len(self.catalog_rows()), 1)
+        self.assertIn("piper", self.catalog_rows()[0])
+        self.ui.catalog_filter.set_active(1)  # the stt category
+        self.ui.refresh_catalog()
+        self.assertEqual(len(self.catalog_rows()), 1)
+        self.assertIn("whisper.cpp", self.catalog_rows()[0])
+
+    def test_unreadable_catalog_is_a_bounded_reason(self):
+        with self.assertRaises(Hold):
+            self.ui.load_catalog_text("{not json")
+        # A malformed import is refused; the previous catalog and its note stand.
+        self.assertEqual(self.ui.catalog.entries, ())
+        note = self.ui.catalog_note.get_text()
+        self.assertTrue(any(marker in note for marker in
+                            ("No catalog yet.", "Henüz katalog yok", "Noch kein Katalog")), note)
