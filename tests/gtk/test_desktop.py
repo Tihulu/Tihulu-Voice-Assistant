@@ -917,7 +917,12 @@ class DownloadFlowTests(MarketFixture):
         self.pick_card("fixture-download")
         self.assertTrue(self.ui.market_fetch.get_sensitive())
         self.click(self.ui.market_fetch)
-        self.until(lambda: not self.ui.busy)
+        try:
+            self.until(lambda: not self.ui.busy)
+        except AssertionError:
+            task = self.ui.session.active
+            raise AssertionError("download stalled: %r" % (
+                task.exception() if task is not None and task.done() else "pending",))
         card = self.ui.market.card("fixture-download")
         self.assertEqual(card.state, "REGISTERED")
         self.assertTrue(card.owned_by_jarvis)
@@ -1049,3 +1054,89 @@ class ActionEnforcementUITests(MarketFixture):
                                             profiles.ALLOW, approval="owner-consent",
                                             expires_at=1e12),))
         self.assertTrue(self.ui.talk.get_sensitive())
+
+
+class DownloadTransportTests(MarketFixture):
+    """The download flow runs through the real loopback transport and fixture."""
+
+    def loopback_server(self, payload=b"synthetic weights fixture over loopback\n"):
+        """Serve the fixture on the same event loop the client drives."""
+        async def serve(reader, writer):
+            try:
+                await reader.readuntil(b"\r\n\r\n")
+                writer.write(b"HTTP/1.1 200 OK\r\nContent-Length: "
+                             + str(len(payload)).encode()
+                             + b"\r\nContent-Type: application/octet-stream\r\n\r\n" + payload)
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+
+        starting = self.loop.create_task(asyncio.start_server(serve, "127.0.0.1", 0))
+        self.until(lambda: starting.done())
+        server = starting.result()
+        port = server.sockets[0].getsockname()[1]
+
+        def stop():
+            server.close()
+            self.loop.run_until_complete(server.wait_closed())
+        self.addCleanup(stop)
+        return "http://127.0.0.1:%d/weights.bin" % port, payload
+
+    def discovered_with_terms(self, url, checksum, size, approval="owner-approval"):
+        card = market.ModelCard(
+            model_id="fixture-download", display_name="Fixture Download", category="stt",
+            engine="whisper.cpp", artifact_format="ggml", installed=True,
+            trust_level="curated", state="DISCOVERED", source_ref=url,
+            source_checksum=checksum, source_size=size, source_version="1.0",
+            license_id="MIT", network_approval=approval, approval_expires_at=1e12).checked()
+        self.ui.market.save_card(card)
+        self.ui.build_market_page()
+        return card
+
+    def begin_download(self, url, checksum, size, approval="owner-approval"):
+        self.discovered_with_terms(url, checksum, size, approval)
+        self.ui.market_filter.set_active(0)
+        self.pick_card("fixture-download")
+
+    def test_download_runs_through_the_real_transport_and_registers(self):
+        url, payload = self.loopback_server()
+        self.begin_download(url, hashlib.sha256(payload).hexdigest(), len(payload))
+        self.assertTrue(self.ui.market_fetch.get_sensitive())
+        self.click(self.ui.market_fetch)
+        try:
+            self.until(lambda: not self.ui.busy)
+        except AssertionError:
+            task = self.ui.session.active
+            raise AssertionError("download stalled: %r" % (
+                task.exception() if task is not None and task.done() else "pending",))
+        card = self.ui.market.card("fixture-download")
+        self.assertEqual(card.state, "REGISTERED")
+        self.assertTrue(card.owned_by_jarvis)
+        self.assertEqual(card.disk_size_bytes, len(payload))
+        self.assertEqual(card.storage_ref, "sha256-" + hashlib.sha256(payload).hexdigest()[:32])
+        target = Path(self.market_home, "artifacts", "fixture-download")
+        self.assertTrue(target.is_file())
+        self.assertEqual(target.read_bytes(), payload)
+        self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))
+
+    def test_a_checksum_mismatch_fails_and_keeps_the_registry_clean(self):
+        url, payload = self.loopback_server()
+        self.begin_download(url, "0" * 64, len(payload))
+        self.click(self.ui.market_fetch)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "transfer_checksum_mismatch")
+        card = self.ui.market.card("fixture-download")
+        self.assertEqual(card.state, "FAILED")
+        self.assertFalse(card.owned_by_jarvis)
+        self.assertFalse(Path(self.market_home, "artifacts", "fixture-download").exists())
+        self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))
+
+    def test_an_unapproved_source_has_no_transport(self):
+        url, payload = self.loopback_server()
+        card = self.discovered_with_terms(url, hashlib.sha256(payload).hexdigest(),
+                                         len(payload), approval="")
+        self.ui.market_filter.set_active(0)
+        self.pick_card("fixture-download")
+        self.assertFalse(self.ui.market_fetch.get_sensitive())
+        self.assertFalse(card.approved_source())

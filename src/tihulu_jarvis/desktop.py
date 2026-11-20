@@ -518,9 +518,10 @@ def create_window(app, loop):
                 ready = False
                 if chosen is not None:
                     try:
-                        ready = (self.market.card(chosen).state == "DISCOVERED"
-                                 and self.market.card(chosen).approved_source()
-                                 and self.transport is not None)
+                        card = self.market.card(chosen)
+                        ready = (card.state == "DISCOVERED" and card.approved_source()
+                                 and (self.transport is not None
+                                      or market.transport_for(card.source_ref) is not None))
                     except Hold:
                         ready = False
                 self.market_fetch.set_sensitive(ready)
@@ -570,9 +571,10 @@ def create_window(app, loop):
         async def download(self, epoch, model_id):
             card = self.market.card(model_id)
             source = market.source_of(card)
-            if self.transport is None:
+            transport = self.transport or market.transport_for(source.reference)
+            if transport is None:
                 raise Hold("download_transport_not_available")
-            transfer = market.Transfer(self.market, card, source, self.transport)
+            transfer = market.Transfer(self.market, card, source, transport)
             try:
                 await transfer.run(lambda count: None)
             finally:
