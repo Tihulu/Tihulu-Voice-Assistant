@@ -3,6 +3,7 @@
 """Opt-in GTK 4 desktop client. No listener, background capture or provider login."""
 import asyncio
 import locale
+import os
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -139,7 +140,10 @@ def create_window(app, loop):
             # No download transport ships with this release; a future,
             # separately authorized transport is plugged in here.
             self.transport = None
+            self.catalog = market.Catalog()
+            self.catalog_rows = {}
             self.build_profiles_page()
+            self.build_catalog_page()
             self.build_market_page()
             try:
                 profiles.ensure_default(self.store)
@@ -476,6 +480,7 @@ def create_window(app, loop):
                 self.market_forget = self.button(row, tr("Unregister","Kaydı sil","Registrierung entfernen"), self.forget_selected_card)
                 self.market_fetch = self.button(row, tr("Download","İndir","Herunterladen"), self.download_selected_card)
                 self.market_find = self.button(row, tr("Discover installed Jan models","Kurulu Jan modellerini bul","Installierte Jan-Modelle suchen"), self.discover_market)
+
             wanted = self.market_filter.get_active_text() or "stt"
             rows = [c for c in self.market.cards() if c.category == wanted]
             for card in sorted(rows, key=lambda c: (c.state, c.model_id)):
@@ -504,6 +509,146 @@ def create_window(app, loop):
                       "%d öğe için bellek tahmini yok" % unknown,
                       "für %d Einträge kein Speicherschätzwert" % unknown)
             return "%s · %s" % (summary.report(), tail if unknown else "")
+
+        def build_catalog_page(self):
+            if getattr(self, "catalog_list", None) is not None:
+                self.refresh_catalog()
+                return
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            view = Gtk.ScrolledWindow(vexpand=True)
+            view.set_child(page)
+            self.stack.add_titled(view, "catalog", tr("Catalog","Katalog","Katalog"))
+            self.catalog_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.catalog_note)
+            self.catalog_search = Gtk.SearchEntry()
+            self.catalog_search.connect("search-changed", lambda *_: self.refresh_catalog())
+            page.append(self.catalog_search)
+            self.catalog_filter = Gtk.ComboBoxText()
+            self.catalog_filter.append_text("")
+            for category in market.CATEGORIES:
+                self.catalog_filter.append_text(category)
+            self.catalog_filter.set_active(0)
+            self.catalog_filter.connect("changed", lambda *_: self.refresh_catalog())
+            page.append(self.catalog_filter)
+            self.catalog_list = Gtk.ListBox()
+            self.catalog_list.connect("row-selected", lambda *_: self.refresh_catalog_buttons())
+            page.append(self.catalog_list)
+            row = Gtk.Box(spacing=8)
+            page.append(row)
+            self.catalog_add = self.button(row, tr("Add to registry","Kayda ekle","Registrieren"), self.add_catalog_entry)
+            self.catalog_approve = self.button(row, tr("Approve download","İndirmeyi onayla","Download genehmigen"), self.approve_download)
+            self.catalog_load = self.button(row, tr("Import catalog","Katalog al","Katalog importieren"), self.import_catalog)
+            self.load_catalog()
+
+        def load_catalog_text(self, text):
+            catalog = market.parse_catalog(text)
+            self.catalog = catalog
+            path = market.catalog_path()
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            os.chmod(path, 0o600)
+            self.refresh_catalog()
+            return catalog
+
+        def load_catalog(self):
+            path = market.catalog_path()
+            try:
+                self.load_catalog_text(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                self.catalog_note.set_text(tr(
+                    "No catalog yet. Import a curated catalog to discover models and voices.",
+                    "Henüz katalog yok. Model ve ses keşfetmek için seçilmiş bir katalog al.",
+                    "Noch kein Katalog. Kuratierten Katalog importieren, um Modelle zu finden."))
+            except (Hold, OSError, ValueError):
+                self.catalog_note.set_text(tr("Catalog unreadable.","Katalog okunamadı.",
+                                              "Katalog nicht lesbar."))
+            self.refresh_catalog()
+
+        def refresh_catalog(self):
+            for item in list(self.catalog_rows):
+                self.catalog_list.remove(item)
+            self.catalog_rows = {}
+            wanted = self.catalog_filter.get_active_text() or ""
+            text = self.catalog_search.get_text().strip()
+            for entry in self.catalog.search(category=wanted, text=text):
+                label = Gtk.Label(label="%s · %s · %s · %s · %s" % (
+                    entry.display_name, entry.category, entry.engine, entry.artifact_format,
+                    entry.license_id), xalign=0, wrap=True)
+                item = Gtk.ListBoxRow()
+                item.set_child(label)
+                self.catalog_list.append(item)
+                self.catalog_rows[item] = entry
+            self.refresh_catalog_buttons()
+
+        def selected_catalog_entry(self):
+            row = self.catalog_list.get_selected_row()
+            return self.catalog_rows.get(row) if row is not None else None
+
+        def refresh_catalog_buttons(self):
+            for w in (self.catalog_add, self.catalog_approve):
+                w.set_sensitive(not self.busy and self.selected_catalog_entry() is not None)
+            self.catalog_list.set_sensitive(not self.busy)
+            self.catalog_load.set_sensitive(not self.busy)
+
+        def add_catalog_entry(self):
+            entry = self.selected_catalog_entry()
+            if entry is None or self.busy:
+                return
+            try:
+                self.market.save_card(entry.checked())
+                self.build_market_page()
+                self.set_state("ready", tr("Added to registry.","Kayda eklendi.","Registriert."))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def approve_download(self):
+            entry = self.selected_catalog_entry()
+            if entry is None or self.busy:
+                return
+            try:
+                known = None
+                try:
+                    known = self.market.card(entry.model_id)
+                except Hold:
+                    pass
+                if known is None:
+                    known = self.market.save_card(entry.checked())
+                if known.state != "DISCOVERED":
+                    raise Hold("lifecycle_transition_rejected:" + known.state + "->REVIEWED")
+                approved = replace(known, network_approval="owner-approved-download",
+                                   approval_expires_at=1e12)
+                self.market.save_card(approved)
+                self.build_market_page()
+                self.set_state("ready", tr("Download approved for this entry.",
+                                           "Bu kayıt için indirme onaylandı.",
+                                           "Download für diesen Eintrag genehmigt."))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def import_catalog(self):
+            if self.busy:
+                return
+            dialog = Gtk.FileChooserNative.new("Import a curated catalog", self.win,
+                                               Gtk.FileChooserAction.OPEN, "Select", "Cancel")
+            filt = Gtk.FileFilter()
+            filt.add_pattern("*.json")
+            dialog.add_filter(filt)
+            def response(d, res):
+                try:
+                    if res != Gtk.ResponseType.ACCEPT:
+                        return
+                    file = d.get_file()
+                    path = file.get_path() if file else None
+                    raw = Path(path).read_text(encoding="utf-8") if path else ""
+                    self.load_catalog_text(raw)
+                    self.set_state("ready", tr("Catalog imported.","Katalog alındı.",
+                                               "Katalog importiert."))
+                except (Hold, OSError, ValueError):
+                    self.set_state("ready", "catalog_import_rejected")
+                finally:
+                    d.destroy()
+            dialog.connect("response", response)
+            dialog.show()
 
         def selected_card(self):
             row = self.market_list.get_selected_row()
