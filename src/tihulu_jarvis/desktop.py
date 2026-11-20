@@ -629,6 +629,7 @@ def create_window(app, loop):
             sample = {"tr": "Bu bir ses önizlemesidir.",
                       "en": "This is a voice preview.",
                       "de": "Das ist eine Stimmprobe."}[lang]
+            self.require_tools(("local_audio_device", ("push_to_talk",)))
             speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"][lang], lang).id)
             async def run(epoch):
                 def progress(stage):
@@ -655,6 +656,19 @@ def create_window(app, loop):
                 self.session.check(epoch)
                 self.test_note.set_text("%s · %s" % (reply.strip()[:240], probe.context.response_language or "unknown"))
             self.submit(run)
+
+        def active_profile(self):
+            """The profile whose policy is in force for this turn."""
+            try:
+                return self.store.load(self.cfg["profile"]).checked()
+            except (Hold, KeyError):
+                raise Hold("no_active_profile") from None
+
+        def require_tools(self, *requests):
+            """Refuse an action the active profile denies, at the moment it runs."""
+            profile = self.active_profile()
+            for action, scope in requests:
+                profiles.require_tool(profile, action, scope)
 
         def require_endpoint(self, raw=None):
             """The active mode decides what kind of endpoint may be used."""
@@ -765,6 +779,7 @@ def create_window(app, loop):
                     if epoch == self.session.epoch and not self.playback_stopping:
                         self.set_state(stage)
 
+                self.require_tools(("local_audio_device", ("push_to_talk",)))
                 voices = audio.SelectedVoices(self.cfg["voices"])
                 self.finish=asyncio.Event()
                 text=await audio.listen(self.cfg["stt"],self.finish,progress)
