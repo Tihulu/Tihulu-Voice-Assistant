@@ -537,7 +537,7 @@ def create_window(app, loop):
 
         def discover_market(self):
             async def run(epoch):
-                raw = self.url.get_text().strip()
+                raw = self.require_endpoint()
                 client = Jan(raw, timeout=10)
                 cards = await market.from_models(client, languages=(), now=0.0)
                 self.session.check(epoch)
@@ -656,8 +656,16 @@ def create_window(app, loop):
                 self.test_note.set_text("%s · %s" % (reply.strip()[:240], probe.context.response_language or "unknown"))
             self.submit(run)
 
+        def require_endpoint(self, raw=None):
+            """The active mode decides what kind of endpoint may be used."""
+            raw = self.url.get_text().strip() if raw is None else raw
+            try:
+                return profiles.enforce_endpoint(self.store.load(self.cfg["profile"]).checked(), raw)
+            except KeyError:
+                raise Hold("no_active_profile") from None
+
         def backend_for_test(self):
-            return Jan(self.cfg["endpoint"], self.cfg["llm"])
+            return Jan(self.require_endpoint(), self.cfg["llm"])
 
         def submit(self, work):
             if self.busy:
@@ -688,7 +696,7 @@ def create_window(app, loop):
 
         def discover(self):
             async def run(epoch):
-                raw=self.url.get_text().strip()
+                raw=self.require_endpoint()
                 client=Jan(raw,timeout=10)
                 models=await client.models()
                 self.session.check(epoch)
@@ -746,7 +754,7 @@ def create_window(app, loop):
             async def run(epoch):
                 self.bubble("You",text)
                 self.set_state("thinking")
-                result,_=await self.session.reply(text,Jan(self.cfg["endpoint"], self.cfg["llm"]),epoch)
+                result,_=await self.session.reply(text,Jan(self.require_endpoint(), self.cfg["llm"]),epoch)
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
             self.submit(run)
@@ -763,7 +771,7 @@ def create_window(app, loop):
                 self.session.check(epoch)
                 self.bubble("You",text)
                 self.set_state("thinking")
-                result,speech=await self.session.reply(text,Jan(self.cfg["endpoint"],self.cfg["llm"]),epoch,voices)
+                result,speech=await self.session.reply(text,Jan(self.require_endpoint(),self.cfg["llm"]),epoch,voices)
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
                 playback = loop.create_task(audio.speak(speech, progress))
