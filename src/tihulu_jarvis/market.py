@@ -8,6 +8,7 @@ separately authorized transport can be reviewed on its own. Nothing is
 downloaded, started or deleted without an explicit, bounded owner action,
 and shared weights are never removed by this project.
 """
+import asyncio
 import hashlib
 import json
 import os
@@ -151,6 +152,12 @@ class ModelCard:
     license_id: str = "unknown"
     state: str = "DISCOVERED"
     last_tested_at: float = 0.0
+    source_ref: str = ""        # approved download terms, opaque reference
+    source_checksum: str = ""
+    source_size: int = 0
+    source_version: str = "unknown"
+    network_approval: str = ""
+    approval_expires_at: float = 0.0
 
     def compatibility(self):
         if self.engine in ENGINE_FORMATS:
@@ -160,6 +167,11 @@ class ModelCard:
                 return UNKNOWN  # an unknown format is never marked incompatible
             return "incompatible_format"
         return UNKNOWN
+
+    def approved_source(self):
+        """True only when every download term the owner must approve is present."""
+        return bool(self.source_ref and self.source_checksum and self.source_size
+                    and self.network_approval)
 
     def checked(self):
         if not isinstance(self.model_id, str) or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", self.model_id):
@@ -182,6 +194,17 @@ class ModelCard:
             raise Hold("invalid_storage_reference")
         if len(self.display_name) > 120 or len(self.provider) > 64 or len(self.version) > 64:
             raise Hold("card_text_too_long")
+        for key in ("source_ref", "source_checksum", "source_version"):
+            if not isinstance(getattr(self, key), str) or len(getattr(self, key)) > 256:
+                raise Hold("invalid_source_reference")
+        if self.source_ref and not re.fullmatch(r"[A-Za-z0-9:._-]{1,256}", self.source_ref):
+            raise Hold("invalid_source_reference")
+        if self.source_checksum and not re.fullmatch(r"[0-9a-f]{64}", self.source_checksum):
+            raise Hold("checksum_required_before_download")
+        if not 0 <= self.source_size <= DIGEST_LIMIT:
+            raise Hold("source_size_not_stated")
+        if self.network_approval and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.network_approval):
+            raise Hold("invalid_approval_reference")
         return replace(self, compatibility_status=self.compatibility())
 
 
@@ -274,6 +297,132 @@ def advance(card, state):
         raise Hold("lifecycle_transition_rejected:" + card.state + "->" + state)
     return replace(card, state=state, installed=True,
                    registered=state in (REGISTERED, TESTABLE, ACTIVE))
+
+
+@dataclass(frozen=True)
+class Source:
+    """An owner-approved download source. It never carries credentials."""
+
+    reference: str = ""        # opaque reference, e.g. a curated catalog entry
+    checksum: str = ""         # expected sha256; a transfer never starts without one
+    size: int = 0              # expected bytes; 0 means the size is not stated
+    version: str = "unknown"
+    license_id: str = "unknown"
+    network_approval: str = ""  # opaque approval reference
+    approval_expires_at: float = 0.0
+
+    def checked(self):
+        if not re.fullmatch(r"[A-Za-z0-9:._-]{1,256}", self.reference):
+            raise Hold("invalid_source_reference")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.checksum):
+            raise Hold("checksum_required_before_download")
+        if not 0 < self.size <= DIGEST_LIMIT:
+            raise Hold("source_size_not_stated")
+        if self.network_approval and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.network_approval):
+            raise Hold("invalid_approval_reference")
+        if not 0 <= self.approval_expires_at <= 1e12:
+            raise Hold("invalid_approval_expiry")
+        return self
+
+    def authorized(self, now):
+        return bool(self.network_approval) and (not self.approval_expires_at
+                                                or self.approval_expires_at > now)
+
+
+def source_of(card):
+    """Build the approved download terms recorded on a card."""
+    if not card.approved_source():
+        raise Hold("download_terms_not_approved")
+    return Source(card.source_ref, card.source_checksum, card.source_size, card.source_version,
+                 card.license_id, card.network_approval, card.approval_expires_at).checked()
+
+
+class Transfer:
+    """Cancellable, verified transfer into an isolated temporary directory.
+
+    `fetch` is an explicitly authorized transport: an async callable that
+    receives a writable path and a progress callback and returns the number of
+    bytes it wrote. This layer owns cancellation, integrity and registration;
+    it never opens a connection itself.
+    """
+
+    def __init__(self, registry, card, source, fetch, root=None, now=0.0):
+        self.registry = registry
+        self.card = card
+        self.source = source.checked()
+        self.fetch = fetch
+        self.now = now
+        self.root = Path(root) if root else registry.root / "transfers"
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.temp = None
+        self.received = 0
+        self.state = card.state
+
+    def _persist(self, state):
+        self.card = advance(self.card, state)
+        self.state = self.card.state
+        return self.registry.save_card(self.card)
+
+    async def run(self, progress=None):
+        if self.card.state != DISCOVERED:
+            # Nothing already installed is ever overwritten by a transfer.
+            raise Hold("model_already_registered")
+        self._persist("REVIEWED")
+        if not self.source.authorized(self.now):
+            self._persist("HOLD")
+            raise Hold("network_not_authorized")
+        self._persist("APPROVED")
+        self._persist("QUEUED")
+        fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
+        os.close(fd)
+        self.temp = Path(name)
+        try:
+            os.chmod(self.temp, 0o600)
+            self._persist("DOWNLOADING")
+            def note(count):
+                self.received = count
+                if progress:
+                    progress(count)
+            written = await self.fetch(str(self.temp), note)
+            if not isinstance(written, int) or written <= 0 or written > DIGEST_LIMIT:
+                raise Hold("transfer_reported_invalid_length")
+            if self.temp.stat().st_size != written:
+                raise Hold("transfer_length_mismatch")
+            if self.source.size and written != self.source.size:
+                raise Hold("transfer_size_mismatch")
+            checksum, _ = digest(self.temp)
+            if checksum != self.source.checksum:
+                self._persist("FAILED")
+                raise Hold("transfer_checksum_mismatch")
+            self._persist("VERIFIED")
+            target = self.registry.root / "artifacts" / self.card.model_id
+            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            os.replace(self.temp, target)
+            self.temp = None
+            os.chmod(target, 0o600)
+            registered = replace(self.card, state="REGISTERED", registered=True, installed=True,
+                                 owned_by_jarvis=True, disk_size_bytes=written,
+                                 storage_ref="sha256-" + checksum[:32],
+                                 version=self.source.version if self.source.version != "unknown" else self.card.version,
+                                 license_id=self.source.license_id, trust_level="curated")
+            self.registry.save_card(registered)
+            self.card = registered
+            self.state = registered.state
+            return registered
+        except asyncio.CancelledError:
+            if self.state not in TERMINAL:
+                self._persist("CANCELLED")
+            raise
+        except Hold:
+            if self.state not in TERMINAL:
+                self._persist("FAILED")
+            raise
+        finally:
+            if self.temp is not None:
+                Path(self.temp).unlink(missing_ok=True)
+
+    def cancel(self):
+        raise Hold("transfer_cancelled_by_owner")
 
 
 class Registry:

@@ -6,6 +6,7 @@ failure, not a skip. No microphone, installed models or Jan service is used.
 """
 import asyncio
 import gc
+import hashlib
 import json
 import shutil
 import sys
@@ -555,8 +556,9 @@ class ProfileUITests(DesktopFixture):
         self.assertEqual(len(self.ui.session.history), len(history) + 2)
 
 
-class MarketUITests(DesktopFixture):
-    """Real market widgets over an isolated registry and read-only fixtures."""
+class MarketFixture(DesktopFixture):
+    """Real profile, market and registry widgets over isolated stores."""
+
 
     def setUp(self):
         self.profile_home = tempfile.mkdtemp()
@@ -588,6 +590,9 @@ class MarketUITests(DesktopFixture):
                 self.ui.market_list.select_row(item)
                 return candidate
         raise AssertionError("missing card: " + model_id)
+
+class MarketUITests(MarketFixture):
+    """Market cards, compatibility and truthful registration."""
 
     def test_picking_a_file_registers_a_truthful_card(self):
         path = self.weights("fixture-whisper.bin")
@@ -653,7 +658,7 @@ class MarketUITests(DesktopFixture):
         self.assertFalse(card.requires_gpu)
 
 
-class MarketInventoryTests(MarketUITests):
+class MarketInventoryTests(MarketFixture):
     """Jan-backed discovery is a fixture server; nothing reaches a network."""
 
     def test_discovered_jan_models_are_listed_as_installed(self):
@@ -725,7 +730,7 @@ class MarketInventoryTests(MarketUITests):
         self.assertEqual(self.ui.market.card("fixture-qwen").state, "REGISTERED")
 
 
-class PreviewTests(MarketUITests):
+class PreviewTests(MarketFixture):
     """Safe test chat and per-locale voice preview over synthetic backends."""
 
     def preview_of(self, lang):
@@ -815,7 +820,7 @@ class PreviewTests(MarketUITests):
         self.assertEqual(self.bubbles(), [])
 
 
-class StorageViewTests(MarketUITests):
+class StorageViewTests(MarketFixture):
     """Storage and resources aggregated from the registry, never estimated."""
 
     def report(self):
@@ -871,3 +876,79 @@ class StorageViewTests(MarketUITests):
         self.ui.market.save_card(card)
         self.ui.build_market_page()
         self.assertIn("shared 1", self.report())
+
+
+class DownloadFlowTests(MarketFixture):
+    """The download flow with a fixture transport; no network is touched."""
+
+    def discovered(self, model_id="fixture-download", **kw):
+        values = {"model_id": model_id, "display_name": model_id, "category": "llm",
+                  "engine": "jan", "provider": "jan", "installed": True, "state": "DISCOVERED",
+                  "source_ref": "catalog:fixture-download", "source_size": len(b"weights"),
+                  "source_checksum": hashlib.sha256(b"weights").hexdigest(),
+                  "source_version": "1.0", "license_id": "MIT",
+                  "network_approval": "owner-1", "approval_expires_at": 1e12}
+        values.update(kw)
+        card = market.ModelCard(**values).checked()
+        self.ui.market.save_card(card)
+        self.ui.build_market_page()
+        return card
+
+    async def fetch_weights(self, path, note):
+        with open(path, "wb") as f:
+            f.write(b"weights")
+        note(len(b"weights"))
+        return len(b"weights")
+
+    def test_download_is_unavailable_without_a_transport(self):
+        self.discovered()
+        self.ui.market_filter.set_active(1)
+        self.pick_card("fixture-download")
+        self.assertFalse(self.ui.market_fetch.get_sensitive())
+        # Even when forced, the honest reason is reported, nothing is written.
+        self.ui.transport = None
+        self.ui.submit(lambda epoch: self.ui.download(epoch, "fixture-download"))
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "download_transport_not_available")
+        self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))
+
+    def test_download_registers_a_verified_artifact(self):
+        self.discovered()
+        self.ui.transport = self.fetch_weights
+        self.ui.market_filter.set_active(1)
+        self.pick_card("fixture-download")
+        self.assertTrue(self.ui.market_fetch.get_sensitive())
+        self.click(self.ui.market_fetch)
+        self.until(lambda: not self.ui.busy)
+        card = self.ui.market.card("fixture-download")
+        self.assertEqual(card.state, "REGISTERED")
+        self.assertTrue(card.owned_by_jarvis)
+        self.assertEqual(card.version, "1.0")
+        self.assertEqual(card.license_id, "MIT")
+        target = Path(self.market_home, "artifacts", "fixture-download")
+        self.assertTrue(target.is_file())
+        self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))
+        rows = self.rows()
+        self.assertTrue(any("REGISTERED" in row for row in rows))
+
+    def test_a_failed_download_leaves_no_artifact(self):
+        self.discovered()
+
+        async def lying(path, note):
+            # Same length, different bytes: integrity, not size, must catch it.
+            with open(path, "wb") as f:
+                f.write(b"WEIGHTS")
+            note(len(b"weights"))
+            return len(b"weights")
+
+        self.ui.transport = lying
+        self.ui.market_filter.set_active(1)
+        self.pick_card("fixture-download")
+        self.click(self.ui.market_fetch)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "transfer_checksum_mismatch")
+        card = self.ui.market.card("fixture-download")
+        self.assertEqual(card.state, "FAILED")
+        self.assertFalse(card.owned_by_jarvis)
+        self.assertFalse(Path(self.market_home, "artifacts", "fixture-download").exists())
+        self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))

@@ -8,8 +8,8 @@ import unittest
 from pathlib import Path
 
 from tihulu_jarvis.market import (ACTIVE, ALLOWED_NEXT, CATEGORIES, TERMINAL, ModelCard,
-                                  Registry, advance, digest, from_file, from_models,
-                                  human_size, register_installed, usage)
+                                  Registry, Source, Transfer, advance, digest, from_file,
+                                  from_models, human_size, register_installed, usage)
 from tihulu_jarvis.voice.m1 import Hold
 
 
@@ -309,3 +309,136 @@ class UsageTests(unittest.TestCase):
         self.assertEqual(empty.cards, 0)
         self.assertEqual(empty.disk_bytes, 0)
         self.assertIn("unknown/not tested", empty.report())
+
+
+async def fake_fetch(path, note):
+    """A fixture transport: it writes into the isolated transfer directory."""
+    with open(path, "wb") as f:
+        f.write(b"weights")
+    note(len(b"weights"))
+    return len(b"weights")
+
+
+class TransferTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Registry(self.tmp)
+
+    def active_card(self, **kw):
+        """A card that already completed the lifecycle and remains usable."""
+        current = card(**kw)
+        for state in ("REVIEWED", "APPROVED", "QUEUED", "DOWNLOADING", "VERIFIED",
+                      "REGISTERED", "TESTABLE", ACTIVE):
+            current = advance(current, state)
+        return current
+
+    def source(self, **kw):
+        values = {"reference": "catalog:fixture-model", "checksum": hashlib.sha256(b"weights").hexdigest(),
+                  "size": len(b"weights"), "version": "1.0", "license_id": "MIT",
+                  "network_approval": "owner-1", "approval_expires_at": 1e12}
+        values.update(kw)
+        return Source(**values)
+
+    def test_transfer_registers_a_verified_artifact(self):
+        item = card(category="llm", state="DISCOVERED")
+        self.store.save_card(item)
+        transfer = Transfer(self.store, item, self.source(), fake_fetch, root=self.tmp)
+        done = asyncio.get_event_loop().run_until_complete(transfer.run())
+        self.assertEqual(done.state, "REGISTERED")
+        self.assertTrue(done.owned_by_jarvis)
+        self.assertEqual(done.disk_size_bytes, len(b"weights"))
+        self.assertEqual(done.storage_ref, "sha256-" + hashlib.sha256(b"weights").hexdigest()[:32])
+        self.assertEqual(done.version, "1.0")
+        self.assertEqual(done.license_id, "MIT")
+        target = self.tmp / "artifacts" / "fixture-model"
+        self.assertTrue(target.is_file())
+        self.assertFalse(list((self.tmp / "transfers").glob("tihulu-transfer-*")))
+        self.assertEqual(self.store.card("fixture-model").state, "REGISTERED")
+
+    def test_checksum_mismatch_fails_and_changes_nothing_registered(self):
+        # A different model stays installed and usable while this one fails.
+        other = self.active_card(model_id="fixture-installed", category="llm", installed=True)
+        self.store.save_card(other)
+        item = card(category="llm", state="DISCOVERED")
+        self.store.save_card(item)
+        transfer = Transfer(self.store, item, self.source(checksum="0" * 64), fake_fetch, root=self.tmp)
+        with self.assertRaisesRegex(Hold, "transfer_checksum_mismatch"):
+            asyncio.get_event_loop().run_until_complete(transfer.run())
+        self.assertEqual(transfer.state, "FAILED")
+        # The previously installed entry is untouched and still usable.
+        self.assertEqual(self.store.card("fixture-installed").state, ACTIVE)
+        self.assertFalse((self.tmp / "artifacts" / "fixture-model").exists())
+        self.assertFalse(list((self.tmp / "transfers").glob("tihulu-transfer-*")))
+        self.assertEqual(self.store.card("fixture-model").state, "FAILED")
+
+    def test_a_transfer_never_overwrites_an_installed_model(self):
+        item = self.active_card(category="llm", installed=True)
+        self.store.save_card(item)
+        transfer = Transfer(self.store, item, self.source(), fake_fetch, root=self.tmp)
+        with self.assertRaisesRegex(Hold, "model_already_registered"):
+            asyncio.get_event_loop().run_until_complete(transfer.run())
+        self.assertEqual(self.store.card("fixture-model").state, ACTIVE)
+        self.assertFalse(list((self.tmp / "transfers").glob("tihulu-transfer-*")))
+
+    def test_size_mismatch_and_invalid_length_are_rejected(self):
+        item = card(category="llm", state="DISCOVERED")
+        self.store.save_card(item)
+        transfer = Transfer(self.store, item, self.source(size=99), fake_fetch, root=self.tmp)
+        with self.assertRaisesRegex(Hold, "transfer_size_mismatch"):
+            asyncio.get_event_loop().run_until_complete(transfer.run())
+        async def lying(path, note):
+            note(0)
+            return 0
+        with self.assertRaisesRegex(Hold, "transfer_reported_invalid_length"):
+            asyncio.get_event_loop().run_until_complete(Transfer(self.store, item, self.source(), lying, root=self.tmp).run())
+
+    def test_without_authorization_the_transfer_holds_before_writing(self):
+        item = card(category="llm", state="DISCOVERED")
+        self.store.save_card(item)
+
+        async def boom(path, note):
+            raise AssertionError("a transfer must not start without authorization")
+
+        transfer = Transfer(self.store, item, self.source(network_approval=""), boom, root=self.tmp)
+        with self.assertRaisesRegex(Hold, "network_not_authorized"):
+            asyncio.get_event_loop().run_until_complete(transfer.run())
+        self.assertEqual(transfer.state, "HOLD")
+        self.assertFalse(list((self.tmp / "transfers").glob("tihulu-transfer-*")))
+
+    def test_expired_authorization_holds_the_transfer(self):
+        item = card(category="llm", state="DISCOVERED")
+        self.store.save_card(item)
+        transfer = Transfer(self.store, item, self.source(approval_expires_at=5.0), fake_fetch, now=10.0)
+        with self.assertRaisesRegex(Hold, "network_not_authorized"):
+            asyncio.get_event_loop().run_until_complete(transfer.run())
+
+    async def test_cancellation_removes_the_partial_file(self):
+        item = card(category="llm", state="DISCOVERED")
+        self.store.save_card(item)
+        started = asyncio.Event()
+
+        async def stalling(path, note):
+            started.set()
+            await asyncio.Future()
+
+        transfer = Transfer(self.store, item, self.source(), stalling, root=self.tmp)
+        task = asyncio.get_running_loop().create_task(transfer.run())
+        await asyncio.wait_for(started.wait(), 2)
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 2)
+        self.assertEqual(transfer.state, "CANCELLED")
+        self.assertFalse(list((self.tmp / "transfers").glob("tihulu-transfer-*")))
+        self.assertEqual(self.store.card("fixture-model").state, "CANCELLED")
+
+    def test_a_source_without_checksum_never_starts(self):
+        with self.assertRaisesRegex(Hold, "checksum_required_before_download"):
+            self.source(checksum="").checked()
+        with self.assertRaisesRegex(Hold, "invalid_source_reference"):
+            self.source(reference="/home/owner/weights").checked()
+        with self.assertRaisesRegex(Hold, "source_size_not_stated"):
+            self.source(size=0).checked()
+
+    def test_transport_credentials_are_not_accepted(self):
+        with self.assertRaisesRegex(Hold, "invalid_approval_reference"):
+            self.source(network_approval="secret/key").checked()

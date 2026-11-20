@@ -136,6 +136,9 @@ def create_window(app, loop):
             self.policy_rows = {}
             self.market = market.Registry(market.market_dir())
             self.market_row_ids = {}
+            # No download transport ships with this release; a future,
+            # separately authorized transport is plugged in here.
+            self.transport = None
             self.build_profiles_page()
             self.build_market_page()
             try:
@@ -471,6 +474,7 @@ def create_window(app, loop):
                 page.append(row)
                 self.market_use = self.button(row, tr("Use selected","Seçileni kullan","Auswahl verwenden"), self.use_selected_card)
                 self.market_forget = self.button(row, tr("Unregister","Kaydı sil","Registrierung entfernen"), self.forget_selected_card)
+                self.market_fetch = self.button(row, tr("Download","İndir","Herunterladen"), self.download_selected_card)
                 self.market_find = self.button(row, tr("Discover installed Jan models","Kurulu Jan modellerini bul","Installierte Jan-Modelle suchen"), self.discover_market)
             wanted = self.market_filter.get_active_text() or "stt"
             rows = [c for c in self.market.cards() if c.category == wanted]
@@ -506,9 +510,20 @@ def create_window(app, loop):
             return self.market_row_ids.get(row) if row is not None else None
 
         def refresh_market_buttons(self):
+            chosen = self.selected_card()
             for w in (self.market_use, self.market_forget):
-                w.set_sensitive(not self.busy and self.selected_card() is not None)
+                w.set_sensitive(not self.busy and chosen is not None)
             self.market_list.set_sensitive(not self.busy)
+            if not self.busy:
+                ready = False
+                if chosen is not None:
+                    try:
+                        ready = (self.market.card(chosen).state == "DISCOVERED"
+                                 and self.market.card(chosen).approved_source()
+                                 and self.transport is not None)
+                    except Hold:
+                        ready = False
+                self.market_fetch.set_sensitive(ready)
 
         def use_selected_card(self):
             model_id = self.selected_card()
@@ -544,6 +559,25 @@ def create_window(app, loop):
                 self.build_market_page()
                 self.refresh()
             self.submit(run)
+
+        def download_selected_card(self):
+            """Queue a discovered item for download; nothing installed is replaced."""
+            model_id = self.selected_card()
+            if model_id is None or self.busy:
+                return
+            self.submit(lambda epoch: self.download(epoch, model_id))
+
+        async def download(self, epoch, model_id):
+            card = self.market.card(model_id)
+            source = market.source_of(card)
+            if self.transport is None:
+                raise Hold("download_transport_not_available")
+            transfer = market.Transfer(self.market, card, source, self.transport)
+            try:
+                await transfer.run(lambda count: None)
+            finally:
+                self.session.check(epoch)
+                self.build_market_page()
 
         def forget_selected_card(self):
             model_id = self.selected_card()
