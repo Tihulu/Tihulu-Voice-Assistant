@@ -298,6 +298,48 @@ MODE_TEXT = {
 }
 
 
+ENDPOINT_LIMIT = 4096
+
+
+def require_tool(profile, action, scope=(), now=0.0):
+    """Refuse an action the active profile explicitly denies, at the moment it
+    is attempted — not only when a control was enabled."""
+    decision, reason = decide(profile.rules(), action, scope, now)
+    if decision == ASK and reason == "approval_expired":
+        raise Hold("approval_expired")
+    # Only an absent rule is not a forbiddance; law and unknown actions never pass.
+    if decision == DENY and reason != "no_rule_matches":
+        raise Hold("profile_forbids_" + action if reason == "rule" else reason)
+    return decision, reason
+
+
+def enforce_endpoint(profile, endpoint):
+    """The active mode decides what kind of endpoint may be used at all.
+
+    This client's only transport is a numeric loopback Jan endpoint, so the
+    modes make that explicit instead of promising capabilities that do not
+    exist here.
+    """
+    if not isinstance(endpoint, str) or len(endpoint) > ENDPOINT_LIMIT or not endpoint.strip():
+        raise Hold("invalid_local_settings")
+    raw = endpoint.strip()
+    try:
+        from .voice.jan import endpoint as parse
+        ip, port = parse(raw)
+    except Hold:
+        # A non-loopback address is only a capability question for modes that
+        # actually carry a cloud route; this build has none.
+        if profile.based_on_mode == "LOCAL_ONLY":
+            raise Hold("local_only_forbids_non_loopback") from None
+        raise Hold("cloud_transport_not_available") from None
+    if profile.based_on_mode == "CLOUD_CHAT" and profile.allowed_providers:
+        # A cloud mode names its providers; a bare address is not one of them.
+        raise Hold("approved_provider_required")
+    if profile.based_on_mode == "LOCAL_ONLY" and profile.allowed_providers:
+        raise Hold("local_only_forbids_providers")
+    return raw
+
+
 def ensure_default(store):
     """Create the permission-light default only when no profile exists."""
     if store.ids():
@@ -412,7 +454,8 @@ class Store:
             raise Hold("profile_unreadable") from None
 
     def ids(self):
-        return tuple(sorted(p.name[:-5] for p in self.root.glob("*.json")))
+        # A fixed-width slice would corrupt any name containing a dot.
+        return tuple(sorted(p.stem for p in self.root.glob("*.json")))
 
     def versions(self, profile_id):
         stem = self._path(profile_id).stem

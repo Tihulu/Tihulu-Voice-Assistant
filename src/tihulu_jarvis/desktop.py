@@ -3,6 +3,7 @@
 """Opt-in GTK 4 desktop client. No listener, background capture or provider login."""
 import asyncio
 import locale
+import os
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -136,10 +137,18 @@ def create_window(app, loop):
             self.policy_rows = {}
             self.market = market.Registry(market.market_dir())
             self.market_row_ids = {}
+            self.downloads = []
+            self.download_entries = {}
             # No download transport ships with this release; a future,
             # separately authorized transport is plugged in here.
             self.transport = None
+            self.catalog = market.Catalog()
+            self.catalog_rows = {}
+            self.downloads = []
+            self.download_entries = {}
+            self.build_downloads_page()
             self.build_profiles_page()
+            self.build_catalog_page()
             self.build_market_page()
             try:
                 profiles.ensure_default(self.store)
@@ -476,6 +485,7 @@ def create_window(app, loop):
                 self.market_forget = self.button(row, tr("Unregister","Kaydı sil","Registrierung entfernen"), self.forget_selected_card)
                 self.market_fetch = self.button(row, tr("Download","İndir","Herunterladen"), self.download_selected_card)
                 self.market_find = self.button(row, tr("Discover installed Jan models","Kurulu Jan modellerini bul","Installierte Jan-Modelle suchen"), self.discover_market)
+
             wanted = self.market_filter.get_active_text() or "stt"
             rows = [c for c in self.market.cards() if c.category == wanted]
             for card in sorted(rows, key=lambda c: (c.state, c.model_id)):
@@ -505,6 +515,146 @@ def create_window(app, loop):
                       "für %d Einträge kein Speicherschätzwert" % unknown)
             return "%s · %s" % (summary.report(), tail if unknown else "")
 
+        def build_catalog_page(self):
+            if getattr(self, "catalog_list", None) is not None:
+                self.refresh_catalog()
+                return
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            view = Gtk.ScrolledWindow(vexpand=True)
+            view.set_child(page)
+            self.stack.add_titled(view, "catalog", tr("Catalog","Katalog","Katalog"))
+            self.catalog_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.catalog_note)
+            self.catalog_search = Gtk.SearchEntry()
+            self.catalog_search.connect("search-changed", lambda *_: self.refresh_catalog())
+            page.append(self.catalog_search)
+            self.catalog_filter = Gtk.ComboBoxText()
+            self.catalog_filter.append_text("")
+            for category in market.CATEGORIES:
+                self.catalog_filter.append_text(category)
+            self.catalog_filter.set_active(0)
+            self.catalog_filter.connect("changed", lambda *_: self.refresh_catalog())
+            page.append(self.catalog_filter)
+            self.catalog_list = Gtk.ListBox()
+            self.catalog_list.connect("row-selected", lambda *_: self.refresh_catalog_buttons())
+            page.append(self.catalog_list)
+            row = Gtk.Box(spacing=8)
+            page.append(row)
+            self.catalog_add = self.button(row, tr("Add to registry","Kayda ekle","Registrieren"), self.add_catalog_entry)
+            self.catalog_approve = self.button(row, tr("Approve download","İndirmeyi onayla","Download genehmigen"), self.approve_download)
+            self.catalog_load = self.button(row, tr("Import catalog","Katalog al","Katalog importieren"), self.import_catalog)
+            self.load_catalog()
+
+        def load_catalog_text(self, text):
+            catalog = market.parse_catalog(text)
+            self.catalog = catalog
+            path = market.catalog_path()
+            path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+            os.chmod(path, 0o600)
+            self.refresh_catalog()
+            return catalog
+
+        def load_catalog(self):
+            path = market.catalog_path()
+            try:
+                self.load_catalog_text(path.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                self.catalog_note.set_text(tr(
+                    "No catalog yet. Import a curated catalog to discover models and voices.",
+                    "Henüz katalog yok. Model ve ses keşfetmek için seçilmiş bir katalog al.",
+                    "Noch kein Katalog. Kuratierten Katalog importieren, um Modelle zu finden."))
+            except (Hold, OSError, ValueError):
+                self.catalog_note.set_text(tr("Catalog unreadable.","Katalog okunamadı.",
+                                              "Katalog nicht lesbar."))
+            self.refresh_catalog()
+
+        def refresh_catalog(self):
+            for item in list(self.catalog_rows):
+                self.catalog_list.remove(item)
+            self.catalog_rows = {}
+            wanted = self.catalog_filter.get_active_text() or ""
+            text = self.catalog_search.get_text().strip()
+            for entry in self.catalog.search(category=wanted, text=text):
+                label = Gtk.Label(label="%s · %s · %s · %s · %s" % (
+                    entry.display_name, entry.category, entry.engine, entry.artifact_format,
+                    entry.license_id), xalign=0, wrap=True)
+                item = Gtk.ListBoxRow()
+                item.set_child(label)
+                self.catalog_list.append(item)
+                self.catalog_rows[item] = entry
+            self.refresh_catalog_buttons()
+
+        def selected_catalog_entry(self):
+            row = self.catalog_list.get_selected_row()
+            return self.catalog_rows.get(row) if row is not None else None
+
+        def refresh_catalog_buttons(self):
+            for w in (self.catalog_add, self.catalog_approve):
+                w.set_sensitive(not self.busy and self.selected_catalog_entry() is not None)
+            self.catalog_list.set_sensitive(not self.busy)
+            self.catalog_load.set_sensitive(not self.busy)
+
+        def add_catalog_entry(self):
+            entry = self.selected_catalog_entry()
+            if entry is None or self.busy:
+                return
+            try:
+                self.market.save_card(entry.checked())
+                self.build_market_page()
+                self.set_state("ready", tr("Added to registry.","Kayda eklendi.","Registriert."))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def approve_download(self):
+            entry = self.selected_catalog_entry()
+            if entry is None or self.busy:
+                return
+            try:
+                known = None
+                try:
+                    known = self.market.card(entry.model_id)
+                except Hold:
+                    pass
+                if known is None:
+                    known = self.market.save_card(entry.checked())
+                if known.state != "DISCOVERED":
+                    raise Hold("lifecycle_transition_rejected:" + known.state + "->REVIEWED")
+                approved = replace(known, network_approval="owner-approved-download",
+                                   approval_expires_at=1e12)
+                self.market.save_card(approved)
+                self.build_market_page()
+                self.set_state("ready", tr("Download approved for this entry.",
+                                           "Bu kayıt için indirme onaylandı.",
+                                           "Download für diesen Eintrag genehmigt."))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def import_catalog(self):
+            if self.busy:
+                return
+            dialog = Gtk.FileChooserNative.new("Import a curated catalog", self.win,
+                                               Gtk.FileChooserAction.OPEN, "Select", "Cancel")
+            filt = Gtk.FileFilter()
+            filt.add_pattern("*.json")
+            dialog.add_filter(filt)
+            def response(d, res):
+                try:
+                    if res != Gtk.ResponseType.ACCEPT:
+                        return
+                    file = d.get_file()
+                    path = file.get_path() if file else None
+                    raw = Path(path).read_text(encoding="utf-8") if path else ""
+                    self.load_catalog_text(raw)
+                    self.set_state("ready", tr("Catalog imported.","Katalog alındı.",
+                                               "Katalog importiert."))
+                except (Hold, OSError, ValueError):
+                    self.set_state("ready", "catalog_import_rejected")
+                finally:
+                    d.destroy()
+            dialog.connect("response", response)
+            dialog.show()
+
         def selected_card(self):
             row = self.market_list.get_selected_row()
             return self.market_row_ids.get(row) if row is not None else None
@@ -518,9 +668,10 @@ def create_window(app, loop):
                 ready = False
                 if chosen is not None:
                     try:
-                        ready = (self.market.card(chosen).state == "DISCOVERED"
-                                 and self.market.card(chosen).approved_source()
-                                 and self.transport is not None)
+                        card = self.market.card(chosen)
+                        ready = (card.state == "DISCOVERED" and card.approved_source()
+                                 and (self.transport is not None
+                                      or market.transport_for(card.source_ref) is not None))
                     except Hold:
                         ready = False
                 self.market_fetch.set_sensitive(ready)
@@ -537,7 +688,7 @@ def create_window(app, loop):
 
         def discover_market(self):
             async def run(epoch):
-                raw = self.url.get_text().strip()
+                raw = self.require_endpoint()
                 client = Jan(raw, timeout=10)
                 cards = await market.from_models(client, languages=(), now=0.0)
                 self.session.check(epoch)
@@ -570,14 +721,93 @@ def create_window(app, loop):
         async def download(self, epoch, model_id):
             card = self.market.card(model_id)
             source = market.source_of(card)
-            if self.transport is None:
+            transport = self.transport or market.transport_for(source.reference)
+            if transport is None:
                 raise Hold("download_transport_not_available")
-            transfer = market.Transfer(self.market, card, source, self.transport)
+            transfer = market.Transfer(self.market, card, source, transport)
+            entry = {"id": model_id, "state": "QUEUED", "received": 0, "total": source.size,
+                     "note": ""}
+            self.downloads.append(entry)
+
+            def progress(count):
+                entry["received"] = count
+                entry["state"] = "DOWNLOADING"
+                self.build_downloads_page()
             try:
-                await transfer.run(lambda count: None)
+                result = await transfer.run(progress)
+                entry["state"] = result.state
+                entry["note"] = tr("Registered.","Kaydedildi.","Registriert.")
             finally:
-                self.session.check(epoch)
+                if transfer.state == "CANCELLED":
+                    entry["state"], entry["note"] = "CANCELLED", tr(
+                        "Cancelled.", "İptal edildi.", "Abgebrochen.")
+                elif transfer.state in market.TERMINAL:
+                    # A failed transfer is reported by the reason in the status line.
+                    entry["state"], entry["note"] = transfer.state, ""
+                elif transfer.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
+                    entry["state"], entry["note"] = transfer.state, tr(
+                        "Registered.", "Kaydedildi.", "Registriert.")
+                try:
+                    # A cancelled turn has nothing to check; cleanup still runs.
+                    self.session.check(epoch)
+                except Hold:
+                    pass
+                self.build_downloads_page()
                 self.build_market_page()
+
+        def build_downloads_page(self):
+            self.download_entries = {}
+            if getattr(self, "download_list", None) is not None:
+                child = self.download_list.get_first_child()
+                while child is not None:
+                    nxt = child.get_next_sibling()
+                    self.download_list.remove(child)
+                    child = nxt
+            else:
+                page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+                view = Gtk.ScrolledWindow(vexpand=True)
+                view.set_child(page)
+                self.stack.add_titled(view, "downloads", tr("Downloads","İndirmeler","Downloads"))
+                self.download_note = Gtk.Label(xalign=0, wrap=True)
+                page.append(self.download_note)
+                self.download_list = Gtk.ListBox()
+                self.download_list.connect("row-selected", lambda *_: self.refresh_download_buttons())
+                page.append(self.download_list)
+                row = Gtk.Box(spacing=8)
+                page.append(row)
+                self.download_cancel = self.button(row, tr("Cancel selected","Seçileni iptal et","Auswahl abbrechen"), self.cancel_download)
+            for entry in list(self.downloads):
+                label = Gtk.Label(label=self.download_line(entry), xalign=0, wrap=True)
+                item = Gtk.ListBoxRow()
+                item.set_child(label)
+                self.download_list.append(item)
+                self.download_entries[item] = entry
+            self.download_note.set_text(tr(
+                "Only approved, verified transfers. Nothing is downloaded without an approved source and checksum.",
+                "Yalnızca onaylı ve doğrulanmış aktarımlar. Onaylı kaynak ve sağlama toplamı olmadan hiçbir şey indirilmez.",
+                "Nur genehmigte, geprüfte Übertragungen. Ohne genehmigte Quelle und Prüfsumme wird nichts geladen."))
+            self.refresh_download_buttons()
+
+        def download_line(self, entry):
+            total = market.human_size(entry["total"]) if entry["total"] else "unknown/not tested"
+            part = "%s · %s · %d of %s bytes" % (entry["id"], entry["state"], entry["received"], total)
+            return part + (" · " + entry["note"] if entry["note"] else "")
+
+        def in_flight(self):
+            return any(entry["state"] in ("QUEUED", "DOWNLOADING") for entry in self.downloads)
+
+        def refresh_download_buttons(self):
+            # Cancelling the queue is available while a transfer runs; it is not new work.
+            self.download_cancel.set_sensitive(self.in_flight())
+
+        def cancel_download(self):
+            if not self.in_flight():
+                return
+            for entry in self.downloads:
+                if entry["state"] in ("QUEUED", "DOWNLOADING"):
+                    entry["note"] = tr("Cancelling…","İptal ediliyor…","Wird abgebrochen…")
+            self.interrupt(False)
+            self.build_downloads_page()
 
         def forget_selected_card(self):
             model_id = self.selected_card()
@@ -629,6 +859,7 @@ def create_window(app, loop):
             sample = {"tr": "Bu bir ses önizlemesidir.",
                       "en": "This is a voice preview.",
                       "de": "Das ist eine Stimmprobe."}[lang]
+            self.require_tools(("local_audio_device", ("push_to_talk",)))
             speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"][lang], lang).id)
             async def run(epoch):
                 def progress(stage):
@@ -656,8 +887,29 @@ def create_window(app, loop):
                 self.test_note.set_text("%s · %s" % (reply.strip()[:240], probe.context.response_language or "unknown"))
             self.submit(run)
 
+        def active_profile(self):
+            """The profile whose policy is in force for this turn."""
+            try:
+                return self.store.load(self.cfg["profile"]).checked()
+            except (Hold, KeyError):
+                raise Hold("no_active_profile") from None
+
+        def require_tools(self, *requests):
+            """Refuse an action the active profile denies, at the moment it runs."""
+            profile = self.active_profile()
+            for action, scope in requests:
+                profiles.require_tool(profile, action, scope)
+
+        def require_endpoint(self, raw=None):
+            """The active mode decides what kind of endpoint may be used."""
+            raw = self.url.get_text().strip() if raw is None else raw
+            try:
+                return profiles.enforce_endpoint(self.store.load(self.cfg["profile"]).checked(), raw)
+            except KeyError:
+                raise Hold("no_active_profile") from None
+
         def backend_for_test(self):
-            return Jan(self.cfg["endpoint"], self.cfg["llm"])
+            return Jan(self.require_endpoint(), self.cfg["llm"])
 
         def submit(self, work):
             if self.busy:
@@ -688,7 +940,7 @@ def create_window(app, loop):
 
         def discover(self):
             async def run(epoch):
-                raw=self.url.get_text().strip()
+                raw=self.require_endpoint()
                 client=Jan(raw,timeout=10)
                 models=await client.models()
                 self.session.check(epoch)
@@ -746,7 +998,7 @@ def create_window(app, loop):
             async def run(epoch):
                 self.bubble("You",text)
                 self.set_state("thinking")
-                result,_=await self.session.reply(text,Jan(self.cfg["endpoint"], self.cfg["llm"]),epoch)
+                result,_=await self.session.reply(text,Jan(self.require_endpoint(), self.cfg["llm"]),epoch)
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
             self.submit(run)
@@ -757,13 +1009,14 @@ def create_window(app, loop):
                     if epoch == self.session.epoch and not self.playback_stopping:
                         self.set_state(stage)
 
+                self.require_tools(("local_audio_device", ("push_to_talk",)))
                 voices = audio.SelectedVoices(self.cfg["voices"])
                 self.finish=asyncio.Event()
                 text=await audio.listen(self.cfg["stt"],self.finish,progress)
                 self.session.check(epoch)
                 self.bubble("You",text)
                 self.set_state("thinking")
-                result,speech=await self.session.reply(text,Jan(self.cfg["endpoint"],self.cfg["llm"]),epoch,voices)
+                result,speech=await self.session.reply(text,Jan(self.require_endpoint(),self.cfg["llm"]),epoch,voices)
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
                 playback = loop.create_task(audio.speak(speech, progress))
