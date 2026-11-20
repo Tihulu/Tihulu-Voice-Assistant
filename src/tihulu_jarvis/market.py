@@ -158,6 +158,7 @@ class ModelCard:
     source_version: str = "unknown"
     network_approval: str = ""
     approval_expires_at: float = 0.0
+    revision: int = 0          # registry-local sequence; 0 means never revised
 
     def compatibility(self):
         if self.engine in ENGINE_FORMATS:
@@ -647,23 +648,38 @@ class Transfer:
         raise Hold("transfer_cancelled_by_owner")
 
 
+def _normalized(items):
+    """JSON turns tuples into lists; normalize before building cards."""
+    out = []
+    for item in items:
+        row = dict(item)
+        row["languages"] = tuple(row.get("languages", ()) or ())
+        out.append(row)
+    return out
+
+
 class Registry:
     """Local registry with per-profile independent STT/LLM/TTS selection."""
 
     LIMIT = 262144
     SELECTION_LIMIT = 64
+    HISTORY_LIMIT = 32
+    HISTORY_BYTES = 262144
 
     def __init__(self, root):
         self.root = Path(root)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = self.root / "registry.json"
+        # A directory of append-only revision logs; not the history() method.
+        self.revisions = self.root / "revisions"
+        self.revisions.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     @staticmethod
     def _parse(text):
         if len(text) > Registry.LIMIT:
             raise Hold("registry_too_large")
         data = json.loads(text)
-        cards = tuple(ModelCard(**item).checked() for item in data.get("cards", []))
+        cards = tuple(ModelCard(**item).checked() for item in _normalized(data.get("cards", [])))
         selection = {}
         for profile, choices in (data.get("selection", {}) or {}).items():
             if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", profile) or not isinstance(choices, dict):
@@ -718,11 +734,70 @@ class Registry:
         raise Hold("model_not_registered")
 
     def save_card(self, card):
+        """Persist a card, keeping the previous entry as a revision."""
         card = card.checked()
         cards, selection = self.load()
+        previous = None
+        for known in cards:
+            if known.model_id == card.model_id:
+                previous = known
+        if previous is not None and previous != card:
+            replacement = replace(card, revision=previous.revision + 1)
+            if replacement == previous:
+                return previous
+            card = replacement
+            self.append_history(previous)
         kept = tuple(c for c in cards if c.model_id != card.model_id)
         self.store(kept + (card,), selection)
         return card
+
+    def append_history(self, card):
+        """Keep a bounded, append-only revision log for one item."""
+        path = self.revisions / (card.model_id + ".jsonl")
+        rows = []
+        if path.is_file():
+            try:
+                rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+            except (ValueError, OSError):
+                raise Hold("registry_unreadable") from None
+        if len(rows) > self.HISTORY_LIMIT - 1:
+            rows = rows[-(self.HISTORY_LIMIT - 1):]
+        rows.append(card.__dict__)
+        text = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
+        if len(text) > self.HISTORY_BYTES:
+            raise Hold("registry_too_large")
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=str(self.revisions), delete=False) as f:
+            tmp = f.name
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+
+    def history(self, model_id):
+        """Previous revisions of one item, oldest first. Never invented."""
+        if not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model_id):
+            raise Hold("invalid_model_id")
+        path = self.revisions / (model_id + ".jsonl")
+        if not path.is_file():
+            return ()
+        out = []
+        try:
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line:
+                    out.append(ModelCard(**_normalized([json.loads(line)])[0]).checked())
+        except (ValueError, OSError):
+            raise Hold("registry_unreadable") from None
+        return tuple(out)
+
+    def rollback(self, model_id, revision):
+        """Restore a previous revision as current, as a new revision."""
+        current = self.card(model_id)
+        for candidate in self.history(model_id):
+            if candidate.revision == revision:
+                restored = replace(current, **{k: v for k, v in candidate.__dict__.items()
+                                              if k not in ("revision", "state")})
+                return self.save_card(restored)
+        raise Hold("revision_not_found")
 
     def select(self, profile, category, model_id):
         """Independent STT/LLM/TTS choice per profile, applied only when ACTIVE."""

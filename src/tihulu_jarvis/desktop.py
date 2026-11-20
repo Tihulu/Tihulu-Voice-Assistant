@@ -485,6 +485,7 @@ def create_window(app, loop):
                 self.market_forget = self.button(row, tr("Unregister","Kaydı sil","Registrierung entfernen"), self.forget_selected_card)
                 self.market_fetch = self.button(row, tr("Download","İndir","Herunterladen"), self.download_selected_card)
                 self.market_find = self.button(row, tr("Discover installed Jan models","Kurulu Jan modellerini bul","Installierte Jan-Modelle suchen"), self.discover_market)
+                self.market_rollback = self.button(row, tr("Roll back","Geri al","Zurücksetzen"), self.rollback_selected_card)
 
             wanted = self.market_filter.get_active_text() or "stt"
             rows = [c for c in self.market.cards() if c.category == wanted]
@@ -675,6 +676,13 @@ def create_window(app, loop):
                     except Hold:
                         ready = False
                 self.market_fetch.set_sensitive(ready)
+                revisions = []
+                if chosen is not None:
+                    try:
+                        revisions = self.market.history(chosen)
+                    except Hold:
+                        revisions = []
+                self.market_rollback.set_sensitive(not self.busy and bool(revisions))
 
         def use_selected_card(self):
             model_id = self.selected_card()
@@ -880,6 +888,23 @@ def create_window(app, loop):
                 entry["state"] = "DOWNLOADING"
                 self.build_downloads_page()
             return progress
+
+        def rollback_selected_card(self):
+            """Restore the previous revision of a registered item, as a new revision."""
+            model_id = self.selected_card()
+            if model_id is None or self.busy:
+                return
+            try:
+                revisions = self.market.history(model_id)
+                if not revisions:
+                    raise Hold("revision_not_found")
+                self.market.rollback(model_id, revisions[-1].revision)
+                self.build_market_page()
+                self.set_state("ready", tr("Previous revision restored.",
+                                           "Önceki sürüm geri yüklendi.",
+                                           "Vorherige Revision wiederhergestellt."))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
 
         def forget_selected_card(self):
             model_id = self.selected_card()
