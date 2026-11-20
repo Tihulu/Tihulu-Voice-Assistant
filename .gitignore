@@ -1,0 +1,9 @@
+# Build and packaging artefacts never belong in the repository.
+build/
+dist/
+*.egg-info/
+__pycache__/
+*.py[cod]
+.release-work/
+.tox/
+.venv/
