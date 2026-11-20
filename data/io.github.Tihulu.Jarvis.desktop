@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=TIHULU JARVIS
+Comment=Private multilingual chat and voice
+Comment[tr]=Yerel çok dilli sohbet ve ses
+Comment[de]=Lokaler mehrsprachiger Chat und Sprache
+Exec=tihulu-jarvis
+Icon=io.github.Tihulu.Jarvis
+Terminal=false
+Categories=Utility;Audio;
+StartupNotify=true

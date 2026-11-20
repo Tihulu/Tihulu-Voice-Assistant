@@ -1,0 +1,77 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Distributed without warranty; see LICENSE for the full terms.
+import asyncio
+import json
+import unittest
+from unittest.mock import AsyncMock, patch
+
+from tihulu_jarvis.voice.jan import Jan, LIMIT, body, endpoint
+from tihulu_jarvis.voice.m1 import Hold, Message
+
+
+class EndpointTests(unittest.TestCase):
+    def test_numeric_loopback_only(self):
+        self.assertEqual(str(endpoint("http://[::1]:9876/v1")[0]), "::1")
+        for url in ("https://api.example.test:443/v1", "http://127.0.0.1", "http://u@127.0.0.1:99",
+                    "http://localhost:9876/v1", "http://192.0.2.1:99", "http://127.0.0.1:99/v1?q=x",
+                    "http://127.0.0.1:99/other", "http://[::1%25lo]:99"):
+            with self.subTest(url=url), self.assertRaises(Hold):
+                endpoint(url)
+
+
+class JanTests(unittest.IsolatedAsyncioTestCase):
+    async def test_fixture_chat_over_loopback(self):
+        seen = []
+        async def serve(reader, writer):
+            try:
+                h = await reader.readuntil(b"\r\n\r\n")
+                n = int(next(l.split(b":")[1] for l in h.splitlines() if l.lower().startswith(b"content-length:")))
+                seen.append((h.splitlines()[0], json.loads(await reader.readexactly(n))))
+                payload = json.dumps({"choices":[{"message":{"role":"assistant","content":"Merhaba!"}}]}).encode()
+                writer.write(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n" +
+                             ("%x\r\n" % len(payload)).encode() + payload + b"\r\n0\r\n\r\n")
+                await writer.drain()
+            finally:
+                writer.close()
+                await writer.wait_closed()
+        server = await asyncio.start_server(serve, "127.0.0.1", 0)
+        async with server:
+            jan = Jan("http://127.0.0.1:%s" % server.sockets[0].getsockname()[1], "fixture")
+            self.assertEqual(await jan((Message("user","naber nasilsin"),)), "Merhaba!")
+        self.assertEqual(seen, [(b"POST /v1/chat/completions HTTP/1.1",
+                         {"model":"fixture","stream":False,"messages":[{"role":"user","content":"naber nasilsin"}]})])
+
+    async def test_timeout_and_cancellation_do_not_retry(self):
+        jan = Jan("http://127.0.0.1:9876", "fixture", timeout=.05)
+        entered = asyncio.Event()
+        async def stall(*args):
+            entered.set()
+            await asyncio.Future()
+        with patch.object(jan, "_exchange", AsyncMock(side_effect=stall)) as exchange:
+            with self.assertRaisesRegex(Hold,"jan_timeout"):
+                await jan.models()
+            entered.clear()
+            task = asyncio.create_task(jan.models())
+            await entered.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(exchange.await_count, 2)
+
+    async def test_bad_framing_size_and_redirect(self):
+        for h in (b"HTTP/1.1 302 Found\r\nLocation: https://example.test/\r\n\r\n",
+                  b"HTTP/1.1 200 OK\r\nContent-Length: 4\r\nTransfer-Encoding: chunked\r\n\r\n",
+                  ("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % (LIMIT+1)).encode()):
+            reader = asyncio.StreamReader()
+            reader.feed_data(h)
+            reader.feed_eof()
+            with self.assertRaises(Hold):
+                await body(reader)
+
+    async def test_inventory_no_model_guess(self):
+        jan = Jan("http://127.0.0.1:9876")
+        with patch.object(jan,"_request",AsyncMock(return_value={"data":[{"id":"fixture"},{"id":"fixture"},{},None,{"id":"bad\nentry"}]})) as req:
+            self.assertEqual(await jan.models(), ("fixture",))
+            with self.assertRaisesRegex(Hold, "select_installed_model"):
+                await jan((Message("user","hi"),))
+            self.assertEqual(req.await_count, 1)
