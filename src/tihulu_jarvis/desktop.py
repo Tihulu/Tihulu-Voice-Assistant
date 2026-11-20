@@ -456,6 +456,8 @@ def create_window(app, loop):
                 self.stack.add_titled(view, "market", tr("AI Market","Yapay Zeka Pazarı","KI-Markt"))
                 self.market_note = Gtk.Label(xalign=0, wrap=True)
                 page.append(self.market_note)
+                self.storage_note = Gtk.Label(xalign=0, wrap=True)
+                page.append(self.storage_note)
                 self.market_filter = Gtk.ComboBoxText()
                 for category in market.CATEGORIES:
                     self.market_filter.append_text(category)
@@ -484,7 +486,20 @@ def create_window(app, loop):
                 "Installed models and voices known to this computer. Unknown values stay unknown/not tested. Import happens in Installed models.",
                 "Bu bilgisayarda bilinen kurulu modeller ve sesler. Bilinmeyen değerler bilinmiyor/denenmedi olarak kalır. İçe alma Kurulu modeller bölümünde yapılır.",
                 "Bekannte installierte Modelle und Stimmen. Unbekannte Werte bleiben unbekannt/nicht getestet. Import unter Installierte Modelle."))
+            self.storage_note.set_text(self.storage_report())
             self.refresh_market_buttons()
+
+        def storage_report(self):
+            """Aggregate only what the registry knows; nothing is estimated."""
+            summary = market.usage(self.market.cards())
+            if not summary.cards:
+                return tr("No registered models yet.","Henüz kayıtlı model yok.",
+                          "Noch keine registrierten Modelle.")
+            unknown = summary.unknown_memory
+            tail = tr("memory not estimated for %d items" % unknown,
+                      "%d öğe için bellek tahmini yok" % unknown,
+                      "für %d Einträge kein Speicherschätzwert" % unknown)
+            return "%s · %s" % (summary.report(), tail if unknown else "")
 
         def selected_card(self):
             row = self.market_list.get_selected_row()

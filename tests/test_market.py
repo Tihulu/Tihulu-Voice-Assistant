@@ -9,7 +9,7 @@ from pathlib import Path
 
 from tihulu_jarvis.market import (ACTIVE, ALLOWED_NEXT, CATEGORIES, TERMINAL, ModelCard,
                                   Registry, advance, digest, from_file, from_models,
-                                  register_installed)
+                                  human_size, register_installed, usage)
 from tihulu_jarvis.voice.m1 import Hold
 
 
@@ -277,3 +277,35 @@ class NoNetworkTests(unittest.TestCase):
                        "urlopen", "aiohttp", "httpx"):
             self.assertNotIn(banned, source)
         self.assertIn("DIGEST_LIMIT", source)
+
+
+class UsageTests(unittest.TestCase):
+    def test_usage_reports_only_known_values(self):
+        stt = card(model_id="a-stt", category="stt", disk_size_bytes=3 * 1024 ** 3,
+                   memory_estimate=2 * 1024 ** 3, requires_gpu=True)
+        voice = card(model_id="b-tts", category="tts", engine="piper", artifact_format="onnx",
+                     shared_storage_owner="piper", disk_size_bytes=40 * 1024 ** 2)
+        report = usage((stt, voice))
+        self.assertEqual(report.cards, 2)
+        self.assertEqual(report.by_category, (("stt", 1), ("tts", 1)))
+        self.assertEqual(report.by_state, (("DISCOVERED", 2),))
+        self.assertEqual(report.disk_bytes, 3 * 1024 ** 3 + 40 * 1024 ** 2)
+        self.assertEqual(report.shared, 1)
+        self.assertEqual(report.imported, 1)
+        self.assertEqual(report.requires_gpu, 1)
+        self.assertEqual(report.memory_bytes, 2 * 1024 ** 3)
+        self.assertEqual(report.unknown_memory, 1)
+        text = report.report()
+        self.assertIn("2 cards", text)
+        self.assertIn("disk 3.0 GiB", text)
+        self.assertIn("shared 1", text)
+        self.assertIn("memory 2.0 GiB", text)
+        self.assertTrue(human_size(0).startswith("unknown"))
+        self.assertEqual(human_size(1536), "1.5 KiB")
+        self.assertEqual(human_size(1024 ** 3), "1.0 GiB")
+
+    def test_empty_registry_reports_nothing_invented(self):
+        empty = usage(())
+        self.assertEqual(empty.cards, 0)
+        self.assertEqual(empty.disk_bytes, 0)
+        self.assertIn("unknown/not tested", empty.report())

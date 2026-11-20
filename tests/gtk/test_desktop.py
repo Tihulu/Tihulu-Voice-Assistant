@@ -813,3 +813,61 @@ class PreviewTests(MarketUITests):
         self.assertEqual((speech.language, speech.text), ("tr", "Bu bir ses önizlemesidir."))
         self.assertEqual(self.ui.session.history, history)
         self.assertEqual(self.bubbles(), [])
+
+
+class StorageViewTests(MarketUITests):
+    """Storage and resources aggregated from the registry, never estimated."""
+
+    def report(self):
+        return self.ui.storage_note.get_text()
+
+    def register(self, name, category, size=None, shared="", owned=False, memory=None, gpu=False):
+        path = self.weights(name + (".bin" if category == "stt" else ".onnx"))
+        if category != "stt":
+            path.with_name(path.name + ".json").write_text(
+                json.dumps({"language": {"code": "tr_TR"}}), encoding="utf-8")
+        card = self.ui.register_choice("stt" if category == "stt" else "tr", str(path))
+        updated = market.replace(card, disk_size_bytes=size if size is not None else 0,
+                                memory_estimate=memory or 0, requires_gpu=gpu,
+                                shared_storage_owner=shared, owned_by_jarvis=owned)
+        self.ui.market.save_card(updated)
+        self.ui.build_market_page()
+        return updated
+
+    def test_storage_reports_known_sizes_and_ownership(self):
+        self.register("big-stt", "stt", size=3 * 1024 ** 3, memory=2 * 1024 ** 3, gpu=True)
+        self.register("tr-voice", "tts", size=40 * 1024 ** 2, shared="piper")
+        self.ui.market_filter.set_active(0)
+        text = self.report()
+        self.assertIn("2 cards", text)
+        self.assertIn("disk 3.0 GiB", text)
+        self.assertIn("shared 1", text)
+        self.assertIn("jarvis-owned 0", text)
+        self.assertIn("memory 2.0 GiB", text)
+        self.assertIn("memory not estimated for 1 items", text)
+
+    def test_unknown_sizes_stay_unknown(self):
+        self.register("tiny-stt", "stt")
+        self.ui.market_filter.set_active(0)
+        text = self.report()
+        self.assertIn("unknown/not tested", text)
+        self.assertNotIn("0 B", text)
+
+    def test_empty_registry_says_nothing_invented(self):
+        self.assertIn("No registered models yet.", self.report())
+
+    def test_unregistering_a_shared_card_keeps_the_weights(self):
+        path = self.weights("tr-voice.onnx")
+        path.write_bytes(b"synthetic voice fixture\n")
+        card = self.register("tr-voice", "tts", shared="piper")
+        self.ui.market_filter.set_active(2)
+        self.pick_card(card.model_id)
+        self.click(self.ui.market_forget)
+        self.until(lambda: not self.ui.busy and self.ui.market.cards() == ())
+        # Unregistering removes only this project's registry entry.
+        self.assertTrue(path.is_file())
+        self.assertIn("No registered models yet.", self.report())
+        # The report before removal counted the shared owner truthfully.
+        self.ui.market.save_card(card)
+        self.ui.build_market_page()
+        self.assertIn("shared 1", self.report())
