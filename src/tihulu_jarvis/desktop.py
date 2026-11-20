@@ -378,11 +378,30 @@ def create_window(app, loop):
             self.build_market_page()
             return card
 
+        def remember(self, category, value):
+            """Record a choice in this profile and in the local settings."""
+            profile = self.store.load(self.cfg["profile"]).checked()
+            fields = {"llm": "llm_model_id", "stt": "stt_model_id", "tts": "tts_model_id"}
+            updated = replace(profile, version=profile.version + 1, **{fields[category]: value})
+            self.store.save(updated)
+            self.activate_profile(updated.id, quiet=True)
+
         def use_card(self, model_id):
             """Apply a registered card. Nothing is downloaded or started."""
             card = self.market.card(model_id)
             if card.compatibility_status == "incompatible_format":
                 raise Hold("incompatible_model_format")
+            if card.category == "llm":
+                # A cloud-visible model must be one the endpoint actually serves.
+                if model_id not in self.inventory:
+                    raise Hold("model_not_in_inventory")
+                # The endpoint itself verifies that this model is installed.
+                card = self.market.save_card(market.register_installed(card))
+                self.cfg["llm"] = model_id
+                self.remember("llm", model_id)
+                self.save()
+                self.refresh()
+                return
             # Using a verified import is an explicit activation, not a silent one.
             if card.state == "REGISTERED":
                 card = market.advance(card, "TESTABLE")
@@ -436,6 +455,7 @@ def create_window(app, loop):
                 page.append(row)
                 self.market_use = self.button(row, tr("Use selected","Seçileni kullan","Auswahl verwenden"), self.use_selected_card)
                 self.market_forget = self.button(row, tr("Unregister","Kaydı sil","Registrierung entfernen"), self.forget_selected_card)
+                self.market_find = self.button(row, tr("Discover installed Jan models","Kurulu Jan modellerini bul","Installierte Jan-Modelle suchen"), self.discover_market)
             wanted = self.market_filter.get_active_text() or "stt"
             rows = [c for c in self.market.cards() if c.category == wanted]
             for card in sorted(rows, key=lambda c: (c.state, c.model_id)):
@@ -470,6 +490,31 @@ def create_window(app, loop):
                 self.set_state("ready", tr("Model selected.","Model seçildi.","Modell ausgewählt."))
             except Hold as exc:
                 self.set_state("ready", str(exc))
+
+        def discover_market(self):
+            async def run(epoch):
+                raw = self.url.get_text().strip()
+                client = Jan(raw, timeout=10)
+                cards = await market.from_models(client, languages=(), now=0.0)
+                self.session.check(epoch)
+                self.cfg["endpoint"] = raw
+                self.inventory = tuple(card.model_id for card in cards)
+                self.models.remove_all()
+                for model_id in self.inventory:
+                    self.models.append_text(model_id)
+                for card in cards:
+                    known = None
+                    try:
+                        known = self.market.card(card.model_id)
+                    except Hold:
+                        pass
+                    if known is None or known.state == "DISCOVERED":
+                        # Re-discovery refreshes a card, never silently upgrades it.
+                        self.market.save_card(card)
+                self.save()
+                self.build_market_page()
+                self.refresh()
+            self.submit(run)
 
         def forget_selected_card(self):
             model_id = self.selected_card()
