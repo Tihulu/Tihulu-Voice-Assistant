@@ -169,9 +169,12 @@ class ModelCard:
         return UNKNOWN
 
     def approved_source(self):
-        """True only when every download term the owner must approve is present."""
-        return bool(self.source_ref and self.source_checksum and self.source_size
-                    and self.network_approval)
+        """True only when every required download term is present.
+
+        A stated size is not required: an unstated size stays unknown and the
+        transport's own limit still bounds the transfer.
+        """
+        return bool(self.source_ref and self.source_checksum and self.network_approval)
 
     def checked(self):
         if not isinstance(self.model_id, str) or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", self.model_id):
@@ -325,7 +328,8 @@ class Source:
             raise Hold("invalid_source_reference")
         if not re.fullmatch(r"[0-9a-f]{64}", self.checksum):
             raise Hold("checksum_required_before_download")
-        if not 0 < self.size <= DIGEST_LIMIT:
+        if not 0 <= self.size <= DIGEST_LIMIT:
+            # 0 means the source does not state a size; it stays unknown, not zero.
             raise Hold("source_size_not_stated")
         if self.network_approval and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.network_approval):
             raise Hold("invalid_approval_reference")
