@@ -1,7 +1,7 @@
 name: Offline unit and contract tests
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'feat/m1-portable-core']
 permissions:
   contents: read
 jobs:
