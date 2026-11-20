@@ -49,28 +49,39 @@ def _url(raw):
 
 
 def loopback_fetch(raw, limit=MAX_BODY):
-    """Build an async `fetch(path, note)` callable for one approved source."""
+    """Build an async `fetch(path, note, start=0)` callable for one source.
+
+    A transfer can continue from an offset: the request carries a Range header
+    and a 206 answer must confirm exactly that offset. A source that answers
+    200 instead restarts from zero, which is always verified afterwards.
+    """
     ip, port, path = _url(raw)
 
-    async def fetch(path_name, note):
+    async def fetch(path_name, note, start=0):
         family = socket.AF_INET if ip.version == 4 else socket.AF_INET6
         try:
             reader, writer = await asyncio.open_connection(str(ip), port, family=family, limit=16384)
         except OSError:
             raise Hold("transfer_unavailable") from None
         written = 0
+        mode, offset = "wb", 0
         try:
-            writer.write(("GET %s HTTP/1.1\r\nHost: %s:%s\r\n"
-                          "Connection: close\r\nAccept: application/octet-stream\r\n\r\n"
-                          % (path, ip, port)).encode("ascii"))
+            head = ("GET %s HTTP/1.1\r\nHost: %s:%s\r\n"
+                    "Connection: close\r\nAccept: application/octet-stream\r\n"
+                    % (path, ip, port))
+            if start:
+                head += "Range: bytes=%d-\r\n" % start
+            writer.write((head + "\r\n").encode("ascii"))
             await writer.drain()
             line = await reader.readline()
             if not line.endswith(b"\r\n"):
                 raise Hold("transfer_invalid_response")
             status = line[:-2]
-            if not re.fullmatch(rb"HTTP/1\.[01] 200(?: [^\r\n]*)?", status):
+            if not re.fullmatch(rb"HTTP/1\.[01] (?:200|206)(?: [^\r\n]*)?", status):
                 # A redirect or an error from the source is never followed.
                 raise Hold("transfer_rejected_by_source")
+            if status.endswith(b" 206 Partial Content") and not start:
+                raise Hold("transfer_range_not_honoured")
             headers, size = {}, 0
             while True:
                 field = await reader.readline()
@@ -88,11 +99,23 @@ def loopback_fetch(raw, limit=MAX_BODY):
                 raise Hold("transfer_redirect_or_stream_rejected")
             if length is not None and not re.fullmatch(rb"[0-9]{1,10}", length):
                 raise Hold("transfer_invalid_response")
+            ranged = headers.get(b"content-range")
+            if status.endswith(b" 206 Partial Content"):
+                # The source must confirm exactly the offset we asked for.
+                if ranged is None or not re.fullmatch(rb"bytes %d-[0-9]+/[0-9]+" % start, ranged.strip()):
+                    raise Hold("transfer_range_not_honoured")
+                mode, offset = "ab", start
+                length = None  # the range length is described by Content-Range
+                total = int(ranged.strip().rsplit(b"/", 1)[1])
+                if total > limit:
+                    raise Hold("transfer_too_large")
+            elif start and status.endswith(b" 200 OK"):
+                mode, offset = "wb", 0  # no Range support: start over, verify later
             if length is not None and int(length) > limit:
                 raise Hold("transfer_too_large")
             if headers.get(b"content-type") is not None and b"application/octet-stream" not in headers[b"content-type"]:
                 raise Hold("transfer_unexpected_content_type")
-            with open(path_name, "wb") as out:
+            with open(path_name, mode) as out:
                 if length is None:
                     while written <= limit:
                         block = await reader.read(min(65536, limit + 1 - written))
@@ -100,7 +123,7 @@ def loopback_fetch(raw, limit=MAX_BODY):
                             break
                         out.write(block)
                         written += len(block)
-                        note(written)
+                        note(written + offset)
                     if written > limit:
                         raise Hold("transfer_too_large")
                 else:
@@ -111,12 +134,12 @@ def loopback_fetch(raw, limit=MAX_BODY):
                             raise Hold("transfer_truncated")
                         out.write(block)
                         written += len(block)
-                        note(written)
+                        note(written + offset)
                     if written > limit:
                         raise Hold("transfer_too_large")
-            if written <= 0:
+            if written <= 0 and not offset:
                 raise Hold("transfer_empty_body")
-            return written
+            return written + offset
         finally:
             writer.close()
             try:
