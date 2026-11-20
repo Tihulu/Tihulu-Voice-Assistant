@@ -1,0 +1,375 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+# Distributed without warranty; see LICENSE for the full terms.
+"""Operating modes and enforceable saved profiles.
+
+This module describes the policy envelope of a profile. It starts no
+process, reads no model and touches no network: it only proves that the
+four operating modes, per-profile scoped rules, global laws, import
+sanitization, approval expiry and rollback behave as specified.
+
+Decision order (fail closed):
+  1. a global law cannot be granted by any profile, preset or import;
+  2. an action unsupported by the current mode is denied by the mode;
+  3. the most specific matching rule wins; on equal specificity deny wins;
+  4. an approval that has expired degrades to ASK, never to silent ALLOW.
+"""
+import json
+import os
+import re
+import tempfile
+from dataclasses import dataclass, field, replace
+from pathlib import Path
+
+from .voice.m1 import Hold
+
+MODES = ("LOCAL_ONLY", "CLOUD_CHAT", "SECURE_HYBRID", "CUSTOM")
+LANGUAGES = ("tr", "en", "de")
+ACTIVATION = ("off", "push_to_talk", "wake_word")
+STATES = ("active", "disabled", "pending_review")
+ALLOW, ASK, DENY = "allow", "ask", "deny"
+DECISIONS = (ALLOW, ASK, DENY)
+
+# Structural law. No profile, preset, import or rollback may grant these.
+GLOBAL_DENIES = frozenset((
+    "credential_material_in_profile_data",
+    "silent_capability_inheritance",
+))
+
+CAPABILITIES = {
+    "LOCAL_ONLY": {"cloud_inference": False, "cloud_disclosure": False, "external_network": None,
+                   "privileged_local_tools": ()},
+    "CLOUD_CHAT": {"cloud_inference": True, "cloud_disclosure": True, "external_network": ("provider",),
+                   "privileged_local_tools": ()},
+    "SECURE_HYBRID": {"cloud_inference": True, "cloud_disclosure": True,
+                      "external_network": ("provider", "authorized_local_worker"),
+                      "privileged_local_tools": ("local_policy_bridge",)},
+    "CUSTOM": {"cloud_inference": True, "cloud_disclosure": True, "external_network": ("constrained",),
+               "privileged_local_tools": ("scoped",)},
+}
+RULE_KINDS = ("tool_rules", "network_rules", "filesystem_rules", "shell_rules", "cloud_disclosure_rules")
+RULE_ACTIONS = frozenset((
+    "cloud_inference", "cloud_disclosure", "external_network", "host_shell",
+    "local_audio_device", "filesystem_read", "filesystem_write", "history_transfer",
+    "wake_word", "background_processing", "publish_artifact", "browser_navigate",
+))
+REF = re.compile(r"[A-Za-z0-9_-]{1,64}$")
+ID = re.compile(r"[a-z0-9][a-z0-9-]{0,62}$")
+
+
+@dataclass(frozen=True)
+class Rule:
+    """One scoped permission. ``scope`` narrows a rule; narrower wins."""
+    action: str
+    scope: tuple = ()
+    decision: str = DENY
+    approval: str = ""        # opaque reference, never secret material
+    expires_at: float = 0.0
+
+    def matches(self, action, scope):
+        return self.action == action and set(scope) >= set(self.scope)
+
+
+def decide(profile_rules, action, scope=(), now=0.0):
+    """Return (decision, reason). Unmatched or unknown actions are denied."""
+    if action in GLOBAL_DENIES:
+        return DENY, "global_deny"
+    if action not in RULE_ACTIONS:
+        return DENY, "unknown_action"
+    best, best_len = None, -1
+    for rule in profile_rules:
+        if not rule.matches(action, scope):
+            continue
+        if len(rule.scope) > best_len or (len(rule.scope) == best_len and rule.decision == DENY):
+            best, best_len = rule, len(rule.scope)
+    if best is None:
+        return DENY, "no_rule_matches"
+    if best.decision == ALLOW and best.approval and best.expires_at <= now:
+        return ASK, "approval_expired"
+    return best.decision, "rule"
+
+
+@dataclass(frozen=True)
+class Profile:
+    id: str
+    version: int = 1
+    name: str = ""
+    description: str = ""
+    based_on_mode: str = "LOCAL_ONLY"
+    ui_locale: str = "tr"
+    stt_model_id: str = ""
+    llm_model_id: str = ""
+    tts_model_id: str = ""
+    voice_by_language: dict = field(default_factory=dict)
+    allowed_providers: tuple = ()
+    credential_refs: tuple = ()
+    tool_rules: tuple = ()
+    network_rules: tuple = ()
+    filesystem_rules: tuple = ()
+    shell_rules: tuple = ()
+    cloud_disclosure_rules: tuple = ()
+    voice_activation: str = "off"
+    background_processing_enabled: bool = False
+    state: str = "active"
+    created_at: float = 0.0
+    updated_at: float = 0.0
+
+    def rules(self):
+        out = []
+        for kind in RULE_KINDS:
+            out.extend(getattr(self, kind))
+        return tuple(out)
+
+    def checked(self):
+        if not isinstance(self.id, str) or not ID.fullmatch(self.id):
+            raise Hold("invalid_profile_id")
+        if self.based_on_mode not in MODES:
+            raise Hold("unknown_operating_mode")
+        if not isinstance(self.version, int) or not 0 < self.version <= 1000000:
+            raise Hold("invalid_profile_version")
+        if self.state not in STATES:
+            raise Hold("invalid_profile_state")
+        if self.ui_locale not in LANGUAGES or self.voice_activation not in ACTIVATION:
+            raise Hold("invalid_locale_or_activation")
+        if set(self.voice_by_language) - set(LANGUAGES):
+            raise Hold("unsupported_voice_language")
+        if any(not isinstance(v, str) or not v for v in self.voice_by_language.values()):
+            raise Hold("invalid_voice_reference")
+        if len(self.name) > 80 or len(self.description) > 400:
+            raise Hold("profile_text_too_long")
+        for key in ("stt_model_id", "llm_model_id", "tts_model_id"):
+            value = getattr(self, key)
+            if not isinstance(value, str) or len(value) > 256:
+                raise Hold("invalid_local_model_choice")
+        for ref in self.credential_refs:
+            if not isinstance(ref, str) or not REF.fullmatch(ref):
+                raise Hold("credential_material_in_profile_data")
+        for provider in self.allowed_providers:
+            if not isinstance(provider, str) or len(provider) > 64 or "/" in provider:
+                raise Hold("invalid_provider_reference")
+        seen = set()
+        for rule in self.rules():
+            if not isinstance(rule, Rule):
+                raise Hold("invalid_rule")
+            if rule.action in GLOBAL_DENIES:
+                # Law is never grantable, whatever the scope or mode.
+                raise Hold("global_deny_not_weakable")
+            if rule.action not in RULE_ACTIONS or rule.decision not in DECISIONS:
+                raise Hold("invalid_rule")
+            if any(not isinstance(s, str) or len(s) > 96 or not s or "~" in s for s in rule.scope):
+                raise Hold("invalid_rule_scope")
+            if rule.approval and not REF.fullmatch(rule.approval):
+                raise Hold("invalid_approval_reference")
+            if not 0 <= rule.expires_at <= 1e12:
+                raise Hold("invalid_approval_expiry")
+            key = (rule.action, rule.scope)
+            if key in seen:
+                raise Hold("duplicate_rule")
+            seen.add(key)
+        return self
+
+
+@dataclass(frozen=True)
+class EffectivePolicy:
+    """Immutable per-task snapshot: a task never rides a mutated profile."""
+    profile_id: str
+    version: int
+    mode: str
+    rules: tuple
+    capabilities: tuple
+
+    def supports(self, action):
+        return action in self.capabilities
+
+    def evaluate(self, action, scope=(), now=0.0):
+        if action in GLOBAL_DENIES:
+            return DENY, "global_deny"
+        if action not in RULE_ACTIONS:
+            return DENY, "unknown_action"
+        if not self.supports(action):
+            return DENY, "mode_without_capability"
+        return decide(self.rules, action, scope, now)
+
+
+def effective(profile):
+    """Mode selection changes capabilities, not only a system prompt."""
+    profile = profile.checked()
+    caps = CAPABILITIES[profile.based_on_mode]
+    unsupported = set(GLOBAL_DENIES)
+    if not caps["cloud_inference"]:
+        unsupported |= {"cloud_inference", "cloud_disclosure"}
+    if not caps["privileged_local_tools"]:
+        unsupported |= {"host_shell"}
+    if caps["external_network"] is None:
+        unsupported |= {"external_network", "browser_navigate"}
+    return EffectivePolicy(profile.id, profile.version, profile.based_on_mode, profile.rules(),
+                           tuple(sorted(set(RULE_ACTIONS) - unsupported)))
+
+
+def clone_to_custom(profile, name):
+    """Customizing a protected preset means a CUSTOM clone, not a weaken preset."""
+    profile = profile.checked()
+    if profile.based_on_mode == "CUSTOM":
+        raise Hold("already_custom")
+    carried = tuple(r for r in profile.rules()
+                    if r.action in ("filesystem_read", "filesystem_write", "browser_navigate"))
+    # An owner's approval is a grant, not an inherited token: the clone re-asks.
+    carried = tuple(replace(r, approval="", expires_at=0.0) for r in carried)
+    filesystem = tuple(r for r in carried if r.action.startswith("filesystem_"))
+    network = tuple(r for r in carried if r.action == "browser_navigate")
+    out = replace(profile, id=profile.id + "-custom", name=name, based_on_mode="CUSTOM",
+                  version=1, state="active", credential_refs=(), allowed_providers=(),
+                  tool_rules=(), network_rules=network, filesystem_rules=filesystem,
+                  shell_rules=(), cloud_disclosure_rules=())
+    return out.checked()
+
+
+PRIVATE = ("home", "users", "root")
+
+
+def sanitized(profile):
+    """Import/export view: no credentials, approvals, private paths or grants."""
+    def clean(rules):
+        out = []
+        for rule in rules:
+            if any(part.lower() in PRIVATE or part.startswith("/") or part.startswith("~")
+                   for part in rule.scope):
+                continue  # workstation-specific scope never travels
+            out.append(replace(rule, approval="", expires_at=0.0))
+        return tuple(out)
+
+    out = replace(profile, state="pending_review", credential_refs=(), allowed_providers=(),
+                  tool_rules=clean(profile.tool_rules), network_rules=clean(profile.network_rules),
+                  filesystem_rules=clean(profile.filesystem_rules), shell_rules=(),
+                  cloud_disclosure_rules=clean(profile.cloud_disclosure_rules))
+    # Privileged rules arrive denied until the owner re-authorizes them.
+    return replace(out, shell_rules=(Rule("host_shell", (), DENY),)).checked()
+
+
+class Store:
+    """Profile storage with version history. No arbitrary cap is imposed."""
+
+    LIMIT = 32768
+
+    def __init__(self, root):
+        self.root = Path(root)
+        self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self.history = self.root / "history"
+        self.history.mkdir(mode=0o700, exist_ok=True)
+
+    def _path(self, profile_id):
+        if not isinstance(profile_id, str) or not ID.fullmatch(profile_id):
+            raise Hold("invalid_profile_id")
+        return self.root / (profile_id + ".json")
+
+    @staticmethod
+    def _dump(profile):
+        out = {"id": profile.id, "version": profile.version, "name": profile.name,
+               "description": profile.description, "based_on_mode": profile.based_on_mode,
+               "ui_locale": profile.ui_locale, "stt_model_id": profile.stt_model_id,
+               "llm_model_id": profile.llm_model_id, "tts_model_id": profile.tts_model_id,
+               "voice_by_language": dict(profile.voice_by_language),
+               "allowed_providers": list(profile.allowed_providers),
+               "credential_refs": list(profile.credential_refs),
+               "voice_activation": profile.voice_activation,
+               "background_processing_enabled": profile.background_processing_enabled,
+               "state": profile.state, "created_at": profile.created_at, "updated_at": profile.updated_at,
+               "rules": [{"action": r.action, "scope": list(r.scope), "decision": r.decision,
+                          "approval": r.approval, "expires_at": r.expires_at} for r in profile.rules()]}
+        return json.dumps(out, ensure_ascii=False, sort_keys=True)
+
+    @classmethod
+    def _parse(cls, text):
+        if len(text) > cls.LIMIT:
+            raise Hold("profile_too_large")
+        data = json.loads(text)
+        by_kind = {"tool_rules": [], "network_rules": [], "filesystem_rules": [],
+                   "shell_rules": [], "cloud_disclosure_rules": []}
+        for item in data.get("rules", []):
+            rule = Rule(item["action"], tuple(item["scope"]), item["decision"],
+                        item.get("approval", ""), item.get("expires_at", 0.0))
+            if rule.action in GLOBAL_DENIES:
+                raise Hold("global_deny_not_weakable")
+            if rule.action == "host_shell":
+                kind = "shell_rules"
+            elif rule.action.startswith("filesystem_"):
+                kind = "filesystem_rules"
+            elif rule.action in ("cloud_disclosure", "history_transfer"):
+                kind = "cloud_disclosure_rules"
+            elif rule.action in ("external_network", "browser_navigate"):
+                kind = "network_rules"
+            else:
+                kind = "tool_rules"
+            by_kind[kind].append(rule)
+        return Profile(data["id"], int(data["version"]), data.get("name", ""),
+                       data.get("description", ""), data["based_on_mode"], data.get("ui_locale", "tr"),
+                       data.get("stt_model_id", ""), data.get("llm_model_id", ""),
+                       data.get("tts_model_id", ""), data.get("voice_by_language", {}),
+                       tuple(data.get("allowed_providers", ())), tuple(data.get("credential_refs", ())),
+                       tuple(by_kind["tool_rules"]), tuple(by_kind["network_rules"]),
+                       tuple(by_kind["filesystem_rules"]), tuple(by_kind["shell_rules"]),
+                       tuple(by_kind["cloud_disclosure_rules"]), data.get("voice_activation", "off"),
+                       bool(data.get("background_processing_enabled", False)),
+                       data.get("state", "active"), float(data.get("created_at", 0.0)),
+                       float(data.get("updated_at", 0.0))).checked()
+
+    def _write(self, path, text):
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=str(path.parent), delete=False) as f:
+                tmp = f.name
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            tmp = None
+        finally:
+            if tmp:
+                Path(tmp).unlink(missing_ok=True)
+
+    def save(self, profile):
+        profile = profile.checked()
+        target = self._path(profile.id)
+        if target.is_file():
+            try:
+                if self._parse(target.read_text(encoding="utf-8")).version >= profile.version:
+                    raise Hold("version_must_increase")
+            except FileNotFoundError:
+                pass
+            except (ValueError, OSError):
+                raise Hold("profile_unreadable") from None
+        self._write(target, self._dump(profile))
+        self._write(self.history / (profile.id + "-v%d.json" % profile.version), self._dump(profile))
+        return profile
+
+    def load(self, profile_id):
+        try:
+            return self._parse(self._path(profile_id).read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            raise Hold("profile_not_found") from None
+        except (ValueError, OSError):
+            raise Hold("profile_unreadable") from None
+
+    def ids(self):
+        return tuple(sorted(p.name[:-5] for p in self.root.glob("*.json")))
+
+    def versions(self, profile_id):
+        stem = self._path(profile_id).stem
+        out = []
+        for path in sorted(self.history.glob(stem + "-v*.json")):
+            try:
+                out.append(self._parse(path.read_text(encoding="utf-8")))
+            except (Hold, ValueError, OSError):
+                out.append(path.name)
+        return tuple(out)
+
+    def rollback(self, profile_id, version):
+        """Restore an earlier policy as a new version, never re-granting later ones."""
+        latest = 0
+        for candidate in self.versions(profile_id):
+            if isinstance(candidate, Profile):
+                latest = max(latest, candidate.version)
+                if candidate.version == version:
+                    target = candidate
+        if latest and "target" in locals():
+            return self.save(replace(target, version=latest + 1))
+        raise Hold("profile_version_not_found")
