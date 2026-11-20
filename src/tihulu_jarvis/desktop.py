@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import profiles, settings
+from . import market, profiles, settings
 from .voice import audio
 from .voice.jan import Jan
 from .voice.m1 import Hold
@@ -126,7 +126,10 @@ def create_window(app, loop):
             self.update_labels()
             self.store = profiles.Store(profiles.profile_dir())
             self.policy_rows = {}
+            self.market = market.Registry(market.market_dir())
+            self.market_row_ids = {}
             self.build_profiles_page()
+            self.build_market_page()
             try:
                 profiles.ensure_default(self.store)
                 wanted = self.cfg.get("profile") or ""
@@ -359,6 +362,131 @@ def create_window(app, loop):
                 p = self.cfg["stt"] if key=="stt" else self.cfg["voices"].get(key)
                 label.set_text(Path(p).name if p else "—")
 
+        def register_choice(self, key, path):
+            """Register a truthful card, then remember the local reference."""
+            category = "stt" if key == "stt" else "tts"
+            engine = "whisper.cpp" if key == "stt" else "piper"
+            card = market.from_file(str(audio.selected_file(path, ".bin" if key == "stt" else ".onnx")),
+                                    category, engine=engine,
+                                    languages=(() if key == "stt" else (key,)))
+            if key != "stt":
+                # A voice must match the locale it is offered for.
+                audio.voice_for(path, key)
+            self.market.save_card(card)
+            self.cfg.setdefault("market_refs", {})[card.storage_ref] = str(path)
+            self.save()
+            self.build_market_page()
+            return card
+
+        def use_card(self, model_id):
+            """Apply a registered card. Nothing is downloaded or started."""
+            card = self.market.card(model_id)
+            if card.compatibility_status == "incompatible_format":
+                raise Hold("incompatible_model_format")
+            # Using a verified import is an explicit activation, not a silent one.
+            if card.state == "REGISTERED":
+                card = market.advance(card, "TESTABLE")
+            if card.state == "TESTABLE":
+                card = market.advance(card, market.ACTIVE)
+            card = self.market.save_card(card)
+            if card.category == "stt":
+                path = self.cfg.get("market_refs", {}).get(card.storage_ref)
+                if not path:
+                    raise Hold("select_local_model")
+                self.cfg["stt"] = path
+            elif card.category == "tts":
+                if len(card.languages) != 1:
+                    raise Hold("voice_locale_unverified")
+                lang = card.languages[0]
+                path = self.cfg.get("market_refs", {}).get(card.storage_ref)
+                if not path:
+                    raise Hold("select_local_model")
+                self.cfg["voices"][lang] = path
+            else:
+                raise Hold("model_category_not_selectable_here")
+            self.save()
+            self.update_labels()
+            self.refresh()
+
+        def build_market_page(self):
+            if getattr(self, "market_list", None) is not None:
+                self.market_row_ids = {}
+                child = self.market_list.get_first_child()
+                while child is not None:
+                    nxt = child.get_next_sibling()
+                    self.market_list.remove(child)
+                    child = nxt
+            else:
+                page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+                view = Gtk.ScrolledWindow(vexpand=True)
+                view.set_child(page)
+                self.stack.add_titled(view, "market", tr("AI Market","Yapay Zeka Pazarı","KI-Markt"))
+                self.market_note = Gtk.Label(xalign=0, wrap=True)
+                page.append(self.market_note)
+                self.market_filter = Gtk.ComboBoxText()
+                for category in market.CATEGORIES:
+                    self.market_filter.append_text(category)
+                self.market_filter.set_active(0)
+                self.market_filter.connect("changed", lambda *_: self.build_market_page())
+                page.append(self.market_filter)
+                self.market_list = Gtk.ListBox()
+                self.market_list.connect("row-selected", lambda *_: self.refresh_market_buttons())
+                page.append(self.market_list)
+                row = Gtk.Box(spacing=8)
+                page.append(row)
+                self.market_use = self.button(row, tr("Use selected","Seçileni kullan","Auswahl verwenden"), self.use_selected_card)
+                self.market_forget = self.button(row, tr("Unregister","Kaydı sil","Registrierung entfernen"), self.forget_selected_card)
+            wanted = self.market_filter.get_active_text() or "stt"
+            rows = [c for c in self.market.cards() if c.category == wanted]
+            for card in sorted(rows, key=lambda c: (c.state, c.model_id)):
+                label = Gtk.Label(label="%s · %s · %s · %s · %s" % (
+                    card.display_name, card.engine, card.artifact_format,
+                    card.compatibility_status, card.state), xalign=0, wrap=True)
+                item = Gtk.ListBoxRow()
+                item.set_child(label)
+                self.market_list.append(item)
+                self.market_row_ids[item] = card.model_id
+            self.market_note.set_text(tr(
+                "Installed models and voices known to this computer. Unknown values stay unknown/not tested. Import happens in Installed models.",
+                "Bu bilgisayarda bilinen kurulu modeller ve sesler. Bilinmeyen değerler bilinmiyor/denenmedi olarak kalır. İçe alma Kurulu modeller bölümünde yapılır.",
+                "Bekannte installierte Modelle und Stimmen. Unbekannte Werte bleiben unbekannt/nicht getestet. Import unter Installierte Modelle."))
+            self.refresh_market_buttons()
+
+        def selected_card(self):
+            row = self.market_list.get_selected_row()
+            return self.market_row_ids.get(row) if row is not None else None
+
+        def refresh_market_buttons(self):
+            for w in (self.market_use, self.market_forget):
+                w.set_sensitive(not self.busy and self.selected_card() is not None)
+            self.market_list.set_sensitive(not self.busy)
+
+        def use_selected_card(self):
+            model_id = self.selected_card()
+            if model_id is None or self.busy:
+                return
+            try:
+                self.use_card(model_id)
+                self.set_state("ready", tr("Model selected.","Model seçildi.","Modell ausgewählt."))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def forget_selected_card(self):
+            model_id = self.selected_card()
+            if model_id is None or self.busy:
+                return
+            try:
+                self.market.unregister(model_id)
+                self.cfg["market_refs"] = {k: v for k, v in self.cfg.get("market_refs", {}).items()
+                                           if self.ref_still_registered(k)}
+                self.save()
+                self.build_market_page()
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def ref_still_registered(self, ref):
+            return any(card.storage_ref == ref for card in self.market.cards())
+
         def choose(self, key):
             dialog=Gtk.FileChooserNative.new("Select a trusted installed local model", self.win,Gtk.FileChooserAction.OPEN,"Select","Cancel")
             filt=Gtk.FileFilter()
@@ -370,6 +498,9 @@ def create_window(app, loop):
                         return
                     file=d.get_file()
                     p=file.get_path() if file else None
+                    # A card is registered before the choice is applied, so an
+                    # unsupported or unreadable file never becomes the active model.
+                    self.register_choice(key, p)
                     if key=="stt":
                         self.cfg["stt"]=str(audio.selected_file(p,".bin"))
                     else:
