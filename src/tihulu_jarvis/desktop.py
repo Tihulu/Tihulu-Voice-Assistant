@@ -7,10 +7,10 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import profiles, settings
+from . import market, profiles, settings
 from .voice import audio
 from .voice.jan import Jan
-from .voice.m1 import Hold
+from .voice.m1 import Hold, SpeechRequest
 from .voice.session import Session
 
 
@@ -115,7 +115,8 @@ def create_window(app, loop):
             models.append(self.models)
             self.models.connect("changed", self.select_model)
             self.url.connect("changed", lambda *_:self.forget_inventory())
-            self.labels, self.pickers = {}, []
+            self.labels, self.pickers, self.previews = {}, [], {}
+            self.preview_locales = {}
             for key, caption in [("stt","STT · Whisper (.bin)"),("tr","Piper · Türkçe"),("en","Piper · English"),("de","Piper · Deutsch")]:
                 row = Gtk.Box(spacing=8)
                 models.append(row)
@@ -123,10 +124,23 @@ def create_window(app, loop):
                 self.pickers.append(btn)
                 self.labels[key] = Gtk.Label(xalign=0, wrap=True)
                 row.append(self.labels[key])
+                if key != "stt":
+                    # A preview speaks a fixed sample in the selected locale only.
+                    hear = self.button(row, tr("Preview","Dinle","Anhören"), lambda k=key:self.preview(k))
+                    self.previews[hear] = key
+            self.test_chat_button = self.button(models, tr("Test selected model","Seçilen modeli dene","Ausgewähltes Modell testen"), self.test_chat)
+            self.test_note = Gtk.Label(xalign=0, wrap=True)
+            models.append(self.test_note)
             self.update_labels()
             self.store = profiles.Store(profiles.profile_dir())
             self.policy_rows = {}
+            self.market = market.Registry(market.market_dir())
+            self.market_row_ids = {}
+            # No download transport ships with this release; a future,
+            # separately authorized transport is plugged in here.
+            self.transport = None
             self.build_profiles_page()
+            self.build_market_page()
             try:
                 profiles.ensure_default(self.store)
                 wanted = self.cfg.get("profile") or ""
@@ -333,8 +347,14 @@ def create_window(app, loop):
             self.finish_btn.set_sensitive(self.stage=="listening" and self.finish is not None)
             self.cancel.set_sensitive(self.busy)
             self.hard.set_sensitive(self.busy)
-            for w in (self.reload,self.url,self.models,*self.pickers):
+            for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,*self.previews):
                 w.set_sensitive(not self.busy)
+            if not self.busy:
+                self.test_chat_button.set_sensitive(connected)
+                for widget, lang in self.previews.items():
+                    # A preview speaks only the locale that is actually selected.
+                    widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
+                                         and audio.tools_ready("piper","aplay"))
 
         def save(self):
             try:
@@ -359,6 +379,222 @@ def create_window(app, loop):
                 p = self.cfg["stt"] if key=="stt" else self.cfg["voices"].get(key)
                 label.set_text(Path(p).name if p else "—")
 
+        def register_choice(self, key, path):
+            """Register a truthful card, then remember the local reference."""
+            category = "stt" if key == "stt" else "tts"
+            engine = "whisper.cpp" if key == "stt" else "piper"
+            card = market.from_file(str(audio.selected_file(path, ".bin" if key == "stt" else ".onnx")),
+                                    category, engine=engine,
+                                    languages=(() if key == "stt" else (key,)))
+            if key != "stt":
+                # A voice must match the locale it is offered for.
+                audio.voice_for(path, key)
+            self.market.save_card(card)
+            self.cfg.setdefault("market_refs", {})[card.storage_ref] = str(path)
+            self.save()
+            self.build_market_page()
+            return card
+
+        def remember(self, category, value):
+            """Record a choice in this profile and in the local settings."""
+            profile = self.store.load(self.cfg["profile"]).checked()
+            fields = {"llm": "llm_model_id", "stt": "stt_model_id", "tts": "tts_model_id"}
+            updated = replace(profile, version=profile.version + 1, **{fields[category]: value})
+            self.store.save(updated)
+            self.activate_profile(updated.id, quiet=True)
+
+        def use_card(self, model_id):
+            """Apply a registered card. Nothing is downloaded or started."""
+            card = self.market.card(model_id)
+            if card.compatibility_status == "incompatible_format":
+                raise Hold("incompatible_model_format")
+            if card.category == "llm":
+                # A cloud-visible model must be one the endpoint actually serves.
+                if model_id not in self.inventory:
+                    raise Hold("model_not_in_inventory")
+                # The endpoint itself verifies that this model is installed.
+                card = self.market.save_card(market.register_installed(card))
+                self.cfg["llm"] = model_id
+                self.remember("llm", model_id)
+                self.save()
+                self.refresh()
+                return
+            # Using a verified import is an explicit activation, not a silent one.
+            if card.state == "REGISTERED":
+                card = market.advance(card, "TESTABLE")
+            if card.state == "TESTABLE":
+                card = market.advance(card, market.ACTIVE)
+            card = self.market.save_card(card)
+            if card.category == "stt":
+                path = self.cfg.get("market_refs", {}).get(card.storage_ref)
+                if not path:
+                    raise Hold("select_local_model")
+                self.cfg["stt"] = path
+            elif card.category == "tts":
+                if len(card.languages) != 1:
+                    raise Hold("voice_locale_unverified")
+                lang = card.languages[0]
+                path = self.cfg.get("market_refs", {}).get(card.storage_ref)
+                if not path:
+                    raise Hold("select_local_model")
+                self.cfg["voices"][lang] = path
+            else:
+                raise Hold("model_category_not_selectable_here")
+            self.save()
+            self.update_labels()
+            self.refresh()
+
+        def build_market_page(self):
+            if getattr(self, "market_list", None) is not None:
+                self.market_row_ids = {}
+                child = self.market_list.get_first_child()
+                while child is not None:
+                    nxt = child.get_next_sibling()
+                    self.market_list.remove(child)
+                    child = nxt
+            else:
+                page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+                view = Gtk.ScrolledWindow(vexpand=True)
+                view.set_child(page)
+                self.stack.add_titled(view, "market", tr("AI Market","Yapay Zeka Pazarı","KI-Markt"))
+                self.market_note = Gtk.Label(xalign=0, wrap=True)
+                page.append(self.market_note)
+                self.storage_note = Gtk.Label(xalign=0, wrap=True)
+                page.append(self.storage_note)
+                self.market_filter = Gtk.ComboBoxText()
+                for category in market.CATEGORIES:
+                    self.market_filter.append_text(category)
+                self.market_filter.set_active(0)
+                self.market_filter.connect("changed", lambda *_: self.build_market_page())
+                page.append(self.market_filter)
+                self.market_list = Gtk.ListBox()
+                self.market_list.connect("row-selected", lambda *_: self.refresh_market_buttons())
+                page.append(self.market_list)
+                row = Gtk.Box(spacing=8)
+                page.append(row)
+                self.market_use = self.button(row, tr("Use selected","Seçileni kullan","Auswahl verwenden"), self.use_selected_card)
+                self.market_forget = self.button(row, tr("Unregister","Kaydı sil","Registrierung entfernen"), self.forget_selected_card)
+                self.market_fetch = self.button(row, tr("Download","İndir","Herunterladen"), self.download_selected_card)
+                self.market_find = self.button(row, tr("Discover installed Jan models","Kurulu Jan modellerini bul","Installierte Jan-Modelle suchen"), self.discover_market)
+            wanted = self.market_filter.get_active_text() or "stt"
+            rows = [c for c in self.market.cards() if c.category == wanted]
+            for card in sorted(rows, key=lambda c: (c.state, c.model_id)):
+                label = Gtk.Label(label="%s · %s · %s · %s · %s" % (
+                    card.display_name, card.engine, card.artifact_format,
+                    card.compatibility_status, card.state), xalign=0, wrap=True)
+                item = Gtk.ListBoxRow()
+                item.set_child(label)
+                self.market_list.append(item)
+                self.market_row_ids[item] = card.model_id
+            self.market_note.set_text(tr(
+                "Installed models and voices known to this computer. Unknown values stay unknown/not tested. Import happens in Installed models.",
+                "Bu bilgisayarda bilinen kurulu modeller ve sesler. Bilinmeyen değerler bilinmiyor/denenmedi olarak kalır. İçe alma Kurulu modeller bölümünde yapılır.",
+                "Bekannte installierte Modelle und Stimmen. Unbekannte Werte bleiben unbekannt/nicht getestet. Import unter Installierte Modelle."))
+            self.storage_note.set_text(self.storage_report())
+            self.refresh_market_buttons()
+
+        def storage_report(self):
+            """Aggregate only what the registry knows; nothing is estimated."""
+            summary = market.usage(self.market.cards())
+            if not summary.cards:
+                return tr("No registered models yet.","Henüz kayıtlı model yok.",
+                          "Noch keine registrierten Modelle.")
+            unknown = summary.unknown_memory
+            tail = tr("memory not estimated for %d items" % unknown,
+                      "%d öğe için bellek tahmini yok" % unknown,
+                      "für %d Einträge kein Speicherschätzwert" % unknown)
+            return "%s · %s" % (summary.report(), tail if unknown else "")
+
+        def selected_card(self):
+            row = self.market_list.get_selected_row()
+            return self.market_row_ids.get(row) if row is not None else None
+
+        def refresh_market_buttons(self):
+            chosen = self.selected_card()
+            for w in (self.market_use, self.market_forget):
+                w.set_sensitive(not self.busy and chosen is not None)
+            self.market_list.set_sensitive(not self.busy)
+            if not self.busy:
+                ready = False
+                if chosen is not None:
+                    try:
+                        ready = (self.market.card(chosen).state == "DISCOVERED"
+                                 and self.market.card(chosen).approved_source()
+                                 and self.transport is not None)
+                    except Hold:
+                        ready = False
+                self.market_fetch.set_sensitive(ready)
+
+        def use_selected_card(self):
+            model_id = self.selected_card()
+            if model_id is None or self.busy:
+                return
+            try:
+                self.use_card(model_id)
+                self.set_state("ready", tr("Model selected.","Model seçildi.","Modell ausgewählt."))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def discover_market(self):
+            async def run(epoch):
+                raw = self.url.get_text().strip()
+                client = Jan(raw, timeout=10)
+                cards = await market.from_models(client, languages=(), now=0.0)
+                self.session.check(epoch)
+                self.cfg["endpoint"] = raw
+                self.inventory = tuple(card.model_id for card in cards)
+                self.models.remove_all()
+                for model_id in self.inventory:
+                    self.models.append_text(model_id)
+                for card in cards:
+                    known = None
+                    try:
+                        known = self.market.card(card.model_id)
+                    except Hold:
+                        pass
+                    if known is None or known.state == "DISCOVERED":
+                        # Re-discovery refreshes a card, never silently upgrades it.
+                        self.market.save_card(card)
+                self.save()
+                self.build_market_page()
+                self.refresh()
+            self.submit(run)
+
+        def download_selected_card(self):
+            """Queue a discovered item for download; nothing installed is replaced."""
+            model_id = self.selected_card()
+            if model_id is None or self.busy:
+                return
+            self.submit(lambda epoch: self.download(epoch, model_id))
+
+        async def download(self, epoch, model_id):
+            card = self.market.card(model_id)
+            source = market.source_of(card)
+            if self.transport is None:
+                raise Hold("download_transport_not_available")
+            transfer = market.Transfer(self.market, card, source, self.transport)
+            try:
+                await transfer.run(lambda count: None)
+            finally:
+                self.session.check(epoch)
+                self.build_market_page()
+
+        def forget_selected_card(self):
+            model_id = self.selected_card()
+            if model_id is None or self.busy:
+                return
+            try:
+                self.market.unregister(model_id)
+                self.cfg["market_refs"] = {k: v for k, v in self.cfg.get("market_refs", {}).items()
+                                           if self.ref_still_registered(k)}
+                self.save()
+                self.build_market_page()
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def ref_still_registered(self, ref):
+            return any(card.storage_ref == ref for card in self.market.cards())
+
         def choose(self, key):
             dialog=Gtk.FileChooserNative.new("Select a trusted installed local model", self.win,Gtk.FileChooserAction.OPEN,"Select","Cancel")
             filt=Gtk.FileFilter()
@@ -370,6 +606,9 @@ def create_window(app, loop):
                         return
                     file=d.get_file()
                     p=file.get_path() if file else None
+                    # A card is registered before the choice is applied, so an
+                    # unsupported or unreadable file never becomes the active model.
+                    self.register_choice(key, p)
                     if key=="stt":
                         self.cfg["stt"]=str(audio.selected_file(p,".bin"))
                     else:
@@ -383,6 +622,42 @@ def create_window(app, loop):
                     d.destroy()
             dialog.connect("response",response)
             dialog.show()
+
+        def preview(self, lang):
+            if self.busy or self.cfg["llm"] not in self.inventory:
+                return
+            sample = {"tr": "Bu bir ses önizlemesidir.",
+                      "en": "This is a voice preview.",
+                      "de": "Das ist eine Stimmprobe."}[lang]
+            speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"][lang], lang).id)
+            async def run(epoch):
+                def progress(stage):
+                    if epoch == self.session.epoch:
+                        self.set_state(stage)
+                await audio.speak(speech, progress)
+            self.submit(run)
+
+        def test_chat(self):
+            if self.busy or self.cfg["llm"] not in self.inventory:
+                return
+            self.test_note.set_text(tr("Testing…","Sınanıyor…","Test läuft…"))
+            async def run(epoch):
+                # A disposable session: a test never enters the conversation.
+                probe = Session()
+                # A disposable session shares this turn's epoch, so cancellation
+                # and staleness checks still apply; its history is never merged.
+                probe.epoch = epoch
+                # A short, anchor-bearing probe so the reply language is provable.
+                text = tr("Hello there! In one short sentence, what can you do?",
+                          "Merhaba! Tek cümleyle cevapla: neler yapabilirsin?",
+                          "Hallo! Antworte in einem kurzen Satz: was kannst du?")
+                reply, _ = await probe.reply(text, self.backend_for_test(), epoch)
+                self.session.check(epoch)
+                self.test_note.set_text("%s · %s" % (reply.strip()[:240], probe.context.response_language or "unknown"))
+            self.submit(run)
+
+        def backend_for_test(self):
+            return Jan(self.cfg["endpoint"], self.cfg["llm"])
 
         def submit(self, work):
             if self.busy:
