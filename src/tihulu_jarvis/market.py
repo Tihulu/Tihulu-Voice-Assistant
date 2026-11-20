@@ -197,7 +197,12 @@ class ModelCard:
         for key in ("source_ref", "source_checksum", "source_version"):
             if not isinstance(getattr(self, key), str) or len(getattr(self, key)) > 256:
                 raise Hold("invalid_source_reference")
-        if self.source_ref and not re.fullmatch(r"[A-Za-z0-9:._-]{1,256}", self.source_ref):
+        if self.source_ref and not re.fullmatch(r"[A-Za-z0-9:._~/-]{1,256}", self.source_ref):
+            raise Hold("invalid_source_reference")
+        # An opaque token or an approved endpoint, never a workstation path.
+        if (self.source_ref.startswith(("/", "~")) or "/home/" in self.source_ref
+                or "/Users/" in self.source_ref or ".." in self.source_ref
+                or self.source_ref.endswith("/")):
             raise Hold("invalid_source_reference")
         if self.source_checksum and not re.fullmatch(r"[0-9a-f]{64}", self.source_checksum):
             raise Hold("checksum_required_before_download")
@@ -312,7 +317,11 @@ class Source:
     approval_expires_at: float = 0.0
 
     def checked(self):
-        if not re.fullmatch(r"[A-Za-z0-9:._-]{1,256}", self.reference):
+        if not re.fullmatch(r"[A-Za-z0-9:._~/-]{1,256}", self.reference):
+            raise Hold("invalid_source_reference")
+        if (self.reference.startswith(("/", "~")) or "/home/" in self.reference
+                or "/Users/" in self.reference or ".." in self.reference
+                or self.reference.endswith("/")):
             raise Hold("invalid_source_reference")
         if not re.fullmatch(r"[0-9a-f]{64}", self.checksum):
             raise Hold("checksum_required_before_download")
@@ -335,6 +344,22 @@ def source_of(card):
         raise Hold("download_terms_not_approved")
     return Source(card.source_ref, card.source_checksum, card.source_size, card.source_version,
                  card.license_id, card.network_approval, card.approval_expires_at).checked()
+
+
+def transport_for(reference):
+    """Build a download transport for an approved source, if one is available.
+
+    Only a numeric loopback http endpoint is supported here. Anything else has
+    no transport in this build, which is the honest answer.
+    """
+    try:
+        from .transfer_http import loopback_fetch
+    except ImportError:
+        return None
+    try:
+        return loopback_fetch(reference)
+    except Hold:
+        return None
 
 
 class Transfer:
