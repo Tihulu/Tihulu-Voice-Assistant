@@ -3,6 +3,7 @@
 """Opt-in GTK 4 desktop client. No listener, background capture or provider login."""
 import asyncio
 import locale
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import settings
@@ -12,16 +13,37 @@ from .voice.m1 import Hold
 from .voice.session import Session
 
 
-def main():
+def _gtk():
     try:
         import gi
         gi.require_version("Gtk", "4.0")
-        from gi.repository import Gdk, Gio, GLib, Gtk
+        from gi.repository import Gio, GLib, Gtk
     except (ImportError, ValueError):
         raise SystemExit("GTK 4 with PyGObject is required for the desktop client.")
 
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
+    return Gio, GLib, Gtk
+
+
+@contextmanager
+def gtk_asyncio(loop):
+    """Run small asyncio slices on the GTK thread until the window closes."""
+    _, GLib, _ = _gtk()
+
+    def tick():
+        loop.call_soon(loop.stop)
+        loop.run_forever()
+        return True
+
+    source = GLib.timeout_add(12, tick)
+    try:
+        yield
+    finally:
+        GLib.source_remove(source)
+
+
+def create_window(app, loop):
+    """Construct the native window on the caller's GTK thread."""
+    _, GLib, Gtk = _gtk()
     lang = (locale.getlocale()[0] or "en").split("_")[0]
     def tr(en, tur, de):
         return {"tr":tur, "de":de}.get(lang,en)
@@ -33,6 +55,7 @@ def main():
             self.session, self.inventory = Session(), ()
             self.stage, self.busy = "ready", False
             self.finish, self.playback, self.closing = None, None, False
+            self.playback_stopping = False
             self.cfg = settings.empty()
             read_error = ""
             try:
@@ -75,7 +98,7 @@ def main():
             chat.append(controls)
             self.talk = self.button(controls,tr("Talk","Konuş","Sprechen"),self.voice)
             self.finish_btn = self.button(controls,tr("Finish recording","Kaydı bitir","Aufnahme beenden"),lambda:self.finish.set() if self.finish else None)
-            self.stop = self.button(controls,tr("Stop speaking","Sesi durdur","Wiedergabe stoppen"),lambda:self.playback.cancel() if self.playback else None)
+            self.stop = self.button(controls,tr("Stop speaking","Sesi durdur","Wiedergabe stoppen"),self.stop_speaking)
             self.cancel = self.button(controls,tr("Cancel turn","Turu iptal et","Antwort abbrechen"),lambda:self.interrupt(False))
             self.end = self.button(controls,tr("End conversation","Sohbeti bitir","Gespräch beenden"),lambda:self.interrupt(True))
             self.hard = self.button(controls,tr("Hard stop","Tümünü durdur","Alles stoppen"),lambda:self.interrupt(False))
@@ -234,6 +257,17 @@ def main():
                 return False
             GLib.idle_add(bottom)
 
+        def stop_speaking(self):
+            task = self.playback
+            if task is None or task.done() or self.playback_stopping:
+                return
+            # Cancellation includes asynchronous device cleanup. Queued clicks
+            # must not cancel that cleanup again or unlock a new turn early.
+            self.playback_stopping = True
+            task.cancel()
+            if self.stage != "stopping":
+                self.set_state("stopping_playback")
+
         def interrupt(self, clear):
             self.session.invalidate(clear=clear)
             if clear:
@@ -259,22 +293,35 @@ def main():
 
         def voice(self):
             async def run(epoch):
-                voices={lang:audio.voice_for(p,lang) for lang,p in self.cfg["voices"].items()}
+                def progress(stage):
+                    if epoch == self.session.epoch and not self.playback_stopping:
+                        self.set_state(stage)
+
+                voices = audio.SelectedVoices(self.cfg["voices"])
                 self.finish=asyncio.Event()
-                text=await audio.listen(self.cfg["stt"],self.finish,self.set_state)
+                text=await audio.listen(self.cfg["stt"],self.finish,progress)
                 self.session.check(epoch)
                 self.bubble("You",text)
                 self.set_state("thinking")
                 result,speech=await self.session.reply(text,Jan(self.cfg["endpoint"],self.cfg["llm"]),epoch,voices)
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
-                self.playback=loop.create_task(audio.speak(speech,self.set_state))
+                playback = loop.create_task(audio.speak(speech, progress))
+                self.playback = playback
                 try:
-                    await self.playback
+                    # Stop Speaking preserves the turn. Cancel Turn invalidates
+                    # it, but both paths must await the same playback cleanup.
+                    await asyncio.shield(playback)
                 except asyncio.CancelledError:
+                    self.stop_speaking()
+                    try:
+                        await playback
+                    except asyncio.CancelledError:
+                        pass
                     self.session.check(epoch)
                 finally:
-                    self.playback=None
+                    self.playback = None
+                    self.playback_stopping = False
             self.submit(run)
 
         def close(self,*_):
@@ -291,23 +338,25 @@ def main():
                 GLib.timeout_add(30,drained)
             return True
 
+    return Desktop(app)
+
+
+def main():
+    Gio, _, Gtk = _gtk()
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
     app=Gtk.Application(application_id="io.github.Tihulu.Jarvis", flags=Gio.ApplicationFlags.FLAGS_NONE)
     state=[]
     def activate(a):
         if a.get_active_window():
             a.get_active_window().present()
         else:
-            state.append(Desktop(a))
+            state.append(create_window(a, loop))
     app.connect("activate",activate)
-    def tick():
-        loop.call_soon(loop.stop)
-        loop.run_forever()
-        return True
-    timer=GLib.timeout_add(12,tick)
     try:
-        return app.run(None)
+        with gtk_asyncio(loop):
+            return app.run(None)
     finally:
-        GLib.source_remove(timer)
         pending=asyncio.all_tasks(loop)
         for task in pending:
             task.cancel()

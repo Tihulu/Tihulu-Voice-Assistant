@@ -1,2 +1,9 @@
-New checkpoint for this source candidate (not an archived specification).
-Resume from docs/STATE.md and docs/DEVELOPMENT.md. Verify the actual PR, branch and CI. Preserve the existing public repository, license and legacy installation. Confirm the baseline and candidate unit results independently before any release claim. Only an authorized local component runs host shell. If unavailable, use the public review branch and an isolated GitHub-hosted runner. Next: verify the portable package and local GTK/Jan, then exercise real capture, cancellation, per-language voices and the four-turn mavi conversation.
+Development checkpoint for the public source (not an archived specification).
+
+Canonical repository: https://github.com/Tihulu/Tihulu-Voice-Assistant
+Read docs/STATE.md, docs/TEST_EVIDENCE.md and docs/NATIVE_ACCEPTANCE.md.
+Core dependency: draft PR #4, feat/m1-portable-core, commit 20116430dc2caa8426c817838194dedb573102fd.
+Native increment: feat/native-voice-controls; issue #5. Verify its actual PR head and CI before continuing.
+Do not merge automatically, overwrite main, publish private configuration or alter the legacy installation.
+The first Ubuntu core run passed 39 tests on Python 3.10 and 3.12. Native GTK fixtures are separate from physical COSMIC/audio acceptance.
+Next: inspect native-control CI, resolve failures, then advance the next unimplemented product gate. Host terminal execution must follow the current workspace authorization policy.

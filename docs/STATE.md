@@ -1,9 +1,30 @@
 # Development checkpoint
 
-Base: Tihulu/Tihulu-Voice-Assistant main at d548f7c04d62dcf4133a17d0adba542d472c0dcf. The existing documentation draft PR #1 was open at 083a524c7905fc588ad6326251f2126419d3a5dd when reviewed. This source candidate has no assigned PR number or remote commit.
+## Published core
 
-Migrated: two pure core modules and their 21 + 8 synthetic tests. Added: loopback Jan HTTP client, cancellable local chat/voice, native GTK client, local installed model/voice selection and a PR-only CI job. New tests: five Jan tests and five session/audio/choice tests. Test definitions are not execution evidence. Native Linux acceptance, provider and device integration, clean install and release are HOLD. Recheck public CI for the actual feature commit.
+- Repository: https://github.com/Tihulu/Tihulu-Voice-Assistant
+- Core draft PR: #4, `feat/m1-portable-core`.
+- Core commit: `20116430dc2caa8426c817838194dedb573102fd`.
+- Ubuntu CI run [44664461595](https://github.com/Tihulu/Tihulu-Voice-Assistant/actions/runs/44664461595): success on Python 3.10 and 3.12, including the native loopback TCP fixture (39 tests per interpreter).
+- Main was still `d548f7c04d62dcf4133a17d0adba542d472c0dcf` at publication. Core PR #4 and documentation PR #1 remain separate drafts.
 
-Rollback: no main or live installation changes are required for this candidate. Abandon the isolated feature branch or revert only its feature commit; preserve shared model files, configuration and the legacy application.
+## Current increment
 
-Observed test results: original 29/29; candidate 38 passed, one native TCP fixture not run. See TEST_EVIDENCE.md. A review branch in a bundle is not a published GitHub PR.
+`feat/native-voice-controls` is based on the exact core commit above and tracks #5. Its PR targets `feat/m1-portable-core` to keep the native increment reviewable independently of #4. Retarget after the dependency is merged; never auto-merge.
+
+Changes: independently constructible GTK window and GLib/asyncio bridge; idempotent turn/playback cancellation; awaited device cleanup; stale progress suppression; response-locale-only voice validation. New tests exercise actual GTK widgets using synthetic backends and native process cleanup using a short-lived Python fixture. Physical audio and model inference are separate gates.
+
+Observed for `feat/native-voice-controls` commit `beaac21`: local Xvfb reproduction exposed a single-test-harness defect (a Gtk.Application exports its D-Bus interface at its application id and cannot export it twice in one process), fixed and re-verified locally, then GitHub CI run 44674465300 succeeded for `test (3.10)`, `test (3.12)` and `gtk`. Core suite: 45 cases per interpreter; native GTK suite: 11 cases. See TEST_EVIDENCE.md. Physical COSMIC and audio acceptance remain HOLD.
+
+## Remaining product gates
+
+- Physical COSMIC window/input behavior and microphone -> Whisper -> Jan -> Piper.
+- Live TR/EN/DE recognition, response and audio quality.
+- AI Market lifecycle, enforced modes and isolated persistent profiles.
+- Authorized integrations, installable release, clean-machine install/recovery.
+
+Manual native acceptance: NATIVE_ACCEPTANCE.md. This is a development increment, not a verified release.
+
+## Recovery
+
+Changes are confined to feature branches. To abandon this increment, discard its branch or revert its feature commit after review. Preserve the core branch, legacy installation, shared models and private configuration. No live service or shared model migration is part of this change.
