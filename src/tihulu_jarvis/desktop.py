@@ -486,6 +486,7 @@ def create_window(app, loop):
                 self.market_fetch = self.button(row, tr("Download","İndir","Herunterladen"), self.download_selected_card)
                 self.market_find = self.button(row, tr("Discover installed Jan models","Kurulu Jan modellerini bul","Installierte Jan-Modelle suchen"), self.discover_market)
                 self.market_rollback = self.button(row, tr("Roll back","Geri al","Zurücksetzen"), self.rollback_selected_card)
+                self.market_update = self.button(row, tr("Update","Güncelle","Aktualisieren"), self.update_selected_card)
 
             wanted = self.market_filter.get_active_text() or "stt"
             rows = [c for c in self.market.cards() if c.category == wanted]
@@ -683,6 +684,15 @@ def create_window(app, loop):
                     except Hold:
                         revisions = []
                 self.market_rollback.set_sensitive(not self.busy and bool(revisions))
+                updatable = False
+                if chosen is not None:
+                    try:
+                        card_now = self.market.card(chosen)
+                        updatable = (card_now.state in ("REGISTERED", "TESTABLE", "ACTIVE")
+                                     and card_now.approved_source())
+                    except Hold:
+                        updatable = False
+                self.market_update.set_sensitive(not self.busy and updatable)
 
         def use_selected_card(self):
             model_id = self.selected_card()
@@ -905,6 +915,40 @@ def create_window(app, loop):
                                            "Vorherige Revision wiederhergestellt."))
             except Hold as exc:
                 self.set_state("ready", str(exc))
+
+        def update_selected_card(self):
+            """Re-fetch the approved source of an installed item, keeping history."""
+            model_id = self.selected_card()
+            if model_id is None or self.busy:
+                return
+
+            async def run(epoch):
+                card = self.market.card(model_id)
+                source = market.source_of(card)
+                transport = self.transport or market.transport_for(source.reference)
+                if transport is None:
+                    raise Hold("download_transport_not_available")
+                entry = {"id": model_id, "state": "DOWNLOADING", "received": 0,
+                         "total": source.size, "note": "", "resume": 0}
+                self.downloads.append(entry)
+                transfer = market.Transfer(self.market, card, source, transport)
+                try:
+                    result = await transfer.update(self.download_progress(entry, 0))
+                    entry["state"], entry["note"] = result.state, tr(
+                        "Updated.", "Güncellendi.", "Aktualisiert.")
+                finally:
+                    if transfer.state == "CANCELLED":
+                        partial = Path(self.market.root, "transfers",
+                                       "partial-" + model_id)
+                        if partial.is_file():
+                            entry["state"], entry["resume"] = "RESUMABLE", partial.stat().st_size
+                    try:
+                        self.session.check(epoch)
+                    except Hold:
+                        pass
+                    self.build_downloads_page()
+                    self.build_market_page()
+            self.submit(run)
 
         def forget_selected_card(self):
             model_id = self.selected_card()
