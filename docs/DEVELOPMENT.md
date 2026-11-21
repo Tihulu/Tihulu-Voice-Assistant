@@ -243,3 +243,11 @@ and which devices they hold, so a busy microphone or output is explained rather
 than merely shown as a number. The count follows the leases as they are taken
 and released — a voice turn names the microphone while it captures and nothing
 after the capture ends — and an idle window says idle rather than zero busy.
+
+Preferences live on the Settings page: the text scale, whether the spoken text
+is shown, and *Forget local choices*. Forgetting removes the stored choices
+file only and says so on the page: profiles, the audit trail and the market
+registry are never touched, and the active profile — a policy, not a preference
+— is kept. A file that is already absent is not an error, and the outcome is
+stated either way. Nothing on the page reaches a device or a provider; models,
+approved sites and profiles have their own pages.

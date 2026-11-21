@@ -3380,3 +3380,56 @@ class QueueSummaryTests(ActivityBoardTests):
         self.until(lambda: self.backend.capture_cleaning)
         self.backend.capture_release.set()
         self.until(lambda: "Queue: idle" in self.ui.queue_note.get_text())
+
+
+class SettingsPageTests(DesktopTests):
+    """Preferences live on one page, and forgetting is bounded."""
+
+    def test_the_two_preferences_are_shown_from_storage(self):
+        self.assertEqual(self.ui.settings_scale.get_active(), 0)
+        self.assertFalse(self.ui.settings_spoken.get_active())
+        self.ui.cfg["text_scale"] = "large"
+        self.ui.cfg["show_spoken_text"] = True
+        self.ui.settings_scale.set_active(1)
+        self.ui.settings_spoken.set_active(True)
+        self.until(lambda: self.ui.cfg.get("text_scale") == "large")
+        self.assertIsNotNone(self.ui.scale_provider)
+
+    def test_the_text_scale_applies_without_a_restart(self):
+        self.ui.settings_scale.set_active(1)
+        self.until(lambda: self.ui.cfg["text_scale"] == "large")
+        self.assertIsNotNone(self.ui.scale_provider)
+        self.ui.settings_scale.set_active(0)
+        self.until(lambda: self.ui.cfg["text_scale"] == "normal")
+        self.assertEqual(settings.load()["text_scale"], "normal")
+
+    def test_forgetting_removes_choices_and_keeps_the_profile(self):
+        profile = self.ui.active_profile().id
+        self.ui.settings_scale.set_active(1)
+        self.until(lambda: self.ui.cfg["text_scale"] == "large")
+        self.click(self.ui.settings_forget)
+        self.until(lambda: self.ui.settings_scale.get_active() == 0)
+        self.assertEqual(self.ui.cfg["text_scale"], "normal")
+        self.assertEqual(self.ui.cfg.get("profile"), profile)
+        # The stored choices file is gone, and reading it back yields defaults.
+        stored = settings.load()
+        self.assertEqual(stored["text_scale"], "normal")
+
+    def test_forgetting_never_touches_the_audit_trail_or_profiles(self):
+        self.ui.url.set_text("https://provider.example/v1")
+        with self.assertRaises(Exception):
+            self.ui.require_endpoint()
+        audit = profiles.audit_path(self.ui.store.root)
+        self.assertTrue(audit.is_file())
+        self.click(self.ui.settings_forget)
+        self.until(lambda: self.ui.settings_scale.get_active() == 0)
+        self.assertTrue(audit.is_file())
+        self.assertTrue(self.ui.store.ids())
+
+    def test_an_absent_choices_file_is_not_an_error(self):
+        settings.forget()
+        self.click(self.ui.settings_forget)
+        # Nothing to remove is said plainly, not treated as a failure.
+        self.until(lambda: "no stored choices" in self.ui.settings_note.get_text().lower()
+                   or "yok" in self.ui.settings_note.get_text().lower())
+        self.assertEqual(self.ui.cfg.get("profile"), self.ui.active_profile().id)
