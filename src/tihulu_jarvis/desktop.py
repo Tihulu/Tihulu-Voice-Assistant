@@ -195,6 +195,17 @@ def create_window(app, loop):
                     self.previews[hear] = key
             self.route_note = Gtk.Label(xalign=0, wrap=True)
             models.append(self.route_note)
+            # The per-task table: one row per task, with its effective route or
+            # the bounded reason why none is used, never an implied road.
+            self.route_rows = {}
+            for task, caption in (("stt", tr("Speech to text", "Yazıya çevirme", "Sprache zu Text")),
+                                  ("llm", tr("Reasoning", "Muhakeme", "Schlussfolgerung")),
+                                  ("tts", tr("Speech", "Konuşma", "Sprache"))):
+                row = Gtk.Box(spacing=8)
+                models.append(row)
+                row.append(Gtk.Label(label=caption, xalign=0))
+                self.route_rows[task] = Gtk.Label(xalign=0, wrap=True, hexpand=True)
+                row.append(self.route_rows[task])
             self.test_chat_button = self.button(models, tr("Test selected model","Seçilen modeli dene","Ausgewähltes Modell testen"), self.test_chat)
             self.transcribe_button = self.button(models, tr("Transcribe a recording","Kayıttan yazıya çevir","Aufnahme transkribieren"), self.transcribe_recording)
             self.test_note = Gtk.Label(xalign=0, wrap=True)
@@ -503,6 +514,21 @@ def create_window(app, loop):
                 self.set_state("ready", "profile_export_rejected")
                 return None
 
+        def route_selection(self):
+            """The local route this client actually has for each task."""
+            out = {}
+            if self.cfg["stt"] and Path(self.cfg["stt"]).is_file():
+                out["stt"] = routing.Route("stt", Path(self.cfg["stt"]).name, "local",
+                                           "jan", self.cfg["endpoint"])
+            if self.cfg["llm"] and self.cfg["llm"] in self.inventory:
+                out["llm"] = routing.Route("llm", self.cfg["llm"], "local",
+                                           "jan", self.cfg["endpoint"])
+            speaking = [lang for lang in ("tr", "en", "de") if self.cfg["voices"].get(lang)]
+            if speaking:
+                out["tts"] = routing.Route("tts", ",".join(speaking), "local",
+                                           "jan", self.cfg["endpoint"])
+            return out
+
         def refresh_route_note(self):
             """State the effective route for the selected model, and the mode's limits."""
             try:
@@ -529,6 +555,32 @@ def create_window(app, loop):
                                  "Bulut rotaları onaylı sağlayıcı gerektirir.",
                                  "Cloud-Routen erfordern einen genehmigten Anbieter.")
             self.route_note.set_text(head)
+
+        def refresh_route_rows(self):
+            """State every task's route, and what the mode cannot promise."""
+            try:
+                profile = self.active_profile()
+                selection = self.route_selection()
+            except Hold:
+                for label in self.route_rows.values():
+                    label.set_text("")
+                return
+            caption = {"local_route": tr("local", "yerel", "lokal"),
+                       "local_only_forbids_cloud_route": tr("local mode refuses a cloud route",
+                                                            "yerel mod bulut rotasını reddeder",
+                                                            "lokaler Modus lehnt eine Cloud-Route ab"),
+                       "approved_provider_required": tr("approved provider required",
+                                                        "onaylı sağlayıcı gerekiyor",
+                                                        "genehmigter Anbieter erforderlich"),
+                       "no_route_configured": tr("no route configured",
+                                                 "rota yapılandırılmamış",
+                                                 "keine Route konfiguriert")}
+            for row in routing.plan(profile, selection):
+                self.route_rows[row.task].set_text(
+                    caption.get(row.reason, row.reason) if row.route is None
+                    else tr("%s on this computer" % row.route.model_id,
+                            "%s bu bilgisayarda" % row.route.model_id,
+                            "%s auf diesem Computer" % row.route.model_id))
 
         def run_search(self):
             """Search the local conversation; results are snippets, bounded.
@@ -643,6 +695,7 @@ def create_window(app, loop):
             # while the window is idle: "microphone listening" is exactly the
             # state a reader cannot infer from a disabled control.
             self.refresh_route_note()
+            self.refresh_route_rows()
             self.refresh_disclosure()
             self.refresh_state_row()
             self.search_entry.set_sensitive(not self.busy)

@@ -106,3 +106,11 @@ empty file after, and an attachment is sent once and then cleared. The policy
 layer's rule is unchanged and stated plainly here: an absent rule is not a
 forbiddance, so attaching is permitted unless the profile denies it; an
 explicit deny is recorded in the audit trail and never opens a file picker.
+
+The Models & Routing page states every task's route, not just reasoning's. One
+row per task — speech to text, reasoning, speech — names the model on this
+computer, or the bounded reason there is no route: no route configured, a local
+mode refusing a cloud route, or an approved provider being required. The rows
+come from the same `routing.plan` the policy layer uses, so a capability is
+never implied by a layout. A fallback is not silently available either: this
+build has one local route per task and says `no_fallback_configured`.
