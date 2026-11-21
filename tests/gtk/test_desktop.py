@@ -3148,3 +3148,41 @@ class FilesResearchTests(DesktopTests):
             out.append(item)
             item = item.get_next_sibling()
         return out
+
+
+class ReadinessUITests(DesktopTests):
+    """What this machine can do is stated, before a turn fails."""
+
+    def readiness(self):
+        return self.ui.readiness_note.get_text()
+
+    def test_everything_configured_is_stated_as_ready(self):
+        self.connect_model()
+        self.until(lambda: "Local models: ready" in self.readiness())
+        self.assertIn("Jan endpoint: ready", self.readiness())
+        self.assertIn("Speech to text: ready", self.readiness())
+        self.assertIn("Voices: ready", self.readiness())
+        self.assertIn("Audio tools: ready", self.readiness())
+        self.assertIn("Active profile: ready", self.readiness())
+
+    def test_an_unasked_question_stays_unknown(self):
+        self.assertIn("Local models: not checked yet (not_discovered_yet)",
+                     self.readiness())
+
+    def test_an_absent_choice_says_what_is_missing(self):
+        self.ui.cfg["stt"] = ""
+        self.ui.refresh()
+        self.until(lambda: "Speech to text: missing (no_model_selected)" in self.readiness())
+        self.assertIn("missing", self.readiness())
+
+    def test_a_non_loopback_endpoint_is_not_ready(self):
+        self.ui.url.set_text("https://provider.example/v1")
+        self.ui.forget_inventory()
+        self.until(lambda: "Jan endpoint: missing (endpoint_not_loopback)" in self.readiness())
+
+    def test_absent_audio_tools_are_stated(self):
+        with patch.object(desktop.audio, "tools_ready", return_value=False):
+            self.ui.refresh()
+            self.until(lambda: "Audio tools: missing (audio_backend_missing)"
+                      in self.readiness())
+            self.assertFalse(self.ui.talk.get_sensitive())

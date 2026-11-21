@@ -202,3 +202,13 @@ nothing is ever written. A folder or file the profile denies is a bounded reason
 and a receipt, and the stored folder is validated again when settings are read,
 so a path that has since disappeared is reported instead of silently listing
 nothing.
+
+The Installed models page states what this machine can do, before a turn fails.
+One line per item — Jan endpoint, local models, speech to text, voices, audio
+tools, active profile — each either ready, missing with the precise reason, or
+not checked yet. Nothing is probed that would touch the network or a device: an
+undiscovered model list is *unknown*, not missing, because nobody has looked,
+and absent audio tools are stated instead of leaving a Talk button enabled that
+would fail later. The row uses the endpoint the owner is looking at, even before
+it is saved, because a readiness statement about a stale value would be a lie
+about what the next turn would use.
