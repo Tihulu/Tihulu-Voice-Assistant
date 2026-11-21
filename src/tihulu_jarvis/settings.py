@@ -6,6 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
+from . import web
 from .voice.m1 import Hold
 
 LOCALES = ("tr", "en", "de")
@@ -13,7 +14,8 @@ LOCALES = ("tr", "en", "de")
 
 def empty():
     return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": "",
-            "market_refs": {}, "allowed_hosts": [], "text_scale": "normal"}
+            "market_refs": {}, "allowed_hosts": [], "text_scale": "normal",
+            "web_targets": []}
 
 
 def config_path():
@@ -57,6 +59,20 @@ def checked(obj):
     if not isinstance(voices, dict) or any(k not in LOCALES or not isinstance(v, str) or len(v)>4096 for k,v in voices.items()):
         raise Hold("invalid_local_settings")
     out["voices"] = dict(voices)
+    targets = obj.get("web_targets", [])
+    if not isinstance(targets, list) or len(targets) > 32:
+        raise Hold("invalid_local_settings")
+    clean_targets = []
+    for item in targets:
+        # Each target is re-validated on read: a stored entry the policy would
+        # refuse today is not silently loaded, and its submission right is
+        # stored with it rather than inferred from the URL again.
+        if (not isinstance(item, dict) or set(item) - {"url", "submit"}
+                or not isinstance(item.get("url"), str) or len(item.get("url", "")) > 400):
+            raise Hold("invalid_local_settings")
+        target = web.from_entry(item)
+        clean_targets.append(web.entry(target))
+    out["web_targets"] = clean_targets
     scale = obj.get("text_scale", "normal")
     # An unknown scale is refused here, not quietly swapped for a default:
     # a stored preference the client cannot honour must not be hidden.
