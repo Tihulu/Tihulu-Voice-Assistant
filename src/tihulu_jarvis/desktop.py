@@ -9,6 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
+from . import attachments
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
 from . import market, profiles, settings
@@ -134,8 +135,12 @@ def create_window(app, loop):
             self.disclosure_note = Gtk.Label(xalign=0, wrap=True)
             chat.append(self.disclosure_note)
             self.send = self.button(entryrow,tr("Send","Gönder","Senden"),self.send_text)
+            self.attach = self.button(entryrow,tr("Attach a file","Dosya ekle","Datei anhängen"),self.attach_file)
             self.entry.connect("activate",lambda *_:self.send_text())
+            self.attachment_note = Gtk.Label(xalign=0, wrap=True)
             chat.append(entryrow)
+            chat.append(self.attachment_note)
+            self.attachment = None
             controls = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=6,row_spacing=4)
             chat.append(controls)
             self.talk = self.button(controls,tr("Talk","Konuş","Sprechen"),self.voice)
@@ -642,6 +647,7 @@ def create_window(app, loop):
             self.refresh_state_row()
             self.search_entry.set_sensitive(not self.busy)
             self.search_clear.set_sensitive(not self.busy)
+            self.attach.set_sensitive(not self.busy and self.cfg["llm"] in self.inventory)
             self.entry.set_sensitive(not self.busy)
             self.send.set_sensitive(not self.busy and connected)
             allowed = getattr(self, "policy", None) is not None and \
@@ -1568,11 +1574,78 @@ def create_window(app, loop):
                     child=nxt
             self.set_state("stopping" if self.busy else "ready")
 
+        def require_attachment(self):
+            """The policy gate for an attachment, decided before any dialog.
+
+            Returning None means the active profile denies the read, and the
+            audit trail already carries the decision. A caller must not open a
+            chooser in that case: a denied read never reaches a file picker.
+            """
+            if self.busy or self.cfg["llm"] not in self.inventory:
+                return None
+            try:
+                self.require_tools((attachments.ACTION, attachments.SCOPE))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return None
+            return True
+
+        def attach_file(self):
+            """Attach a local text file, behind the active profile's policy."""
+            if self.require_attachment() is None:
+                return
+            dialog=Gtk.FileChooserNative.new("Attach a text file", self.win,Gtk.FileChooserAction.OPEN,"Attach","Cancel")
+            def response(d, res):
+                try:
+                    if res!=Gtk.ResponseType.ACCEPT or self.busy:
+                        return
+                    file=d.get_file()
+                    p=file.get_path() if file else None
+                    item = attachments.load(p)
+                    self.attachment = item
+                    self.attachment_note.set_text(tr("Attached: %s" % attachments.describe(item),
+                                                     "Eklendi: %s" % attachments.describe(item),
+                                                     "Angehängt: %s" % attachments.describe(item)))
+                except Hold as exc:
+                    self.attachment = None
+                    self.attachment_note.set_text("")
+                    self.set_state("ready", str(exc))
+                except Exception:
+                    self.attachment = None
+                    self.attachment_note.set_text("")
+                    self.set_state("ready", "local_operation_failed")
+                finally:
+                    d.destroy()
+            dialog.connect("response",response)
+            dialog.show()
+
+        def read_attachment(self, path):
+            """Read one attachment from a chosen path; the chooser calls this."""
+            try:
+                item = attachments.load(path)
+            except Hold as exc:
+                self.attachment = None
+                self.attachment_note.set_text("")
+                self.set_state("ready", str(exc))
+                return None
+            self.attachment = item
+            self.attachment_note.set_text(tr("Attached: %s" % attachments.describe(item),
+                                             "Eklendi: %s" % attachments.describe(item),
+                                             "Angehängt: %s" % attachments.describe(item)))
+            return item
+
         def send_text(self):
             text=self.entry.get_text().strip()
             if self.busy or not text or self.cfg["llm"] not in self.inventory:
                 return
             self.record_disclosure()
+            # The attachment is a bounded block in the same message, and it is
+            # cleared afterwards so it can never be sent twice.
+            item = self.attachment
+            if item is not None:
+                text = text + "\n\n" + attachments.prompt_block(item)
+                self.attachment = None
+                self.attachment_note.set_text("")
             self.entry.set_text("")
             async def run(epoch):
                 self.bubble("You",text)
