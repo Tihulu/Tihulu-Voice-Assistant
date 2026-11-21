@@ -3430,3 +3430,57 @@ class SettingsPageTests(DesktopTests):
         self.until(lambda: "no stored choices" in self.ui.settings_note.get_text().lower()
                    or "yok" in self.ui.settings_note.get_text().lower())
         self.assertEqual(self.ui.cfg.get("profile"), self.ui.active_profile().id)
+
+
+class TranscriptExportTests(DesktopTests):
+    """An export is bounded text of what was said, written privately."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+
+    def turn(self):
+        self.connect_model()
+        self.backend.answers.append("Güle güle.")
+        self.text("Merhaba! Benim kelimem mavi.")
+
+    def test_an_imported_conversation_is_written_with_its_speakers(self):
+        self.turn()
+        path = str(self.tmp / "conversation.txt")
+        self.assertEqual(self.ui.write_export(path), path)
+        text = Path(path).read_text(encoding="utf-8")
+        self.assertIn("user: Merhaba! Benim kelimem mavi.", text)
+        self.assertIn("assistant: Güle güle.", text)
+        self.assertEqual(Path(path).stat().st_mode & 0o777, 0o600)
+
+    def test_the_file_carries_no_endpoint_path_or_rule(self):
+        self.turn()
+        path = str(self.tmp / "conversation.txt")
+        self.ui.write_export(path)
+        text = Path(path).read_text(encoding="utf-8")
+        self.assertNotIn(self.ui.cfg["endpoint"], text)
+        self.assertNotIn(self.ui.cfg["stt"], text)
+        self.assertNotIn(self.ui.cfg["voices"]["tr"], text)
+        self.assertNotIn("filesystem_read", text)
+        self.assertIn("# TIHULU JARVIS conversation exported locally", text)
+
+    def test_an_export_is_receipted(self):
+        self.turn()
+        self.ui.write_export(str(self.tmp / "conversation.txt"))
+        receipts = [row for row in self.log_rows() if getattr(row, "receipt", False)]
+        self.assertIn("Performed on this computer · exported the conversation",
+                      receipts[-1].get_text())
+
+    def test_a_relative_path_or_an_empty_log_is_refused(self):
+        self.assertFalse(self.ui.export_chat.get_sensitive())
+        self.assertIsNone(self.ui.write_export("relative.txt"))
+        self.assertEqual(self.ui.status.get_text(), "invalid_local_settings")
+        self.turn()
+        self.assertTrue(self.ui.export_chat.get_sensitive())
+
+    def log_rows(self):
+        out, item = [], self.ui.log.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out

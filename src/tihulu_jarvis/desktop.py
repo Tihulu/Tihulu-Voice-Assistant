@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, attachments, files, keys, queries, readiness, receipts, tasks, web
+from . import a11y, attachments, files, keys, queries, readiness, receipts, tasks, transcript, web
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -149,6 +149,10 @@ def create_window(app, loop):
             self.search_entry = Gtk.Entry(hexpand=True,placeholder_text=tr("Search this conversation…","Bu sohbette ara…","In diesem Gespräch suchen…"))
             searchrow.append(self.search_entry)
             self.search_clear = self.button(searchrow,tr("Clear","Temizle","Leeren"),self.clear_search)
+            self.export_chat = self.button(searchrow, tr("Export conversation",
+                                                         "Sohbeti dışa aktar",
+                                                         "Gespräch exportieren"),
+                                           self.export_conversation)
             chat.append(searchrow)
             self.search_results = Gtk.ListBox()
             chat.append(self.search_results)
@@ -859,6 +863,47 @@ def create_window(app, loop):
             self.save()
             self.refresh_search_history()
 
+        def export_conversation(self):
+            """Write the conversation to a file the owner chooses.
+
+            The file holds messages with their speaker and nothing else — no
+            endpoint, no model path, no profile rule, no decision.
+            """
+            if self.busy or not self.session.history:
+                self.set_state("ready", tr("Nothing to export yet.",
+                                           "Henüz aktarılacak bir şey yok.",
+                                           "Noch nichts zu exportieren."))
+                return None
+            dialog = Gtk.FileChooserNative.new("Export this conversation", self.win,
+                                               Gtk.FileChooserAction.SAVE, "Export", "Cancel")
+            dialog.set_current_name("tihulu-jarvis-conversation.txt")
+
+            def response(d, res):
+                try:
+                    if res != Gtk.ResponseType.ACCEPT or self.busy:
+                        return
+                    file = d.get_file()
+                    path = file.get_path() if file else None
+                    self.write_export(path)
+                finally:
+                    d.destroy()
+            dialog.connect("response", response)
+            dialog.show()
+            return None
+
+        def write_export(self, path):
+            try:
+                text = transcript.render(self.session.history, started=1.0)
+                target = transcript.write(path, text)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return None
+            self.set_state("ready", tr("Conversation exported to a local file.",
+                                       "Sohbet yerel bir dosyaya aktarıldı.",
+                                       "Gespräch in eine lokale Datei exportiert."))
+            self.receipt("performed", "exported the conversation to a local file")
+            return target
+
         def clear_search(self):
             self.search_entry.set_text("")
             self.search_entry.grab_focus()
@@ -979,6 +1024,8 @@ def create_window(app, loop):
             self.refresh_state_row()
             self.search_entry.set_sensitive(not self.busy)
             self.search_clear.set_sensitive(not self.busy)
+            # An export needs something to export; an empty log offers nothing.
+            self.export_chat.set_sensitive(not self.busy and bool(self.session.history))
             self.attach.set_sensitive(not self.busy and self.cfg["llm"] in self.inventory)
             self.entry.set_sensitive(not self.busy)
             self.send.set_sensitive(not self.busy and connected)
