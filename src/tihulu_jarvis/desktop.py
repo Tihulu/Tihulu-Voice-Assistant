@@ -8,7 +8,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import market, profiles, settings
+from . import catalog_fetch, market, profiles, settings
 from .voice import audio
 from .voice.jan import Jan
 from .voice.m1 import Hold, SpeechRequest
@@ -51,7 +51,8 @@ def create_window(app, loop):
         return {"tr":tur, "de":de}.get(lang,en)
 
     class Desktop:
-        def __init__(self, app):
+        def __init__(self, app, loop=None):
+            self.loop = loop
             self.win = Gtk.ApplicationWindow(application=app, title="TIHULU JARVIS")
             self.win.set_default_size(920, 650)
             self.session, self.inventory = Session(), ()
@@ -544,6 +545,14 @@ def create_window(app, loop):
             self.catalog_add = self.button(row, tr("Add to registry","Kayda ekle","Registrieren"), self.add_catalog_entry)
             self.catalog_approve = self.button(row, tr("Approve download","İndirmeyi onayla","Download genehmigen"), self.approve_download)
             self.catalog_load = self.button(row, tr("Import catalog","Katalog al","Katalog importieren"), self.import_catalog)
+            self.catalog_fetch_btn = self.button(page, tr("Fetch catalog","Katalog getir","Katalog abrufen"), self.fetch_catalog)
+            self.catalog_url = Gtk.Entry(placeholder_text="https://catalog.example.test/list.json")
+            self.catalog_url.connect("activate", lambda *_: self.fetch_catalog())
+            page.append(self.catalog_url)
+            self.catalog_hosts = Gtk.Entry(text=" ".join(self.cfg.get("allowed_hosts", [])),
+                                            placeholder_text="allowed hosts, separated by spaces")
+            self.catalog_hosts.connect("changed", lambda *_: self.remember_hosts())
+            page.append(self.catalog_hosts)
             self.load_catalog()
 
         def load_catalog_text(self, text):
@@ -601,8 +610,10 @@ def create_window(app, loop):
                       % self.catalog.report())
 
         def refresh_catalog_buttons(self):
+            chosen = self.selected_catalog_entry() is not None
+            # An unverified catalog may be inspected, never installed from.
             for w in (self.catalog_add, self.catalog_approve):
-                w.set_sensitive(not self.busy and self.selected_catalog_entry() is not None)
+                w.set_sensitive(not self.busy and chosen and self.catalog.verified)
             self.catalog_list.set_sensitive(not self.busy)
             self.catalog_load.set_sensitive(not self.busy)
 
@@ -611,6 +622,9 @@ def create_window(app, loop):
             if entry is None or self.busy:
                 return
             try:
+                if not self.catalog.verified:
+                    # An unverified catalog may be inspected, never installed from.
+                    raise Hold("catalog_not_verified")
                 self.market.save_card(entry.checked())
                 self.build_market_page()
                 self.set_state("ready", tr("Added to registry.","Kayda eklendi.","Registriert."))
@@ -640,6 +654,35 @@ def create_window(app, loop):
                                            "Download für diesen Eintrag genehmigt."))
             except Hold as exc:
                 self.set_state("ready", str(exc))
+
+        def remember_hosts(self):
+            hosts = [h for h in self.catalog_hosts.get_text().split() if h]
+            if hosts != self.cfg.get("allowed_hosts", []):
+                self.cfg["allowed_hosts"] = hosts
+                self.save()
+
+        def fetch_catalog(self):
+            if self.busy:
+                return
+            self.remember_hosts()
+            url = self.catalog_url.get_text().strip()
+            hosts = self.cfg.get("allowed_hosts", [])
+            try:
+                self.require_catalog_fetch(url, hosts)
+                raw = self.loop.run_until_complete(
+                    catalog_fetch.fetch(url, hosts, catalog_fetch.urlopen_opener()))
+                self.load_catalog_text(raw)
+                self.set_state("ready", tr("Catalog fetched and verified.",
+                                           "Katalog getirildi ve dogrulandi.",
+                                           "Katalog abgerufen und geprueft."))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def require_catalog_fetch(self, url, hosts):
+            if not hosts:
+                raise Hold("catalog_host_not_allowed")
+            profiles.require_tool(self.active_profile(), "external_network", ("catalog",))
+            catalog_fetch.allowed(url, hosts)
 
         def import_catalog(self):
             if self.busy:
@@ -1217,7 +1260,7 @@ def create_window(app, loop):
                 GLib.timeout_add(30,drained)
             return True
 
-    return Desktop(app)
+    return Desktop(app, loop)
 
 
 def main():
