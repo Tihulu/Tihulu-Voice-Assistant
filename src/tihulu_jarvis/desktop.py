@@ -115,6 +115,16 @@ def create_window(app, loop):
             # boundary in words, so a glance never has to guess them.
             self.topbar_note = Gtk.Label(xalign=0, wrap=True, hexpand=True)
             top.append(self.topbar_note)
+            # A hard stop in the topbar: the same cancellation path as the
+            # composer's, reachable without looking for it.
+            self.quick_stop = Gtk.Button(label=tr("Hard stop","Tümünü durdur","Alles stoppen"))
+            self.quick_stop.add_css_class("badge")
+            self.quick_stop.connect("clicked", lambda *_: self.interrupt(False))
+            self.quick_stop.set_sensitive(False)
+            accessible_name(self.quick_stop, tr("Stop everything now",
+                                                 "Her şeyi şimdi durdur",
+                                                 "Alles sofort stoppen"))
+            top.append(self.quick_stop)
             self.status = Gtk.Label(xalign=0, wrap=True)
             root.append(self.status)
             # The state is stated in words, never in colour alone: a person who
@@ -996,6 +1006,8 @@ def create_window(app, loop):
             self.finish_btn.set_sensitive(self.stage=="listening" and self.finish is not None)
             self.cancel.set_sensitive(self.busy)
             self.hard.set_sensitive(self.busy)
+            # The topbar stop is the composer stop, so its state matches.
+            self.quick_stop.set_sensitive(self.busy)
             for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,
                       self.transcribe_button,*self.previews):
                 w.set_sensitive(not self.busy)

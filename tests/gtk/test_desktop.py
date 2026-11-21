@@ -3314,3 +3314,38 @@ class TopbarTests(DesktopTests):
             out.extend(self.widgets_of(item))
             item = item.get_next_sibling()
         return out
+
+
+class QuickStopTests(DesktopTests):
+    """A hard stop in the topbar is the composer's stop, not a second one."""
+
+    def test_the_topbar_stop_is_idle_when_nothing_runs(self):
+        self.connect_model()
+        self.assertFalse(self.ui.quick_stop.get_sensitive())
+        self.assertFalse(self.ui.hard.get_sensitive())
+
+    def test_clicking_the_topbar_stop_cancels_the_turn(self):
+        self.connect_model()
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.chat_entered)
+        self.assertTrue(self.ui.quick_stop.get_sensitive())
+        self.click(self.ui.quick_stop)
+        self.until(lambda: self.backend.chat_cancelled)
+        self.assertTrue(self.ui.busy)
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.assertFalse(self.ui.quick_stop.get_sensitive())
+        self.assertEqual(self.ui.session.history, ())
+
+    def test_both_stops_share_one_state(self):
+        self.connect_model()
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.chat_entered)
+        self.assertEqual(self.ui.quick_stop.get_sensitive(), self.ui.hard.get_sensitive())
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.quick_stop.get_sensitive(), self.ui.hard.get_sensitive())
