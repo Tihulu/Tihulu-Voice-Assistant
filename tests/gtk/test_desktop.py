@@ -3252,3 +3252,65 @@ class SearchHistoryTests(ConversationSearchTests):
         self.assertEqual(settings.load()["search_history"], [])
         self.assertFalse(self.ui.search_forget.get_sensitive())
         self.assertFalse(self.ui.search_history_label.get_visible())
+
+
+class TopbarTests(DesktopTests):
+    """The topbar names the active mode, profile, model and boundary."""
+
+    def add_profile(self, profile):
+        self.ui.store.save(profile)
+        self.ui.refresh_profiles()
+        return profile
+
+    def pick_profile(self, profile_id):
+        for item, entry in self.ui.policy_rows.items():
+            if entry.id == profile_id:
+                self.ui.profile_list.select_row(item)
+                return entry
+        raise AssertionError("missing profile: " + profile_id)
+
+    def test_a_local_configuration_is_named(self):
+        self.connect_model()
+        text = self.ui.topbar_note.get_text()
+        self.assertIn("LOCAL_ONLY", text)
+        self.assertIn("Private Assistant", text)
+        self.assertIn("fixture-chat", text)
+        self.assertIn("content stays on this computer", text)
+
+    def test_an_absent_model_is_said_to_be_absent(self):
+        self.ui.cfg["llm"] = ""
+        self.ui.refresh()
+        self.until(lambda: "no model selected" in self.ui.topbar_note.get_text())
+
+    def test_switching_to_a_cloud_profile_changes_the_line(self):
+        self.connect_model()
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                          based_on_mode="CLOUD_CHAT",
+                                          allowed_providers=("fixture-provider",)).checked())
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.ui.confirmations)
+        for widget in self.widgets_of(self.ui.confirmations[-1]):
+            if type(widget).__name__ == "Button" and (widget.get_label() or "").startswith("Confirm"):
+                widget.emit("clicked")
+        self.until(lambda: self.ui.cfg["profile"] == "cloud-chat")
+        text = self.ui.topbar_note.get_text()
+        self.assertIn("CLOUD_CHAT", text)
+        self.assertIn("Cloud Chat", text)
+        self.assertIn("cloud reasoning permitted", text)
+
+    def test_the_topbar_follows_the_field_before_it_is_saved(self):
+        self.connect_model()
+        self.ui.url.set_text("https://provider.example/v1")
+        self.until(lambda: "endpoint not a loopback address" in self.ui.topbar_note.get_text())
+        # The microphone stays local either way: this build transports only to
+        # a numeric loopback endpoint, so nothing leaves the computer.
+        self.assertIn("content stays on this computer", self.ui.topbar_note.get_text())
+
+    def widgets_of(self, widget):
+        out, item = [], widget.get_first_child()
+        while item is not None:
+            out.append(item)
+            out.extend(self.widgets_of(item))
+            item = item.get_next_sibling()
+        return out
