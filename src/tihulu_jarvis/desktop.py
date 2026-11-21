@@ -4,6 +4,7 @@
 import asyncio
 import locale
 import os
+import time
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -200,6 +201,9 @@ def create_window(app, loop):
             self.profile_activate = self.button(controls,tr("Activate","Etkinleştir","Aktivieren"),self.activate_selected)
             self.profile_clone = self.button(controls,tr("Clone to CUSTOM","CUSTOM kopyala","Als CUSTOM klonen"),self.clone_selected)
             self.profile_delete = self.button(controls,tr("Delete","Sil","Löschen"),self.delete_selected)
+            self.audit_list = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.audit_list)
+            self.refresh_audit()
             picker = Gtk.ComboBoxText()
             for key in profiles.TEMPLATES:
                 picker.append_text(key)
@@ -214,6 +218,21 @@ def create_window(app, loop):
         def selected_profile(self):
             row = self.profile_list.get_selected_row()
             return self.policy_rows.get(row) if row is not None else None
+
+        def refresh_audit(self):
+            try:
+                rows = profiles.read_audit(self.store.root, 40)
+            except Hold:
+                rows = ()
+            if not rows:
+                self.audit_list.set_text(tr("No policy decisions recorded yet.",
+                                            "Henüz politika kararı kaydedilmedi.",
+                                            "Noch keine Richtlinienentscheidungen."))
+                return
+            lines = ["%s %s %s %s %s" % (time.strftime("%H:%M:%S", time.localtime(r["at"])),
+                                         r["decision"], r["action"], "/".join(r["scope"]) or "-",
+                                         r["reason"]) for r in rows]
+            self.audit_list.set_text("\n".join(lines))
 
         def refresh_profile_buttons(self):
             chosen = self.selected_profile()
@@ -1104,18 +1123,40 @@ def create_window(app, loop):
                 raise Hold("no_active_profile") from None
 
         def require_tools(self, *requests):
-            """Refuse an action the active profile denies, at the moment it runs."""
+            """Refuse an action the active profile denies, at the moment it runs.
+
+            Every decision is appended to the local audit trail.
+            """
             profile = self.active_profile()
             for action, scope in requests:
-                profiles.require_tool(profile, action, scope)
+                try:
+                    profiles.require_tool(profile, action, scope)
+                except Hold as exc:
+                    self.record_policy(action, scope, "deny", str(exc))
+                    raise
+                self.record_policy(action, scope, "allow", "rule_or_absent")
+
+        def record_policy(self, action, scope, decision, reason):
+            try:
+                profiles.record_decision(self.store.root, self.cfg["profile"], action,
+                                         scope, decision, reason)
+            except (Hold, OSError):
+                self.status.set_text("audit_unavailable")
+                return
+            self.refresh_audit()
 
         def require_endpoint(self, raw=None):
             """The active mode decides what kind of endpoint may be used."""
             raw = self.url.get_text().strip() if raw is None else raw
             try:
-                return profiles.enforce_endpoint(self.store.load(self.cfg["profile"]).checked(), raw)
+                result = profiles.enforce_endpoint(self.store.load(self.cfg["profile"]).checked(), raw)
             except KeyError:
                 raise Hold("no_active_profile") from None
+            except Hold as exc:
+                self.record_policy("endpoint", (raw[:64],), "deny", str(exc))
+                raise
+            self.record_policy("endpoint", (raw[:64],), "allow", "mode_policy")
+            return result
 
         def backend_for_test(self):
             return Jan(self.require_endpoint(), self.cfg["llm"])

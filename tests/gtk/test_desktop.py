@@ -1822,3 +1822,38 @@ class CatalogFetchUITests(MarketFixture):
         self.click(self.ui.catalog_add)
         self.until(lambda: any(c.model_id == "fixture-remote" for c in self.ui.market.cards()))
         self.assertEqual(self.ui.market.card("fixture-remote").state, "DISCOVERED")
+
+
+class AuditTrailUITests(ActionEnforcementUITests):
+    """Policy decisions are recorded locally, with no private material."""
+
+    def audit_rows(self):
+        text = self.ui.audit_list.get_text()
+        return [line for line in text.split("\n") if line.strip()]
+
+    def test_a_denied_audio_decision_is_recorded(self):
+        self.deny_audio()
+        self.connect_model()
+        self.assertFalse(self.ui.talk.get_sensitive())
+        async def denied(epoch):
+            self.ui.require_tools(("local_audio_device", ("push_to_talk",)))
+        self.ui.submit(denied)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "profile_forbids_local_audio_device")
+        rows = self.audit_rows()
+        self.assertTrue(any("deny" in row and "local_audio_device" in row for row in rows), rows)
+
+    def test_an_allowed_endpoint_decision_is_recorded(self):
+        self.ui.url.set_text("http://127.0.0.1:9876/v1")
+        self.ui.require_endpoint()
+        rows = self.audit_rows()
+        self.assertTrue(any("allow" in row and "endpoint" in row for row in rows), rows)
+
+    def test_the_local_audit_file_carries_no_private_material(self):
+        self.ui.url.set_text("https://provider.example/v1")
+        with self.assertRaises(Exception):
+            self.ui.require_endpoint()
+        text = Path(self.profile_home, "audit.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("/home/", text)
+        self.assertNotIn("secret", text)
+        self.assertIn("local_only_forbids_non_loopback", text)
