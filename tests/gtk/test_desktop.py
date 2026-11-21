@@ -1905,3 +1905,54 @@ class UpdateUITests(DownloadFixture):
         self.assertEqual(self.ui.market.card("fixture-update").state, "ACTIVE")
         # The failed update replaced nothing; only the explicit rename revision exists.
         self.assertEqual(len(self.ui.market.history("fixture-update")), 1)
+
+
+class QueueRestoreTests(DownloadFixture):
+    """A restart rebuilds the queue from disk; a partial stays resumable."""
+
+    def partial_on_disk(self, model_id, data, state="DISCOVERED"):
+        transfers = Path(self.market_home, "transfers")
+        transfers.mkdir(parents=True, exist_ok=True)
+        (transfers / ("partial-" + model_id)).write_bytes(data)
+        self.ui.market.save_card(market.ModelCard(
+            model_id=model_id, display_name=model_id, category="stt",
+            engine="whisper.cpp", artifact_format="ggml", installed=True,
+            state=state, source_ref="catalog:" + model_id,
+            source_checksum=hashlib.sha256(b"weights").hexdigest(),
+            source_size=len(b"weights"), network_approval="owner",
+            approval_expires_at=1e12).checked())
+        return self.ui.market.card(model_id)
+
+    def test_a_restart_restores_a_resumable_entry(self):
+        self.partial_on_disk("fixture-restore", b"partial bytes")
+        # A fresh window is a restart: the queue is rebuilt from disk only.
+        fresh = desktop.create_window(self.app, self.loop)
+        self.addCleanup(fresh.win.close)
+        restored = [e for e in fresh.downloads if e["id"] == "fixture-restore"]
+        self.assertEqual(len(restored), 1)
+        entry = restored[0]
+        self.assertEqual(entry["state"], "RESUMABLE")
+        self.assertEqual(entry["resume"], len(b"partial bytes"))
+        self.assertIn("Restored from disk.", entry["note"])
+        self.assertTrue(fresh.download_resume.get_sensitive())
+        self.assertIn("RESUMABLE", fresh.download_line(entry))
+        fresh.win.close()
+        self.until(lambda: fresh.win.get_visible() is False)
+
+    def test_an_installed_item_is_not_reported_as_pending(self):
+        self.partial_on_disk("fixture-installed", b"leftover", state="ACTIVE")
+        fresh = desktop.create_window(self.app, self.loop)
+        self.addCleanup(fresh.win.close)
+        self.assertEqual([e["id"] for e in fresh.downloads], [])
+        fresh.win.close()
+        self.until(lambda: fresh.win.get_visible() is False)
+
+    def test_an_orphan_partial_is_ignored(self):
+        transfers = Path(self.market_home, "transfers")
+        transfers.mkdir(parents=True, exist_ok=True)
+        (transfers / "partial-unknown-model").write_bytes(b"orphan")
+        fresh = desktop.create_window(self.app, self.loop)
+        self.addCleanup(fresh.win.close)
+        self.assertEqual(fresh.downloads, [])
+        fresh.win.close()
+        self.until(lambda: fresh.win.get_visible() is False)

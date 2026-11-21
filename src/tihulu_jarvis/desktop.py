@@ -137,8 +137,6 @@ def create_window(app, loop):
             self.policy_rows = {}
             self.market = market.Registry(market.market_dir())
             self.market_row_ids = {}
-            self.downloads = []
-            self.download_entries = {}
             # No download transport ships with this release; a future,
             # separately authorized transport is plugged in here.
             self.transport = None
@@ -146,6 +144,7 @@ def create_window(app, loop):
             self.catalog_rows = {}
             self.downloads = []
             self.download_entries = {}
+            self.restore_download_queue()
             self.build_downloads_page()
             self.build_profiles_page()
             self.build_catalog_page()
@@ -891,6 +890,22 @@ def create_window(app, loop):
                     self.build_downloads_page()
                     self.build_market_page()
             self.submit(run)
+
+        def restore_download_queue(self):
+            """Rebuild the queue from disk: a partial transfer is resumable."""
+            for model_id, size in market.resumable_partials(self.market.root):
+                try:
+                    card = self.market.card(model_id)
+                except Hold:
+                    continue  # an orphan partial is not this client's business
+                if card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
+                    continue  # an installed item has no pending transfer
+                self.downloads.append({
+                    "id": model_id, "state": "RESUMABLE", "received": size,
+                    "total": card.source_size,
+                    "note": tr("Restored from disk.","Diskten geri yüklendi.",
+                               "Von der Festplatte wiederhergestellt."),
+                    "resume": size})
 
         def download_progress(self, entry, offset):
             def progress(count):

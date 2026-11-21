@@ -480,6 +480,25 @@ def source_of(card):
                  card.license_id, card.network_approval, card.approval_expires_at).checked()
 
 
+def resumable_partials(root):
+    """Partial transfers on disk, so a restart can continue from them.
+
+    The registry is the authority for what an item is; a partial file only
+    says how far a transfer got.
+    """
+    transfers = Path(root) / "transfers"
+    if not transfers.is_dir():
+        return ()
+    out = []
+    for path in sorted(transfers.glob("partial-*")):
+        if not path.is_file():
+            continue
+        size = path.stat().st_size
+        if size > 0:
+            out.append((path.name[len("partial-"):], size))
+    return tuple(out)
+
+
 def transport_for(reference):
     """Build a download transport for an approved source, if one is available.
 

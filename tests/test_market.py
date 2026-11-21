@@ -14,7 +14,8 @@ from tihulu_jarvis.transfer_http import loopback_fetch
 from tihulu_jarvis.market import (ACTIVE, ALLOWED_NEXT, CATEGORIES, TERMINAL, Catalog,
                                   ModelCard, Registry, Source, Transfer, advance, digest,
                                   from_file, from_models, human_size, parse_catalog,
-                                  register_installed, usage, CATALOG_LIMIT)
+                                  register_installed, resumable_partials, usage,
+                                  CATALOG_LIMIT)
 from tihulu_jarvis.voice.m1 import Hold
 
 
@@ -736,3 +737,20 @@ class UpdateTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(current.source_version, "unknown")
         # Nothing was replaced, so no revision was created either.
         self.assertEqual(self.store.history("fixture-model"), ())
+
+
+class PartialDiscoveryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.transfers = self.tmp / "transfers"
+        self.transfers.mkdir(parents=True)
+
+    def test_partials_are_reported_with_their_size(self):
+        (self.transfers / "partial-fixture-model").write_bytes(b"abc")
+        (self.transfers / "partial-other").write_bytes(b"abcdefgh")
+        (self.transfers / "partial-empty").write_bytes(b"")
+        self.assertEqual(resumable_partials(self.tmp),
+                         (("fixture-model", 3), ("other", 8)))
+
+    def test_no_transfers_directory_is_not_an_error(self):
+        self.assertEqual(resumable_partials(self.tmp.parent / "missing"), ())
