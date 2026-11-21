@@ -3349,3 +3349,31 @@ class QuickStopTests(DesktopTests):
         self.backend.chat_release.set()
         self.until(lambda: not self.ui.busy)
         self.assertEqual(self.ui.quick_stop.get_sensitive(), self.ui.hard.get_sensitive())
+
+
+class QueueSummaryTests(ActivityBoardTests):
+    """The topbar counts the tasks the client actually runs."""
+
+    def test_an_idle_window_says_idle(self):
+        self.assertIn("Queue: idle", self.ui.queue_note.get_text())
+
+    def test_a_running_turn_is_counted_with_its_lease(self):
+        self.connect_model()
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: "Queue: 1 running" in self.ui.queue_note.get_text())
+        self.backend.chat_release.set()
+        self.until(lambda: "Queue: idle" in self.ui.queue_note.get_text())
+
+    def test_a_voice_turn_names_the_microphone_lease(self):
+        self.connect_model()
+        self.backend.hold_transcription = False
+        self.begin_voice()
+        self.until(lambda: "Queue: 1 running" in self.ui.queue_note.get_text())
+        self.assertIn("microphone", self.ui.queue_note.get_text())
+        self.click(self.ui.cancel)
+        # The capture cleanup is awaited, exactly like the composer's cancel.
+        self.until(lambda: self.backend.capture_cleaning)
+        self.backend.capture_release.set()
+        self.until(lambda: "Queue: idle" in self.ui.queue_note.get_text())

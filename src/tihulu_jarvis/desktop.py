@@ -125,6 +125,10 @@ def create_window(app, loop):
                                                  "Her şeyi şimdi durdur",
                                                  "Alles sofort stoppen"))
             top.append(self.quick_stop)
+            # The queue summary counts the tasks this client is actually
+            # running; an idle window says idle rather than zero busy.
+            self.queue_note = Gtk.Label(xalign=0, wrap=True)
+            top.append(self.queue_note)
             self.status = Gtk.Label(xalign=0, wrap=True)
             root.append(self.status)
             # The state is stated in words, never in colour alone: a person who
@@ -1495,6 +1499,40 @@ def create_window(app, loop):
         def activity_rows(self):
             return tuple(reversed(self.board.rows))
 
+        def refresh_queue_note(self):
+            """State the running tasks as a count, from the board itself."""
+            busy = self.board.busy()
+            if not busy:
+                self.queue_note.set_text(tr("Queue: idle", "Kuyruk: boşta",
+                                            "Warteschlange: untätig"))
+                return
+            leases = sorted({resource for _, resource in self.board.locks()})
+            detail = " (%s)" % ", ".join(leases) if leases else ""
+            self.queue_note.set_text(tr("Queue: %d running%s" % (len(busy), detail),
+                                        "Kuyruk: %d çalışıyor%s" % (len(busy), detail),
+                                        "Warteschlange: %d läuft%s" % (len(busy), detail)))
+
+        def note_leases(self):
+            """Record which devices the running task holds, as it holds them.
+
+            The board is the reason a busy device is explained, so it follows
+            the leases rather than being told about them separately.
+            """
+            task_id = getattr(self, "active_task", None)
+            if task_id is None:
+                return
+            try:
+                row = self.board.get(task_id)
+            except Hold:
+                return
+            if not row.busy:
+                return
+            try:
+                self.board.update(task_id, locks=tuple(sorted(self.leases.held())))
+                self.refresh_activity()
+            except Hold:
+                pass
+
         def refresh_activity(self):
             rows, item = [], self.activity_list.get_first_child()
             while item is not None:
@@ -1522,6 +1560,7 @@ def create_window(app, loop):
                 line.set_activatable(True)
                 self.activity_list.append(line)
             self.activity_stop.set_sensitive(bool(self.board.busy()))
+            self.refresh_queue_note()
             self.activity_note.set_text(tr(
                 "Progress is never guessed: a turn has no percentage, a download counts bytes.",
                 "İlerleme asla tahmin edilmez: bir turun yüzdesi yoktur, indirme bayt sayar.",
@@ -2253,6 +2292,7 @@ def create_window(app, loop):
             # Every turn the client runs is a task on the board, with no
             # percentage: its state is the truth until it ends.
             board_id = self.board.start("turn", self.turn_label(), now=time.time())
+            self.active_task = board_id
             # A running task is visible while it runs, not only after it ends.
             self.refresh_activity()
             def finished(t):
@@ -2488,7 +2528,10 @@ def create_window(app, loop):
                 # The microphone is exclusive: a turn that cannot get the lease
                 # is refused before capture starts, never after it fails.
                 async with self.leases.hold("microphone", "voice-turn-%d" % epoch):
+                    self.note_leases()
                     text=await audio.listen(self.cfg["stt"],self.finish,progress)
+                # The microphone is free again the moment the capture ends.
+                self.note_leases()
                 self.session.check(epoch)
                 self.bubble("You",text)
                 self.set_state("thinking")
@@ -2497,6 +2540,7 @@ def create_window(app, loop):
                 self.bubble("JARVIS",result)
                 self.spoken_line(speech, epoch)
                 async with self.leases.hold("audio_playback", "voice-turn-%d" % epoch):
+                    self.note_leases()
                     playback = loop.create_task(audio.speak(speech, progress))
                     self.playback = playback
                     try:
@@ -2513,6 +2557,7 @@ def create_window(app, loop):
                     finally:
                         self.playback = None
                         self.playback_stopping = False
+                self.note_leases()
             self.submit(run)
 
         def close(self,*_):
