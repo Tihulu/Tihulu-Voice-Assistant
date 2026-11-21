@@ -122,3 +122,13 @@ is time, outcome, action, scope and reason; nothing else, and no raw log. An
 empty log and a filter that matches nothing are different facts and are stated
 as such. A filter survives new decisions: adding an allowed decision does not
 silently widen a denied view.
+
+A typed reply is shown as the server sends it. The client asks the Jan
+endpoint for a server-sent stream, reads only `data:` fields — comments and
+other fields are ignored — and appends each piece to the same message label, in
+order. Nothing is displayed that the transport did not actually receive, and a
+piece that arrives after the turn was invalidated is dropped rather than shown.
+The stream is bounded by events and by characters: a runaway server cannot hold
+a turn open or grow a reply without end, and the joined answer is validated
+exactly like a whole one. A spoken reply never streams, because synthesis needs
+one whole answer.

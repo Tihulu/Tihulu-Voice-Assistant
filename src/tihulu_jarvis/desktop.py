@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import attachments
+from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
 from . import market, profiles, settings
@@ -75,6 +76,7 @@ def create_window(app, loop):
             self.confirmations = []
             self.leases = locks.Leases()
             self.search_matches = ()
+            self.growing = {}
             self.transcribe_runner = None
             self.win = Gtk.ApplicationWindow(application=app, title="TIHULU JARVIS")
             self.win.set_default_size(920, 650)
@@ -1657,6 +1659,8 @@ def create_window(app, loop):
 
         def bubble(self,speaker,text):
             label=Gtk.Label(label=speaker+"\n"+text,xalign=0,selectable=True,wrap=True)
+            # A message that grows keeps its own bounded text here.
+            self.growing[label]=text
             label.add_css_class("message")
             label.add_css_class("user" if speaker=="You" else "assistant")
             self.log.append(label)
@@ -1665,6 +1669,21 @@ def create_window(app, loop):
                 adj.set_value(max(0,adj.get_upper()-adj.get_page_size()))
                 return False
             GLib.idle_add(bottom)
+            # The caller keeps the label so a reply can grow into it.
+            return label
+
+        def extend(self,label,speaker,piece,replace=False):
+            """Grow one message label with the text actually received."""
+            if not isinstance(piece,str) or not piece:
+                return
+            grown = piece if replace else self.growing.get(label,"")+piece
+            if len(grown) > STREAM_CAP:
+                # A cap is a reason, never a silent truncation of a reply.
+                self.growing[label]=grown[:STREAM_CAP]
+                self.set_state("ready","stream_too_large")
+                return
+            self.growing[label]=grown
+            label.set_text(speaker+"\n"+grown)
 
         def stop_speaking(self):
             task = self.playback
@@ -1763,9 +1782,15 @@ def create_window(app, loop):
             async def run(epoch):
                 self.bubble("You",text)
                 self.set_state("thinking")
-                result,_=await self.session.reply(text,Jan(self.require_endpoint(), self.cfg["llm"]),epoch)
+                answer=self.bubble("JARVIS","")
+                def grow(piece):
+                    # Only what the server actually sent is shown, in order.
+                    if epoch == self.session.epoch:
+                        self.extend(answer,"JARVIS",piece)
+                result,_=await self.session.reply(text,Jan(self.require_endpoint(), self.cfg["llm"]),
+                                                  epoch,on_delta=grow)
                 self.session.check(epoch)
-                self.bubble("JARVIS",result)
+                self.extend(answer,"JARVIS",result,replace=True)
             self.submit(run)
 
         def voice(self):
