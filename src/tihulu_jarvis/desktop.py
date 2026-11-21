@@ -111,6 +111,10 @@ def create_window(app, loop):
             local = Gtk.Label(label=tr("LOCAL CONNECTION","YEREL BAĞLANTI","LOKALE VERBINDUNG"))
             local.add_css_class("badge")
             top.append(local)
+            # The topbar states the active mode, profile, model and privacy
+            # boundary in words, so a glance never has to guess them.
+            self.topbar_note = Gtk.Label(xalign=0, wrap=True, hexpand=True)
+            top.append(self.topbar_note)
             self.status = Gtk.Label(xalign=0, wrap=True)
             root.append(self.status)
             # The state is stated in words, never in colour alone: a person who
@@ -864,14 +868,52 @@ def create_window(app, loop):
             self.search_entry.set_text("")
             self.search_entry.grab_focus()
 
+        def topbar_text(self):
+            """Mode, profile, model and boundary, as one line of words.
+
+            The line names what is active right now; an absent choice is said
+            to be absent rather than left blank.
+            """
+            try:
+                profile = self.active_profile()
+            except Hold:
+                mode, name = "", tr("no active profile", "etkin profil yok",
+                                    "kein aktives Profil")
+            else:
+                mode, name = profile.based_on_mode, profile.name or profile.id
+            model = self.cfg["llm"] or tr("no model selected", "model seçili değil",
+                                          "kein Modell ausgewählt")
+            boundary = tr("content stays on this computer",
+                          "içerik bu bilgisayarda kalır",
+                          "Inhalt bleibt auf diesem Computer")
+            try:
+                data = disclosure.facts(profile, self.url.get_text().strip())
+            except (Hold, UnboundLocalError):
+                data = None
+            if data is not None and data["boundary"] != disclosure.STAYS_LOCAL:
+                boundary = tr("cloud reasoning permitted",
+                              "bulut çıkarımına izinli",
+                              "Cloud-Schlussfolgerung erlaubt")
+            parts = [mode or tr("no mode", "mod yok", "kein Modus"), name, model, boundary]
+            if data is not None and data["endpoint"] != "loopback":
+                # The boundary is about the profile; the endpoint is its own
+                # fact, and a build that cannot use it says so rather than
+                # leaving a reader to assume it will work.
+                parts.append(tr("endpoint not a loopback address",
+                                "uç nokta geri döngü adresi değil",
+                                "Endpunkt ist keine Loopback-Adresse"))
+            return " · ".join(parts)
+
         def refresh_state_row(self):
             """State the live condition in words: local or cloud, microphone,
             privileged tools, a pending approval and connection state."""
             try:
-                data = disclosure.facts(self.active_profile(), self.url.get_text().strip())
-                grants = profiles.granted(self.active_profile())
+                profile = self.active_profile()
+                data = disclosure.facts(profile, self.url.get_text().strip())
+                grants = profiles.granted(profile)
             except Hold:
                 self.state_row.set_text("")
+                self.topbar_note.set_text(self.topbar_text())
                 return
             words = states.tokens(data, self.stage, grants,
                                   bool(self.confirmations),
@@ -887,6 +929,7 @@ def create_window(app, loop):
             text = tr("State: ", "Durum: ", "Zustand: ") + " · ".join(
                 caption.get(token, token) for token in words)
             self.state_row.set_text(text)
+            self.topbar_note.set_text(self.topbar_text())
 
         def refresh_disclosure(self):
             """State the privacy boundary of a message before it is written.

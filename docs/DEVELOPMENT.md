@@ -221,3 +221,12 @@ behind. Forgetting clears the store rather than hiding the row, the label and
 the button disappear with it, and a stored history is re-validated when settings
 are read, so a corrupt one is refused instead of loaded as a promise of queries
 that cannot be run again.
+
+The topbar names what is active, in words. One line carries the active mode, the
+active profile, the selected model and the privacy boundary, and a second fact
+when the endpoint in the field is not a numeric loopback address — because that
+build cannot use it. An absent choice is said to be absent: no model selected,
+no active profile, no mode. The line follows the endpoint field before it is
+saved, since a statement about a stale value would describe a turn nobody will
+run, and it is refreshed with the profile, the model and the state row rather
+than on a timer.
