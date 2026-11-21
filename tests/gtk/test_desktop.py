@@ -2991,3 +2991,58 @@ class ActivityBoardTests(DesktopTests):
 
     def test_the_page_states_that_progress_is_not_guessed(self):
         self.assertIn("never guessed", self.ui.activity_note.get_text())
+
+
+class SpokenTextUITests(DesktopTests):
+    """The text that will be spoken is shown only when the owner asks for it."""
+
+    def spoken_rows(self):
+        out, item = [], self.ui.log.get_first_child()
+        while item is not None:
+            if getattr(item, "spoken", False):
+                out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def voice_turn(self):
+        self.connect_model()
+        self.backend.answers.append("Merhaba!")
+        self.backend.transcript = "naber nasilsin"
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: self.ui.stage == self.backend.playback_stage)
+
+    def test_without_the_preference_no_spoken_line_is_shown(self):
+        self.voice_turn()
+        self.assertEqual(self.spoken_rows(), [])
+        self.assertIn("JARVIS\nMerhaba!", self.labels_of(self.ui.log)[-1].get_text())
+
+    def test_asking_for_it_shows_the_exact_spoken_text(self):
+        self.ui.cfg["show_spoken_text"] = True
+        self.voice_turn()
+        rows = self.spoken_rows()
+        self.assertEqual(len(rows), 1)
+        text = rows[0].get_text()
+        self.assertTrue(text.startswith("Spoken: "))
+        spoken = self.backend.speeches[-1].text
+        self.assertIn(spoken, text)
+
+    def test_the_choice_is_stored_and_survives_a_restart(self):
+        self.ui.spoken_text.set_active(True)
+        self.until(lambda: self.ui.cfg.get("show_spoken_text") is True)
+        self.assertEqual(settings.load()["show_spoken_text"], True)
+        self.ui.win.close()
+        self.until(lambda: not self.app.get_windows())
+        self.ui = desktop.create_window(self.app, self.loop)
+        self.until(lambda: self.ui.win.get_mapped())
+        self.assertTrue(self.ui.spoken_text.get_active())
+        self.ui.cfg["show_spoken_text"] = False
+        settings.save(self.ui.cfg)
+
+    def labels_of(self, widget):
+        out, item = [], widget.get_first_child()
+        while item is not None:
+            if hasattr(item, "get_text"):
+                out.append(item)
+            item = item.get_next_sibling()
+        return out

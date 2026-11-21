@@ -15,7 +15,7 @@ LOCALES = ("tr", "en", "de")
 def empty():
     return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": "",
             "market_refs": {}, "allowed_hosts": [], "text_scale": "normal",
-            "web_targets": []}
+            "web_targets": [], "show_spoken_text": False}
 
 
 def config_path():
@@ -73,6 +73,11 @@ def checked(obj):
         target = web.from_entry(item)
         clean_targets.append(web.entry(target))
     out["web_targets"] = clean_targets
+    spoken = obj.get("show_spoken_text", False)
+    # A stored preference must be a plain boolean, never a truthy guess.
+    if not isinstance(spoken, bool):
+        raise Hold("invalid_local_settings")
+    out["show_spoken_text"] = spoken
     scale = obj.get("text_scale", "normal")
     # An unknown scale is refused here, not quietly swapped for a default:
     # a stored preference the client cannot honour must not be hidden.

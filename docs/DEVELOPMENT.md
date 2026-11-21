@@ -181,3 +181,13 @@ turn is visible while it runs, not only after it ends, and the selected running
 task can be stopped, which cancels the turn through the real cancellation path
 and records the reason. This is the client's own work; an OpenCode project and
 session view is not part of this build and is not implied by the page.
+
+The text that will be spoken can be shown, when the owner asks for it. A voice
+turn's answer is the full text; the voice layer separately normalises it into
+the text Piper will actually read, and until now that normalisation was
+discarded. With *Show the text that will be spoken* on, the exact spoken text
+appears under the answer as its own row, stored as a preference and honoured at
+the next start. This build has no second, shorter answer: a display text that
+cannot be spoken is refused, never silently shortened, so the spoken line is
+the same content in speakable form rather than a summary of it. A typed reply
+never shows a spoken line, because nothing is spoken.
