@@ -230,3 +230,10 @@ no active profile, no mode. The line follows the endpoint field before it is
 saved, since a statement about a stale value would describe a turn nobody will
 run, and it is refreshed with the profile, the model and the state row rather
 than on a timer.
+
+The topbar carries a hard stop, and it is the same stop as the composer's: one
+cancellation path, one state, one accessible name. It is disabled while nothing
+runs, so a stop that would do nothing is never offered as if it would. The
+cancellation itself is unchanged — it invalidates the turn and waits for the
+cleanup — and the tests assert that the topbar button, the composer button and
+the durability of that path all agree.
