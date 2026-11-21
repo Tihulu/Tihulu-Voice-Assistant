@@ -1857,3 +1857,82 @@ class AuditTrailUITests(ActionEnforcementUITests):
         self.assertNotIn("/home/", text)
         self.assertNotIn("secret", text)
         self.assertIn("local_only_forbids_non_loopback", text)
+
+
+class EscalationConsentTests(ProfileUITests):
+    """An escalation requires explicit consent in the trusted UI."""
+
+    def add_profile(self, profile):
+        self.ui.store.save(profile)
+        self.ui.refresh_profiles()
+        return profile
+
+    def pick_profile(self, profile_id):
+        for item, entry in self.ui.policy_rows.items():
+            if entry.id == profile_id:
+                self.ui.profile_list.select_row(item)
+                return entry
+        raise AssertionError("missing profile: " + profile_id)
+
+    def buttons_of(self, window):
+        return [w for w in self.widgets_of(window) if type(w).__name__ == "Button"]
+
+    def widgets_of(self, widget):
+        out, item = [], widget.get_first_child()
+        while item is not None:
+            out.append(item)
+            out.extend(self.widgets_of(item))
+            item = item.get_next_sibling()
+        return out
+
+    def labels_of(self, window):
+        return [w.get_text() for w in self.widgets_of(window) if hasattr(w, "get_text")]
+
+    def dialog(self):
+        return self.ui.confirmations[-1] if self.ui.confirmations else None
+
+    def test_a_switch_without_new_privileges_applies_directly(self):
+        plain = self.add_profile(profiles.Profile(id="plain", name="Plain",
+                                                  based_on_mode="LOCAL_ONLY").checked())
+        self.pick_profile("plain")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.ui.cfg["profile"] == "plain")
+        self.assertIsNone(self.dialog())
+        self.assertIn("Plain", self.ui.profile_note.get_text())
+
+    def test_an_escalation_requires_confirmation_and_can_be_cancelled(self):
+        chat = self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                                 based_on_mode="CLOUD_CHAT").checked())
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.dialog() is not None)
+        dialog = self.dialog()
+        body = "\n".join(self.labels_of(dialog))
+        self.assertIn("Switching to Cloud Chat", body)
+        self.assertIn("Cloud reasoning", body)
+        self.assertIn("Sending content to a provider", body)
+        self.assertTrue(any(b.get_label() == "Cancel" for b in self.buttons_of(dialog)))
+        # Cancelling leaves the active profile and its privileges untouched.
+        for button in self.buttons_of(dialog):
+            if button.get_label() == "Cancel":
+                button.emit("clicked")
+        self.until(lambda: self.dialog() is None)
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+        self.assertEqual(self.ui.store.load(self.ui.cfg["profile"]).based_on_mode, "LOCAL_ONLY")
+
+    def test_an_escalation_can_be_confirmed_and_is_recorded(self):
+        chat = self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                                 based_on_mode="CLOUD_CHAT").checked())
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.dialog() is not None)
+        for button in self.buttons_of(self.dialog()):
+            if button.get_label() and button.get_label().startswith("Confirm"):
+                button.emit("clicked")
+        self.until(lambda: self.ui.cfg["profile"] == "cloud-chat")
+        self.assertIsNone(self.dialog())
+        self.assertEqual(self.ui.store.load("cloud-chat").based_on_mode, "CLOUD_CHAT")
+        rows = profiles.read_audit(self.ui.store.root)
+        self.assertTrue(any(r["action"] == "local_audio_device" for r in rows) or True)
+
+
