@@ -74,3 +74,30 @@ deterministic suite. It does not prove a clean-machine install on a target deskt
 desktop integration on COSMIC or Wayland, physical microphone or output, or model
 inference quality. Those gates are tracked separately and require a real machine and
 operator-chosen models.
+
+## Debian package
+
+The portable wheel alone is not an end-user install. A Debian package is
+assembled from the built wheel with `packaging/deb/build.sh`, which needs no
+network: it stages the wheel into `/usr/share/tihulu-jarvis/venv` with `pip
+--no-index --find-links`, adds a wrapper at `/usr/bin/tihulu-jarvis`, installs
+the desktop entry and icon into `/usr/share`, and records the runtime
+dependencies (python3, PyGObject, GTK 4, Pango, cairo) in `control`. No
+service, no root-owned data and no autostart entry are added.
+
+```sh
+sh packaging/deb/build.sh          # produces .release-work/tihulu-jarvis.deb
+sudo dpkg -i .release-work/tihulu-jarvis.deb
+sudo dpkg -r tihulu-jarvis
+```
+
+CI builds this package and verifies its contents: every shipped module and
+metadata file is present, the file list carries no workstation path, credential
+material or tests, and the package is extracted into an isolated root where the
+package imports and the entry module load. Removal deletes only what the
+package owns; the user's XDG configuration, profiles, market registry and
+every shared model remain.
+
+What a green package job does not prove: installation on a real desktop,
+launch under COSMIC, physical audio, or clean-machine installation on a
+different machine. Those remain separate gates and require a target system.
