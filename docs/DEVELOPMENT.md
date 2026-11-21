@@ -46,3 +46,11 @@ the same signal test used for captures, runs the selected Whisper model and
 appends the transcript to the conversation. The speech engine is injected, so
 tests exercise the validation, bounds and error reasons without a model. A
 missing, silent or unsupported recording is refused before the engine runs.
+
+Model routing is explicit. A route names the engine that serves a task
+(STT/LLM/TTS), whether it runs on this computer or at a provider, and whether
+the active mode permits it: LOCAL_ONLY never routes to a provider, a cloud
+route requires an approved provider, and an unavailable local route is a
+bounded reason rather than a silent transition to the cloud. The *Installed
+models* page states the effective route for the selected model and the mode's
+limit, so a capability is never implied.
