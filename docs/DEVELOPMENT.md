@@ -14,3 +14,11 @@ Only local model choices are stored in the XDG config directory, with a private 
 The local-only path is a development feature, not proof of OS-wide egress enforcement. A verified private execution bridge, remote providers, privileged automation, complete marketplace downloads, full profile enforcement, authenticated remote access, release packaging and clean-machine rollback remain separate gates. Never enable them based only on this source or a passing fixture.
 
 Project source: AGPL-3.0-only; see LICENSE. Third-party engines, models and voices retain their own terms and are not shipped. The public CI job uses read-only contents permission and synthetic data. Its loopback fixture is not a live Jan instance.
+
+A catalog may be imported from a local file or fetched over HTTPS. A fetch is
+scoped by an owner-managed allowlist in the local settings, uses HTTPS with
+default system certificate verification, sends no credentials, follows no
+redirect and is bounded to the catalog size limit. An unverified catalog may be
+browsed and inspected; only a catalog verified against an owner-managed key can
+add entries to the registry, and only with the owner's separate download
+approval. Tests inject the transport, so no test opens a socket.
