@@ -1991,3 +1991,60 @@ class TranscribeFileUITests(DownloadFixture):
         self.ui.cfg["stt"] = ""
         self.ui.refresh()
         self.assertFalse(self.ui.transcribe_button.get_sensitive())
+
+
+class RoutePolicyUITests(MarketFixture):
+    """The effective route and the mode's limits are stated, not implied."""
+
+    def add_profile(self, profile):
+        self.ui.store.save(profile)
+        self.ui.refresh_profiles()
+        return profile
+
+    def pick_profile(self, profile_id):
+        for item, entry in self.ui.policy_rows.items():
+            if entry.id == profile_id:
+                self.ui.profile_list.select_row(item)
+                return entry
+        raise AssertionError("missing profile: " + profile_id)
+
+    def widgets_of(self, widget):
+        out, item = [], widget.get_first_child()
+        while item is not None:
+            out.append(item)
+            out.extend(self.widgets_of(item))
+            item = item.get_next_sibling()
+        return out
+
+    def confirm(self, prefix):
+        self.until(lambda: self.ui.confirmations)
+        for widget in self.widgets_of(self.ui.confirmations[-1]):
+            if type(widget).__name__ == "Button" and (widget.get_label() or "").startswith(prefix):
+                widget.emit("clicked")
+                return widget
+        raise AssertionError("confirmation button missing: " + prefix)
+
+    def test_a_local_route_is_stated_for_a_connected_model(self):
+        self.connect_model()
+        text = self.ui.route_note.get_text()
+        self.assertIn("Route: fixture-chat via this computer", text)
+        self.assertIn("(local_route)", text)
+        self.assertIn("never routes to a provider", text)
+
+    def test_a_mode_with_providers_states_the_limit_without_implying_a_route(self):
+        self.connect_model()
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                          based_on_mode="CLOUD_CHAT",
+                                          allowed_providers=("fixture-provider",)).checked())
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_switch)
+        self.confirm("Confirm")
+        self.until(lambda: self.ui.cfg["profile"] == "cloud-chat")
+        text = self.ui.route_note.get_text()
+        self.assertIn("Route: fixture-chat via this computer", text)
+        self.assertIn("Cloud routes need an approved provider", text)
+        self.assertNotIn("never routes", text)
+
+    def test_without_a_model_no_route_is_claimed(self):
+        self.assertIn("no local model selected", self.ui.route_note.get_text())
+        self.assertEqual(self.ui.inventory, ())

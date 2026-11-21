@@ -9,7 +9,8 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import catalog_fetch, market, profiles, settings
+from . import catalog_fetch, routing
+from . import market, profiles, settings
 from .voice import audio
 from .voice.jan import Jan
 from .voice.m1 import Hold, SpeechRequest
@@ -133,6 +134,8 @@ def create_window(app, loop):
                     # A preview speaks a fixed sample in the selected locale only.
                     hear = self.button(row, tr("Preview","Dinle","Anhören"), lambda k=key:self.preview(k))
                     self.previews[hear] = key
+            self.route_note = Gtk.Label(xalign=0, wrap=True)
+            models.append(self.route_note)
             self.test_chat_button = self.button(models, tr("Test selected model","Seçilen modeli dene","Ausgewähltes Modell testen"), self.test_chat)
             self.transcribe_button = self.button(models, tr("Transcribe a recording","Kayıttan yazıya çevir","Aufnahme transkribieren"), self.transcribe_recording)
             self.test_note = Gtk.Label(xalign=0, wrap=True)
@@ -439,6 +442,33 @@ def create_window(app, loop):
                 self.set_state("ready", "profile_export_rejected")
                 return None
 
+        def refresh_route_note(self):
+            """State the effective route for the selected model, and the mode's limits."""
+            try:
+                profile = self.active_profile()
+            except Hold:
+                self.route_note.set_text("")
+                return
+            model = self.cfg["llm"]
+            if model and model in self.inventory:
+                route, reason = routing.select(profile, routing.Preference(
+                    "llm", (routing.Route("llm", model, "local", "jan", self.cfg["endpoint"]),)))
+                head = tr("Route: %s via this computer (%s)." % (route.model_id, reason),
+                          "Rota: %s bu bilgisayar üzerinden (%s)." % (route.model_id, reason),
+                          "Route: %s über diesen Computer (%s)." % (route.model_id, reason))
+            else:
+                head = tr("Route: no local model selected.", "Rota: yerel model seçili değil.",
+                          "Route: kein lokales Modell ausgewählt.")
+            if profile.based_on_mode == "LOCAL_ONLY":
+                head += " " + tr("This mode never routes to a provider.",
+                                 "Bu mod asla sağlayıcıya yönlendirmez.",
+                                 "Dieser Modus leitet nie an einen Anbieter um.")
+            elif profile.allowed_providers:
+                head += " " + tr("Cloud routes need an approved provider.",
+                                 "Bulut rotaları onaylı sağlayıcı gerektirir.",
+                                 "Cloud-Routen erfordern einen genehmigten Anbieter.")
+            self.route_note.set_text(head)
+
         def refresh(self):
             connected = self.cfg["llm"] in self.inventory
             self.entry.set_sensitive(not self.busy)
@@ -458,6 +488,7 @@ def create_window(app, loop):
             if not self.busy:
                 self.test_chat_button.set_sensitive(connected)
                 self.transcribe_button.set_sensitive(connected and bool(self.cfg["stt"]))
+                self.refresh_route_note()
                 for widget, lang in self.previews.items():
                     # A preview speaks only the locale that is actually selected.
                     widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
