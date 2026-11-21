@@ -54,3 +54,12 @@ route requires an approved provider, and an unavailable local route is a
 bounded reason rather than a silent transition to the cloud. The *Installed
 models* page states the effective route for the selected model and the mode's
 limit, so a capability is never implied.
+
+Exclusive hardware is leased, not assumed. The microphone and audio playback
+are exclusive: a voice turn holds the microphone for the capture only and the
+playback lease for the reply only, so a capture never keeps the input busy
+after it ends and two turns cannot share one device. A turn that cannot get the
+lease it needs is refused before the device is touched — `resource_busy:…` is a
+bounded reason, never an attempt that fails later, and never a silent retry
+against a second device. The lease is always released, including when the turn
+is cancelled or fails.

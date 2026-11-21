@@ -2048,3 +2048,50 @@ class RoutePolicyUITests(MarketFixture):
     def test_without_a_model_no_route_is_claimed(self):
         self.assertIn("no local model selected", self.ui.route_note.get_text())
         self.assertEqual(self.ui.inventory, ())
+
+
+class ResourceLockTests(DesktopTests):
+    """Exclusive devices: a turn leases the microphone and the output."""
+
+    def test_a_voice_turn_leases_the_microphone_then_the_output(self):
+        self.connect_model()
+        self.begin_voice()
+        epoch = self.ui.session.epoch
+        self.assertEqual(self.ui.leases.owner("microphone"), "voice-turn-%d" % epoch)
+        self.click(self.ui.finish_btn)
+        self.until(lambda: self.ui.stage == self.backend.playback_stage)
+        # Capture is over: the microphone is free again while playback holds the output.
+        self.assertIsNone(self.ui.leases.owner("microphone"))
+        self.assertEqual(self.ui.leases.owner("audio_playback"), "voice-turn-%d" % epoch)
+        self.click(self.ui.stop)
+        self.until(lambda: self.backend.playback_cleaning)
+        self.backend.playback_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.leases.held(), {})
+
+    def test_a_stale_holder_refuses_the_capture_before_it_starts(self):
+        self.connect_model()
+        self.ui.leases.acquire("microphone", "stale-turn")
+        self.click(self.ui.talk)
+        self.until(lambda: self.ui.status.get_text() == "resource_busy:microphone")
+        self.assertEqual(self.backend.speeches, [])
+        self.assertEqual(self.ui.session.history, ())
+        self.assertEqual(self.bubbles(), [])
+        # The refused turn ends idle, and the stale lease is untouched.
+        self.assertFalse(self.ui.busy)
+        self.assertEqual(self.ui.leases.owner("microphone"), "stale-turn")
+        self.ui.leases.release("microphone", "stale-turn")
+        self.assertEqual(self.ui.leases.held(), {})
+
+    def test_a_playback_refusal_leaves_the_turn_alive_for_text(self):
+        self.connect_model()
+        self.text("Merhaba!")
+        self.ui.leases.acquire("audio_playback", "other-player")
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: self.ui.status.get_text() == "resource_busy:audio_playback")
+        self.assertFalse(self.backend.speeches)
+        self.ui.leases.release("audio_playback", "other-player")
+        self.text("tekrar")
+        # The refused playback did not end the turn: both replies are kept.
+        self.assertEqual(len(self.ui.session.history), 6)
