@@ -39,3 +39,10 @@ target adds any privilege, a trusted-UI confirmation lists exactly what would
 be added and requires an explicit Confirm; cancelling changes nothing. Without
 an escalation the switch applies directly. A spoken or typed command is never a
 privileged approval; there is no other path.
+
+A recording supplied by the owner can be transcribed without the microphone:
+*Transcribe a recording* in *Installed models* picks a WAV file, checks it with
+the same signal test used for captures, runs the selected Whisper model and
+appends the transcript to the conversation. The speech engine is injected, so
+tests exercise the validation, bounds and error reasons without a model. A
+missing, silent or unsupported recording is refused before the engine runs.
