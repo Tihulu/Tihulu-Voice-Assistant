@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import attachments
+from . import a11y, attachments
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -44,6 +44,12 @@ def accessible_name(widget, text):
     except (ImportError, ValueError, TypeError, AttributeError):
         return None
     return text
+
+
+LOOK = (".workspace {padding:20px;} .hero {font-size:24px;font-weight:bold;}"
+        " .badge {color:#40ae96;font-weight:bold;} .message {padding:10px 14px;"
+        "border-radius:12px;background:alpha(currentColor,.07);}"
+        " .user {border-left:3px solid #39a68f;} .assistant {border-left:3px solid #787ee0;}")
 
 
 @contextmanager
@@ -90,9 +96,9 @@ def create_window(app, loop):
                 self.cfg = settings.load()
             except Hold as e:
                 read_error = str(e)
-            css = Gtk.CssProvider()
-            css.load_from_data(b".workspace {padding:20px;} .hero {font-size:24px;font-weight:bold;} .badge {color:#40ae96;font-weight:bold;} .message {padding:10px 14px;border-radius:12px;background:alpha(currentColor,.07);} .user {border-left:3px solid #39a68f;} .assistant {border-left:3px solid #787ee0;}")
-            Gtk.StyleContext.add_provider_for_display(self.win.get_display(),css,Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            self.look = LOOK
+            self.scale_provider = None
+            self.apply_text_scale()
             root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=10)
             root.add_css_class("workspace")
             self.win.set_child(root)
@@ -212,6 +218,19 @@ def create_window(app, loop):
             self.transcribe_button = self.button(models, tr("Transcribe a recording","Kayıttan yazıya çevir","Aufnahme transkribieren"), self.transcribe_recording)
             self.test_note = Gtk.Label(xalign=0, wrap=True)
             models.append(self.test_note)
+            # Display preferences: one text scale, and no motion at any size.
+            display = Gtk.Box(spacing=8)
+            models.append(display)
+            display.append(Gtk.Label(label=tr("Text size", "Yazı boyutu", "Textgröße"), xalign=0))
+            self.text_scale = Gtk.ComboBoxText()
+            for value, caption in (("normal", tr("Normal", "Normal", "Normal")),
+                                   ("large", tr("Large", "Büyük", "Groß"))):
+                self.text_scale.append_text(caption)
+            display.append(self.text_scale)
+            # The stored choice is shown before the handler is connected, so a
+            # startup never rewrites the settings file.
+            self.text_scale.set_active(0 if self.cfg.get("text_scale") != "large" else 1)
+            self.text_scale.connect("changed", self.choose_text_scale)
             self.update_labels()
             self.store = profiles.Store(profiles.profile_dir())
             self.policy_rows = {}
@@ -251,6 +270,27 @@ def create_window(app, loop):
             self.win.connect("close-request",self.close)
             self.set_state("ready",read_error or tr("Open Installed models to connect.","Bağlantı için Kurulu modeller’i aç.","Zum Verbinden Installierte Modelle öffnen."))
             self.win.present()
+
+        def apply_text_scale(self):
+            """Apply one stylesheet for the stored scale, and nothing else.
+
+            Reduced motion is not a switch here: no scale writes a transition,
+            an animation or a transform, so the interface has none at any size.
+            """
+            display = self.win.get_display()
+            if self.scale_provider is not None:
+                Gtk.StyleContext.remove_provider_for_display(display, self.scale_provider)
+            provider = Gtk.CssProvider()
+            self.scale_provider = provider
+            try:
+                provider.load_from_data(a11y.css(self.cfg.get("text_scale", "normal"),
+                                                 self.look).encode("utf-8"))
+                Gtk.StyleContext.add_provider_for_display(display, provider,
+                                                          Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            except (Hold, ValueError):
+                # A scale the client cannot honour is a bounded reason.
+                self.scale_provider = None
+                self.status.set_text("invalid_text_scale")
 
         @staticmethod
         def button(parent, label, callback):
@@ -784,6 +824,17 @@ def create_window(app, loop):
                     # A preview speaks only the locale that is actually selected.
                     widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
                                          and audio.tools_ready("piper","aplay"))
+
+        def choose_text_scale(self, *_):
+            """Store and apply the chosen scale immediately, never at restart."""
+            try:
+                self.cfg["text_scale"] = a11y.checked(
+                    "large" if self.text_scale.get_active() == 1 else "normal")
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
+            self.apply_text_scale()
+            self.save()
 
         def save(self):
             try:

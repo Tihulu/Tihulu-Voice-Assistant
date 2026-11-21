@@ -13,7 +13,7 @@ LOCALES = ("tr", "en", "de")
 
 def empty():
     return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": "",
-            "market_refs": {}, "allowed_hosts": []}
+            "market_refs": {}, "allowed_hosts": [], "text_scale": "normal"}
 
 
 def config_path():
@@ -57,6 +57,12 @@ def checked(obj):
     if not isinstance(voices, dict) or any(k not in LOCALES or not isinstance(v, str) or len(v)>4096 for k,v in voices.items()):
         raise Hold("invalid_local_settings")
     out["voices"] = dict(voices)
+    scale = obj.get("text_scale", "normal")
+    # An unknown scale is refused here, not quietly swapped for a default:
+    # a stored preference the client cannot honour must not be hidden.
+    if scale not in ("normal", "large"):
+        raise Hold("invalid_text_scale")
+    out["text_scale"] = scale
     return out
 
 

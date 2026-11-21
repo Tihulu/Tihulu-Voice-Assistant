@@ -132,3 +132,11 @@ The stream is bounded by events and by characters: a runaway server cannot hold
 a turn open or grow a reply without end, and the joined answer is validated
 exactly like a whole one. A spoken reply never streams, because synthesis needs
 one whole answer.
+
+The interface is scalable and ships no motion. One stored token — Normal or
+Large — is applied to a single stylesheet as soon as it is chosen, so a restart
+is never needed and no other part of the look changes. Reduced motion is not a
+switch: no scale writes a transition, an animation or a transform, so the
+interface has none at any size, and a test keeps that true. A stored scale the
+client cannot honour is refused when settings are read, never quietly swapped
+for a default, and the style provider is replaced rather than stacked.
