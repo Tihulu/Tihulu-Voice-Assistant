@@ -232,6 +232,13 @@ def create_window(app, loop):
             # startup never rewrites the settings file.
             self.text_scale.set_active(0 if self.cfg.get("text_scale") != "large" else 1)
             self.text_scale.connect("changed", self.choose_text_scale)
+            self.spoken_text = Gtk.CheckButton(
+                label=tr("Show the text that will be spoken",
+                         "Okunacak metni göster",
+                         "Den vorzulesenden Text zeigen"))
+            display.append(self.spoken_text)
+            self.spoken_text.set_active(bool(self.cfg.get("show_spoken_text")))
+            self.spoken_text.connect("toggled", self.choose_spoken_text)
             self.update_labels()
             self.store = profiles.Store(profiles.profile_dir())
             self.policy_rows = {}
@@ -894,6 +901,11 @@ def create_window(app, loop):
                     # A preview speaks only the locale that is actually selected.
                     widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
                                          and audio.tools_ready("piper","aplay"))
+
+        def choose_spoken_text(self, *_):
+            """Store the choice immediately; a restart is never required."""
+            self.cfg["show_spoken_text"] = bool(self.spoken_text.get_active())
+            self.save()
 
         def choose_text_scale(self, *_):
             """Store and apply the chosen scale immediately, never at restart."""
@@ -2025,6 +2037,25 @@ def create_window(app, loop):
             adj.set_value(max(0, adj.get_upper() - adj.get_page_size()))
             return False
 
+        def spoken_line(self, speech, epoch):
+            """Show the exact text that will be spoken, when asked for it.
+
+            This is the normalised text the voice layer produces, not a second
+            answer: a display text that cannot be spoken is refused, never
+            silently shortened.
+            """
+            if not self.cfg.get("show_spoken_text") or speech is None:
+                return
+            if epoch != self.session.epoch:
+                return
+            label = Gtk.Label(label=tr("Spoken: ", "Okunan: ", "Gesprochen: ") + speech.text,
+                              xalign=0, selectable=True, wrap=True)
+            label.add_css_class("message")
+            label.add_css_class("receipt")
+            label.spoken = True
+            self.log.append(label)
+            GLib.idle_add(self.bottom)
+
         def bubble(self,speaker,text):
             label=Gtk.Label(label=speaker+"\n"+text,xalign=0,selectable=True,wrap=True)
             # A message that grows keeps its own bounded text here.
@@ -2184,6 +2215,7 @@ def create_window(app, loop):
                 result,speech=await self.session.reply(text,Jan(self.require_endpoint(),self.cfg["llm"]),epoch,voices)
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
+                self.spoken_line(speech, epoch)
                 async with self.leases.hold("audio_playback", "voice-turn-%d" % epoch):
                     playback = loop.create_task(audio.speak(speech, progress))
                     self.playback = playback
