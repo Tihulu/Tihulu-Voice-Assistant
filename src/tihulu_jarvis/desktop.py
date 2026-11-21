@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, attachments, files, keys, receipts, tasks, web
+from . import a11y, attachments, files, keys, readiness, receipts, tasks, web
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -204,6 +204,9 @@ def create_window(app, loop):
                     self.previews[hear] = key
             self.route_note = Gtk.Label(xalign=0, wrap=True)
             models.append(self.route_note)
+            # What this machine can do, stated before a turn fails.
+            self.readiness_note = Gtk.Label(xalign=0, wrap=True)
+            models.append(self.readiness_note)
             # The per-task table: one row per task, with its effective route or
             # the bounded reason why none is used, never an implied road.
             self.route_rows = {}
@@ -279,6 +282,7 @@ def create_window(app, loop):
             self.set_state("ready",read_error or tr("Open Installed models to connect.","Bağlantı için Kurulu modeller’i aç.","Zum Verbinden Installierte Modelle öffnen."))
             self.bind_keys()
             self.board = tasks.Board()
+            self.tools_available = None
             self.build_files_page()
             self.turn_note = ""
             self.build_activity_page()
@@ -868,6 +872,10 @@ def create_window(app, loop):
 
         def refresh(self):
             connected = self.cfg["llm"] in self.inventory
+            # Whether the audio tools exist is asked once per refresh, and the
+            # answer is what the readiness row states.
+            self.tools_available = audio.tools_ready("arecord", "whisper-cli",
+                                                     "piper", "aplay")
             if self.search_entry.get_text().strip():
                 # A turn's reply can match a saved query; keep it honest.
                 self.run_search()
@@ -875,6 +883,7 @@ def create_window(app, loop):
             # while the window is idle: "microphone listening" is exactly the
             # state a reader cannot infer from a disabled control.
             self.refresh_route_note()
+            self.refresh_readiness()
             self.refresh_route_rows()
             self.refresh_disclosure()
             self.refresh_state_row()
@@ -1555,6 +1564,38 @@ def create_window(app, loop):
                                        "%s önizlemesi" % entry.name,
                                        "Vorschau von %s" % entry.name))
             return text
+
+        def refresh_readiness(self):
+            """State what this machine can do, before a turn fails.
+
+            Nothing is probed that would touch the network or a device: the
+            items come from the configuration and from what a discovery has
+            actually returned, so an un-asked question stays unknown.
+            """
+            profile = self.cfg.get("profile", "")
+            # The endpoint the owner is looking at is the one that counts, even
+            # before it is saved: a readiness row about a stale value would be
+            # a lie about what the next turn would use.
+            live = dict(self.cfg, endpoint=self.url.get_text().strip())
+            items = readiness.report(live, self.inventory,
+                                     self.tools_available, profile)
+            caption = {readiness.READY: tr("ready", "hazır", "bereit"),
+                       readiness.MISSING: tr("missing", "eksik", "fehlt"),
+                       readiness.UNKNOWN: tr("not checked yet", "henüz bakılmadı",
+                                             "noch nicht geprüft")}
+            labels = {"endpoint": tr("Jan endpoint", "Jan uç noktası", "Jan-Endpunkt"),
+                      "local_models": tr("Local models", "Yerel modeller", "Lokale Modelle"),
+                      "stt": tr("Speech to text", "Yazıya çevirme", "Sprache zu Text"),
+                      "voices": tr("Voices", "Sesler", "Stimmen"),
+                      "audio_tools": tr("Audio tools", "Ses araçları", "Audio-Werkzeuge"),
+                      "profile": tr("Active profile", "Etkin profil", "Aktives Profil")}
+            lines = []
+            for item in items:
+                detail = item.detail if item.detail and item.state != readiness.READY else ""
+                lines.append("%s: %s%s" % (labels.get(item.token, item.token),
+                                           caption[item.state],
+                                           " (%s)" % detail if detail else ""))
+            self.readiness_note.set_text("\n".join(lines))
 
         def remember_hosts(self):
             hosts = [h for h in self.catalog_hosts.get_text().split() if h]
