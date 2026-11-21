@@ -2411,3 +2411,43 @@ class AttachmentTests(EscalationConsentTests):
         self.connect_model()
         self.assertIsNone(self.ui.read_attachment("notes.txt"))
         self.assertEqual(self.ui.status.get_text(), "attachment_not_found")
+
+
+class RouteTableTests(MarketFixture):
+    """Every task states its route, or the bounded reason it has none."""
+
+    def add_profile(self, profile):
+        self.ui.store.save(profile)
+        self.ui.refresh_profiles()
+        return profile
+
+    def pick_profile(self, profile_id):
+        for item, entry in self.ui.policy_rows.items():
+            if entry.id == profile_id:
+                self.ui.profile_list.select_row(item)
+                return entry
+        raise AssertionError("missing profile: " + profile_id)
+
+    def test_a_configured_local_task_names_its_model(self):
+        self.connect_model()
+        self.assertIn("fixture-chat on this computer", self.ui.route_rows["llm"].get_text())
+        self.assertIn("synthetic.bin on this computer", self.ui.route_rows["stt"].get_text())
+        speaking = self.ui.route_rows["tts"].get_text()
+        self.assertIn("tr,en,de", speaking)
+
+    def test_an_unconfigured_task_says_so(self):
+        self.ui.cfg["stt"] = ""
+        self.ui.refresh()
+        self.assertIn("no route configured", self.ui.route_rows["stt"].get_text())
+
+    def test_a_local_mode_refuses_a_cloud_route_by_name(self):
+        self.connect_model()
+        self.add_profile(profiles.Profile(
+            id="reader", name="Reader", based_on_mode="LOCAL_ONLY",
+            filesystem_rules=(profiles.Rule("filesystem_read", ("attachment",), "allow"),),
+        ).checked())
+        self.pick_profile("reader")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.ui.cfg["profile"] == "reader")
+        self.assertIn("fixture-chat on this computer", self.ui.route_rows["llm"].get_text())
+        self.assertIn("never routes to a provider", self.ui.route_note.get_text())

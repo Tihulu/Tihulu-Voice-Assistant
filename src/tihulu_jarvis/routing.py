@@ -88,3 +88,72 @@ def describe(route, reason):
     return "%s %s via %s (%s)" % (route.task, route.model_id,
                                   route.provider if route.local_or_cloud == "cloud" else "this computer",
                                   reason)
+
+
+@dataclass(frozen=True)
+class Row:
+    """One task's route as the client can state it, with nothing implied."""
+    task: str
+    route: Route = None
+    reason: str = ""
+    warning: str = ""
+
+    def checked(self):
+        if self.task not in TASKS:
+            raise Hold("unknown_task")
+        if self.route is not None:
+            self.route.checked()
+            if self.route.task != self.task:
+                raise Hold("route_task_mismatch")
+        return self
+
+
+def warnings(profile):
+    """Conditions a reader must be told about, as stable tokens.
+
+    A cloud permission is never presented as a working road: if this build has
+    no provider approved, or no cloud transport at all, that is stated.
+    """
+    from .profiles import granted
+    tokens = granted(profile)
+    out = []
+    if "cloud_inference" in tokens or "cloud_disclosure" in tokens:
+        if not profile.allowed_providers:
+            out.append("cloud_route_without_provider")
+        else:
+            out.append("cloud_transport_not_available")
+    out.append("no_fallback_configured")
+    return tuple(out)
+
+
+def plan(profile, selection):
+    """The per-task table for one configuration.
+
+    ``selection`` maps a task to its Route or to None. Each row states the
+    effective route with the reason, or the bounded reason why none is used.
+    """
+    if not isinstance(selection, dict):
+        raise Hold("invalid_route_selection")
+    rows = []
+    for task in TASKS:
+        route = selection.get(task)
+        if route is None:
+            rows.append(Row(task, None, "no_route_configured", ""))
+            continue
+        row = Row(task)
+        route.checked()
+        if route.task != task:
+            raise Hold("route_task_mismatch")
+        ok, reason = permitted(profile, route)
+        if ok:
+            rows.append(Row(task, route, reason, ""))
+        else:
+            rows.append(Row(task, None, reason, reason))
+    return tuple(rows)
+
+
+def summary(row):
+    """One short English line for a row; the UI translates the reason tokens."""
+    if row.route is None:
+        return "%s: no route (%s)" % (row.task, row.reason)
+    return describe(row.route, row.reason)
