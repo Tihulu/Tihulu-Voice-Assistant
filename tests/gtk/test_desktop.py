@@ -10,9 +10,11 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import time
+import wave
 import unittest
 from collections import deque
 from contextlib import ExitStack
@@ -1936,3 +1938,56 @@ class EscalationConsentTests(ProfileUITests):
         self.assertTrue(any(r["action"] == "local_audio_device" for r in rows) or True)
 
 
+
+
+class TranscribeFileUITests(DownloadFixture):
+    """An owner-supplied recording is transcribed without the microphone."""
+
+    def setUp(self):
+        super().setUp()
+        self.connect_model()
+        self.ui.cfg["stt"] = str(self.weights("fixture-whisper.bin"))
+        self.ui.refresh()
+
+    def clip(self, name="clip.wav"):
+        path = self.weights(name).with_name(name)
+        with wave.open(str(path), "wb") as f:
+            f.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+            f.writeframes(struct.pack("<hh", 1250, -1250) * 1600)
+        return path
+
+    def runner(self, text="Merhaba!", error=None):
+        calls = []
+
+        async def runtime(model, wav, stem):
+            calls.append((str(model), str(wav)))
+            if error:
+                raise error
+            Path(str(stem) + ".txt").write_text(text, encoding="utf-8")
+        return runtime, calls
+
+    def test_a_recording_is_transcribed_into_the_conversation(self):
+        runner, calls = self.runner()
+        clip = self.clip()
+        self.ui.transcribe_runner = runner
+        # The file chooser is native; the action it triggers runs here.
+        result = self.ui.run_transcribe(str(clip))
+        self.assertEqual(result, "Merhaba!", self.ui.status.get_text())
+        self.until(lambda: any(b.startswith("Recording") for b in self.bubbles()))
+        self.assertEqual(calls, [(self.ui.cfg["stt"], str(clip))])
+        self.assertIn("Merhaba!", self.bubbles()[-1])
+
+    def test_a_rejected_recording_is_a_bounded_reason(self):
+        runner, calls = self.runner()
+        self.ui.transcribe_runner = runner
+        clip = self.weights("clip.wav")
+        clip.unlink()
+        result = self.ui.run_transcribe(str(clip))
+        self.assertIsNone(result)
+        self.assertEqual(self.ui.status.get_text(), "recording_not_found")
+        self.assertEqual(calls, [])
+
+    def test_without_an_stt_model_nothing_is_offered(self):
+        self.ui.cfg["stt"] = ""
+        self.ui.refresh()
+        self.assertFalse(self.ui.transcribe_button.get_sensitive())

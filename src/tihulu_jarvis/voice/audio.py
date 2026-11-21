@@ -162,6 +162,47 @@ async def listen(model, finish, publish):
         return text
 
 
+MAX_TRANSCRIPT = 64000
+
+
+async def transcribe(model, recording, runner=None, publish=None):
+    """Transcribe an owner-supplied recording without touching the microphone.
+
+    ``runner(model, wav, stem)`` is the speech engine; the default uses
+    whisper-cli, and tests inject a fixture. Nothing is recorded here.
+    """
+    model = selected_file(model, ".bin")
+    recording = Path(recording)
+    if not recording.is_absolute() or not recording.is_file():
+        raise Hold("recording_not_found")
+    if recording.suffix.lower() != ".wav" or recording.stat().st_size > 256 * 1024 * 1024:
+        raise Hold("unsupported_recording")
+    if not await asyncio.to_thread(has_signal, recording):
+        raise Hold("no_speech_signal")
+    runner = runner or _whisper
+    if publish:
+        publish("transcribing")
+    with tempfile.TemporaryDirectory(prefix="tihulu-transcribe-") as tmp:
+        stem = Path(tmp) / "transcript"
+        await runner(model, recording, stem)
+        output = stem.with_suffix(".txt")
+        if not output.is_file() or output.stat().st_size > MAX_TRANSCRIPT:
+            raise Hold("invalid_transcript")
+        text = output.read_text(encoding="utf-8").strip()
+        if not text or len(text) > 16000 or not any(ch.isalnum() for ch in text):
+            raise Hold("empty_transcript")
+        return text
+
+
+async def _whisper(model, wav, stem):
+    if not tools_ready("whisper-cli"):
+        raise Hold("transcription_backend_missing")
+    async with child("whisper-cli", "-m", model, "-f", wav, "-l", "auto",
+                     "-otxt", "-of", stem) as p:
+        if await asyncio.wait_for(p.wait(), 120):
+            raise Hold("transcription_failed")
+
+
 async def speak(speech, publish):
     model = voice_for(speech.voice_id, speech.language)
     if not tools_ready("piper","aplay"):
