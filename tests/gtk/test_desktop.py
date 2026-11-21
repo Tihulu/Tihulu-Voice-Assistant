@@ -135,6 +135,17 @@ class DesktopFixture(unittest.TestCase):
             cfg["voices"][lang] = str(model)
         settings.save(cfg, tmp / "models.json")
         self.stack.enter_context(patch.object(settings, "config_path", return_value=tmp / "models.json"))
+        # Profiles and market state live in a private directory per test:
+        # a fixture must never write to the owner's real store, and a saved
+        # profile from one test must not collide with the next.
+        self.profile_home = tempfile.mkdtemp()
+        self.market_home = tempfile.mkdtemp()
+        self.addCleanup(lambda: shutil.rmtree(self.profile_home, ignore_errors=True))
+        self.addCleanup(lambda: shutil.rmtree(self.market_home, ignore_errors=True))
+        self.stack.enter_context(patch.object(profiles, "profile_dir",
+                                              return_value=Path(self.profile_home)))
+        self.stack.enter_context(patch.object(market, "market_dir",
+                                              return_value=Path(self.market_home)))
         self.jan = self.stack.enter_context(patch.object(desktop, "Jan", return_value=self.backend))
         self.stack.enter_context(patch.object(desktop.audio, "listen", side_effect=self.backend.listen))
         self.stack.enter_context(patch.object(desktop.audio, "speak", side_effect=self.backend.speak))
@@ -3044,5 +3055,93 @@ class SpokenTextUITests(DesktopTests):
         while item is not None:
             if hasattr(item, "get_text"):
                 out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+
+class FilesResearchTests(DesktopTests):
+    """A local folder is listed and previewed behind the filesystem policy."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        (self.tmp / "notes.txt").write_text("Benim kelimem mavi.\n", encoding="utf-8")
+        (self.tmp / "pictures").mkdir()
+        (self.tmp / "image.bin").write_bytes(b"\x89PNG\x00\x01")
+
+    def rows(self):
+        out, item = [], self.ui.folder_entries.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def row_named(self, name):
+        for row in self.rows():
+            if row.entry.name == name:
+                return row
+        raise AssertionError("missing entry: " + name)
+
+    def allow_reads(self, decision="allow"):
+        profile = profiles.Profile(
+            id="reader", name="Reader", based_on_mode="LOCAL_ONLY",
+            filesystem_rules=(profiles.Rule("filesystem_read", ("folder",), decision),
+                              profiles.Rule("filesystem_read", ("file",), decision)),
+        ).checked()
+        self.ui.store.save(profile)
+        self.ui.refresh_profiles()
+        self.pick_profile("reader")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.ui.cfg["profile"] == "reader")
+
+    def pick_profile(self, profile_id):
+        for item, entry in self.ui.policy_rows.items():
+            if entry.id == profile_id:
+                self.ui.profile_list.select_row(item)
+                return entry
+        raise AssertionError("missing profile: " + profile_id)
+
+    def test_a_folder_is_listed_folders_first(self):
+        self.allow_reads()
+        folder = self.ui.list_folder(str(self.tmp))
+        self.assertEqual([row.entry.name for row in self.rows()],
+                         ["pictures", "image.bin", "notes.txt"])
+        self.assertIn("3 entries", self.ui.file_note.get_text())
+        self.assertEqual(self.ui.cfg.get("research_root"), str(self.tmp))
+
+    def test_a_text_file_is_previewed_and_a_binary_one_refused(self):
+        self.allow_reads()
+        self.ui.list_folder(str(self.tmp))
+        self.ui.folder_entries.select_row(self.row_named("notes.txt"))
+        text = self.ui.read_selected_file()
+        self.assertEqual(text, "Benim kelimem mavi.")
+        self.assertIn("mavi", self.ui.file_preview.get_text())
+        self.ui.folder_entries.select_row(self.row_named("image.bin"))
+        self.assertIsNone(self.ui.read_selected_file())
+        self.assertEqual(self.ui.file_note.get_text(), "file_not_text")
+
+    def test_a_denied_read_is_a_reason_and_a_receipt(self):
+        self.allow_reads("deny")
+        self.assertIsNone(self.ui.list_folder(str(self.tmp)))
+        self.assertEqual(self.ui.file_note.get_text(), "profile_forbids_filesystem_read")
+        receipts = [row for row in self.log_rows() if getattr(row, "receipt", False)]
+        self.assertIn("Refused by the active profile · list a folder", receipts[0].get_text())
+
+    def test_a_missing_folder_is_a_bounded_reason(self):
+        self.allow_reads()
+        self.assertIsNone(self.ui.list_folder(str(self.tmp / "missing")))
+        self.assertEqual(self.ui.file_note.get_text(), "folder_not_found")
+
+    def test_enter_on_a_row_reads_it(self):
+        self.allow_reads()
+        self.ui.list_folder(str(self.tmp))
+        self.ui.folder_entries.select_row(self.row_named("notes.txt"))
+        self.row_named("notes.txt").emit("activate")
+        self.assertIn("mavi", self.ui.file_preview.get_text())
+
+    def log_rows(self):
+        out, item = [], self.ui.log.get_first_child()
+        while item is not None:
+            out.append(item)
             item = item.get_next_sibling()
         return out

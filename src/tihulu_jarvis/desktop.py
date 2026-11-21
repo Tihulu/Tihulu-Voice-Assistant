@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, attachments, keys, receipts, tasks, web
+from . import a11y, attachments, files, keys, receipts, tasks, web
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -279,6 +279,7 @@ def create_window(app, loop):
             self.set_state("ready",read_error or tr("Open Installed models to connect.","Bağlantı için Kurulu modeller’i aç.","Zum Verbinden Installierte Modelle öffnen."))
             self.bind_keys()
             self.board = tasks.Board()
+            self.build_files_page()
             self.turn_note = ""
             self.build_activity_page()
             self.win.present()
@@ -1423,6 +1424,137 @@ def create_window(app, loop):
             self.refresh_activity()
             self.set_state("ready", tr("Task stopped.", "Görev durduruldu.",
                                        "Aufgabe gestoppt."))
+
+        def build_files_page(self):
+            """A folder the owner chose, listed and previewed behind the policy.
+
+            Nothing is written here, and a preview is bounded text: a binary
+            file is refused before it is decoded.
+            """
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            view = Gtk.ScrolledWindow(vexpand=True)
+            view.set_child(page)
+            self.stack.add_titled(view, "files", tr("Files & Research",
+                                                    "Dosyalar ve Araştırma",
+                                                    "Dateien & Recherche"))
+            row = Gtk.Box(spacing=8)
+            page.append(row)
+            self.folder_root = Gtk.Entry(hexpand=True,
+                                         placeholder_text=tr("A folder on this computer",
+                                                             "Bu bilgisayardaki bir klasör",
+                                                             "Ein Ordner auf diesem Computer"))
+            row.append(self.folder_root)
+            self.folder_root.set_text(self.cfg.get("research_root", ""))
+            self.folder_choose = self.button(row, tr("Choose folder", "Klasör seç",
+                                                     "Ordner wählen"), self.choose_folder)
+            self.folder_list = self.button(row, tr("List folder", "Klasörü listele",
+                                                   "Ordner listen"), self.list_folder)
+            self.folder_entries = Gtk.ListBox()
+            self.folder_entries.connect("row-selected", lambda *_: self.refresh_files_buttons())
+            page.append(self.folder_entries)
+            self.file_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.file_note)
+            self.file_preview = Gtk.Label(xalign=0, wrap=True, selectable=True)
+            page.append(self.file_preview)
+            self.file_read = self.button(page, tr("Read the selected file", "Seçili dosyayı oku",
+                                                  "Ausgewählte Datei lesen"), self.read_selected_file)
+            self.refresh_files_buttons()
+
+        def choose_folder(self):
+            if self.busy:
+                return
+            dialog = Gtk.FileChooserNative.new("Choose a folder to read from", self.win,
+                                               Gtk.FileChooserAction.SELECT_FOLDER,
+                                               "Choose", "Cancel")
+
+            def response(d, res):
+                try:
+                    if res != Gtk.ResponseType.ACCEPT or self.busy:
+                        return
+                    file = d.get_file()
+                    path = file.get_path() if file else None
+                    self.read_folder(path)
+                finally:
+                    d.destroy()
+            dialog.connect("response", response)
+            dialog.show()
+
+        def read_folder(self, path):
+            """Store a chosen folder and list it; nothing is read yet."""
+            try:
+                root = files.checked_root(path)
+                self.cfg["research_root"] = root
+                self.save()
+                self.folder_root.set_text(root)
+                self.list_folder(root)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return None
+            return root
+
+        def list_folder(self, root=None):
+            if self.busy:
+                return
+            root = root or self.folder_root.get_text().strip()
+            try:
+                self.require_tools(("filesystem_read", ("folder",)))
+                folder = files.list_dir(root)
+            except Hold as exc:
+                # A refused or unreadable folder is a bounded reason.
+                if "filesystem_read" in str(exc) or "profile_forbids" in str(exc):
+                    self.receipt("refused", "list a folder (filesystem_read)")
+                self.file_note.set_text(str(exc))
+                return None
+            self.cfg["research_root"] = folder.root
+            self.save()
+            self.folder_root.set_text(folder.root)
+            self.show_folder(folder)
+            self.file_note.set_text(tr("%d entries, folders first." % len(folder.entries),
+                                       "%d girdi, önce klasörler." % len(folder.entries),
+                                       "%d Einträge, Ordner zuerst." % len(folder.entries)))
+            return folder
+
+        def show_folder(self, folder):
+            rows, item = [], self.folder_entries.get_first_child()
+            while item is not None:
+                nxt = item.get_next_sibling()
+                self.folder_entries.remove(item)
+                item = nxt
+            for entry in folder.entries:
+                row = Gtk.ListBoxRow()
+                row.entry = entry
+                caption = entry.name + ("/" if entry.directory else
+                                        " · %d bytes" % entry.size)
+                row.set_child(Gtk.Label(label=caption, xalign=0, wrap=True))
+                row.set_activatable(True)
+                # Enter and Space read the file, exactly like the button.
+                row.connect("activate", lambda *_: self.read_selected_file())
+                self.folder_entries.append(row)
+
+        def refresh_files_buttons(self):
+            row = self.folder_entries.get_selected_row()
+            self.file_preview.set_text("")
+
+        def read_selected_file(self):
+            row = self.folder_entries.get_selected_row()
+            if row is None or self.busy:
+                return None
+            entry = row.entry
+            if entry.directory:
+                return None
+            try:
+                self.require_tools(("filesystem_read", ("file",)))
+                text = files.preview(self.cfg.get("research_root", ""), entry.name)
+            except Hold as exc:
+                if "profile_forbids" in str(exc):
+                    self.receipt("refused", "read a file (filesystem_read)")
+                self.file_note.set_text(str(exc))
+                return None
+            self.file_preview.set_text(text)
+            self.file_note.set_text(tr("Preview of %s" % entry.name,
+                                       "%s önizlemesi" % entry.name,
+                                       "Vorschau von %s" % entry.name))
+            return text
 
         def remember_hosts(self):
             hosts = [h for h in self.catalog_hosts.get_text().split() if h]
