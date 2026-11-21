@@ -10,6 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import catalog_fetch, routing
+from . import locks
 from . import market, profiles, settings
 from .voice import audio
 from .voice.jan import Jan
@@ -56,6 +57,7 @@ def create_window(app, loop):
         def __init__(self, app, loop=None):
             self.loop = loop
             self.confirmations = []
+            self.leases = locks.Leases()
             self.transcribe_runner = None
             self.win = Gtk.ApplicationWindow(application=app, title="TIHULU JARVIS")
             self.win.set_default_size(920, 650)
@@ -1203,7 +1205,10 @@ def create_window(app, loop):
                 def progress(stage):
                     if epoch == self.session.epoch:
                         self.set_state(stage)
-                await audio.speak(speech, progress)
+                # A preview shares the playback lease with a turn, never the
+                # device: a refused lease is a bounded reason.
+                async with self.leases.hold("audio_playback", "preview"):
+                    await audio.speak(speech, progress)
             self.submit(run)
 
         def test_chat(self):
@@ -1408,29 +1413,33 @@ def create_window(app, loop):
                 self.require_tools(("local_audio_device", ("push_to_talk",)))
                 voices = audio.SelectedVoices(self.cfg["voices"])
                 self.finish=asyncio.Event()
-                text=await audio.listen(self.cfg["stt"],self.finish,progress)
+                # The microphone is exclusive: a turn that cannot get the lease
+                # is refused before capture starts, never after it fails.
+                async with self.leases.hold("microphone", "voice-turn-%d" % epoch):
+                    text=await audio.listen(self.cfg["stt"],self.finish,progress)
                 self.session.check(epoch)
                 self.bubble("You",text)
                 self.set_state("thinking")
                 result,speech=await self.session.reply(text,Jan(self.require_endpoint(),self.cfg["llm"]),epoch,voices)
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
-                playback = loop.create_task(audio.speak(speech, progress))
-                self.playback = playback
-                try:
-                    # Stop Speaking preserves the turn. Cancel Turn invalidates
-                    # it, but both paths must await the same playback cleanup.
-                    await asyncio.shield(playback)
-                except asyncio.CancelledError:
-                    self.stop_speaking()
+                async with self.leases.hold("audio_playback", "voice-turn-%d" % epoch):
+                    playback = loop.create_task(audio.speak(speech, progress))
+                    self.playback = playback
                     try:
-                        await playback
+                        # Stop Speaking preserves the turn. Cancel Turn invalidates
+                        # it, but both paths must await the same playback cleanup.
+                        await asyncio.shield(playback)
                     except asyncio.CancelledError:
-                        pass
-                    self.session.check(epoch)
-                finally:
-                    self.playback = None
-                    self.playback_stopping = False
+                        self.stop_speaking()
+                        try:
+                            await playback
+                        except asyncio.CancelledError:
+                            pass
+                        self.session.check(epoch)
+                    finally:
+                        self.playback = None
+                        self.playback_stopping = False
             self.submit(run)
 
         def close(self,*_):
