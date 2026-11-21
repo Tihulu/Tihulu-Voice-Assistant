@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import catalog_fetch, disclosure, routing
-from . import locks, states
+from . import locks, search, states
 from . import market, profiles, settings
 from .voice import audio
 from .voice.jan import Jan
@@ -73,6 +73,7 @@ def create_window(app, loop):
             self.loop = loop
             self.confirmations = []
             self.leases = locks.Leases()
+            self.search_matches = ()
             self.transcribe_runner = None
             self.win = Gtk.ApplicationWindow(application=app, title="TIHULU JARVIS")
             self.win.set_default_size(920, 650)
@@ -116,6 +117,17 @@ def create_window(app, loop):
             self.scroll = Gtk.ScrolledWindow(vexpand=True)
             self.scroll.set_child(self.log)
             chat.append(self.scroll)
+            searchrow = Gtk.Box(spacing=8)
+            self.search_entry = Gtk.Entry(hexpand=True,placeholder_text=tr("Search this conversation…","Bu sohbette ara…","In diesem Gespräch suchen…"))
+            searchrow.append(self.search_entry)
+            self.search_clear = self.button(searchrow,tr("Clear","Temizle","Leeren"),self.clear_search)
+            chat.append(searchrow)
+            self.search_results = Gtk.ListBox()
+            chat.append(self.search_results)
+            self.search_note = Gtk.Label(xalign=0, wrap=True)
+            chat.append(self.search_note)
+            self.search_entry.connect("changed", lambda *_: self.run_search())
+            self.search_results.connect("row-selected", lambda *_: self.show_match())
             entryrow = Gtk.Box(spacing=8)
             self.entry = Gtk.Entry(hexpand=True,placeholder_text=tr("Write a message…","Bir mesaj yaz…","Nachricht schreiben…"))
             entryrow.append(self.entry)
@@ -513,6 +525,52 @@ def create_window(app, loop):
                                  "Cloud-Routen erfordern einen genehmigten Anbieter.")
             self.route_note.set_text(head)
 
+        def run_search(self):
+            """Search the local conversation; results are snippets, bounded.
+
+            Nothing leaves this machine, and the field is disabled while a turn
+            runs so a search can never race a reply.
+            """
+            query = self.search_entry.get_text().strip()
+            rows, item = [], self.search_results.get_first_child()
+            while item is not None:
+                nxt = item.get_next_sibling()
+                self.search_results.remove(item)
+                item = nxt
+            if not query:
+                self.search_note.set_text("")
+                return
+            try:
+                self.search_matches = search.find(self.session.history, query)
+            except Hold as exc:
+                self.search_matches = ()
+                self.search_note.set_text(str(exc))
+                return
+            for index, role, text in self.search_matches:
+                row = Gtk.ListBoxRow()
+                label = Gtk.Label(label="%s · %s" % (role, text), xalign=0, wrap=True)
+                label.set_size_request(420, -1)
+                row.set_child(label)
+                row.match = (index, role, text)
+                self.search_results.append(row)
+            self.search_note.set_text(tr("%d matches for \"%s\"" % (len(self.search_matches), query),
+                                         "\"%s\" için %d eşleşme" % (query, len(self.search_matches)),
+                                         "%d Treffer für \"%s\"" % (len(self.search_matches), query)))
+
+        def show_match(self):
+            """Show the selected match in the detail line, never inline."""
+            row = self.search_results.get_selected_row()
+            if row is None or not hasattr(row, "match"):
+                return
+            index, role, text = row.match
+            self.search_note.set_text(tr("Message %d (%s): %s" % (index + 1, role, text),
+                                         "Mesaj %d (%s): %s" % (index + 1, role, text),
+                                         "Nachricht %d (%s): %s" % (index + 1, role, text)))
+
+        def clear_search(self):
+            self.search_entry.set_text("")
+            self.search_entry.grab_focus()
+
         def refresh_state_row(self):
             """State the live condition in words: local or cloud, microphone,
             privileged tools, a pending approval and connection state."""
@@ -573,12 +631,17 @@ def create_window(app, loop):
 
         def refresh(self):
             connected = self.cfg["llm"] in self.inventory
+            if self.search_entry.get_text().strip():
+                # A turn's reply can match a saved query; keep it honest.
+                self.run_search()
             # The stated condition must be true while a turn runs, not only
             # while the window is idle: "microphone listening" is exactly the
             # state a reader cannot infer from a disabled control.
             self.refresh_route_note()
             self.refresh_disclosure()
             self.refresh_state_row()
+            self.search_entry.set_sensitive(not self.busy)
+            self.search_clear.set_sensitive(not self.busy)
             self.entry.set_sensitive(not self.busy)
             self.send.set_sensitive(not self.busy and connected)
             allowed = getattr(self, "policy", None) is not None and \
