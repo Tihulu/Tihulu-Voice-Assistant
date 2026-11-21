@@ -8,6 +8,7 @@ import asyncio
 import gc
 import hashlib
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -574,6 +575,12 @@ class MarketFixture(DesktopFixture):
         self.addCleanup(lambda: shutil.rmtree(self.market_home, ignore_errors=True))
         patch.object(profiles, "profile_dir", return_value=Path(self.profile_home)).start()
         patch.object(market, "market_dir", return_value=Path(self.market_home)).start()
+        previous_data = os.environ.get("XDG_DATA_HOME")
+        os.environ["XDG_DATA_HOME"] = str(self.market_home)
+        if previous_data is None:
+            self.addCleanup(os.environ.pop, "XDG_DATA_HOME", None)
+        else:
+            self.addCleanup(os.environ.__setitem__, "XDG_DATA_HOME", previous_data)
         self.addCleanup(patch.stopall)
         super().setUp()
 
@@ -1806,8 +1813,8 @@ class CatalogFetchUITests(MarketFixture):
             self.click(self.ui.catalog_fetch_btn)
             self.until(lambda: self.ui.catalog.entries)
         # Sign the fetched document with the owner key; verification then holds.
-        signed = market.sign_catalog(json.dumps(self.document), "fixture-key", now=1.0)
         market.save_key("fixture-key", "shared-secret-for-catalog-signing")
+        signed = market.sign_catalog(json.dumps(self.document), "fixture-key", now=1.0)
         self.ui.load_catalog_text(signed)
         self.assertIn("verified", self.ui.catalog_note.get_text())
         self.pick_entry("fixture-remote")
