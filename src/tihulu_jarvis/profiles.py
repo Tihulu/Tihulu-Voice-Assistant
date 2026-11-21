@@ -17,6 +17,7 @@ import json
 import os
 import re
 import tempfile
+import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -299,6 +300,60 @@ MODE_TEXT = {
 
 
 ENDPOINT_LIMIT = 4096
+
+
+AUDIT_LIMIT = 512
+AUDIT_BYTES = 262144
+
+
+def audit_path(root):
+    return Path(root) / "audit.jsonl"
+
+
+def record_decision(root, profile_id, action, scope, decision, reason, now=0.0):
+    """Append one policy decision. No secret, path or transcript is recorded."""
+    if not isinstance(profile_id, str) or not ID.fullmatch(profile_id):
+        raise Hold("invalid_profile_id")
+    path = audit_path(root)
+    row = {"at": now or time.time(), "profile": profile_id, "action": str(action)[:64],
+           "scope": [str(s)[:64] for s in scope], "decision": str(decision),
+           "reason": str(reason)[:80]}
+    rows = []
+    if path.is_file():
+        try:
+            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+        except (ValueError, OSError):
+            raise Hold("audit_unreadable") from None
+    rows.append(row)
+    if len(rows) > AUDIT_LIMIT:
+        rows = rows[-AUDIT_LIMIT:]
+    text = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in rows)
+    if len(text.encode("utf-8")) > AUDIT_BYTES:
+        raise Hold("audit_too_large")
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="tihulu-audit-", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(text)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, path)
+        tmp = None
+    finally:
+        if tmp:
+            Path(tmp).unlink(missing_ok=True)
+
+
+def read_audit(root, limit=100):
+    """The most recent decisions, oldest first. Never invented."""
+    path = audit_path(root)
+    if not path.is_file():
+        return ()
+    try:
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
+    except (ValueError, OSError):
+        raise Hold("audit_unreadable") from None
+    return tuple(rows[-limit:])
 
 
 def require_tool(profile, action, scope=(), now=0.0):

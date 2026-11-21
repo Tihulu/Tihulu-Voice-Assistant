@@ -5,7 +5,7 @@ on:
                'feat/market-ui', 'feat/mode-endpoint', 'feat/action-enforcement',
                'feat/loopback-transport', 'feat/market-consolidated',
                'feat/transfer-resume', 'feat/market-history', 'feat/update-flow',
-               'feat/queue-persistence', 'feat/catalog-trust', 'feat/deb-packaging']
+               'feat/queue-persistence', 'feat/catalog-trust', 'feat/deb-packaging', 'feat/remote-catalog']
 permissions:
   contents: read
 jobs:
