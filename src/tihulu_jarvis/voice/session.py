@@ -34,7 +34,7 @@ class Session:
         if epoch != self.epoch:
             raise Hold("turn_cancelled")
 
-    async def reply(self, user, jan, epoch, voices=None):
+    async def reply(self, user, jan, epoch, voices=None, on_delta=None):
         self.check(epoch)
         history = self.history
         if voices is not None:
@@ -44,12 +44,16 @@ class Session:
             return done.display_text, done.speech
         decision = route_language(user,self.context)
         message = Message("user", user)
+        # A client that can stream is asked to stream: the same reply, shown as
+        # the server sends it. A client without that capability still answers.
+        streaming = on_delta is not None and callable(getattr(jan, "chat", None))
         for attempt in range(2):
             self.check(epoch)
             system = "Answer naturally in " + LANGUAGES[decision.response_language] + ". Preserve conversation facts. Return only your final answer."
             if attempt:
                 system += " Correct the response language and omit internal analysis."
-            result = await jan((Message("system",system),*history,message))
+            result = await (jan.chat((Message("system",system),*history,message), on_delta=on_delta)
+                            if streaming else jan((Message("system",system),*history,message)))
             self.check(epoch)
             if (isinstance(result,str) and result.strip() and len(result)<=32000
                     and not re.search(r"</?(?:think|analysis)\b",result,re.I)
