@@ -21,7 +21,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-from tihulu_jarvis import catalog_fetch, desktop, market, profiles, settings
+from tihulu_jarvis import a11y, catalog_fetch, desktop, market, profiles, settings
 from tihulu_jarvis.profiles import Profile, Rule
 from tihulu_jarvis.voice.m1 import Hold
 
@@ -2614,3 +2614,54 @@ class StreamingReplyTests(DesktopTests):
         # The spoken reply never streams: synthesis needs one whole answer.
         self.assertEqual(self.bubbles()[-1], "JARVIS\nMerhaba!")
         self.assertTrue(self.backend.speeches)
+
+
+class TextScaleUITests(DesktopTests):
+    """A text scale is one stored token, applied at once, with no motion."""
+
+    def items(self, box):
+        model = box.get_model()
+        return [model[model.iter_nth_child(None, index)][0]
+                for index in range(model.iter_n_children(None))]
+
+    def test_the_stored_scale_is_the_shown_choice(self):
+        self.assertEqual(tuple(self.items(self.ui.text_scale)), ("Normal", "Large"))
+        self.assertEqual(self.ui.text_scale.get_active(), 0)
+        # A stored choice is honoured on the next start, not only when chosen.
+        self.ui.cfg["text_scale"] = "large"
+        self.ui.text_scale.set_active(1)
+        self.until(lambda: a11y.checked(self.ui.cfg.get("text_scale")) == "large")
+
+    def test_a_stored_large_scale_is_shown_at_startup(self):
+        cfg = settings.load()
+        cfg["text_scale"] = "large"
+        settings.save(cfg)
+        self.ui.win.close()
+        self.until(lambda: not self.app.get_windows())
+        self.ui = desktop.create_window(self.app, self.loop)
+        self.until(lambda: self.ui.win.get_mapped())
+        self.assertEqual(self.ui.text_scale.get_active(), 1)
+        self.assertIsNotNone(self.ui.scale_provider)
+
+    def test_a_chosen_scale_is_applied_and_stored(self):
+        self.ui.text_scale.set_active(1)
+        self.until(lambda: self.ui.cfg["text_scale"] == "large")
+        self.assertEqual(desktop.a11y.POINTS[self.ui.cfg["text_scale"]], 1.25)
+        # The provider is replaced, not stacked: one stylesheet at a time.
+        self.assertIsNotNone(self.ui.scale_provider)
+        self.ui.text_scale.set_active(0)
+        self.until(lambda: self.ui.cfg["text_scale"] == "normal")
+        self.assertIsNotNone(self.ui.scale_provider)
+
+    def test_no_scale_writes_motion_into_the_stylesheet(self):
+        for value in ("normal", "large"):
+            with self.subTest(value=value):
+                self.assertEqual(desktop.a11y.motion_words(
+                    desktop.a11y.css(value, desktop.LOOK)), ())
+        self.assertNotIn("transition", desktop.LOOK)
+        self.assertNotIn("animation", desktop.LOOK)
+
+    def test_an_unknown_stored_scale_is_refused_not_hidden(self):
+        with self.assertRaises(Hold):
+            settings.checked({**settings.empty(), "text_scale": "huge"})
+        self.assertEqual(settings.checked({**settings.empty()})["text_scale"], "normal")
