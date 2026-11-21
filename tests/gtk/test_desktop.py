@@ -3183,3 +3183,72 @@ class ReadinessUITests(DesktopTests):
             self.until(lambda: "Audio tools: missing (audio_backend_missing)"
                       in self.readiness())
             self.assertFalse(self.ui.talk.get_sensitive())
+
+
+class SearchHistoryTests(ConversationSearchTests):
+    """Remembered queries are local, bounded and re-runnable."""
+
+    def turn(self):
+        self.connect_model()
+        self.backend.answers.append("Güle güle.")
+        self.text("Merhaba! Benim kelimem mavi.")
+
+    def history_rows(self):
+        out, item = [], self.ui.search_history.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def queries(self):
+        return [row.query for row in self.history_rows()]
+
+    def test_a_query_that_ran_is_remembered(self):
+        self.turn()
+        self.ui.search_entry.set_text("kelimem")
+        self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.assertEqual(self.ui.cfg.get("search_history"), ["kelimem"])
+        self.assertEqual(self.queries(), ["kelimem"])
+        self.assertTrue(self.ui.search_forget.get_sensitive())
+
+    def test_a_refused_query_is_not_remembered(self):
+        self.turn()
+        self.ui.search_entry.set_text("absent-word")
+        self.until(lambda: '"absent-word"' in self.ui.search_note.get_text())
+        # A query that ran but matched nothing was still searched for.
+        self.assertEqual(self.ui.cfg.get("search_history"), ["absent-word"])
+        # A query the client refuses to run leaves no memory behind.
+        self.ui.search_entry.set_text("x" * 200)
+        self.until(lambda: self.ui.search_note.get_text() == "invalid_search_query")
+        self.assertEqual(self.ui.cfg.get("search_history"), ["absent-word"])
+
+    def test_re_asking_moves_a_query_to_the_front(self):
+        self.turn()
+        self.ui.search_entry.set_text("kelimem")
+        self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.ui.search_entry.set_text("mavi")
+        self.until(lambda: '"mavi"' in self.ui.search_note.get_text())
+        self.ui.search_entry.set_text("kelimem")
+        self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.assertEqual(self.queries(), ["kelimem", "mavi"])
+
+    def test_a_remembered_query_re_runs_the_search(self):
+        self.turn()
+        self.ui.search_entry.set_text("kelimem")
+        self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.ui.search_entry.set_text("")
+        self.assertEqual(self.rows(), [])
+        self.history_rows()[0].emit("activate")
+        self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.assertEqual(len(self.rows()), 1)
+
+    def test_forgetting_clears_the_store_not_just_the_row(self):
+        self.turn()
+        self.ui.search_entry.set_text("kelimem")
+        self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.click(self.ui.search_forget)
+        self.until(lambda: not self.history_rows())
+        self.assertEqual(self.ui.cfg.get("search_history"), [])
+        self.assertEqual(settings.load()["search_history"], [])
+        self.assertFalse(self.ui.search_forget.get_sensitive())
+        self.assertFalse(self.ui.search_history_label.get_visible())

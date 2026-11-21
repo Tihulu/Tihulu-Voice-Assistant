@@ -212,3 +212,12 @@ and absent audio tools are stated instead of leaving a Talk button enabled that
 would fail later. The row uses the endpoint the owner is looking at, even before
 it is saved, because a readiness statement about a stale value would be a lie
 about what the next turn would use.
+
+A search that runs is remembered, locally and bounded. The conversation search
+keeps the last queries — at most twenty, no duplicates, the newest first — and
+activating one re-runs it, so a repeated question costs one key. Only a query
+that actually ran is remembered: one the client refuses to run leaves no memory
+behind. Forgetting clears the store rather than hiding the row, the label and
+the button disappear with it, and a stored history is re-validated when settings
+are read, so a corrupt one is refused instead of loaded as a promise of queries
+that cannot be run again.

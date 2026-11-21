@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, attachments, files, keys, readiness, receipts, tasks, web
+from . import a11y, attachments, files, keys, queries, readiness, receipts, tasks, web
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -138,6 +138,20 @@ def create_window(app, loop):
             chat.append(self.search_note)
             self.search_entry.connect("changed", lambda *_: self.run_search())
             self.search_results.connect("row-selected", lambda *_: self.show_match())
+            self.search_history = Gtk.ListBox()
+            chat.append(self.search_history)
+            historyrow = Gtk.Box(spacing=8)
+            chat.append(historyrow)
+            self.search_history_label = Gtk.Label(xalign=0, wrap=True)
+            historyrow.append(self.search_history_label)
+            self.search_history_label.set_text(tr("Recent searches",
+                                                  "Son aramalar",
+                                                  "Letzte Suchen"))
+            self.search_forget = self.button(historyrow, tr("Forget searches",
+                                                            "Aramaları unut",
+                                                            "Suchen vergessen"),
+                                             self.forget_searches)
+            self.refresh_search_history()
             entryrow = Gtk.Box(spacing=8)
             self.entry = Gtk.Entry(hexpand=True,placeholder_text=tr("Write a message…","Bir mesaj yaz…","Nachricht schreiben…"))
             entryrow.append(self.entry)
@@ -785,6 +799,8 @@ def create_window(app, loop):
                 self.search_matches = ()
                 self.search_note.set_text(str(exc))
                 return
+            # Only a query that ran is remembered, and only once it ran.
+            self.remember_search(query)
             for index, role, text in self.search_matches:
                 row = Gtk.ListBoxRow()
                 label = Gtk.Label(label="%s · %s" % (role, text), xalign=0, wrap=True)
@@ -807,6 +823,42 @@ def create_window(app, loop):
             self.search_note.set_text(tr("Message %d (%s): %s" % (index + 1, role, text),
                                          "Mesaj %d (%s): %s" % (index + 1, role, text),
                                          "Nachricht %d (%s): %s" % (index + 1, role, text)))
+
+        def refresh_search_history(self):
+            """Show the remembered queries, newest first, re-runnable.
+
+            The history is local and bounded; forgetting it clears the store,
+            not just the row.
+            """
+            rows, item = [], self.search_history.get_first_child()
+            while item is not None:
+                nxt = item.get_next_sibling()
+                self.search_history.remove(item)
+                item = nxt
+            for query in self.cfg.get("search_history", []):
+                row = Gtk.ListBoxRow()
+                row.query = query
+                row.set_child(Gtk.Label(label=query, xalign=0, wrap=True))
+                row.set_activatable(True)
+                row.connect("activate", lambda *_: self.search_entry.set_text(row.query))
+                self.search_history.append(row)
+            self.search_history_label.set_visible(bool(self.cfg.get("search_history")))
+            self.search_forget.set_sensitive(bool(self.cfg.get("search_history")))
+
+        def remember_search(self, query):
+            """Remember a query that was actually searched for."""
+            try:
+                self.cfg["search_history"] = list(queries.remember(
+                    tuple(self.cfg.get("search_history", [])), query))
+            except Hold:
+                return
+            self.save()
+            self.refresh_search_history()
+
+        def forget_searches(self):
+            self.cfg["search_history"] = list(queries.clear())
+            self.save()
+            self.refresh_search_history()
 
         def clear_search(self):
             self.search_entry.set_text("")
