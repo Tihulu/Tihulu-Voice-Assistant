@@ -50,3 +50,15 @@ class WebTargetTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(Hold):
                     settings.checked({"web_targets": bad})
+
+
+class ForgetTests(unittest.TestCase):
+    def test_forgetting_removes_only_the_choices_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "models.json"
+            settings.save(settings.empty(), path)
+            self.assertTrue(settings.forget(path))
+            self.assertFalse(path.exists())
+            self.assertFalse(settings.forget(path))
+            # A missing file is not an error, and nothing else is touched.
+            self.assertTrue(settings.load(path)["text_scale"] == "normal")

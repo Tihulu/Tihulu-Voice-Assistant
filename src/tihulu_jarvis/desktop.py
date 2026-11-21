@@ -254,26 +254,6 @@ def create_window(app, loop):
             self.transcribe_button = self.button(models, tr("Transcribe a recording","Kayıttan yazıya çevir","Aufnahme transkribieren"), self.transcribe_recording)
             self.test_note = Gtk.Label(xalign=0, wrap=True)
             models.append(self.test_note)
-            # Display preferences: one text scale, and no motion at any size.
-            display = Gtk.Box(spacing=8)
-            models.append(display)
-            display.append(Gtk.Label(label=tr("Text size", "Yazı boyutu", "Textgröße"), xalign=0))
-            self.text_scale = Gtk.ComboBoxText()
-            for value, caption in (("normal", tr("Normal", "Normal", "Normal")),
-                                   ("large", tr("Large", "Büyük", "Groß"))):
-                self.text_scale.append_text(caption)
-            display.append(self.text_scale)
-            # The stored choice is shown before the handler is connected, so a
-            # startup never rewrites the settings file.
-            self.text_scale.set_active(0 if self.cfg.get("text_scale") != "large" else 1)
-            self.text_scale.connect("changed", self.choose_text_scale)
-            self.spoken_text = Gtk.CheckButton(
-                label=tr("Show the text that will be spoken",
-                         "Okunacak metni göster",
-                         "Den vorzulesenden Text zeigen"))
-            display.append(self.spoken_text)
-            self.spoken_text.set_active(bool(self.cfg.get("show_spoken_text")))
-            self.spoken_text.connect("toggled", self.choose_spoken_text)
             self.update_labels()
             self.store = profiles.Store(profiles.profile_dir())
             self.policy_rows = {}
@@ -316,6 +296,7 @@ def create_window(app, loop):
             self.board = tasks.Board()
             self.tools_available = None
             self.build_files_page()
+            self.build_settings_page()
             self.turn_note = ""
             self.build_activity_page()
             self.win.present()
@@ -1025,14 +1006,14 @@ def create_window(app, loop):
 
         def choose_spoken_text(self, *_):
             """Store the choice immediately; a restart is never required."""
-            self.cfg["show_spoken_text"] = bool(self.spoken_text.get_active())
+            self.cfg["show_spoken_text"] = bool(self.settings_spoken.get_active())
             self.save()
 
         def choose_text_scale(self, *_):
             """Store and apply the chosen scale immediately, never at restart."""
             try:
                 self.cfg["text_scale"] = a11y.checked(
-                    "large" if self.text_scale.get_active() == 1 else "normal")
+                    "large" if self.settings_scale.get_active() == 1 else "normal")
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return
@@ -1742,6 +1723,79 @@ def create_window(app, loop):
                                            caption[item.state],
                                            " (%s)" % detail if detail else ""))
             self.readiness_note.set_text("\n".join(lines))
+
+        def build_settings_page(self):
+            """Preferences in one place, with what they touch stated plainly.
+
+            Display choices live here; models, sites and profiles have their
+            own pages, and nothing on this page reaches a device or a provider.
+            """
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            view = Gtk.ScrolledWindow(vexpand=True)
+            view.set_child(page)
+            self.stack.add_titled(view, "settings", tr("Settings", "Ayarlar", "Einstellungen"))
+            row = Gtk.Box(spacing=8)
+            page.append(row)
+            row.append(Gtk.Label(label=tr("Text size", "Yazı boyutu", "Textgröße"), xalign=0))
+            self.settings_scale = Gtk.ComboBoxText()
+            for value, caption in (("normal", tr("Normal", "Normal", "Normal")),
+                                   ("large", tr("Large", "Büyük", "Groß"))):
+                self.settings_scale.append_text(caption)
+            row.append(self.settings_scale)
+            self.settings_scale.set_active(0 if self.cfg.get("text_scale") != "large" else 1)
+            self.settings_scale.connect("changed", self.choose_text_scale)
+            self.settings_spoken = Gtk.CheckButton(
+                label=tr("Show the text that will be spoken",
+                         "Okunacak metni göster",
+                         "Den vorzulesenden Text zeigen"))
+            page.append(self.settings_spoken)
+            self.settings_spoken.set_active(bool(self.cfg.get("show_spoken_text")))
+            self.settings_spoken.connect("toggled", self.choose_spoken_text)
+            page.append(Gtk.Label(label=tr(
+                "Models, approved sites and profiles have their own pages; nothing here reaches a device or a provider.",
+                "Modeller, onaylı siteler ve profillerin kendi sayfaları var; buradaki hiçbir şey aygıta veya sağlayıcıya erişmez.",
+                "Modelle, genehmigte Seiten und Profile haben eigene Seiten; nichts hier erreicht ein Gerät oder einen Anbieter."),
+                xalign=0, wrap=True))
+            forget = Gtk.Box(spacing=8)
+            page.append(forget)
+            self.settings_forget = self.button(forget, tr("Forget local choices",
+                                                          "Yerel seçimleri unut",
+                                                          "Lokale Auswahl vergessen"),
+                                               self.forget_choices)
+            self.settings_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.settings_note)
+            self.settings_note.set_text(tr(
+                "Forgetting removes the stored choices only. Profiles, the audit trail and the market registry are never touched.",
+                "Unutma yalnızca saklı seçimleri kaldırır. Profiller, denetim kaydı ve pazar kaydı asla dokunulmaz.",
+                "Vergessen entfernt nur die gespeicherte Auswahl. Profile, das Audit-Protokoll und die Markt-Registry werden nie berührt."))
+
+        def forget_choices(self):
+            """Erase the stored choices, and state what it did not erase."""
+            try:
+                removed = settings.forget()
+            except Hold as exc:
+                self.settings_note.set_text(str(exc))
+                return
+            # The active profile is kept: it is a policy, not a preference.
+            profile = self.store_active_profile_id()
+            self.cfg = settings.empty()
+            self.cfg["profile"] = profile
+            self.save()
+            self.settings_scale.set_active(0)
+            self.settings_spoken.set_active(False)
+            self.apply_text_scale()
+            self.refresh()
+            outcome = tr("Local choices forgotten." if removed else "No stored choices to forget.",
+                         "Yerel seçimler unutuldu." if removed else "Unutulacak saklı seçim yok.",
+                         "Lokale Auswahl vergessen." if removed else "Keine gespeicherte Auswahl zu vergessen.")
+            self.settings_note.set_text(outcome)
+            self.set_state("ready", outcome)
+
+        def store_active_profile_id(self):
+            try:
+                return self.active_profile().id
+            except Hold:
+                return self.cfg.get("profile", "")
 
         def remember_hosts(self):
             hosts = [h for h in self.catalog_hosts.get_text().split() if h]

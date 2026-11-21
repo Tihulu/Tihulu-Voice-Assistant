@@ -110,6 +110,23 @@ def load(path=None):
         raise Hold("settings_unreadable") from None
 
 
+def forget(path=None):
+    """Remove the stored choices, and say what was left alone.
+
+    Only the local choices file is removed. Profiles, the audit trail and the
+    market registry live elsewhere and are never touched by this call, so
+    forgetting a preference can never erase a decision record.
+    """
+    p = config_path() if path is None else Path(path)
+    try:
+        p.unlink()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise Hold("settings_unwritable") from None
+    return True
+
+
 def save(obj, path=None):
     p = config_path() if path is None else Path(path)
     text = json.dumps(checked(obj), ensure_ascii=False, sort_keys=True)
