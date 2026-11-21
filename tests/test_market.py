@@ -628,3 +628,55 @@ class ResumeTransferTests(unittest.IsolatedAsyncioTestCase):
                                 root=self.tmp)
             with self.assertRaisesRegex(Hold, "model_already_registered"):
                 await transfer.resume(lambda count: None, start=3)
+
+
+class RevisionHistoryTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Registry(self.tmp)
+
+    def card(self, **kw):
+        values = {"model_id": "fixture-model", "display_name": "Fixture", "category": "stt"}
+        values.update(kw)
+        return ModelCard(**values).checked()
+
+    def test_revisions_are_kept_and_restorable(self):
+        first = self.store.save_card(self.card(display_name="First"))
+        second = self.store.save_card(self.card(display_name="Second"))
+        self.assertEqual(first.revision, 0)
+        self.assertEqual(second.revision, 1)
+        self.assertEqual(self.store.card("fixture-model").display_name, "Second")
+        history = self.store.history("fixture-model")
+        self.assertEqual([c.revision for c in history], [0])
+        self.assertEqual(history[0].display_name, "First")
+        restored = self.store.rollback("fixture-model", 0)
+        self.assertEqual(restored.revision, 2)
+        self.assertEqual(self.store.card("fixture-model").display_name, "First")
+        self.assertEqual(len(self.store.history("fixture-model")), 2)
+
+    def test_an_unchanged_card_is_not_a_new_revision(self):
+        saved = self.store.save_card(self.card())
+        again = self.store.save_card(self.card())
+        self.assertEqual(again.revision, 0)
+        self.assertEqual(saved, again)
+        self.assertEqual(self.store.history("fixture-model"), ())
+
+    def test_rollback_of_an_unknown_revision_is_refused(self):
+        self.store.save_card(self.card())
+        with self.assertRaisesRegex(Hold, "revision_not_found"):
+            self.store.rollback("fixture-model", 7)
+
+    def test_history_is_empty_and_bounded(self):
+        self.assertEqual(self.store.history("missing"), ())
+        for index in range(Registry.HISTORY_LIMIT + 4):
+            self.store.save_card(self.card(display_name="Revision %d" % index))
+        self.assertEqual(len(self.store.history("fixture-model")), Registry.HISTORY_LIMIT)
+        with self.assertRaisesRegex(Hold, "invalid_model_id"):
+            self.store.history("bad/id")
+
+    def test_history_survives_a_reopen(self):
+        self.store.save_card(self.card(display_name="First"))
+        self.store.save_card(self.card(display_name="Second"))
+        again = Registry(self.tmp)
+        self.assertEqual([c.display_name for c in again.history("fixture-model")], ["First"])
+        self.assertEqual(again.card("fixture-model").display_name, "Second")

@@ -1795,3 +1795,41 @@ class ResumeQueueTests(DownloadFixture):
         self.assertEqual(self.ui.market.card("fixture-download").state, "CANCELLED")
         self.assertFalse(self.ui.download_resume.get_sensitive())
         self.assertIn("CANCELLED", self.download_rows()[0])
+
+
+class RevisionHistoryUITests(MarketFixture):
+    """Item history is real registry data; a rollback is explicit."""
+
+    def revise(self, model_id, name):
+        card = self.ui.market.card(model_id)
+        self.ui.market.save_card(market.replace(card, display_name=name))
+
+    def test_a_rollback_restores_the_previous_entry(self):
+        self.weights("fixture-stt.bin").write_bytes(b"synthetic weights fixture\n")
+        card = self.ui.register_choice("stt", str(self.weights("fixture-stt.bin")))
+        self.ui.market_filter.set_active(0)
+        self.pick_card(card.model_id)
+        self.assertFalse(self.ui.market_rollback.get_sensitive())
+        self.revise(card.model_id, "Renamed once")
+        self.revise(card.model_id, "Renamed twice")
+        self.assertEqual(self.ui.market.card(card.model_id).display_name, "Renamed twice")
+        self.ui.refresh_market_buttons()
+        self.assertTrue(self.ui.market_rollback.get_sensitive())
+        self.click(self.ui.market_rollback)
+        self.until(lambda: self.ui.market.card(card.model_id).display_name == "Renamed once")
+        self.assertEqual(self.ui.market.card(card.model_id).revision, 3)
+        # The rollback itself is a revision, so the replaced entry is kept too.
+        self.assertEqual(len(self.ui.market.history(card.model_id)), 3)
+        self.assertEqual(self.ui.status.get_text(), "Previous revision restored.")
+        self.assertIn("Renamed once", self.rows()[0])
+
+    def test_rollback_without_history_stays_refused(self):
+        self.ui.market.save_card(market.ModelCard(
+            model_id="fixture-lonely", display_name="Lonely", category="llm").checked())
+        self.ui.market_filter.set_active(1)
+        self.pick_card("fixture-lonely")
+        self.assertFalse(self.ui.market_rollback.get_sensitive())
+        # Even when forced, the honest reason is reported and nothing changes.
+        self.ui.rollback_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "revision_not_found")
+        self.assertEqual(self.ui.market.card("fixture-lonely").display_name, "Lonely")
