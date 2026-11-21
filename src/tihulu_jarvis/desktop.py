@@ -55,6 +55,7 @@ def create_window(app, loop):
         def __init__(self, app, loop=None):
             self.loop = loop
             self.confirmations = []
+            self.transcribe_runner = None
             self.win = Gtk.ApplicationWindow(application=app, title="TIHULU JARVIS")
             self.win.set_default_size(920, 650)
             self.session, self.inventory = Session(), ()
@@ -133,6 +134,7 @@ def create_window(app, loop):
                     hear = self.button(row, tr("Preview","Dinle","Anhören"), lambda k=key:self.preview(k))
                     self.previews[hear] = key
             self.test_chat_button = self.button(models, tr("Test selected model","Seçilen modeli dene","Ausgewähltes Modell testen"), self.test_chat)
+            self.transcribe_button = self.button(models, tr("Transcribe a recording","Kayıttan yazıya çevir","Aufnahme transkribieren"), self.transcribe_recording)
             self.test_note = Gtk.Label(xalign=0, wrap=True)
             models.append(self.test_note)
             self.update_labels()
@@ -450,10 +452,12 @@ def create_window(app, loop):
             self.finish_btn.set_sensitive(self.stage=="listening" and self.finish is not None)
             self.cancel.set_sensitive(self.busy)
             self.hard.set_sensitive(self.busy)
-            for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,*self.previews):
+            for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,
+                      self.transcribe_button,*self.previews):
                 w.set_sensitive(not self.busy)
             if not self.busy:
                 self.test_chat_button.set_sensitive(connected)
+                self.transcribe_button.set_sensitive(connected and bool(self.cfg["stt"]))
                 for widget, lang in self.previews.items():
                     # A preview speaks only the locale that is actually selected.
                     widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
@@ -1196,6 +1200,42 @@ def create_window(app, loop):
                 return self.store.load(self.cfg["profile"]).checked()
             except (Hold, KeyError):
                 raise Hold("no_active_profile") from None
+
+        def transcribe_recording(self):
+            if self.busy or not self.cfg["stt"]:
+                self.set_state("ready", "select_local_model")
+                return
+            dialog=Gtk.FileChooserNative.new("Select a recording to transcribe", self.win,Gtk.FileChooserAction.OPEN,"Select","Cancel")
+            filt=Gtk.FileFilter()
+            filt.add_pattern("*.wav")
+            dialog.add_filter(filt)
+            def response(d, res):
+                try:
+                    if res!=Gtk.ResponseType.ACCEPT or self.busy:
+                        return
+                    file=d.get_file()
+                    p=file.get_path() if file else None
+                    self.run_transcribe(p)
+                finally:
+                    d.destroy()
+            dialog.connect("response",response)
+            dialog.show()
+
+        def run_transcribe(self, path):
+            """Transcribe an owner-supplied recording; nothing is captured here."""
+            try:
+                self.set_state("ready", "transcribing")
+                raw = self.loop.run_until_complete(
+                    audio.transcribe(self.cfg["stt"], path, runner=self.transcribe_runner))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return None
+            except Exception:
+                self.set_state("ready", "local_operation_failed")
+                return None
+            self.bubble("Recording", raw)
+            self.set_state("ready", "transcribed")
+            return raw
 
         def require_tools(self, *requests):
             """Refuse an action the active profile denies, at the moment it runs.
