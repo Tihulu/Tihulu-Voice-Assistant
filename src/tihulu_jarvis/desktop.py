@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, attachments
+from . import a11y, attachments, keys
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -269,6 +269,7 @@ def create_window(app, loop):
                 read_error = (read_error + " " if read_error else "") + str(exc)
             self.win.connect("close-request",self.close)
             self.set_state("ready",read_error or tr("Open Installed models to connect.","Bağlantı için Kurulu modeller’i aç.","Zum Verbinden Installierte Modelle öffnen."))
+            self.bind_keys()
             self.win.present()
 
         def apply_text_scale(self):
@@ -291,6 +292,56 @@ def create_window(app, loop):
                 # A scale the client cannot honour is a bounded reason.
                 self.scale_provider = None
                 self.status.set_text("invalid_text_scale")
+
+        def bind_keys(self):
+            """Bind the stated shortcuts, and record what was bound.
+
+            A binding is never silent: the table lives in ``keys`` and is
+            exposed here so a test can assert it, and a control that does not
+            exist yet is skipped rather than bound to nothing.
+            """
+            self.shortcuts = []
+            targets = {"entry": self.entry, "search": self.search_entry,
+                       "window": self.win}
+            for name, caption, target, trigger, mods in keys.BINDINGS:
+                widget = targets.get(target)
+                if widget is None:
+                    continue
+                controller = Gtk.ShortcutController()
+                controller.set_scope(Gtk.ShortcutScope.GLOBAL)
+                controller.add_shortcut(Gtk.Shortcut(
+                    trigger=Gtk.ShortcutTrigger.parse_string(trigger),
+                    action=Gtk.CallbackAction.new(getattr(self, "run_" + name))))
+                widget.add_controller(controller)
+                self.shortcuts.append(name)
+
+        def run_send(self, *_):
+            """Send, but never while a turn is running or the field is empty."""
+            if self.busy or not self.entry.get_text().strip():
+                return True
+            self.send_text()
+            return True
+
+        def run_focus_search(self, *_):
+            self.search_entry.grab_focus()
+            return True
+
+        def run_cancel_turn(self, *_):
+            if self.busy:
+                self.interrupt(False)
+            elif self.search_entry.get_text().strip():
+                self.clear_search()
+            return True
+
+        def run_hard_stop(self, *_):
+            if self.busy:
+                self.interrupt(True)
+            return True
+
+        def run_attach(self, *_):
+            if not self.busy:
+                self.attach_file()
+            return True
 
         @staticmethod
         def button(parent, label, callback):
@@ -711,6 +762,8 @@ def create_window(app, loop):
                 label.set_size_request(420, -1)
                 row.set_child(label)
                 row.match = (index, role, text)
+                row.set_activatable(True)
+                row.connect("activate", lambda *_: self.show_match())
                 self.search_results.append(row)
             self.search_note.set_text(tr("%d matches for \"%s\"" % (len(self.search_matches), query),
                                          "\"%s\" için %d eşleşme" % (query, len(self.search_matches)),
@@ -967,6 +1020,8 @@ def create_window(app, loop):
                     card.compatibility_status, card.state), xalign=0, wrap=True)
                 item = Gtk.ListBoxRow()
                 item.set_child(label)
+                item.set_activatable(True)
+                item.connect("activate", lambda *_: self.use_selected_card())
                 self.market_list.append(item)
                 self.market_row_ids[item] = card.model_id
             self.market_note.set_text(tr(

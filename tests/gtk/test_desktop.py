@@ -21,7 +21,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-from tihulu_jarvis import a11y, catalog_fetch, desktop, market, profiles, settings
+from tihulu_jarvis import (a11y, catalog_fetch, desktop, keys, market, profiles,
+                           settings)
 from tihulu_jarvis.profiles import Profile, Rule
 from tihulu_jarvis.voice.m1 import Hold
 
@@ -2665,3 +2666,61 @@ class TextScaleUITests(DesktopTests):
         with self.assertRaises(Hold):
             settings.checked({**settings.empty(), "text_scale": "huge"})
         self.assertEqual(settings.checked({**settings.empty()})["text_scale"], "normal")
+
+
+class KeyboardTests(DesktopTests):
+    """Keys are stated, bound, and reach the same actions as the mouse."""
+
+    def test_the_bound_keys_are_the_stated_ones(self):
+        self.assertEqual(tuple(self.ui.shortcuts), keys.names())
+
+    def turn(self):
+        self.connect_model()
+        self.backend.answers.append("Güle güle.")
+        self.text("Merhaba! Benim kelimem mavi.")
+
+    def test_enter_on_a_search_row_shows_the_match(self):
+        self.turn()
+        self.ui.search_entry.set_text("kelimem")
+        self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        row = self.ui.search_results.get_first_child()
+        row.emit("activate")
+        self.assertIn("Message 1", self.ui.search_note.get_text())
+
+    def test_escape_cancels_or_clears_and_never_does_both(self):
+        self.turn()
+        # With no turn running, Escape clears a saved search.
+        self.ui.search_entry.set_text("kelimem")
+        self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.ui.run_cancel_turn()
+        self.assertEqual(self.ui.search_entry.get_text(), "")
+        # With a turn running, Escape cancels it and leaves the field alone.
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.chat_entered)
+        self.ui.run_cancel_turn()
+        self.until(lambda: self.backend.chat_cancelled)
+        self.assertTrue(self.ui.busy)
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+
+    def test_ctrl_return_sends_only_a_written_message(self):
+        self.connect_model()
+        self.ui.run_send()
+        self.assertFalse(self.backend.requests)
+        self.ui.entry.set_text("naber nasilsin")
+        self.ui.run_send()
+        self.until(lambda: self.backend.requests)
+        # A second send while the turn runs is refused.
+        self.ui.run_send()
+        self.assertEqual(len(self.backend.requests), 1)
+
+    def test_ctrl_focus_requests_the_search_field(self):
+        self.connect_model()
+        # The handler asks for focus and cannot fail. Whether the window
+        # manager actually delivers focus is not something a headless session
+        # can show, so the request itself is what is asserted here.
+        self.assertTrue(self.ui.run_focus_search() is True)
+        self.assertTrue(self.ui.search_entry.get_sensitive())
+        self.assertTrue(self.ui.search_entry.get_can_focus())

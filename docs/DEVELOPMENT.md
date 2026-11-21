@@ -140,3 +140,15 @@ switch: no scale writes a transition, an animation or a transform, so the
 interface has none at any size, and a test keeps that true. A stored scale the
 client cannot honour is refused when settings are read, never quietly swapped
 for a default, and the style provider is replaced rather than stacked.
+
+Keyboard navigation is a stated table, not a surprise. Five bindings are
+declared in `keys` — Ctrl+Return sends a written message, Ctrl+F focuses the
+conversation search, Escape cancels a running turn or clears a saved search,
+Ctrl+Escape stops everything, Ctrl+O opens the attachment chooser — and the
+client records which of them it actually bound, so a test can assert the table
+without simulating a keyboard. Escape never does two things at once: it
+cancels a turn when one is running and clears a saved search otherwise. The
+conversation search rows and the market cards are activatable, so Enter and
+Space run the same handler as clicking them. Delivering focus itself depends on
+the window manager, which a headless session cannot show; that part is physical
+acceptance.
