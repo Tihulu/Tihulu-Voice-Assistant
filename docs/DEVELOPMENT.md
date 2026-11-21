@@ -237,3 +237,9 @@ runs, so a stop that would do nothing is never offered as if it would. The
 cancellation itself is unchanged — it invalidates the turn and waits for the
 cleanup — and the tests assert that the topbar button, the composer button and
 the durability of that path all agree.
+
+The topbar counts the queue from the board itself: how many tasks are running
+and which devices they hold, so a busy microphone or output is explained rather
+than merely shown as a number. The count follows the leases as they are taken
+and released — a voice turn names the microphone while it captures and nothing
+after the capture ends — and an idle window says idle rather than zero busy.
