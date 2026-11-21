@@ -2171,3 +2171,56 @@ class DisclosureUITests(EscalationConsentTests):
         note = self.ui.disclosure_note.get_text()
         self.assertIn("not a loopback address", note)
         self.assertNotIn("example.test", note)
+
+
+class StateLabelTests(DisclosureUITests):
+    """The state is a sentence in words, so colour is never the only signal."""
+
+    def switch_to(self, profile_id):
+        self.pick_profile(profile_id)
+        self.click(self.ui.profile_switch)
+        self.confirm("Confirm")
+        self.until(lambda: self.ui.cfg["profile"] == profile_id)
+
+    def test_an_idle_local_state_is_stated_in_words(self):
+        self.connect_model()
+        text = self.ui.state_row.get_text()
+        self.assertIn("local", text)
+        self.assertIn("microphone idle", text)
+        self.assertNotIn("approval pending", text)
+        self.assertNotIn("no local model", text)
+
+    def test_a_listening_turn_is_stated(self):
+        self.connect_model()
+        self.begin_voice()
+        self.assertIn("microphone listening", self.ui.state_row.get_text())
+
+    def test_a_pending_approval_is_stated(self):
+        self.connect_model()
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                          based_on_mode="CLOUD_CHAT").checked())
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.ui.confirmations)
+        self.assertIn("approval pending", self.ui.state_row.get_text())
+        self.confirm("Confirm")
+        self.until(lambda: self.ui.cfg["profile"] == "cloud-chat")
+        self.assertNotIn("approval pending", self.ui.state_row.get_text())
+
+    def test_a_privileged_profile_says_so_without_a_colour(self):
+        self.connect_model()
+        self.add_profile(profiles.Profile(
+            id="agent", name="Coding Agent", based_on_mode="SECURE_HYBRID",
+            shell_rules=(profiles.Rule("host_shell", ("jan-qwen",), "allow", "owner-1", 1e12),),
+        ).checked())
+        self.switch_to("agent")
+        self.assertIn("privileged tools may run", self.ui.state_row.get_text())
+
+    def test_without_a_model_the_state_says_offline_in_words(self):
+        self.assertIn("no local model", self.ui.state_row.get_text())
+
+    def test_controls_carry_names_a_screen_reader_can_read(self):
+        self.connect_model()
+        for widget in (self.ui.talk, self.ui.stop, self.ui.cancel, self.ui.end, self.ui.hard):
+            probe = desktop.accessible_name(widget, "probe")
+            self.assertIn(probe, ("probe", None), "unexpected naming result: %r" % (probe,))

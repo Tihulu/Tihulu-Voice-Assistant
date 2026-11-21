@@ -10,7 +10,7 @@ from dataclasses import replace
 from pathlib import Path
 
 from . import catalog_fetch, disclosure, routing
-from . import locks
+from . import locks, states
 from . import market, profiles, settings
 from .voice import audio
 from .voice.jan import Jan
@@ -27,6 +27,21 @@ def _gtk():
         raise SystemExit("GTK 4 with PyGObject is required for the desktop client.")
 
     return Gio, GLib, Gtk
+
+
+def accessible_name(widget, text):
+    """Give a control a screen-reader name when the platform offers one.
+
+    A name is a property, not a promise: where the GTK build cannot set it the
+    control is left exactly as it was, and the state row below carries the same
+    words for a sighted reader.
+    """
+    try:
+        from gi.repository import Gtk
+        widget.update_property([Gtk.AccessibleProperty.LABEL], [text])
+    except (ImportError, ValueError, TypeError, AttributeError):
+        return None
+    return text
 
 
 @contextmanager
@@ -87,6 +102,10 @@ def create_window(app, loop):
             top.append(local)
             self.status = Gtk.Label(xalign=0, wrap=True)
             root.append(self.status)
+            # The state is stated in words, never in colour alone: a person who
+            # cannot see the accent colour reads the same condition here.
+            self.state_row = Gtk.Label(xalign=0, wrap=True)
+            root.append(self.state_row)
             self.stack = Gtk.Stack(vexpand=True)
             tabs = Gtk.StackSwitcher(stack=self.stack)
             root.append(tabs)
@@ -113,6 +132,25 @@ def create_window(app, loop):
             self.cancel = self.button(controls,tr("Cancel turn","Turu iptal et","Antwort abbrechen"),lambda:self.interrupt(False))
             self.end = self.button(controls,tr("End conversation","Sohbeti bitir","Gespräch beenden"),lambda:self.interrupt(True))
             self.hard = self.button(controls,tr("Hard stop","Tümünü durdur","Alles stoppen"),lambda:self.interrupt(False))
+            for widget, caption in ((self.talk, tr("Start listening on the microphone",
+                                                   "Mikrofonda dinlemeyi başlat",
+                                                   "Zuhören mit dem Mikrofon starten")),
+                                    (self.finish_btn, tr("Finish the recording",
+                                                         "Kaydı bitir",
+                                                         "Aufnahme beenden")),
+                                    (self.stop, tr("Stop speaking the reply",
+                                                   "Yanıtı okumayı durdur",
+                                                   "Antwort nicht mehr vorlesen")),
+                                    (self.cancel, tr("Cancel the current turn",
+                                                     "Geçerli turu iptal et",
+                                                     "Aktuelle Runde abbrechen")),
+                                    (self.end, tr("End this conversation",
+                                                  "Bu sohbeti bitir",
+                                                  "Dieses Gespräch beenden")),
+                                    (self.hard, tr("Stop everything now",
+                                                   "Her şeyi şimdi durdur",
+                                                   "Alles sofort stoppen"))):
+                accessible_name(widget, caption)
             models = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=8)
             view = Gtk.ScrolledWindow(vexpand=True)
             view.set_child(models)
@@ -339,12 +377,14 @@ def create_window(app, loop):
                         lambda: self.apply_escalation(target, dialog))
             dialog.connect("close-request", lambda *_: self.forget_confirmation(dialog) or False)
             self.confirmations.append(dialog)
+            self.refresh_state_row()
             dialog.present()
             return dialog
 
         def forget_confirmation(self, dialog):
             if dialog in self.confirmations:
                 self.confirmations.remove(dialog)
+            self.refresh_state_row()
             return False
 
         def apply_escalation(self, target, dialog):
@@ -473,6 +513,30 @@ def create_window(app, loop):
                                  "Cloud-Routen erfordern einen genehmigten Anbieter.")
             self.route_note.set_text(head)
 
+        def refresh_state_row(self):
+            """State the live condition in words: local or cloud, microphone,
+            privileged tools, a pending approval and connection state."""
+            try:
+                data = disclosure.facts(self.active_profile(), self.url.get_text().strip())
+                grants = profiles.granted(self.active_profile())
+            except Hold:
+                self.state_row.set_text("")
+                return
+            words = states.tokens(data, self.stage, grants,
+                                  bool(self.confirmations),
+                                  self.cfg["llm"] in self.inventory)
+            caption = {"local": tr("local", "yerel", "lokal"),
+                       "cloud": tr("cloud permitted", "buluta izinli", "Cloud erlaubt"),
+                       "listening": tr("microphone listening", "mikrofon dinliyor", "Mikrofon hört zu"),
+                       "transcribing": tr("microphone transcribing", "mikrofon yazıya çeviriyor", "Mikrofon transkribiert"),
+                       "idle": tr("microphone idle", "mikrofon boşta", "Mikrofon untätig"),
+                       "privileged_tool": tr("privileged tools may run", "ayrıcalıklı araçlar çalabilir", "Privilegierte Werkzeuge können laufen"),
+                       "approval_pending": tr("approval pending", "onay bekliyor", "Bestätigung ausstehend"),
+                       "offline": tr("no local model", "yerel model yok", "kein lokales Modell")}
+            text = tr("State: ", "Durum: ", "Zustand: ") + " · ".join(
+                caption.get(token, token) for token in words)
+            self.state_row.set_text(text)
+
         def refresh_disclosure(self):
             """State the privacy boundary of a message before it is written.
 
@@ -509,6 +573,12 @@ def create_window(app, loop):
 
         def refresh(self):
             connected = self.cfg["llm"] in self.inventory
+            # The stated condition must be true while a turn runs, not only
+            # while the window is idle: "microphone listening" is exactly the
+            # state a reader cannot infer from a disabled control.
+            self.refresh_route_note()
+            self.refresh_disclosure()
+            self.refresh_state_row()
             self.entry.set_sensitive(not self.busy)
             self.send.set_sensitive(not self.busy and connected)
             allowed = getattr(self, "policy", None) is not None and \
@@ -526,8 +596,6 @@ def create_window(app, loop):
             if not self.busy:
                 self.test_chat_button.set_sensitive(connected)
                 self.transcribe_button.set_sensitive(connected and bool(self.cfg["stt"]))
-                self.refresh_route_note()
-                self.refresh_disclosure()
                 for widget, lang in self.previews.items():
                     # A preview speaks only the locale that is actually selected.
                     widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
