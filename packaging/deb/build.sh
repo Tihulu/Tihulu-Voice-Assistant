@@ -3,6 +3,11 @@
 set -eu
 root=$(cd "$(dirname "$0")/../.." && pwd)
 work=${1:-"$root/.release-work/deb"}
+wheels=${2:-"$root/.release-work/dist"}
+if [ ! -d "$wheels" ]; then
+    echo "no wheel directory: $wheels" >&2
+    exit 2
+fi
 rm -rf "$work"
 mkdir -p "$work/DEBIAN" "$work/usr/share/tihulu-jarvis"
 cp "$root/packaging/deb/control" "$work/DEBIAN/control"
@@ -11,7 +16,7 @@ cp "$root/packaging/deb/postinst" "$work/DEBIAN/postinst"
 cp "$root/packaging/deb/prerm" "$work/DEBIAN/prerm"
 chmod 0755 "$work/DEBIAN/postinst" "$work/DEBIAN/prerm"
 python3 -m venv "$work/.venv"
-"$work/.venv/bin/pip" install -q --no-index --find-links "$root/.release-work/dist" tihulu-jarvis
+"$work/.venv/bin/pip" install -q --no-index --find-links "$wheels" tihulu-jarvis
 "$work/.venv/bin/pip" uninstall -q -y pip setuptools 2>/dev/null || true
 rm -rf "$work/.venv/lib/python"*/site-packages/*.dist-info/RECORD.jws || true
 mv "$work/.venv" "$work/usr/share/tihulu-jarvis/venv"

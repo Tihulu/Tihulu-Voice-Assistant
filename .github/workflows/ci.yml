@@ -106,7 +106,7 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
-          sh packaging/deb/build.sh
+          sh packaging/deb/build.sh .release-work/deb dist
           dpkg-deb --info .release-work/tihulu-jarvis.deb | grep -E "Package:|Version:|Architecture:|Depends:"
           dpkg-deb --contents .release-work/tihulu-jarvis.deb | awk '{print $6}' | sed 's|^\./|/|' > .release-work/deb-files.txt
           grep -qE "^/usr/bin/tihulu-jarvis$" .release-work/deb-files.txt
