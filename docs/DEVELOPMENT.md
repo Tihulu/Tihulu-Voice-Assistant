@@ -22,3 +22,10 @@ redirect and is bounded to the catalog size limit. An unverified catalog may be
 browsed and inspected; only a catalog verified against an owner-managed key can
 add entries to the registry, and only with the owner's separate download
 approval. Tests inject the transport, so no test opens a socket.
+
+Policy decisions are audited locally: every tool-rule and endpoint decision made
+by the client is appended to a bounded, append-only log in the profile store.
+Entries record time, profile, action, scope, decision and reason only — no
+secret, path or transcript. The audit view is on the Profiles page and updates
+after each decision. A partial or unreadable log is a bounded reason, never a
+silent gap; it is never deleted by the client.

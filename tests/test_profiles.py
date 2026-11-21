@@ -289,3 +289,35 @@ class ActionEnforcementTests(unittest.TestCase):
     def test_a_global_law_is_never_granted_by_a_rule(self):
         with self.assertRaisesRegex(Hold, "global_deny"):
             profiles.require_tool(self.profile(), "credential_material_in_profile_data", ("any",))
+
+
+class AuditTrailTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+
+    def test_decisions_are_appended_and_bounded(self):
+        profiles.record_decision(self.tmp, "local-only", "local_audio_device", ("push_to_talk",), "allow", "rule", now=1.0)
+        profiles.record_decision(self.tmp, "local-only", "host_shell", ("bridge",), "deny", "profile_forbids_host_shell", now=2.0)
+        rows = profiles.read_audit(self.tmp)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0]["decision"], "allow")
+        self.assertEqual(rows[1]["reason"], "profile_forbids_host_shell")
+        self.assertEqual(rows[1]["scope"], ["bridge"])
+        for index in range(profiles.AUDIT_LIMIT + 20):
+            profiles.record_decision(self.tmp, "local-only", "local_audio_device", ("push_to_talk",), "allow", "rule", now=3.0 + index)
+        self.assertEqual(len(profiles.read_audit(self.tmp, profiles.AUDIT_LIMIT)), profiles.AUDIT_LIMIT)
+
+    def test_an_empty_or_broken_log_is_honest(self):
+        self.assertEqual(profiles.read_audit(self.tmp), ())
+        profiles.audit_path(self.tmp).write_text("{not json", encoding="utf-8")
+        with self.assertRaisesRegex(Hold, "audit_unreadable"):
+            profiles.read_audit(self.tmp)
+
+    def test_the_log_carries_no_private_material(self):
+        profiles.record_decision(self.tmp, "local-only", "local_audio_device", ("push_to_talk",), "deny", "profile_forbids_local_audio_device", now=9.0)
+        text = profiles.audit_path(self.tmp).read_text(encoding="utf-8")
+        self.assertNotIn("/home/", text)
+        self.assertNotIn("secret", text)
+        self.assertIn("profile_forbids_local_audio_device", text)
+        with self.assertRaisesRegex(Hold, "invalid_profile_id"):
+            profiles.record_decision(self.tmp, "bad/id", "local_audio_device", (), "deny", "reason")
