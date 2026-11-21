@@ -2451,3 +2451,75 @@ class RouteTableTests(MarketFixture):
         self.until(lambda: self.ui.cfg["profile"] == "reader")
         self.assertIn("fixture-chat on this computer", self.ui.route_rows["llm"].get_text())
         self.assertIn("never routes to a provider", self.ui.route_note.get_text())
+
+
+class AuditFilterUITests(AuditTrailUITests):
+    """The audit view filters what the log holds, and says when nothing matches."""
+
+    def items(self, box):
+        model = box.get_model()
+        return [model[model.iter_nth_child(None, index)][0]
+                for index in range(model.iter_n_children(None))]
+
+    def choose(self, box, value):
+        self.choose_index(box, self.items(box).index(value))
+
+    def choose_index(self, box, index):
+        box.set_active(index)
+
+    def audit_seed(self):
+        """One allowed and one denied decision, in the order they happened."""
+        self.connect_model()
+        self.ui.require_tools(("local_audio_device", ("push_to_talk",)))
+        self.ui.url.set_text("https://provider.example/v1")
+        with self.assertRaises(Exception):
+            self.ui.require_endpoint()
+        self.until(lambda: "deny" in self.ui.audit_list.get_text())
+
+    def test_the_filter_boxes_offer_only_what_the_log_olds(self):
+        self.audit_seed()
+        self.assertEqual(tuple(self.items(self.ui.audit_action))[0], "all")
+        for value in ("endpoint", "local_audio_device"):
+            self.assertIn(value, self.items(self.ui.audit_action))
+        self.assertEqual(tuple(self.items(self.ui.audit_decision)),
+                         ("all", "allow", "deny", "shown"))
+
+    def test_filtering_narrows_the_rows_to_the_chosen_action(self):
+        self.audit_seed()
+        self.choose(self.ui.audit_action, "endpoint")
+        self.until(lambda: "local_audio_device" not in self.ui.audit_list.get_text())
+        # Discovery writes an allowed endpoint decision, so both outcomes of
+        # this action remain; the audio decision is gone.
+        self.assertIn("endpoint", self.ui.audit_list.get_text())
+        self.assertIn("deny", self.ui.audit_list.get_text())
+        self.assertIn("allow", self.ui.audit_list.get_text())
+
+    def test_a_filter_that_matches_nothing_says_so(self):
+        self.audit_seed()
+        self.choose(self.ui.audit_decision, "shown")
+        self.until(lambda: self.ui.audit_list.get_text()
+                   == "No decision matches this filter.")
+
+    def test_an_empty_log_is_different_from_a_filter_with_no_match(self):
+        self.assertEqual(self.ui.audit_list.get_text(),
+                         "No policy decisions recorded yet.")
+
+    def test_a_filter_survives_new_decisions_and_narrows_them(self):
+        self.audit_seed()
+        self.choose(self.ui.audit_decision, "deny")
+        self.until(lambda: "allow" not in self.ui.audit_list.get_text())
+        # A new allowed decision does not clear the filter: the rows stay denied.
+        self.ui.url.set_text("http://127.0.0.1:9876/v1")
+        self.ui.require_endpoint()
+        self.until(lambda: "mode_policy" in self.ui.audit_list.get_text()
+                   or "allow" not in self.ui.audit_list.get_text())
+        self.assertIn("deny", self.ui.audit_list.get_text())
+        self.assertNotIn("mode_policy", self.ui.audit_list.get_text())
+
+    def test_reset_returns_every_decision(self):
+        self.audit_seed()
+        self.choose(self.ui.audit_decision, "deny")
+        self.until(lambda: "allow" not in self.ui.audit_list.get_text())
+        self.choose(self.ui.audit_decision, "all")
+        self.until(lambda: "allow" in self.ui.audit_list.get_text()
+                   and "deny" in self.ui.audit_list.get_text())
