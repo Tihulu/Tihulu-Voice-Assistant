@@ -251,3 +251,12 @@ registry are never touched, and the active profile — a policy, not a preferenc
 — is kept. A file that is already absent is not an error, and the outcome is
 stated either way. Nothing on the page reaches a device or a provider; models,
 approved sites and profiles have their own pages.
+
+Exporting a conversation writes what was said and nothing else. One line per
+message carries its speaker and its text; the file states its own fields in a
+header so a reader knows there is no other column, and it never contains an
+endpoint, a model path, a profile rule or a policy decision. The write is
+atomic, the file is private by mode (0600), the total is bounded by messages
+(500) and bytes (1 MiB) with a stated truncation, and a relative path is
+refused rather than written somewhere unstated. The export is recorded as a
+receipt, and an empty log offers no export button at all.
