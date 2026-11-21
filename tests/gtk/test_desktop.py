@@ -18,7 +18,7 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-from tihulu_jarvis import desktop, market, profiles, settings
+from tihulu_jarvis import catalog_fetch, desktop, market, profiles, settings
 from tihulu_jarvis.profiles import Profile, Rule
 from tihulu_jarvis.voice.m1 import Hold
 
@@ -1723,3 +1723,95 @@ class ActionEnforcementUITests(MarketFixture):
                                             profiles.ALLOW, approval="owner-consent",
                                             expires_at=1e12),))
         self.assertTrue(self.ui.talk.get_sensitive())
+
+
+class CatalogFetchUITests(MarketFixture):
+    """A catalog fetch is scoped by an allowlist and remains verifiable."""
+
+    document = {
+        "source_name": "remote catalog",
+        "entries": [
+            {"model_id": "fixture-remote", "display_name": "Fixture Remote",
+             "category": "stt", "engine": "whisper.cpp", "artifact_format": "ggml",
+             "languages": ["tr"], "license_id": "MIT",
+             "source_ref": "catalog:fixture-remote",
+             "source_checksum": hashlib.sha256(b"stt-weights").hexdigest(),
+             "source_size": 11, "publisher": "fixture-publisher"},
+        ],
+    }
+    url = "https://catalog.example.test/list.json"
+
+    def opener(self, body=None, error=None):
+        calls = []
+
+        async def runtime(url, timeout):
+            calls.append((url, timeout))
+            if error:
+                raise error
+            return body if body is not None else json.dumps(self.document)
+        return runtime, calls
+
+    def allow(self, *hosts):
+        self.ui.catalog_hosts.set_text(" ".join(hosts))
+        self.ui.remember_hosts()
+
+    def test_an_allowed_host_is_fetched_and_must_verify(self):
+        opener, calls = self.opener()
+        self.allow("catalog.example.test")
+        with patch.object(catalog_fetch, "urlopen_opener", return_value=opener):
+            self.ui.catalog_url.set_text(self.url)
+            self.click(self.ui.catalog_fetch_btn)
+            self.until(lambda: self.ui.catalog.entries and self.ui.catalog_note.get_text() != "")
+        self.assertEqual(calls[0][0], self.url)
+        self.assertIn("unverified", self.ui.catalog_note.get_text())
+        self.assertEqual(len(self.catalog_rows()), 1)
+        # An unsigned catalog may be inspected, never installed from.
+        self.pick_entry("fixture-remote")
+        self.assertFalse(self.ui.catalog_add.get_sensitive())
+        self.ui.add_catalog_entry()
+        self.assertEqual(self.ui.status.get_text(), "catalog_not_verified")
+        self.assertEqual(self.ui.market.cards(), ())
+
+    def test_a_host_outside_the_allowlist_is_never_fetched(self):
+        opener, calls = self.opener()
+        self.allow("other.example.test")
+        with patch.object(catalog_fetch, "urlopen_opener", return_value=opener):
+            self.ui.catalog_url.set_text(self.url)
+            self.click(self.ui.catalog_fetch_btn)
+            self.until(lambda: self.ui.status.get_text() == "catalog_host_not_allowed")
+        self.assertEqual(calls, [])
+
+    def test_no_allowlist_means_no_fetch(self):
+        opener, calls = self.opener()
+        with patch.object(catalog_fetch, "urlopen_opener", return_value=opener):
+            self.ui.catalog_url.set_text(self.url)
+            self.click(self.ui.catalog_fetch_btn)
+            self.until(lambda: self.ui.status.get_text() == "catalog_host_not_allowed")
+        self.assertEqual(calls, [])
+
+    def test_a_failing_transport_is_a_bounded_reason(self):
+        opener, calls = self.opener(error=OSError("fixture"))
+        self.allow("catalog.example.test")
+        with patch.object(catalog_fetch, "urlopen_opener", return_value=opener):
+            self.ui.catalog_url.set_text(self.url)
+            self.click(self.ui.catalog_fetch_btn)
+            self.until(lambda: self.ui.status.get_text() == "catalog_fetch_failed")
+        self.assertEqual(len(calls), 1)
+
+    def test_a_signed_remote_catalog_can_be_installed_from(self):
+        opener, calls = self.opener()
+        self.allow("catalog.example.test")
+        with patch.object(catalog_fetch, "urlopen_opener", return_value=opener):
+            self.ui.catalog_url.set_text(self.url)
+            self.click(self.ui.catalog_fetch_btn)
+            self.until(lambda: self.ui.catalog.entries)
+        # Sign the fetched document with the owner key; verification then holds.
+        signed = market.sign_catalog(json.dumps(self.document), "fixture-key", now=1.0)
+        market.save_key("fixture-key", "shared-secret-for-catalog-signing")
+        self.ui.load_catalog_text(signed)
+        self.assertIn("verified", self.ui.catalog_note.get_text())
+        self.pick_entry("fixture-remote")
+        self.assertTrue(self.ui.catalog_add.get_sensitive())
+        self.click(self.ui.catalog_add)
+        self.until(lambda: any(c.model_id == "fixture-remote" for c in self.ui.market.cards()))
+        self.assertEqual(self.ui.market.card("fixture-remote").state, "DISCOVERED")

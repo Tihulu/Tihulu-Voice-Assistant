@@ -13,7 +13,7 @@ LOCALES = ("tr", "en", "de")
 
 def empty():
     return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": "",
-            "market_refs": {}}
+            "market_refs": {}, "allowed_hosts": []}
 
 
 def config_path():
@@ -44,6 +44,15 @@ def checked(obj):
             raise Hold("invalid_local_settings")
         clean[ref] = path
     out["market_refs"] = clean
+    hosts = obj.get("allowed_hosts", [])
+    if not isinstance(hosts, list) or len(hosts) > 32:
+        raise Hold("invalid_local_settings")
+    clean_hosts = []
+    for host in hosts:
+        if not isinstance(host, str) or len(host) > 253:
+            raise Hold("invalid_local_settings")
+        clean_hosts.append(host)
+    out["allowed_hosts"] = clean_hosts
     voices = obj.get("voices", {})
     if not isinstance(voices, dict) or any(k not in LOCALES or not isinstance(v, str) or len(v)>4096 for k,v in voices.items()):
         raise Hold("invalid_local_settings")
