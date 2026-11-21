@@ -280,6 +280,16 @@ def create_window(app, loop):
             self.profile_delete = self.button(controls,tr("Delete","Sil","Löschen"),self.delete_selected)
             self.audit_list = Gtk.Label(xalign=0, wrap=True)
             page.append(self.audit_list)
+            # Filters narrow what the log already holds; they never invent a row.
+            filters = Gtk.Box(spacing=8)
+            page.append(filters)
+            self.audit_action = Gtk.ComboBoxText()
+            self.audit_decision = Gtk.ComboBoxText()
+            filters.append(self.audit_action)
+            filters.append(self.audit_decision)
+            self.audit_building = False
+            self.audit_action.connect("changed", lambda *_: self.refresh_audit())
+            self.audit_decision.connect("changed", lambda *_: self.refresh_audit())
             self.refresh_audit()
             picker = Gtk.ComboBoxText()
             for key in profiles.TEMPLATES:
@@ -296,20 +306,70 @@ def create_window(app, loop):
             row = self.profile_list.get_selected_row()
             return self.policy_rows.get(row) if row is not None else None
 
+        def audit_filters(self):
+            """The filters actually chosen, or None when a box says "every".
+
+            An empty log offers no actions: a filter is a name the log can
+            show, never a free-text guess.
+            """
+            action = self.audit_action.get_active_text() if self.audit_action else None
+            decision = self.audit_decision.get_active_text() if self.audit_decision else None
+            if action in (None, "", "every", "all"):
+                action = None
+            if decision in (None, "", "every", "all"):
+                decision = None
+            return action, decision
+
         def refresh_audit(self):
+            """Rebuild the filter choices from the log, then show the rows.
+
+            Rebuilding a box changes its selection, which would call this again;
+            the guard keeps one pass.
+            """
+            if self.audit_building:
+                return
+            self.audit_building = True
             try:
-                rows = profiles.read_audit(self.store.root, 40)
+                self.rebuild_audit_filters()
+                self.show_audit_rows()
+            finally:
+                self.audit_building = False
+
+        def rebuild_audit_filters(self):
+            chosen, decision = self.audit_filters()
+            for box, values, keep in ((self.audit_action,
+                                        ("all",) + profiles.audit_actions(self.store.root),
+                                        chosen),
+                                      (self.audit_decision, ("all", "allow", "deny", "shown"),
+                                       decision)):
+                box.remove_all()
+                for value in values:
+                    box.append_text(value)
+                box.set_active(max(0, values.index(keep) if keep in values else 0))
+
+        def show_audit_rows(self):
+            chosen, decision = self.audit_filters()
+            try:
+                rows = profiles.read_audit(self.store.root, 40, action=chosen,
+                                           decision=decision)
             except Hold:
                 rows = ()
             if not rows:
-                self.audit_list.set_text(tr("No policy decisions recorded yet.",
-                                            "Henüz politika kararı kaydedilmedi.",
-                                            "Noch keine Richtlinienentscheidungen."))
+                # An empty log and a filter that matches nothing are different
+                # facts; the reader is told which one holds.
+                if chosen is None and decision is None:
+                    self.audit_list.set_text(tr("No policy decisions recorded yet.",
+                                                "Henüz politika kararı kaydedilmedi.",
+                                                "Noch keine Richtlinienentscheidungen."))
+                else:
+                    self.audit_list.set_text(tr("No decision matches this filter.",
+                                                "Bu filtreyle eşleşen karar yok.",
+                                                "Keine Entscheidung passt zu diesem Filter."))
                 return
-            lines = ["%s %s %s %s %s" % (time.strftime("%H:%M:%S", time.localtime(r["at"])),
-                                         r["decision"], r["action"], "/".join(r["scope"]) or "-",
-                                         r["reason"]) for r in rows]
-            self.audit_list.set_text("\n".join(lines))
+            self.audit_list.set_text("\n".join(
+                "%s %s %s %s %s" % (time.strftime("%H:%M:%S", time.localtime(r["at"])),
+                                    r["decision"], r["action"], "/".join(r["scope"]) or "-",
+                                    r["reason"]) for r in rows))
 
         def refresh_profile_buttons(self):
             chosen = self.selected_profile()

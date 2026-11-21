@@ -114,3 +114,11 @@ mode refusing a cloud route, or an approved provider being required. The rows
 come from the same `routing.plan` the policy layer uses, so a capability is
 never implied by a layout. A fallback is not silently available either: this
 build has one local route per task and says `no_fallback_configured`.
+
+The audit view filters what the log already holds. The action box is filled from
+the decisions the log contains — never from a name it cannot show — and the
+decision box offers every outcome the client writes: allow, deny, shown. A row
+is time, outcome, action, scope and reason; nothing else, and no raw log. An
+empty log and a filter that matches nothing are different facts and are stated
+as such. A filter survives new decisions: adding an allowed decision does not
+silently widen a denied view.

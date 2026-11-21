@@ -361,3 +361,43 @@ class EscalationTests(unittest.TestCase):
         local = self.profile()
         denied = self.profile(tool_rules=(Rule("host_shell", ("bridge",), "deny"),))
         self.assertEqual(profiles.escalation(local, denied), frozenset())
+
+
+class AuditFilterTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        profiles.record_decision(self.tmp, "reader", "filesystem_read", ("attachment",),
+                                 "allow", "rule_or_absent", now=1.0)
+        profiles.record_decision(self.tmp, "reader", "endpoint", ("http://127.0.0.1:9876/",),
+                                 "deny", "local_only_forbids_non_loopback", now=2.0)
+        profiles.record_decision(self.tmp, "reader", "disclosure", ("stays_local", "loopback"),
+                                 "shown", "loopback_transport_only", now=3.0)
+
+    def test_a_filter_narrows_without_adding_or_hiding(self):
+        self.assertEqual(len(profiles.read_audit(self.tmp, decision="deny")), 1)
+        self.assertEqual(len(profiles.read_audit(self.tmp, action="filesystem_read")), 1)
+        self.assertEqual(profiles.read_audit(self.tmp, decision="allow")[0]["action"],
+                         "filesystem_read")
+        self.assertEqual(len(profiles.read_audit(self.tmp, profile="reader")), 3)
+        self.assertEqual(profiles.read_audit(self.tmp, profile="other"), ())
+        self.assertEqual(profiles.read_audit(self.tmp, action="no_such_action"), ())
+
+    def test_a_combined_filter_is_the_intersection(self):
+        rows = profiles.read_audit(self.tmp, action="endpoint", decision="deny",
+                                  profile="reader")
+        self.assertEqual([r["reason"] for r in rows], ["local_only_forbids_non_loopback"])
+
+    def test_the_actions_offered_come_from_the_log(self):
+        self.assertEqual(profiles.audit_actions(self.tmp),
+                         ("filesystem_read", "endpoint", "disclosure"))
+        self.assertEqual(profiles.audit_actions(Path(tempfile.mkdtemp())), ())
+
+    def test_a_bad_filter_is_refused(self):
+        for bad in ("", "x" * 65, 42, []):
+            with self.subTest(action=bad):
+                with self.assertRaises(Hold):
+                    profiles.read_audit(self.tmp, action=bad)
+        with self.assertRaisesRegex(Hold, "audit_decision_filter"):
+            profiles.read_audit(self.tmp, decision=7)
+        with self.assertRaisesRegex(Hold, "audit_profile_filter"):
+            profiles.read_audit(self.tmp, profile="a" * 100)
