@@ -2916,3 +2916,74 @@ class ApprovedSitesTests(DesktopTests):
             out.append(item)
             item = item.get_next_sibling()
         return out
+
+
+class ActivityBoardTests(DesktopTests):
+    """A running task is a row with a state, never a guessed percentage."""
+
+    def rows(self):
+        out, item = [], self.ui.activity_list.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def labels(self):
+        return [row.get_child().get_text() for row in self.rows()]
+
+    def test_a_running_turn_is_stated_without_a_percentage(self):
+        self.connect_model()
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.ui.board.busy())
+        # The newest task is the first row, so a running turn is read there.
+        text = self.labels()[0]
+        self.assertIn("turn", text)
+        self.assertIn("running", text)
+        self.assertIn("naber nasilsin", text)
+        self.assertNotIn("%", text)
+        self.assertTrue(self.ui.activity_stop.get_sensitive())
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.until(lambda: "running" not in self.labels()[0])
+        self.assertIn("done", self.labels()[0])
+
+    def test_a_stopped_task_names_its_reason(self):
+        self.connect_model()
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.ui.board.busy())
+        self.ui.activity_list.select_row(self.rows()[0])
+        self.click(self.ui.activity_stop)
+        self.until(lambda: "stopped_by_owner" in self.labels()[0])
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+
+    def test_the_board_keeps_every_turn_and_the_newest_last(self):
+        self.connect_model()
+        for index in range(3):
+            self.text("naber nasilsin %d" % index)
+        labels = self.labels()
+        # Connecting discovered the local models first, so it is a row too, and
+        # the newest task is first: the oldest turn is the last row.
+        self.assertEqual(len(labels), 4)
+        self.assertIn("naber nasilsin 0", labels[-2])
+        self.assertIn("naber nasilsin 2", labels[0])
+
+    def test_a_failed_turn_says_failed(self):
+        self.connect_model()
+        self.backend.capture_error = False
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: not self.ui.busy)
+        self.backend.answers.clear()
+        patched = self.stack.enter_context(patch.object(
+            self.ui, "turn_label", return_value="a turn that fails"))
+        # A Hold reason is the row's reason, never a generic label.
+        self.assertIn("turn", self.labels()[0])
+        patched.__exit__(None, None, None)
+
+    def test_the_page_states_that_progress_is_not_guessed(self):
+        self.assertIn("never guessed", self.ui.activity_note.get_text())

@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, attachments, keys, receipts, web
+from . import a11y, attachments, keys, receipts, tasks, web
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -271,6 +271,9 @@ def create_window(app, loop):
             self.win.connect("close-request",self.close)
             self.set_state("ready",read_error or tr("Open Installed models to connect.","Bağlantı için Kurulu modeller’i aç.","Zum Verbinden Installierte Modelle öffnen."))
             self.bind_keys()
+            self.board = tasks.Board()
+            self.turn_note = ""
+            self.build_activity_page()
             self.win.present()
 
         def apply_text_scale(self):
@@ -1318,6 +1321,97 @@ def create_window(app, loop):
                                       "%s adresine gönderiliyor (POST)…" % target.url,
                                       "Senden an %s (POST)…" % target.url))
 
+        def build_activity_page(self):
+            """The tasks this client runs, stated without a guessed percentage.
+
+            A task names its kind, label, state, elapsed time and the leases it
+            holds. Progress is bytes or nothing: a turn has no bytes to count.
+            """
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            view = Gtk.ScrolledWindow(vexpand=True)
+            view.set_child(page)
+            self.stack.add_titled(view, "activity", tr("Activity","Etkinlik","Aktivität"))
+            self.activity_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.activity_note)
+            self.activity_list = Gtk.ListBox()
+            page.append(self.activity_list)
+            controls = Gtk.Box(spacing=8)
+            page.append(controls)
+            self.activity_stop = self.button(controls, tr("Stop the selected task",
+                                                          "Seçili görevi durdur",
+                                                          "Ausgewählte Aufgabe stoppen"),
+                                             self.stop_task)
+            self.refresh_activity()
+
+        def turn_label(self):
+            """What the running turn is about, for the board and for a reader.
+
+            The label is captured when the turn is written, because the
+            composer is emptied the moment it is sent.
+            """
+            return getattr(self, "turn_note", "") or tr("a local turn", "yerel tur",
+                                                        "eine lokale Runde")
+
+        def finish_task(self, board_id, t, message):
+            """Record how a turn ended: done, cancelled or failed, with the reason."""
+            try:
+                state = "failed" if message else "done"
+                if t.cancelled():
+                    state = "cancelled"
+                    message = message or "Stopped"
+                self.board.finish(board_id, state, message or "")
+            except Hold:
+                pass
+
+        def activity_rows(self):
+            return tuple(reversed(self.board.rows))
+
+        def refresh_activity(self):
+            rows, item = [], self.activity_list.get_first_child()
+            while item is not None:
+                nxt = item.get_next_sibling()
+                self.activity_list.remove(item)
+                item = nxt
+            states = {"queued": tr("queued", "sırada", "wartend"),
+                      "running": tr("running", "çalışıyor", "läuft"),
+                      "done": tr("done", "bitti", "fertig"),
+                      "cancelled": tr("cancelled", "iptal", "abgebrochen"),
+                      "failed": tr("failed", "başarısız", "fehlgeschlagen")}
+            for row in self.activity_rows():
+                line = Gtk.ListBoxRow()
+                line.task = row
+                detail = "%s · %s · %s · %.0fs" % (row.kind, row.label,
+                                                   states[row.state], row.elapsed())
+                if row.reason:
+                    detail += " · %s" % row.reason
+                if row.locks:
+                    detail += " · " + ",".join(row.locks)
+                if row.counted_total:
+                    detail += " · %d/%d bytes" % (row.counted, row.counted_total)
+                label = Gtk.Label(label=detail, xalign=0, wrap=True)
+                line.set_child(label)
+                line.set_activatable(True)
+                self.activity_list.append(line)
+            self.activity_stop.set_sensitive(bool(self.board.busy()))
+            self.activity_note.set_text(tr(
+                "Progress is never guessed: a turn has no percentage, a download counts bytes.",
+                "İlerleme asla tahmin edilmez: bir turun yüzdesi yoktur, indirme bayt sayar.",
+                "Fortschritt wird nie geschätzt: eine Runde hat keinen Prozentsatz, ein Download zählt Bytes."))
+
+        def stop_task(self):
+            """Stop the selected busy task, and say which one was stopped."""
+            row = self.activity_list.get_selected_row()
+            chosen = row.task if row is not None else None
+            if chosen is None or not chosen.busy:
+                return
+            self.board.cancel(chosen.id, "stopped_by_owner")
+            # A running turn is cancelled through the real cancellation path.
+            if chosen.kind == "turn" and self.busy:
+                self.interrupt(False)
+            self.refresh_activity()
+            self.set_state("ready", tr("Task stopped.", "Görev durduruldu.",
+                                       "Aufgabe gestoppt."))
+
         def remember_hosts(self):
             hosts = [h for h in self.catalog_hosts.get_text().split() if h]
             if hosts != self.cfg.get("allowed_hosts", []):
@@ -1754,6 +1848,9 @@ def create_window(app, loop):
                 # A disposable session shares this turn's epoch, so cancellation
                 # and staleness checks still apply; its history is never merged.
                 probe.epoch = epoch
+                self.turn_note = tr("testing the selected model",
+                                    "seçilen model sınanıyor",
+                                    "ausgewähltes Modell wird getestet")
                 # A short, anchor-bearing probe so the reply language is provable.
                 text = tr("Hello there! In one short sentence, what can you do?",
                           "Merhaba! Tek cümleyle cevapla: neler yapabilirsin?",
@@ -1861,6 +1958,11 @@ def create_window(app, loop):
             task=self.session.own(work, loop=loop)
             epoch=self.session.epoch
             self.set_state("starting")
+            # Every turn the client runs is a task on the board, with no
+            # percentage: its state is the truth until it ends.
+            board_id = self.board.start("turn", self.turn_label(), now=time.time())
+            # A running task is visible while it runs, not only after it ends.
+            self.refresh_activity()
             def finished(t):
                 message=""
                 try:
@@ -1875,6 +1977,8 @@ def create_window(app, loop):
                     message="Local operation failed"
                 self.busy=False
                 self.finish=self.playback=None
+                self.finish_task(board_id, t, message)
+                self.refresh_activity()
                 if epoch==self.session.epoch:
                     self.set_state("ready",message)
                 else:
@@ -2045,6 +2149,7 @@ def create_window(app, loop):
                 self.attachment = None
                 self.attachment_note.set_text("")
             self.entry.set_text("")
+            self.turn_note = text[:80]
             async def run(epoch):
                 self.bubble("You",text)
                 self.set_state("thinking")
@@ -2066,6 +2171,7 @@ def create_window(app, loop):
                         self.set_state(stage)
 
                 self.require_tools(("local_audio_device", ("push_to_talk",)))
+                self.turn_note = tr("a spoken turn", "sesli tur", "eine gesprochene Runde")
                 voices = audio.SelectedVoices(self.cfg["voices"])
                 self.finish=asyncio.Event()
                 # The microphone is exclusive: a turn that cannot get the lease
