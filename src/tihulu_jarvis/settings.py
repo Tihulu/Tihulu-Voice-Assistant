@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from . import files, web
+from . import files, queries, web
 from .voice.m1 import Hold
 
 LOCALES = ("tr", "en", "de")
@@ -15,7 +15,8 @@ LOCALES = ("tr", "en", "de")
 def empty():
     return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": "",
             "market_refs": {}, "allowed_hosts": [], "text_scale": "normal",
-            "web_targets": [], "show_spoken_text": False, "research_root": ""}
+            "web_targets": [], "show_spoken_text": False, "research_root": "",
+            "search_history": []}
 
 
 def config_path():
@@ -73,6 +74,10 @@ def checked(obj):
         target = web.from_entry(item)
         clean_targets.append(web.entry(target))
     out["web_targets"] = clean_targets
+    history = obj.get("search_history", [])
+    # A stored history is re-validated here, so a corrupt one is refused rather
+    # than loaded as a promise of queries that cannot be run again.
+    out["search_history"] = list(queries.checked(tuple(history)))
     root = obj.get("research_root", "")
     # A stored folder is validated on read: a path that is no longer a folder
     # is a bounded reason later, never a silently empty listing.
