@@ -160,3 +160,14 @@ first: "Approved by you · switching to Cloud Chat adds Cloud reasoning, …",
 "Not approved · … no privileges were added", "Refused by the active profile ·
 read a file (filesystem_read)". `receipts.is_receipt` is the check that keeps a
 message from ever reading as an approval, and the tests assert it both ways.
+
+Approved sites separate two rights. A site is registered with its host and
+path, and with an explicit submission right; reading is a GET preview and
+submitting is a POST that only a registered, submission-approved target allows.
+A private or local address is not a web target, a bare domain is not a target
+either, and each refusal names its own reason. A stored target is re-validated
+when settings are read, and its submission right is stored with it rather than
+inferred from the URL a second time. A submission without the right is refused
+in words and recorded as a receipt. Browsing itself — rendering, scripts,
+screenshots — is not part of this increment: this is the policy and the
+registry behind it.

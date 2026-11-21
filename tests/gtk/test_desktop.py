@@ -2819,3 +2819,100 @@ class ReceiptUITests(EscalationConsentTests):
         self.text("Merhaba! Benim kelimem mavi.")
         for row in self.log_rows():
             self.assertFalse(receipts.is_receipt(row.get_text()), row.get_text())
+
+
+class ApprovedSitesTests(DesktopTests):
+    """Reading and submitting are separate rights, both stated in words."""
+
+    def rows(self):
+        out, item = [], self.ui.web_targets.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def register(self, raw, submit=False):
+        self.ui.web_target.set_text(raw)
+        self.ui.web_submit.set_active(submit)
+        self.click(self.ui.web_add)
+        self.until(lambda: self.rows() != self.last)
+        self.last = list(self.rows())
+
+    def setUp(self):
+        super().setUp()
+        self.last = []
+
+    def test_a_registered_site_is_listed_with_its_right(self):
+        self.register("https://example.test/docs")
+        self.assertEqual(len(self.rows()), 1)
+        self.assertIn("https://example.test/docs", self.rows()[0].get_child().get_label())
+        self.assertNotIn("submits allowed", self.rows()[0].get_child().get_label())
+        self.ui.web_targets.select_row(self.rows()[0])
+        self.assertTrue(self.ui.web_read.get_sensitive())
+
+    def test_a_submit_right_is_asked_for_separately_and_shown(self):
+        self.register("https://example.test/form", submit=True)
+        self.assertIn("submits allowed", self.rows()[0].get_child().get_label())
+        self.ui.web_targets.select_row(self.rows()[0])
+        self.ui.submit_target()
+        self.assertIn("POST", self.ui.web_note.get_text())
+
+    def test_reading_is_stated_as_a_get_without_sending_anything(self):
+        self.register("https://example.test/docs")
+        self.ui.web_targets.select_row(self.rows()[0])
+        self.ui.read_target()
+        self.assertIn("https://example.test/docs (GET)", self.ui.web_note.get_text())
+
+    def test_a_submission_without_the_right_is_refused_and_receipted(self):
+        self.register("https://example.test/form")
+        self.ui.web_targets.select_row(self.rows()[0])
+        self.ui.submit_target()
+        self.until(lambda: self.ui.web_note.get_text() == "submission_not_approved")
+        receipts = [row for row in self.log_rows() if getattr(row, "receipt", False)]
+        self.assertEqual(len(receipts), 1)
+        self.assertIn("Refused by the active profile · submitting to", receipts[0].get_text())
+
+    def test_a_local_or_plain_address_is_not_a_target(self):
+        # Each refusal names its own reason: a private or local address is not
+        # a public target, and a malformed one is a settings problem.
+        expected = {"http://example.test/x": "invalid_local_settings",
+                    "https://localhost/x": "target_not_public",
+                    "https://127.0.0.1/x": "target_not_public",
+                    "https://example.test": "invalid_local_settings",
+                    "not-a-url": "invalid_local_settings"}
+        for raw, reason in expected.items():
+            with self.subTest(raw=raw):
+                self.ui.web_target.set_text(raw)
+                self.click(self.ui.web_add)
+                self.assertEqual(self.ui.status.get_text(), reason)
+        self.assertEqual(self.rows(), [])
+
+    def test_forgetting_a_site_removes_only_it(self):
+        self.register("https://example.test/docs")
+        self.register("https://other.test/docs")
+        self.ui.web_targets.select_row(self.rows()[0])
+        self.click(self.ui.web_forget)
+        self.until(lambda: len(self.rows()) == 1)
+        self.assertIn("https://other.test/docs", self.rows()[0].get_child().get_label())
+
+    def test_a_stored_target_is_revalidated_on_read(self):
+        cfg = settings.load()
+        cfg["web_targets"] = [{"url": "https://example.test/docs", "submit": False}]
+        settings.save(cfg)
+        # A stored target is re-validated when the settings are read again,
+        # and its submission right survives the round trip.
+        self.assertEqual(settings.load()["web_targets"],
+                         [{"url": "https://example.test/docs", "submit": False}])
+        for bad in ([{"url": "http://example.test/x", "submit": False}],
+                    [{"url": "https://localhost/x", "submit": True}],
+                    ["https://example.test/docs"], [{"url": 5}]):
+            with self.subTest(bad=bad):
+                with self.assertRaises(Hold):
+                    settings.checked({**settings.empty(), "web_targets": bad})
+
+    def log_rows(self):
+        out, item = [], self.ui.log.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out

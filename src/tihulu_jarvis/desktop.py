@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, attachments, keys, receipts
+from . import a11y, attachments, keys, receipts, web
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -1195,6 +1195,129 @@ def create_window(app, loop):
             except Hold as exc:
                 self.set_state("ready", str(exc))
 
+        def build_web_page(self):
+            """Approved web targets: reading is one right, submitting another.
+
+            Nothing here fetches at startup, and a page is shown as bounded
+            text: no script runs, nothing is stored beyond the preview.
+            """
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
+            view = Gtk.ScrolledWindow(vexpand=True)
+            view.set_child(page)
+            self.stack.add_titled(view, "web", tr("Approved sites","Onaylı siteler","Genehmigte Seiten"))
+            page.append(Gtk.Label(label=tr(
+                "A site must be registered before it can be read. Reading is a GET preview; submitting needs a separate right.",
+                "Bir site okunmadan önce kaydedilmelidir. Okuma GET önizlemesidir; göndermek ayrı bir izin ister.",
+                "Eine Seite muss registriert sein, bevor sie gelesen wird. Lesen ist eine GET-Vorschau; Senden braucht ein eigenes Recht."),
+                xalign=0, wrap=True))
+            row = Gtk.Box(spacing=8)
+            page.append(row)
+            self.web_target = Gtk.Entry(hexpand=True,
+                                        placeholder_text="https://site.test/path")
+            row.append(self.web_target)
+            self.web_submit = Gtk.CheckButton(label=tr("allow submitting", "göndermeye izin ver",
+                                                       "Senden erlauben"))
+            row.append(self.web_submit)
+            self.web_add = self.button(row, tr("Register site", "Siteyi kaydet", "Seite registrieren"),
+                                       self.register_target)
+            self.web_targets = Gtk.ListBox()
+            self.web_targets.connect("row-selected", lambda *_: self.refresh_web_buttons())
+            page.append(self.web_targets)
+            self.web_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.web_note)
+            buttons = Gtk.Box(spacing=8)
+            page.append(buttons)
+            self.web_read = self.button(buttons, tr("Read page (GET)", "Sayfayı oku (GET)",
+                                                    "Seite lesen (GET)"), self.read_target)
+            self.web_submit_btn = self.button(buttons, tr("Submit (POST)", "Gönder (POST)",
+                                                          "Senden (POST)"), self.submit_target)
+            self.web_forget = self.button(buttons, tr("Forget site", "Siteyi unut", "Seite vergessen"),
+                                          self.forget_target)
+            self.refresh_web_page()
+
+        def target_entries(self):
+            return web.entries(self.cfg.get("web_targets", []))
+
+        def selected_target(self):
+            row = self.web_targets.get_selected_row()
+            return row.target if row is not None else None
+
+        def register_target(self):
+            raw = self.web_target.get_text().strip()
+            try:
+                target = web.parse(raw)
+                if self.web_submit.get_active():
+                    target = web.Target(target.host, target.path, True)
+                self.cfg["web_targets"] = web.store(web.register(
+                    self.target_entries(), target))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
+            self.save()
+            self.web_target.set_text("")
+            self.web_submit.set_active(False)
+            self.refresh_web_page()
+
+        def forget_target(self):
+            target = self.selected_target()
+            if target is None:
+                return
+            self.cfg["web_targets"] = web.store(web.forget(self.target_entries(), target))
+            self.save()
+            self.refresh_web_page()
+
+        def refresh_web_page(self):
+            rows, item = [], self.web_targets.get_first_child()
+            while item is not None:
+                nxt = item.get_next_sibling()
+                self.web_targets.remove(item)
+                item = nxt
+            for target in self.target_entries():
+                row = Gtk.ListBoxRow()
+                row.target = target
+                row.set_activatable(True)
+                label = Gtk.Label(label=target.url + (" · submits allowed" if target.submit else ""),
+                                  xalign=0, wrap=True)
+                row.set_child(label)
+                self.web_targets.append(row)
+            self.refresh_web_buttons()
+
+        def refresh_web_buttons(self):
+            chosen = self.selected_target()
+            self.web_read.set_sensitive(not self.busy and chosen is not None)
+            self.web_submit_btn.set_sensitive(not self.busy and chosen is not None)
+            self.web_forget.set_sensitive(chosen is not None)
+
+        def read_target(self):
+            target = self.selected_target()
+            if target is None or self.busy:
+                return
+            try:
+                method, url, reason = web.plan(target)
+            except Hold as exc:
+                self.web_note.set_text(str(exc))
+                return
+            self.require_tools(("browser_navigate", ("approved_target",)))
+            self.web_note.set_text(tr("Reading %s (%s)…" % (url, method),
+                                      "%s okunuyor (%s)…" % (url, method),
+                                      "%s wird gelesen (%s)…" % (url, method)))
+
+        def submit_target(self):
+            target = self.selected_target()
+            if target is None or self.busy:
+                return
+            try:
+                web.plan(target, submit=True)
+            except Hold as exc:
+                # Submitting without the separate right is refused, and said.
+                self.web_note.set_text(str(exc))
+                self.receipt("refused", "submitting to %s (submission_not_approved)" % target.url)
+                return
+            self.require_tools(("browser_navigate", ("submission",)))
+            self.web_note.set_text(tr("Submitting to %s (POST)…" % target.url,
+                                      "%s adresine gönderiliyor (POST)…" % target.url,
+                                      "Senden an %s (POST)…" % target.url))
+
         def remember_hosts(self):
             hosts = [h for h in self.catalog_hosts.get_text().split() if h]
             if hosts != self.cfg.get("allowed_hosts", []):
@@ -1391,6 +1514,7 @@ def create_window(app, loop):
                 view = Gtk.ScrolledWindow(vexpand=True)
                 view.set_child(page)
                 self.stack.add_titled(view, "downloads", tr("Downloads","İndirmeler","Downloads"))
+                self.build_web_page()
                 self.download_note = Gtk.Label(xalign=0, wrap=True)
                 page.append(self.download_note)
                 self.download_list = Gtk.ListBox()
