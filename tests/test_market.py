@@ -4,6 +4,7 @@
 import asyncio
 import hashlib
 import json
+import os
 import sys
 import tempfile
 import unittest
@@ -14,8 +15,9 @@ from tihulu_jarvis.transfer_http import loopback_fetch
 from tihulu_jarvis.market import (ACTIVE, ALLOWED_NEXT, CATEGORIES, TERMINAL, Catalog,
                                   ModelCard, Registry, Source, Transfer, advance, digest,
                                   from_file, from_models, human_size, parse_catalog,
-                                  register_installed, resumable_partials, usage,
-                                  CATALOG_LIMIT)
+                                  key_path, load_key, register_installed,
+                                  resumable_partials, save_key, sign_catalog, usage,
+                                  verify_catalog, CATALOG_LIMIT)
 from tihulu_jarvis.voice.m1 import Hold
 
 
@@ -754,3 +756,72 @@ class PartialDiscoveryTests(unittest.TestCase):
 
     def test_no_transfers_directory_is_not_an_error(self):
         self.assertEqual(resumable_partials(self.tmp.parent / "missing"), ())
+
+
+class CatalogTrustTests(unittest.TestCase):
+    document = {
+        "source_name": "fixture catalog",
+        "entries": [
+            {"model_id": "fixture-whisper-large", "display_name": "Fixture Whisper Large",
+             "category": "stt", "engine": "whisper.cpp", "artifact_format": "ggml",
+             "languages": ["tr", "en", "de"], "license_id": "MIT",
+             "source_ref": "catalog:fixture-whisper-large",
+             "source_checksum": hashlib.sha256(b"stt-weights").hexdigest(),
+             "source_size": 11, "source_version": "v3", "publisher": "fixture-publisher"},
+        ],
+    }
+
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: os.environ.pop("XDG_DATA_HOME", None))
+        os.environ["XDG_DATA_HOME"] = str(self.tmp)
+
+    def test_a_signed_catalog_verifies_and_an_unsigned_one_does_not(self):
+        save_key("owner-catalog", "shared-secret-for-catalog-signing")
+        signed = sign_catalog(json.dumps(self.document), "owner-catalog", now=100.0)
+        verified = parse_catalog(signed)
+        self.assertTrue(verified.verified)
+        self.assertEqual(verified.key_ref, "owner-catalog")
+        self.assertIn("verified", verified.report())
+        unsigned = parse_catalog(json.dumps(self.document))
+        self.assertFalse(unsigned.verified)
+        self.assertIn("unverified", unsigned.report())
+        self.assertEqual(unsigned.entries[0].model_id, "fixture-whisper-large")
+
+    def test_a_tampered_catalog_never_verifies(self):
+        save_key("owner-catalog", "shared-secret-for-catalog-signing")
+        signed = json.loads(sign_catalog(json.dumps(self.document), "owner-catalog"))
+        signed["entries"][0]["source_size"] = 999
+        self.assertFalse(parse_catalog(json.dumps(signed)).verified)
+        signed_ok = json.loads(sign_catalog(json.dumps(self.document), "owner-catalog"))
+        signed_ok["source_name"] = "renamed by someone else"
+        self.assertFalse(parse_catalog(json.dumps(signed_ok)).verified)
+
+    def test_an_unknown_key_is_a_bounded_reason(self):
+        save_key("owner-catalog", "shared-secret-for-catalog-signing")
+        signed = json.loads(sign_catalog(json.dumps(self.document), "owner-catalog"))
+        signed["signature"]["key_ref"] = "other-key"
+        catalog = parse_catalog(json.dumps(signed))
+        self.assertFalse(catalog.verified)
+        verified, reason = verify_catalog(catalog)
+        self.assertFalse(verified)
+        self.assertIn(reason, ("key_unreadable", "invalid_key_reference", "invalid_key_material"))
+
+    def test_keys_are_private_and_bounded(self):
+        path = key_path("owner-catalog")
+        save_key("owner-catalog", "shared-secret-for-catalog-signing")
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.stat().st_mode & 0o077, 0)
+        with self.assertRaisesRegex(Hold, "invalid_key_material"):
+            save_key("short", "tooshort")
+        with self.assertRaisesRegex(Hold, "invalid_key_reference"):
+            save_key("bad/name", "shared-secret-for-catalog-signing")
+        with self.assertRaisesRegex(Hold, "key_unreadable"):
+            load_key("missing-key")
+
+    def test_a_tampered_key_file_is_refused(self):
+        save_key("owner-catalog", "shared-secret-for-catalog-signing")
+        key_path("owner-catalog").write_text("x", encoding="utf-8")
+        with self.assertRaisesRegex(Hold, "invalid_key_material"):
+            load_key("owner-catalog")
+        self.assertFalse(parse_catalog(json.dumps(self.document)).verified)

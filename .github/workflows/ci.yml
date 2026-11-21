@@ -4,7 +4,8 @@ on:
     branches: [main, 'feat/m1-portable-core', 'feat/modes-and-profiles', 'feat/profile-ui',
                'feat/market-ui', 'feat/mode-endpoint', 'feat/action-enforcement',
                'feat/loopback-transport', 'feat/market-consolidated',
-               'feat/transfer-resume', 'feat/market-history', 'feat/update-flow']
+               'feat/transfer-resume', 'feat/market-history', 'feat/update-flow',
+               'feat/queue-persistence']
 permissions:
   contents: read
 jobs:
