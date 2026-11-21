@@ -152,3 +152,11 @@ conversation search rows and the market cards are activatable, so Enter and
 Space run the same handler as clicking them. Delivering focus itself depends on
 the window manager, which a headless session cannot show; that part is physical
 acceptance.
+
+A decision in the conversation is a receipt, never a bubble. Approvals,
+cancellations and refusals are appended as their own kind of row — no sender,
+no time that could be mistaken for an approval — and each one names the outcome
+first: "Approved by you · switching to Cloud Chat adds Cloud reasoning, …",
+"Not approved · … no privileges were added", "Refused by the active profile ·
+read a file (filesystem_read)". `receipts.is_receipt` is the check that keeps a
+message from ever reading as an approval, and the tests assert it both ways.
