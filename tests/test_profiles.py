@@ -321,3 +321,43 @@ class AuditTrailTests(unittest.TestCase):
         self.assertIn("profile_forbids_local_audio_device", text)
         with self.assertRaisesRegex(Hold, "invalid_profile_id"):
             profiles.record_decision(self.tmp, "bad/id", "local_audio_device", (), "deny", "reason")
+
+
+class EscalationTests(unittest.TestCase):
+    def profile(self, **kw):
+        values = {"id": "local-only", "name": "Assistant", "based_on_mode": "LOCAL_ONLY", "version": 1}
+        values.update(kw)
+        return Profile(**values).checked()
+
+    def test_privileges_are_derived_from_mode_and_rules(self):
+        local = self.profile()
+        self.assertEqual(profiles.granted(local), frozenset())
+        chat = self.profile(based_on_mode="CLOUD_CHAT")
+        self.assertEqual(profiles.granted(chat), frozenset({"cloud_inference", "cloud_disclosure"}))
+        hybrid = self.profile(based_on_mode="SECURE_HYBRID",
+                             shell_rules=(Rule("host_shell", ("jan-qwen",), "allow", "owner-1", 1e12),))
+        self.assertEqual(profiles.granted(hybrid),
+                         frozenset({"cloud_inference", "cloud_disclosure", "host_shell"}))
+        denied = self.profile(based_on_mode="SECURE_HYBRID",
+                              shell_rules=(Rule("host_shell", ("jan-qwen",), "deny"),))
+        self.assertEqual(profiles.granted(denied), frozenset({"cloud_inference", "cloud_disclosure"}))
+        wake = self.profile(voice_activation="wake_word")
+        self.assertEqual(profiles.granted(wake), frozenset({"wake_word"}))
+        busy = self.profile(background_processing_enabled=True)
+        self.assertEqual(profiles.granted(busy), frozenset({"background_processing"}))
+
+    def test_escalation_is_computed_by_token_not_by_name(self):
+        local = self.profile()
+        renamed = self.profile(name="Totally different name")
+        self.assertEqual(profiles.escalation(renamed, local), frozenset())
+        chat = self.profile(based_on_mode="CLOUD_CHAT")
+        extra = profiles.escalation(local, chat)
+        self.assertEqual(extra, frozenset({"cloud_inference", "cloud_disclosure"}))
+        lines = profiles.describe(extra)
+        self.assertEqual(sorted(lines), ["Cloud reasoning", "Sending content to a provider"])
+        self.assertEqual(profiles.escalation(chat, local), frozenset())
+
+    def test_a_denial_never_counts_as_an_escalation(self):
+        local = self.profile()
+        denied = self.profile(tool_rules=(Rule("host_shell", ("bridge",), "deny"),))
+        self.assertEqual(profiles.escalation(local, denied), frozenset())

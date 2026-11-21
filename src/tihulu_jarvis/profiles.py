@@ -368,6 +368,50 @@ def require_tool(profile, action, scope=(), now=0.0):
     return decision, reason
 
 
+PRIVILEGES = {
+    "cloud_inference": "Cloud reasoning",
+    "cloud_disclosure": "Sending content to a provider",
+    "host_shell": "Running local programs",
+    "external_network": "Reaching other hosts",
+    "background_processing": "Working while the app is idle",
+    "wake_word": "Listening for a wake word",
+}
+
+
+def granted(profile):
+    """Privileges the profile's policy actually grants, as stable tokens."""
+    rules = profile.rules()
+    out = set()
+    # A mode grants a capability; a rule can still deny it.
+    if profile.based_on_mode in ("CLOUD_CHAT", "SECURE_HYBRID", "CUSTOM"):
+        out |= {"cloud_inference", "cloud_disclosure"}
+    for action in PRIVILEGES:
+        # A scoped allow still grants the capability; a deny removes it.
+        if any(rule.action == action and rule.decision == "allow" for rule in rules):
+            out.add(action)
+        elif any(rule.action == action and rule.decision == "deny" for rule in rules):
+            out.discard(action)
+    if profile.voice_activation == "wake_word":
+        out.add("wake_word")
+    if profile.background_processing_enabled:
+        out.add("background_processing")
+    return frozenset(out)
+
+
+def escalation(current, target):
+    """Privileges the target would add. An empty result needs no confirmation.
+
+    Privileges are compared by granted token, never by name, so renaming a
+    profile cannot hide an escalation.
+    """
+    return frozenset(granted(target) - granted(current))
+
+
+def describe(escalation_set):
+    """Human-readable lines for a confirmation prompt; never invented."""
+    return [PRIVILEGES[token] for token in sorted(escalation_set) if token in PRIVILEGES]
+
+
 def enforce_endpoint(profile, endpoint):
     """The active mode decides what kind of endpoint may be used at all.
 

@@ -54,6 +54,7 @@ def create_window(app, loop):
     class Desktop:
         def __init__(self, app, loop=None):
             self.loop = loop
+            self.confirmations = []
             self.win = Gtk.ApplicationWindow(application=app, title="TIHULU JARVIS")
             self.win.set_default_size(920, 650)
             self.session, self.inventory = Session(), ()
@@ -199,6 +200,7 @@ def create_window(app, loop):
             controls = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE)
             page.append(controls)
             self.profile_activate = self.button(controls,tr("Activate","Etkinleştir","Aktivieren"),self.activate_selected)
+            self.profile_switch = self.button(controls,tr("Switch mode","Mod değiştir","Modus wechseln"),self.switch_selected)
             self.profile_clone = self.button(controls,tr("Clone to CUSTOM","CUSTOM kopyala","Als CUSTOM klonen"),self.clone_selected)
             self.profile_delete = self.button(controls,tr("Delete","Sil","Löschen"),self.delete_selected)
             self.audit_list = Gtk.Label(xalign=0, wrap=True)
@@ -236,7 +238,8 @@ def create_window(app, loop):
 
         def refresh_profile_buttons(self):
             chosen = self.selected_profile()
-            for w in (self.profile_activate, self.profile_clone, self.profile_delete, self.profile_export):
+            for w in (self.profile_activate, self.profile_clone, self.profile_delete,
+                      self.profile_export, self.profile_switch):
                 w.set_sensitive(not self.busy and chosen is not None)
             self.profile_list.set_sensitive(not self.busy)
 
@@ -272,6 +275,78 @@ def create_window(app, loop):
             self.refresh()
             self.refresh_profiles()
             return entry
+
+        def switch_selected(self):
+            """Switch to a profile, with explicit consent for added privileges.
+
+            A spoken command is never a privileged approval; only this trusted
+            UI can grant an escalation.
+            """
+            chosen = self.selected_profile()
+            if chosen is None or self.busy:
+                return
+            try:
+                self.switch_profile(chosen.id)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def switch_profile(self, profile_id):
+            target = self.store.load(profile_id).checked()
+            try:
+                current = self.store.load(self.cfg["profile"]).checked()
+            except (Hold, KeyError):
+                current = None
+            if current is None:
+                extra = profiles.granted(target)
+            else:
+                extra = profiles.escalation(current, target)
+            if not extra:
+                self.activate_profile(profile_id)
+                return None
+            return self.confirm_escalation(target, extra)
+
+        def confirm_escalation(self, target, extra):
+            """Show exactly which privileges the switch would add."""
+            lines = profiles.describe(extra)
+            dialog = Gtk.Window(title=tr("Confirm added privileges",
+                                         "Eklenen yetkileri onayla",
+                                         "Hinzugefügte Rechte bestätigen"),
+                                modal=True, transient_for=self.win)
+            box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            box.set_margin_top(16); box.set_margin_bottom(16)
+            box.set_margin_start(16); box.set_margin_end(16)
+            dialog.set_child(box)
+            box.append(Gtk.Label(label=tr("Switching to %s would add:"
+                                          % target.name,
+                                          "%s profiline geçiş şunları ekler:" % target.name,
+                                          "Wechsel zu %s würde hinzufügen:" % target.name),
+                                 xalign=0, wrap=True))
+            for line in lines:
+                box.append(Gtk.Label(label="• " + line, xalign=0, wrap=True))
+            row = Gtk.Box(spacing=8)
+            box.append(row)
+            self.button(row, tr("Cancel", "Vazgeç", "Abbrechen"), lambda: dialog.close())
+            self.button(row, tr("Confirm switch", "Geçişi onayla", "Wechsel bestätigen"),
+                        lambda: self.apply_escalation(target, dialog))
+            dialog.connect("close-request", lambda *_: self.forget_confirmation(dialog) or False)
+            self.confirmations.append(dialog)
+            dialog.present()
+            return dialog
+
+        def forget_confirmation(self, dialog):
+            if dialog in self.confirmations:
+                self.confirmations.remove(dialog)
+            return False
+
+        def apply_escalation(self, target, dialog):
+            dialog.close()
+            try:
+                self.activate_profile(target.id)
+                self.set_state("ready", tr("Mode switched with consent.",
+                                           "Onayla mod değiştirildi.",
+                                           "Modus mit Bestätigung gewechselt."))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
 
         def activate_selected(self):
             chosen = self.selected_profile()

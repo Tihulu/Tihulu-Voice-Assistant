@@ -29,3 +29,13 @@ Entries record time, profile, action, scope, decision and reason only — no
 secret, path or transcript. The audit view is on the Profiles page and updates
 after each decision. A partial or unreadable log is a bounded reason, never a
 silent gap; it is never deleted by the client.
+
+Switching profiles cannot silently add privileges. The client compares the
+privileges the current profile grants with those the target would grant —
+cloud reasoning, sending content to a provider, running local programs,
+reaching other hosts, working while idle, listening for a wake word — by
+token, never by name, so renaming a profile cannot hide an escalation. When the
+target adds any privilege, a trusted-UI confirmation lists exactly what would
+be added and requires an explicit Confirm; cancelling changes nothing. Without
+an escalation the switch applies directly. A spoken or typed command is never a
+privileged approval; there is no other path.
