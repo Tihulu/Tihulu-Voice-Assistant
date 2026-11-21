@@ -96,3 +96,13 @@ detail line instead of rewriting the conversation. The field is disabled while
 a turn runs, so a search can never race a reply, and a query that is empty or
 longer than 120 characters is refused with a bounded reason rather than
 silently returning everything.
+
+An attachment is read once, behind the active profile's filesystem policy, and
+bounded twice: by size on disk (256 KiB) and by characters in the message
+(60000). The model sees the file by *name* only — the directory it came from
+never enters the transcript — inside a block that states its own boundaries so
+nothing can be read past it. A binary file is refused before it is decoded, an
+empty file after, and an attachment is sent once and then cleared. The policy
+layer's rule is unchanged and stated plainly here: an absent rule is not a
+forbiddance, so attaching is permitted unless the profile denies it; an
+explicit deny is recorded in the audit trail and never opens a file picker.

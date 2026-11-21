@@ -2293,3 +2293,121 @@ class ConversationSearchTests(DesktopTests):
         # Only the question carries the word; the fixture reply does not, and
         # the user's message is the third history entry, not the second.
         self.assertEqual([row.match[0] for row in self.rows()], [2])
+
+
+class AttachmentTests(EscalationConsentTests):
+    """An attachment is policy-gated, bounded and identified by name only."""
+
+    def add_profile(self, profile):
+        self.ui.store.save(profile)
+        self.ui.refresh_profiles()
+        return profile
+
+    def pick_profile(self, profile_id):
+        for item, entry in self.ui.policy_rows.items():
+            if entry.id == profile_id:
+                self.ui.profile_list.select_row(item)
+                return entry
+        raise AssertionError("missing profile: " + profile_id)
+
+    def widgets_of(self, widget):
+        out, item = [], widget.get_first_child()
+        while item is not None:
+            out.append(item)
+            out.extend(self.widgets_of(item))
+            item = item.get_next_sibling()
+        return out
+
+    def confirm(self, prefix):
+        self.until(lambda: self.ui.confirmations)
+        for widget in self.widgets_of(self.ui.confirmations[-1]):
+            if type(widget).__name__ == "Button" and (widget.get_label() or "").startswith(prefix):
+                widget.emit("clicked")
+                return widget
+        raise AssertionError("confirmation button missing: " + prefix)
+
+    def switch_to(self, profile_id):
+        self.pick_profile(profile_id)
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.ui.cfg["profile"] == profile_id)
+
+    def reader(self, decision="allow"):
+        return self.add_profile(profiles.Profile(
+            id="reader", name="Reader", based_on_mode="LOCAL_ONLY",
+            filesystem_rules=(profiles.Rule("filesystem_read", ("attachment",), decision),),
+        ).checked())
+
+    def file(self, name, payload):
+        if not hasattr(self, "tmp"):
+            self.tmp = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        path = self.tmp / name
+        if isinstance(payload, str):
+            payload = payload.encode("utf-8")
+        path.write_bytes(payload)
+        return path
+
+    def note(self, text, name="notes.txt"):
+        return self.file(name, text)
+
+    def test_an_absent_rule_does_not_forbid_a_read(self):
+        self.connect_model()
+        # The policy layer's rule: an absent rule is not a forbiddance, so the
+        # gate opens and the decision is recorded as such.
+        self.assertEqual(self.ui.require_attachment(), True)
+        rows = profiles.read_audit(self.ui.store.root)
+        row = [r for r in rows if r["action"] == "filesystem_read"][-1]
+        self.assertEqual((row["decision"], row["reason"]), ("allow", "rule_or_absent"))
+
+    def test_an_explicit_deny_refuses_the_read_before_any_dialog(self):
+        self.connect_model()
+        self.reader("deny")
+        self.switch_to("reader")
+        self.assertIsNone(self.ui.require_attachment())
+        self.assertEqual(self.ui.status.get_text(), "profile_forbids_filesystem_read")
+        self.assertIsNone(self.ui.attachment)
+        self.assertEqual(self.ui.attachment_note.get_text(), "")
+        self.assertFalse(self.backend.requests)
+        rows = profiles.read_audit(self.ui.store.root)
+        row = [r for r in rows if r["action"] == "filesystem_read"][-1]
+        self.assertEqual(row["decision"], "deny")
+
+    def test_an_allowed_read_sends_a_bounded_block_once(self):
+        self.connect_model()
+        self.reader("allow")
+        self.switch_to("reader")
+        path = self.note("Benim kelimem mavi.\n")
+        item = self.ui.read_attachment(str(path))
+        self.assertEqual(item.name, "notes.txt")
+        self.assertIn("Attached:", self.ui.attachment_note.get_text())
+        self.ui.entry.set_text("Kelime ne?")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.requests)
+        sent = self.backend.requests[-1][-1].content
+        self.assertIn("mavi", sent)
+        self.assertIn("[attached file: notes.txt", sent)
+        self.assertIn("[end of attached file]", sent)
+        # The directory never enters the conversation.
+        self.assertNotIn(str(path.parent), sent)
+        # An attachment is sent once, never twice.
+        self.assertIsNone(self.ui.attachment)
+        self.assertEqual(self.ui.attachment_note.get_text(), "")
+
+    def test_an_unusable_file_is_refused_with_a_bounded_reason(self):
+        self.connect_model()
+        binary = self.file("picture.bin", b"\x89PNG\x00\x01")
+        self.assertIsNone(self.ui.read_attachment(str(binary)))
+        self.assertEqual(self.ui.status.get_text(), "attachment_not_text")
+        # A path that does not exist at all is different from an empty file.
+        self.assertIsNone(self.ui.read_attachment(str(self.tmp / "missing.txt")))
+        self.assertEqual(self.ui.status.get_text(), "attachment_not_found")
+        blank = self.file("blank.txt", "   \n")
+        blank.write_bytes(b"   \n")  # No path, no permission, no read: absent.
+        self.assertIsNone(self.ui.read_attachment(str(blank)))
+        self.assertEqual(self.ui.status.get_text(), "attachment_empty")
+        self.assertIsNone(self.ui.attachment)
+        self.assertEqual(self.ui.attachment_note.get_text(), "")
+
+    def test_a_relative_path_is_not_a_file(self):
+        self.connect_model()
+        self.assertIsNone(self.ui.read_attachment("notes.txt"))
+        self.assertEqual(self.ui.status.get_text(), "attachment_not_found")
