@@ -22,7 +22,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tihulu_jarvis import (a11y, catalog_fetch, desktop, keys, market, profiles,
-                           settings)
+                           receipts, settings)
 from tihulu_jarvis.profiles import Profile, Rule
 from tihulu_jarvis.voice.m1 import Hold
 
@@ -2724,3 +2724,98 @@ class KeyboardTests(DesktopTests):
         self.assertTrue(self.ui.run_focus_search() is True)
         self.assertTrue(self.ui.search_entry.get_sensitive())
         self.assertTrue(self.ui.search_entry.get_can_focus())
+
+
+class ReceiptUITests(EscalationConsentTests):
+    """A decision is a receipt, never a bubble that could be mistaken for one."""
+
+    def add_profile(self, profile):
+        self.ui.store.save(profile)
+        self.ui.refresh_profiles()
+        return profile
+
+    def pick_profile(self, profile_id):
+        for item, entry in self.ui.policy_rows.items():
+            if entry.id == profile_id:
+                self.ui.profile_list.select_row(item)
+                return entry
+        raise AssertionError("missing profile: " + profile_id)
+
+    def widgets_of(self, widget):
+        out, item = [], widget.get_first_child()
+        while item is not None:
+            out.append(item)
+            out.extend(self.widgets_of(item))
+            item = item.get_next_sibling()
+        return out
+
+    def confirm(self, prefix):
+        self.until(lambda: self.ui.confirmations)
+        for widget in self.widgets_of(self.ui.confirmations[-1]):
+            if type(widget).__name__ == "Button" and (widget.get_label() or "").startswith(prefix):
+                widget.emit("clicked")
+                return widget
+        raise AssertionError("confirmation button missing: " + prefix)
+
+    def log_rows(self):
+        out, item = [], self.ui.log.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def escalate(self, profile_id):
+        """Switch to a profile, confirming only when privileges are added."""
+        self.pick_profile(profile_id)
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.ui.confirmations or self.ui.cfg["profile"] == profile_id)
+        if self.ui.confirmations:
+            self.confirm("Confirm")
+        self.until(lambda: self.ui.cfg["profile"] == profile_id)
+
+    def test_a_confirmed_switch_leaves_a_receipt_not_a_bubble(self):
+        self.connect_model()
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                          based_on_mode="CLOUD_CHAT").checked())
+        self.escalate("cloud-chat")
+        rows = [row for row in self.log_rows() if getattr(row, "receipt", False)]
+        self.assertEqual(len(rows), 1)
+        text = rows[0].get_text()
+        self.assertTrue(receipts.is_receipt(text), text)
+        self.assertIn("switching to Cloud Chat", text)
+        self.assertIn("Cloud reasoning", text)
+        # No sender, and no bubble was added for the approval.
+        self.assertEqual([b for b in self.ui.growing], [])
+
+    def test_a_cancelled_switch_says_nothing_was_approved(self):
+        self.connect_model()
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                          based_on_mode="CLOUD_CHAT").checked())
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_switch)
+        self.confirm("Cancel")
+        self.until(lambda: not self.ui.confirmations)
+        rows = [row.get_text() for row in self.log_rows() if getattr(row, "receipt", False)]
+        self.assertEqual(rows, ["Not approved · switching to Cloud Chat; "
+                                "no privileges were added"])
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+
+    def test_a_refused_read_is_a_receipt(self):
+        self.connect_model()
+        self.add_profile(profiles.Profile(
+            id="no-reads", name="No Reads", based_on_mode="LOCAL_ONLY",
+            filesystem_rules=(profiles.Rule("filesystem_read", ("attachment",), "deny"),),
+        ).checked())
+        self.escalate("no-reads")
+        self.assertIsNone(self.ui.require_attachment())
+        rows = [row.get_text() for row in self.log_rows() if getattr(row, "receipt", False)]
+        # An absent rule is not a forbiddance, so only an explicit deny writes
+        # a refusal; the receipt names the action and the refuser.
+        self.assertIn("Refused by the active profile · read a file (filesystem_read)",
+                      rows[-1])
+
+    def test_a_message_never_looks_like_a_receipt(self):
+        self.connect_model()
+        self.text("Merhaba! Benim kelimem mavi.")
+        for row in self.log_rows():
+            self.assertFalse(receipts.is_receipt(row.get_text()), row.get_text())

@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, attachments, keys
+from . import a11y, attachments, keys, receipts
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -47,6 +47,7 @@ def accessible_name(widget, text):
 
 
 LOOK = (".workspace {padding:20px;} .hero {font-size:24px;font-weight:bold;}"
+        " .receipt {padding:6px 10px;border-radius:8px;background:alpha(currentColor,.05);}"
         " .badge {color:#40ae96;font-weight:bold;} .message {padding:10px 14px;"
         "border-radius:12px;background:alpha(currentColor,.07);}"
         " .user {border-left:3px solid #39a68f;} .assistant {border-left:3px solid #787ee0;}")
@@ -553,9 +554,10 @@ def create_window(app, loop):
                 box.append(Gtk.Label(label="• " + line, xalign=0, wrap=True))
             row = Gtk.Box(spacing=8)
             box.append(row)
-            self.button(row, tr("Cancel", "Vazgeç", "Abbrechen"), lambda: dialog.close())
+            self.button(row, tr("Cancel", "Vazgeç", "Abbrechen"),
+                        lambda: self.cancel_escalation(target, dialog))
             self.button(row, tr("Confirm switch", "Geçişi onayla", "Wechsel bestätigen"),
-                        lambda: self.apply_escalation(target, dialog))
+                        lambda: self.apply_escalation(target, dialog, lines))
             dialog.connect("close-request", lambda *_: self.forget_confirmation(dialog) or False)
             self.confirmations.append(dialog)
             self.refresh_state_row()
@@ -568,15 +570,27 @@ def create_window(app, loop):
             self.refresh_state_row()
             return False
 
-        def apply_escalation(self, target, dialog):
+        def apply_escalation(self, target, dialog, lines):
             dialog.close()
             try:
                 self.activate_profile(target.id)
-                self.set_state("ready", tr("Mode switched with consent.",
-                                           "Onayla mod değiştirildi.",
-                                           "Modus mit Bestätigung gewechselt."))
             except Hold as exc:
                 self.set_state("ready", str(exc))
+                return
+            what = "switching to %s adds %s" % (target.name, ", ".join(lines))
+            self.receipt("approved", what)
+            self.set_state("ready", tr("Mode switched with consent.",
+                                       "Onayla mod değiştirildi.",
+                                       "Modus mit Bestätigung gewechselt."))
+
+        def cancel_escalation(self, target, dialog):
+            dialog.close()
+            # A cancelled approval changes nothing and says exactly that.
+            self.receipt("not_approved", "switching to %s; no privileges were added"
+                         % target.name)
+            self.set_state("ready", tr("Switch cancelled.",
+                                       "Geçiş vazgeçildi.",
+                                       "Wechsel abgebrochen."))
 
         def activate_selected(self):
             chosen = self.selected_profile()
@@ -1763,6 +1777,26 @@ def create_window(app, loop):
                     raise Hold("no_installed_chat_models")
             self.submit(run)
 
+        def receipt(self, kind, what):
+            """Record one decision in the conversation, as a receipt.
+
+            A receipt is not a bubble: it carries no sender and no time that
+            could be mistaken for an approval, and it names the outcome first.
+            """
+            text = receipts.line(kind, what)
+            label = Gtk.Label(label=text, xalign=0, selectable=True, wrap=True)
+            label.add_css_class("message")
+            label.add_css_class("receipt")
+            label.receipt = True
+            self.log.append(label)
+            GLib.idle_add(self.bottom)
+            return label
+
+        def bottom(self):
+            adj = self.scroll.get_vadjustment()
+            adj.set_value(max(0, adj.get_upper() - adj.get_page_size()))
+            return False
+
         def bubble(self,speaker,text):
             label=Gtk.Label(label=speaker+"\n"+text,xalign=0,selectable=True,wrap=True)
             # A message that grows keeps its own bounded text here.
@@ -1824,6 +1858,8 @@ def create_window(app, loop):
             try:
                 self.require_tools((attachments.ACTION, attachments.SCOPE))
             except Hold as exc:
+                # A refused read is a receipt, not a silent menu item.
+                self.receipt("refused", "read a file (filesystem_read)")
                 self.set_state("ready", str(exc))
                 return None
             return True
