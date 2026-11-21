@@ -2641,11 +2641,11 @@ class TextScaleUITests(DesktopTests):
                 for index in range(model.iter_n_children(None))]
 
     def test_the_stored_scale_is_the_shown_choice(self):
-        self.assertEqual(tuple(self.items(self.ui.text_scale)), ("Normal", "Large"))
-        self.assertEqual(self.ui.text_scale.get_active(), 0)
+        self.assertEqual(tuple(self.items(self.ui.settings_scale)), ("Normal", "Large"))
+        self.assertEqual(self.ui.settings_scale.get_active(), 0)
         # A stored choice is honoured on the next start, not only when chosen.
         self.ui.cfg["text_scale"] = "large"
-        self.ui.text_scale.set_active(1)
+        self.ui.settings_scale.set_active(1)
         self.until(lambda: a11y.checked(self.ui.cfg.get("text_scale")) == "large")
 
     def test_a_stored_large_scale_is_shown_at_startup(self):
@@ -2656,16 +2656,16 @@ class TextScaleUITests(DesktopTests):
         self.until(lambda: not self.app.get_windows())
         self.ui = desktop.create_window(self.app, self.loop)
         self.until(lambda: self.ui.win.get_mapped())
-        self.assertEqual(self.ui.text_scale.get_active(), 1)
+        self.assertEqual(self.ui.settings_scale.get_active(), 1)
         self.assertIsNotNone(self.ui.scale_provider)
 
     def test_a_chosen_scale_is_applied_and_stored(self):
-        self.ui.text_scale.set_active(1)
+        self.ui.settings_scale.set_active(1)
         self.until(lambda: self.ui.cfg["text_scale"] == "large")
         self.assertEqual(desktop.a11y.POINTS[self.ui.cfg["text_scale"]], 1.25)
         # The provider is replaced, not stacked: one stylesheet at a time.
         self.assertIsNotNone(self.ui.scale_provider)
-        self.ui.text_scale.set_active(0)
+        self.ui.settings_scale.set_active(0)
         self.until(lambda: self.ui.cfg["text_scale"] == "normal")
         self.assertIsNotNone(self.ui.scale_provider)
 
@@ -3042,14 +3042,14 @@ class SpokenTextUITests(DesktopTests):
         self.assertIn(spoken, text)
 
     def test_the_choice_is_stored_and_survives_a_restart(self):
-        self.ui.spoken_text.set_active(True)
+        self.ui.settings_spoken.set_active(True)
         self.until(lambda: self.ui.cfg.get("show_spoken_text") is True)
         self.assertEqual(settings.load()["show_spoken_text"], True)
         self.ui.win.close()
         self.until(lambda: not self.app.get_windows())
         self.ui = desktop.create_window(self.app, self.loop)
         self.until(lambda: self.ui.win.get_mapped())
-        self.assertTrue(self.ui.spoken_text.get_active())
+        self.assertTrue(self.ui.settings_spoken.get_active())
         self.ui.cfg["show_spoken_text"] = False
         settings.save(self.ui.cfg)
 
