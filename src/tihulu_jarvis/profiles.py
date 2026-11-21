@@ -344,8 +344,16 @@ def record_decision(root, profile_id, action, scope, decision, reason, now=0.0):
             Path(tmp).unlink(missing_ok=True)
 
 
-def read_audit(root, limit=100):
-    """The most recent decisions, oldest first. Never invented."""
+def read_audit(root, limit=100, action=None, decision=None, profile=None):
+    """The most recent decisions, oldest first. Never invented.
+
+    A filter narrows the rows that already exist; it never adds one, and a
+    filter that is not a short string is refused rather than guessed at.
+    """
+    for value, name in ((action, "audit_action_filter"), (decision, "audit_decision_filter"),
+                        (profile, "audit_profile_filter")):
+        if value is not None and (not isinstance(value, str) or not value or len(value) > 64):
+            raise Hold(name)
     path = audit_path(root)
     if not path.is_file():
         return ()
@@ -353,7 +361,27 @@ def read_audit(root, limit=100):
         rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
     except (ValueError, OSError):
         raise Hold("audit_unreadable") from None
+    if action is not None:
+        rows = [r for r in rows if r.get("action") == action]
+    if decision is not None:
+        rows = [r for r in rows if r.get("decision") == decision]
+    if profile is not None:
+        rows = [r for r in rows if r.get("profile") == profile]
     return tuple(rows[-limit:])
+
+
+def audit_actions(root, limit=40):
+    """The distinct actions a log already contains, in the order they appear.
+
+    A filter is offered for what happened, never for a name the log cannot
+    show.
+    """
+    seen = []
+    for row in read_audit(root, AUDIT_LIMIT):
+        action = row.get("action")
+        if isinstance(action, str) and action not in seen:
+            seen.append(action)
+    return tuple(seen[:limit])
 
 
 def require_tool(profile, action, scope=(), now=0.0):
