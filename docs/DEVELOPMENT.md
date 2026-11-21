@@ -85,3 +85,14 @@ otherwise hide it, and it is refreshed when a confirmation appears or closes.
 Controls carry screen-reader names where the GTK build can set them; where it
 cannot, the control is left untouched and the same words remain readable in the
 row.
+
+Searching the conversation stays local and bounded. The field under the chat
+log searches the session's own messages for a plain substring — never a pattern,
+so a search cannot become an expression engine — casefolded with combining
+marks dropped, so "kelimem" matches "KELİMEM" without depending on the platform
+locale. Results are snippets with a bounded window around the first match and
+are listed newest first; selecting one names its position and role in the
+detail line instead of rewriting the conversation. The field is disabled while
+a turn runs, so a search can never race a reply, and a query that is empty or
+longer than 120 characters is refused with a bounded reason rather than
+silently returning everything.

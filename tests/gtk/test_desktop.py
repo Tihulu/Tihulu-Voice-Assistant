@@ -2224,3 +2224,72 @@ class StateLabelTests(DisclosureUITests):
         for widget in (self.ui.talk, self.ui.stop, self.ui.cancel, self.ui.end, self.ui.hard):
             probe = desktop.accessible_name(widget, "probe")
             self.assertIn(probe, ("probe", None), "unexpected naming result: %r" % (probe,))
+
+
+class ConversationSearchTests(DesktopTests):
+    """Searching the conversation stays local, bounded and snippet-only."""
+
+    def search(self, query):
+        self.ui.search_entry.set_text(query)
+        # The note names the query, so this waits for this search to have run.
+        self.until(lambda: '"%s"' % query in self.ui.search_note.get_text())
+
+    def rows(self):
+        out, item = [], self.ui.search_results.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def ask(self, *messages):
+        self.connect_model()
+        self.backend.answers.extend(("Güle güle.", "Tamam.", "Peki.", "Olur."))
+        for message in messages:
+            self.text(message)
+
+    def test_a_word_from_an_earlier_turn_is_found(self):
+        self.ask("Merhaba! Benim kelimem mavi.", "Kelime ne?")
+        self.search("kelimem")
+        self.assertIn('1 matches for "kelimem"', self.ui.search_note.get_text())
+        self.assertEqual(len(self.rows()), 1)
+        self.assertIn("mavi", self.rows()[0].get_child().get_label())
+
+    def test_matches_are_newest_first_and_selectable(self):
+        self.ask("selam nasilsin", "merhaba nasilsin", "gunaydin nasilsin")
+        self.search("nasilsin")
+        self.assertIn('3 matches for "nasilsin"', self.ui.search_note.get_text())
+        self.assertEqual([row.match[0] for row in self.rows()], [4, 2, 0])
+        self.ui.search_results.select_row(self.rows()[0])
+        self.assertIn("Message 5", self.ui.search_note.get_text())
+
+    def test_clearing_restores_the_field_and_removes_the_rows(self):
+        self.ask("Merhaba! Benim kelimem mavi.")
+        self.search("kelimem")
+        self.assertEqual(len(self.rows()), 1)
+        self.click(self.ui.search_clear)
+        self.until(lambda: not self.rows())
+        self.assertEqual(self.ui.search_note.get_text(), "")
+        self.assertEqual(self.ui.search_entry.get_text(), "")
+
+    def test_an_absent_word_is_stated_not_guessed(self):
+        self.ask("Merhaba! Benim kelimem mavi.")
+        self.search("yok-boyle-bir-sey")
+        self.assertIn('0 matches', self.ui.search_note.get_text())
+        self.assertEqual(self.rows(), [])
+
+    def test_the_field_is_disabled_while_a_turn_runs(self):
+        self.ask("Merhaba! Benim kelimem mavi.")
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.chat_entered)
+        self.assertFalse(self.ui.search_entry.get_sensitive())
+        self.ui.search_entry.set_text("naber")
+        # While the turn runs the field does not search, so no row is claimed.
+        self.assertEqual(self.rows(), [])
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.search("naber")
+        # Only the question carries the word; the fixture reply does not, and
+        # the user's message is the third history entry, not the second.
+        self.assertEqual([row.match[0] for row in self.rows()], [2])
