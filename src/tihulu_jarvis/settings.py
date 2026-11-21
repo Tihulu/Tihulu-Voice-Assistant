@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from . import web
+from . import files, web
 from .voice.m1 import Hold
 
 LOCALES = ("tr", "en", "de")
@@ -15,7 +15,7 @@ LOCALES = ("tr", "en", "de")
 def empty():
     return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": "",
             "market_refs": {}, "allowed_hosts": [], "text_scale": "normal",
-            "web_targets": [], "show_spoken_text": False}
+            "web_targets": [], "show_spoken_text": False, "research_root": ""}
 
 
 def config_path():
@@ -73,6 +73,12 @@ def checked(obj):
         target = web.from_entry(item)
         clean_targets.append(web.entry(target))
     out["web_targets"] = clean_targets
+    root = obj.get("research_root", "")
+    # A stored folder is validated on read: a path that is no longer a folder
+    # is a bounded reason later, never a silently empty listing.
+    if not isinstance(root, str) or len(root) > 4096:
+        raise Hold("invalid_local_settings")
+    out["research_root"] = files.checked_root(root) if root else ""
     spoken = obj.get("show_spoken_text", False)
     # A stored preference must be a plain boolean, never a truthy guess.
     if not isinstance(spoken, bool):

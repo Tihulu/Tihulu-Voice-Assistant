@@ -191,3 +191,14 @@ the next start. This build has no second, shorter answer: a display text that
 cannot be spoken is refused, never silently shortened, so the spoken line is
 the same content in speakable form rather than a summary of it. A typed reply
 never shows a spoken line, because nothing is spoken.
+
+Files & Research reads a folder the owner chose, behind the filesystem policy.
+The folder is chosen once and stored; listing it is bounded to 200 entries and
+sorted folders first, and a preview is bounded text — 8000 characters — with a
+binary file refused before it is decoded and a long file cut with the cut
+stated. A name that leaves the chosen root, by traversal, by being absolute or
+by following a symlink out of it, is refused before anything is opened, and
+nothing is ever written. A folder or file the profile denies is a bounded reason
+and a receipt, and the stored folder is validated again when settings are read,
+so a path that has since disappeared is reported instead of silently listing
+nothing.
