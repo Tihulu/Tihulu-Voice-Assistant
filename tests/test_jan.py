@@ -75,3 +75,101 @@ class JanTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(Hold, "select_installed_model"):
                 await jan((Message("user","hi"),))
             self.assertEqual(req.await_count, 1)
+
+
+class JanStreamTests(unittest.IsolatedAsyncioTestCase):
+    def events(self, *pieces, done=True):
+        out = b""
+        for piece in pieces:
+            payload = json.dumps({"choices": [{"delta": {"content": piece}}]}).encode()
+            out += b"data: " + payload + b"\r\n\r\n"
+        if done:
+            out += b"data: [DONE]\r\n\r\n"
+        return out
+
+    async def serve(self, chunks, status=b"HTTP/1.1 200 OK"):
+        state = {"requests": []}
+
+        async def handler(reader, writer):
+            head = await reader.readuntil(b"\r\n\r\n")
+            n = int(next(l.split(b":")[1] for l in head.splitlines()
+                         if l.lower().startswith(b"content-length:")))
+            body = await reader.readexactly(n)
+            state["requests"].append(json.loads(body))
+            for chunk in chunks:
+                writer.write(chunk)
+                await writer.drain()
+            writer.close()
+            try:
+                await writer.wait_closed()
+            except (ConnectionResetError, BrokenPipeError):
+                pass
+
+        server = await asyncio.start_server(handler, "127.0.0.1", 0)
+        return server, state
+
+    def client(self, server):
+        return Jan("http://127.0.0.1:%s" % server.sockets[0].getsockname()[1], "fixture")
+
+    async def test_a_stream_is_joined_and_progressive(self):
+        head = b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+        server, state = await self.serve([head + self.events("Merha", "ba!")])
+        async with server:
+            seen = []
+            jan = self.client(server)
+            text = await jan.chat((Message("user", "naber nasilsin"),), on_delta=seen.append)
+        self.assertEqual(text, "Merhaba!")
+        self.assertEqual(seen, ["Merha", "ba!"])
+        # The request asks for a stream, with the same messages as a call.
+        self.assertTrue(state["requests"][0]["stream"] is True)
+        self.assertEqual(state["requests"][0]["messages"][0]["content"], "naber nasilsin")
+
+    async def test_a_stream_without_done_still_ends_at_the_close(self):
+        head = b"HTTP/1.1 200 OK\r\n\r\n"
+        server, _ = await self.serve([head + self.events("Merhaba", "!")])
+        async with server:
+            self.assertEqual(await self.client(server).chat((Message("user", "hi"),), on_delta=lambda p: None),
+                             "Merhaba!")
+
+    async def test_a_non_streaming_call_is_unchanged(self):
+        answer = json.dumps({"choices": [{"message": {"role": "assistant",
+                                                      "content": "Merhaba!"}}]}).encode()
+        server, state = await self.serve([b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n"
+                                          % len(answer) + answer])
+        async with server:
+            self.assertEqual(await self.client(server)((Message("user", "hi"),)), "Merhaba!")
+        self.assertTrue(state["requests"][0]["stream"] is False)
+
+    async def test_a_stream_is_bounded(self):
+        head = b"HTTP/1.1 200 OK\r\n\r\n"
+        # More events than the cap, with no closing marker at all.
+        endless = b"".join(b"data: " + json.dumps(
+            {"choices": [{"delta": {"content": "x"}}]}).encode() + b"\r\n\r\n"
+            for _ in range(5000))
+        server, _ = await self.serve([head + endless])
+        async with server:
+            with self.assertRaisesRegex(Hold, "jan_stream_unbounded"):
+                await self.client(server).chat((Message("user", "hi"),),
+                                               on_delta=lambda p: None)
+        # A reply past the character cap is refused, never truncated silently.
+        big = b"".join(b"data: " + json.dumps(
+            {"choices": [{"delta": {"content": "y" * 100}}]}).encode() + b"\r\n\r\n"
+            for _ in range(400))
+        server, _ = await self.serve([head + big])
+        async with server:
+            with self.assertRaisesRegex(Hold, "jan_response_too_large"):
+                await self.client(server).chat((Message("user", "hi"),), on_delta=lambda p: None)
+
+    async def test_a_stream_without_content_is_empty_not_invented(self):
+        head = b"HTTP/1.1 200 OK\r\n\r\n"
+        server, _ = await self.serve([head + self.events("", "", done=True)])
+        async with server:
+            with self.assertRaisesRegex(Hold, "jan_invalid_response"):
+                await self.client(server).chat((Message("user", "hi"),), on_delta=lambda p: None)
+
+    async def test_a_broken_event_is_a_bounded_reason(self):
+        head = b"HTTP/1.1 200 OK\r\n\r\n"
+        server, _ = await self.serve([head + b"data: {not json}\r\n\r\n"])
+        async with server:
+            with self.assertRaisesRegex(Hold, "jan_invalid_response"):
+                await self.client(server).chat((Message("user", "hi"),), on_delta=lambda p: None)

@@ -2523,3 +2523,94 @@ class AuditFilterUITests(AuditTrailUITests):
         self.choose(self.ui.audit_decision, "all")
         self.until(lambda: "allow" in self.ui.audit_list.get_text()
                    and "deny" in self.ui.audit_list.get_text())
+
+
+class StreamingReplyTests(DesktopTests):
+    """A reply grows with the text the server actually sends, in order."""
+
+    def setUp(self):
+        super().setUp()
+        self.pieces = []
+
+        async def chat(messages, on_delta=None):
+            self.backend.requests.append(messages)
+            self.backend.chat_entered = True
+            if self.backend.hold_chat:
+                try:
+                    await self.backend.chat_release.wait()
+                except asyncio.CancelledError:
+                    # Deliberately uncooperative: keep waiting after a cancel.
+                    self.backend.chat_cancelled = True
+                    await self.backend.chat_release.wait()
+            whole = self.backend.answers.popleft() if self.backend.answers else "Merhaba!"
+            if on_delta is None:
+                return whole
+            # Like the real transport: the joined pieces are the answer, and a
+            # server that sends no pieces is not a stream at all.
+            streamed = ""
+            for piece in self.pieces:
+                on_delta(piece)
+                streamed += piece
+            return streamed or whole
+
+        # The fixture backend gains a streaming-aware entry point, exactly the
+        # shape the real client offers: chat(messages, on_delta=None).
+        self.backend.chat = chat
+
+    def bubbles(self):
+        return [label.get_text() for label in self.labels_of(self.ui.log)]
+
+    def labels_of(self, widget):
+        out, item = [], widget.get_first_child()
+        while item is not None:
+            if hasattr(item, "get_text"):
+                out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def test_a_reply_grows_with_the_pieces_as_they_arrive(self):
+        self.connect_model()
+        self.pieces[:] = ["Merha", "ba!", " Nasılsın?"]
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        # The growing text is visible before the turn ends, and the final
+        # message is exactly what the server sent, joined.
+        self.until(lambda: any("Nasılsın?" in text for text in self.bubbles()))
+        self.assertIn("JARVIS\nMerhaba! Nasılsın?", self.bubbles()[-1])
+
+    def test_a_late_piece_after_a_cancelled_turn_is_not_shown(self):
+        self.connect_model()
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.chat_entered)
+        self.click(self.ui.hard)
+        # The server sends pieces only now, after the turn was invalidated.
+        self.pieces[:] = ["geç", " kaldı"]
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+        for text in self.bubbles():
+            self.assertNotIn("geç", text)
+        # The answer label of the invalidated turn is still empty: a late piece
+        # never becomes an answer, and nothing grows from a dead turn.
+        self.assertIn("JARVIS\n", self.bubbles()[-1])
+        self.assertEqual(self.bubbles()[-1], "JARVIS\n")
+        self.assertEqual(self.ui.session.history, ())
+
+    def test_a_whole_reply_without_streaming_is_unchanged(self):
+        self.connect_model()
+        self.backend.answers.append("naber nasilsin")
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.bubbles()[-1], "JARVIS\nnaber nasilsin")
+
+    def test_a_voice_turn_still_answers_as_a_whole(self):
+        self.connect_model()
+        self.backend.transcript = "naber nasilsin"
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: self.ui.stage == self.backend.playback_stage)
+        # The spoken reply never streams: synthesis needs one whole answer.
+        self.assertEqual(self.bubbles()[-1], "JARVIS\nMerhaba!")
+        self.assertTrue(self.backend.speeches)
