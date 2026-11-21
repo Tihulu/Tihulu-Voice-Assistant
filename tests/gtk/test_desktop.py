@@ -2095,3 +2095,79 @@ class ResourceLockTests(DesktopTests):
         self.text("tekrar")
         # The refused playback did not end the turn: both replies are kept.
         self.assertEqual(len(self.ui.session.history), 6)
+
+
+class DisclosureUITests(EscalationConsentTests):
+    """The privacy boundary is stated before content is written, in words."""
+
+    def add_profile(self, profile):
+        self.ui.store.save(profile)
+        self.ui.refresh_profiles()
+        return profile
+
+    def pick_profile(self, profile_id):
+        for item, entry in self.ui.policy_rows.items():
+            if entry.id == profile_id:
+                self.ui.profile_list.select_row(item)
+                return entry
+        raise AssertionError("missing profile: " + profile_id)
+
+    def widgets_of(self, widget):
+        out, item = [], widget.get_first_child()
+        while item is not None:
+            out.append(item)
+            out.extend(self.widgets_of(item))
+            item = item.get_next_sibling()
+        return out
+
+    def confirm(self, prefix):
+        self.until(lambda: self.ui.confirmations)
+        for widget in self.widgets_of(self.ui.confirmations[-1]):
+            if type(widget).__name__ == "Button" and (widget.get_label() or "").startswith(prefix):
+                widget.emit("clicked")
+                return widget
+        raise AssertionError("confirmation button missing: " + prefix)
+
+    def switch_to(self, profile_id):
+        self.pick_profile(profile_id)
+        self.click(self.ui.profile_switch)
+        self.confirm("Confirm")
+        self.until(lambda: self.ui.cfg["profile"] == profile_id)
+
+    def test_the_local_boundary_is_stated_before_a_message(self):
+        self.connect_model()
+        self.assertIn("Content stays on this computer", self.ui.disclosure_note.get_text())
+        self.text("Merhaba!")
+        rows = profiles.read_audit(self.ui.store.root)
+        self.assertTrue(any(r["action"] == "disclosure" for r in rows))
+        row = [r for r in rows if r["action"] == "disclosure"][-1]
+        self.assertEqual(row["decision"], "shown")
+        self.assertEqual(row["reason"], "loopback_transport_only")
+
+    def test_a_cloud_mode_states_the_permission_and_the_transport_limit(self):
+        self.connect_model()
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                          based_on_mode="CLOUD_CHAT",
+                                          allowed_providers=("fixture-provider",)).checked())
+        self.switch_to("cloud-chat")
+        note = self.ui.disclosure_note.get_text()
+        self.assertIn("fixture-provider", note)
+        self.assertIn("nothing leaves this computer", note)
+
+    def test_a_cloud_mode_without_providers_says_routes_are_refused(self):
+        self.connect_model()
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                          based_on_mode="CLOUD_CHAT").checked())
+        self.switch_to("cloud-chat")
+        note = self.ui.disclosure_note.get_text()
+        self.assertIn("refused", note)
+        # A disabled disclosure is never a stale claim about an older profile.
+        self.assertNotIn("Content stays", note)
+
+    def test_the_statement_has_no_address_and_survives_a_bad_endpoint(self):
+        self.connect_model()
+        self.ui.url.set_text("http://example.test/x")
+        self.ui.forget_inventory()
+        note = self.ui.disclosure_note.get_text()
+        self.assertIn("not a loopback address", note)
+        self.assertNotIn("example.test", note)

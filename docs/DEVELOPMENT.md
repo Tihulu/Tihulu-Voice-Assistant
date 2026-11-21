@@ -63,3 +63,14 @@ lease it needs is refused before the device is touched — `resource_busy:…` i
 bounded reason, never an attempt that fails later, and never a silent retry
 against a second device. The lease is always released, including when the turn
 is cancelled or fails.
+
+The privacy boundary is stated before content is written. The client derives
+it from the active profile's granted privileges, its approved providers and the
+kind of endpoint configured — never from a mode name alone, and never from a
+guess about a later change. The composer shows one line: content stays on this
+computer; this mode permits cloud reasoning with approved providers (named),
+but this build only transports to a loopback endpoint; or the configured
+endpoint is not a loopback address and this build refuses it. This build's only
+transport is a numeric loopback endpoint, so no configuration sends content off
+the machine — that is stated as a fact, not left to be inferred. Stating it is
+recorded in the audit trail with the boundary tokens and no message content.

@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import catalog_fetch, routing
+from . import catalog_fetch, disclosure, routing
 from . import locks
 from . import market, profiles, settings
 from .voice import audio
@@ -100,6 +100,8 @@ def create_window(app, loop):
             entryrow = Gtk.Box(spacing=8)
             self.entry = Gtk.Entry(hexpand=True,placeholder_text=tr("Write a message…","Bir mesaj yaz…","Nachricht schreiben…"))
             entryrow.append(self.entry)
+            self.disclosure_note = Gtk.Label(xalign=0, wrap=True)
+            chat.append(self.disclosure_note)
             self.send = self.button(entryrow,tr("Send","Gönder","Senden"),self.send_text)
             self.entry.connect("activate",lambda *_:self.send_text())
             chat.append(entryrow)
@@ -471,6 +473,40 @@ def create_window(app, loop):
                                  "Cloud-Routen erfordern einen genehmigten Anbieter.")
             self.route_note.set_text(head)
 
+        def refresh_disclosure(self):
+            """State the privacy boundary of a message before it is written.
+
+            The facts come from the active profile and the configured endpoint;
+            nothing is contacted and no message is inspected here.
+            """
+            try:
+                profile = self.active_profile()
+                endpoint = self.url.get_text().strip()
+            except Hold:
+                self.disclosure_note.set_text("")
+                return
+            data = disclosure.facts(profile, endpoint)
+            if data["boundary"] == disclosure.CLOUD_WITH_APPROVAL:
+                body = tr("Content you write may go to: %s." % ", ".join(data["providers"]),
+                          "Yazdığın içerik şuraya gidebilir: %s." % ", ".join(data["providers"]),
+                          "Inhalt, den du schreibst, kann an %s gehen." % ", ".join(data["providers"]))
+                body += " " + tr("This build only transports to a loopback endpoint, so nothing leaves this computer yet.",
+                                 "Bu sürüm yalnızca geri döngü uç noktasına taşır, bu yüzden şimdilik hiçbir şey bilgisayardan çıkmaz.",
+                                 "Dieser Build transportiert nur zu einem Loopback-Endpunkt, deshalb verlässt nichts diesen Computer.")
+            elif data["boundary"] == disclosure.CLOUD_WITHOUT_APPROVAL:
+                body = tr("This mode permits cloud reasoning but no provider is approved, so cloud routes are refused.",
+                          "Bu mod bulut çıkarımına izin verir ama onaylı sağlayıcı yok, bulut rotaları reddedilir.",
+                          "Dieser Modus erlaubt Cloud-Schlussfolgerung, aber kein Anbieter ist genehmigt, daher werden Cloud-Routen abgelehnt.")
+            elif data["endpoint"] != "loopback":
+                body = tr("The configured endpoint is not a loopback address; this build refuses it.",
+                          "Yapılandırılan uç nokta geri döngü adresi değil; bu sürüm onu reddeder.",
+                          "Der konfigurierte Endpunkt ist keine Loopback-Adresse; dieser Build lehnt ihn ab.")
+            else:
+                body = tr("Content stays on this computer.",
+                          "İçerik bu bilgisayarda kalır.",
+                          "Inhalt bleibt auf diesem Computer.")
+            self.disclosure_note.set_text(tr("Privacy: ", "Gizlilik: ", "Privatsphäre: ") + body)
+
         def refresh(self):
             connected = self.cfg["llm"] in self.inventory
             self.entry.set_sensitive(not self.busy)
@@ -491,6 +527,7 @@ def create_window(app, loop):
                 self.test_chat_button.set_sensitive(connected)
                 self.transcribe_button.set_sensitive(connected and bool(self.cfg["stt"]))
                 self.refresh_route_note()
+                self.refresh_disclosure()
                 for widget, lang in self.previews.items():
                     # A preview speaks only the locale that is actually selected.
                     widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
@@ -1287,6 +1324,15 @@ def create_window(app, loop):
                     raise
                 self.record_policy(action, scope, "allow", "rule_or_absent")
 
+        def record_disclosure(self):
+            """Record that the boundary was stated before the message was sent."""
+            try:
+                data = disclosure.facts(self.active_profile(), self.url.get_text().strip())
+            except Hold:
+                return
+            self.record_policy("disclosure", (data["boundary"], data["endpoint"]),
+                               "shown", data["leak_reason"])
+
         def record_policy(self, action, scope, decision, reason):
             try:
                 profiles.record_decision(self.store.root, self.cfg["profile"], action,
@@ -1395,6 +1441,7 @@ def create_window(app, loop):
             text=self.entry.get_text().strip()
             if self.busy or not text or self.cfg["llm"] not in self.inventory:
                 return
+            self.record_disclosure()
             self.entry.set_text("")
             async def run(epoch):
                 self.bubble("You",text)
