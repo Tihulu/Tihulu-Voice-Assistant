@@ -561,10 +561,7 @@ def create_window(app, loop):
             try:
                 self.load_catalog_text(path.read_text(encoding="utf-8"))
             except FileNotFoundError:
-                self.catalog_note.set_text(tr(
-                    "No catalog yet. Import a curated catalog to discover models and voices.",
-                    "Henüz katalog yok. Model ve ses keşfetmek için seçilmiş bir katalog al.",
-                    "Noch kein Katalog. Kuratierten Katalog importieren, um Modelle zu finden."))
+                self.catalog_note.set_text(self.catalog_report())
             except (Hold, OSError, ValueError):
                 self.catalog_note.set_text(tr("Catalog unreadable.","Katalog okunamadı.",
                                               "Katalog nicht lesbar."))
@@ -576,6 +573,7 @@ def create_window(app, loop):
             self.catalog_rows = {}
             wanted = self.catalog_filter.get_active_text() or ""
             text = self.catalog_search.get_text().strip()
+            self.catalog_note.set_text(self.catalog_report())
             for entry in self.catalog.search(category=wanted, text=text):
                 label = Gtk.Label(label="%s · %s · %s · %s · %s" % (
                     entry.display_name, entry.category, entry.engine, entry.artifact_format,
@@ -589,6 +587,18 @@ def create_window(app, loop):
         def selected_catalog_entry(self):
             row = self.catalog_list.get_selected_row()
             return self.catalog_rows.get(row) if row is not None else None
+
+        def catalog_report(self):
+            if not self.catalog.entries:
+                return tr("No catalog yet. Import a curated catalog to discover models and voices.",
+                          "Henüz katalog yok. Model ve ses keşfetmek için seçilmiş bir katalog al.",
+                          "Noch kein Katalog. Kuratierten Katalog importieren, um Modelle zu finden.")
+            return tr("%s. An unverified catalog may be inspected, never installed from."
+                      % self.catalog.report(),
+                      "%s. Doğrulanmamış katalog incelenebilir, kurulum yapılamaz."
+                      % self.catalog.report(),
+                      "%s. Ein ungeprüfter Katalog darf angesehen, nicht installiert werden."
+                      % self.catalog.report())
 
         def refresh_catalog_buttons(self):
             for w in (self.catalog_add, self.catalog_approve):

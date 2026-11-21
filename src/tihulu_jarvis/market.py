@@ -10,11 +10,13 @@ and shared weights are never removed by this project.
 """
 import asyncio
 import hashlib
+import hmac
 import json
 import os
+import time
 import re
 import tempfile
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .voice.m1 import Hold
@@ -392,10 +394,27 @@ class Entry:
 
 @dataclass(frozen=True)
 class Catalog:
-    """An owner-supplied curated catalog. It is never fetched."""
+    """An owner-supplied curated catalog. It is never fetched.
+
+    ``verified`` records whether this client could authenticate the document
+    against an owner-managed key. An unverified catalog may be inspected, but
+    its entries cannot be added as downloadable items.
+    """
 
     entries: tuple = ()
     source_name: str = "unknown"
+    verified: bool = False
+    key_ref: str = ""
+    signed_at: float = 0.0
+    document: dict = field(default_factory=dict)
+    signature: dict = field(default_factory=dict)
+
+    def report(self):
+        if not self.entries:
+            return "empty"
+        state = "verified" if self.verified else "unverified"
+        extra = " · key " + self.key_ref if self.key_ref else ""
+        return "%d entries · %s%s" % (len(self.entries), state, extra)
 
     def checked(self):
         seen = set()
@@ -432,6 +451,78 @@ class Catalog:
         return tuple(entry.checked() for entry in self.entries)
 
 
+def key_path(name):
+    """Owner-managed catalog keys live beside the market data, mode 0600."""
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", name):
+        raise Hold("invalid_key_reference")
+    base = os.environ.get("XDG_DATA_HOME")
+    folder = Path(base) if base and Path(base).is_absolute() else Path.home() / ".local" / "share"
+    return folder / "tihulu-jarvis" / "market" / "keys" / (name + ".key")
+
+
+def save_key(name, secret):
+    """Store an owner-managed catalog key; the secret never leaves that file."""
+    if not isinstance(secret, str) or not 16 <= len(secret) <= 256:
+        raise Hold("invalid_key_material")
+    path = key_path(name)
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(secret)
+
+
+def load_key(name):
+    """Read an owner-managed catalog key, or report why it cannot be used."""
+    try:
+        path = key_path(name)
+        if path.stat().st_size > 512 or not path.is_file():
+            raise Hold("invalid_key_material")
+        secret = path.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
+        raise Hold("key_unreadable") from None
+    if not 16 <= len(secret) <= 256:
+        raise Hold("invalid_key_material")
+    return secret
+
+
+def sign_catalog(text, key_name, now=0.0):
+    """Attach an owner-managed signature to a catalog document."""
+    secret = load_key(key_name)
+    try:
+        data = json.loads(text)
+        if not isinstance(data, dict):
+            raise ValueError
+    except ValueError:
+        raise Hold("invalid_catalog") from None
+    signed_at = now or time.time()
+    payload = json.dumps({k: v for k, v in data.items() if k != "signature"},
+                         ensure_ascii=False, sort_keys=True).encode("utf-8")
+    data["signature"] = {"key_ref": key_name,
+                         "mac": hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest(),
+                         "signed_at": signed_at}
+    return json.dumps(data, ensure_ascii=False, sort_keys=True)
+
+
+def verify_catalog(catalog):
+    """Authenticate a parsed catalog against its owner-managed key.
+
+    Returns (verified, reason). It never mutates the document.
+    """
+    signature = catalog.signature if isinstance(catalog.signature, dict) else {}
+    if not signature:
+        return False, "catalog_signature_absent"
+    try:
+        secret = load_key(str(signature.get("key_ref", "")))
+    except Hold as exc:
+        return False, str(exc)
+    payload = json.dumps({k: v for k, v in catalog.document.items() if k != "signature"},
+                         ensure_ascii=False, sort_keys=True).encode("utf-8")
+    expected = hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, str(signature.get("mac", ""))):
+        return False, "catalog_signature_invalid"
+    return True, "catalog_signature_verified"
+
+
 def parse_catalog(text, source_name="owner-supplied"):
     """Parse and validate a curated catalog document."""
     if len(text) > CATALOG_LIMIT:
@@ -464,7 +555,13 @@ def parse_catalog(text, source_name="owner-supplied"):
             raise Hold("invalid_catalog") from None
         entry.checked()  # validate; the entry is stored, not its derived card
         entries.append(entry)
-    return Catalog(tuple(entries), str(data.get("source_name", source_name))[:64]).checked()
+    signature = data.get("signature") if isinstance(data.get("signature"), dict) else {}
+    catalog = Catalog(tuple(entries), str(data.get("source_name", source_name))[:64],
+                      verified=False, key_ref=str(signature.get("key_ref", "")),
+                      signed_at=float(signature.get("signed_at", 0.0) or 0.0),
+                      document=data, signature=signature).checked()
+    verified, _ = verify_catalog(catalog)
+    return replace(catalog, verified=verified)
 
 
 def catalog_path():
