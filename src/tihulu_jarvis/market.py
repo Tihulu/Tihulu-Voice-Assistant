@@ -522,13 +522,13 @@ class Transfer:
         self.state = self.card.state
         return self.registry.save_card(self.card)
 
-    async def resume(self, progress=None, start=0):
+    async def resume(self, progress=None, start=0, allow_installed=False):
         """Continue an interrupted transfer from a verified byte offset.
 
         The card's lifecycle is not advanced here: an interrupted item stays
         cancelled until the resumed transfer verifies and registers it.
         """
-        if self.card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
+        if not allow_installed and self.card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
             raise Hold("model_already_registered")
         fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
         os.close(fd)
@@ -545,8 +545,8 @@ class Transfer:
                 raise Hold("transfer_resume_made_no_progress")
             checksum, _ = digest(self.temp)
             if checksum != self.source.checksum:
-                self.card = replace(self.card, state="FAILED")
-                self.state = self.card.state
+                # A failed update leaves the installed item and its settings intact.
+                self.state = "FAILED"
                 raise Hold("transfer_checksum_mismatch")
             # A resumed transfer registers directly; the interrupted item's
             # lifecycle was not advanced for the retry itself.
@@ -557,10 +557,13 @@ class Transfer:
             os.chmod(target, 0o600)
             # The resumed bytes are the artifact now; the partial is no longer needed.
             (self.root / ("partial-" + self.card.model_id)).unlink(missing_ok=True)
-            registered = replace(self.card, state="REGISTERED", registered=True, installed=True,
+            # A successful update keeps an installed item installed.
+            stays = self.card.state if self.card.state in ("TESTABLE", "ACTIVE") else "REGISTERED"
+            registered = replace(self.card, state=stays, registered=True, installed=True,
                                  owned_by_jarvis=True, disk_size_bytes=written,
                                  storage_ref="sha256-" + checksum[:32],
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
+                                 source_version=self.source.version,
                                  license_id=self.source.license_id, trust_level="curated")
             self.registry.save_card(registered)
             self.card = registered
@@ -581,6 +584,16 @@ class Transfer:
                     self.temp.replace(self.root / ("partial-" + self.card.model_id))
                 else:
                     Path(self.temp).unlink(missing_ok=True)
+
+    async def update(self, progress=None):
+        """Replace an installed item with its approved source, keeping history.
+
+        The previous entry stays as a revision; the new one registers
+        atomically after verification.
+        """
+        if self.card.state not in ("REGISTERED", "TESTABLE", "ACTIVE"):
+            raise Hold("model_not_installed")
+        return await self.resume(progress, start=0, allow_installed=True)
 
     async def run(self, progress=None):
         if self.card.state != DISCOVERED:

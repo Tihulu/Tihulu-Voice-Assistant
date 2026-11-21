@@ -1477,6 +1477,16 @@ class DownloadFixture(MarketFixture):
         self.ui.market_filter.set_active(0)
         self.pick_card("fixture-download")
 
+    def drain_tasks(self):
+        """Let fixture handlers finish so no task outlives the window."""
+        async def drain():
+            for _ in range(100):
+                live = asyncio.all_tasks(self.loop) - {asyncio.current_task()}
+                if not live:
+                    return
+                await asyncio.sleep(0.02)
+        self.loop.run_until_complete(asyncio.wait_for(drain(), 4))
+
     def download_rows(self):
         out = []
         item = self.ui.download_list.get_first_child()
@@ -1669,7 +1679,7 @@ class DownloadQueueTests(DownloadFixture):
         self.assertFalse(list(Path(self.market_home, "transfers").glob("tihulu-transfer-*")))
         self.assertIn("CANCELLED", self.download_rows()[0])
         release.set()
-        self.loop.run_until_complete(asyncio.sleep(0.05))
+        self.drain_tasks()
 
 
 
@@ -1748,7 +1758,7 @@ class ResumeQueueTests(DownloadFixture):
         self.assertTrue(self.ui.download_discard.get_sensitive())
         self.assertIn("RESUMABLE", self.download_rows()[0])
         release.set()
-        self.loop.run_until_complete(asyncio.sleep(0.05))
+        self.drain_tasks()
         release.set()
 
     def test_resume_completes_the_registration(self):
@@ -1775,7 +1785,7 @@ class ResumeQueueTests(DownloadFixture):
         self.assertEqual(served["offset"], start)
         self.assertIn("REGISTERED", self.download_rows()[0])
         release.set()
-        self.loop.run_until_complete(asyncio.sleep(0.05))
+        self.drain_tasks()
 
     def test_discard_removes_the_partial_and_leaves_nothing_installed(self):
         url, release, served = self.range_server()
@@ -1833,3 +1843,65 @@ class RevisionHistoryUITests(MarketFixture):
         self.ui.rollback_selected_card()
         self.assertEqual(self.ui.status.get_text(), "revision_not_found")
         self.assertEqual(self.ui.market.card("fixture-lonely").display_name, "Lonely")
+
+
+class UpdateUITests(DownloadFixture):
+    """An installed item updates from its approved source, keeping history."""
+
+    def installed_with_terms(self, url, checksum, size, version="1.0"):
+        card = market.ModelCard(
+            model_id="fixture-update", display_name="Fixture Update", category="stt",
+            engine="whisper.cpp", artifact_format="ggml", installed=True, registered=True,
+            trust_level="curated", state="ACTIVE", source_ref=url, source_checksum=checksum,
+            source_size=size, source_version=version, license_id="MIT",
+            network_approval="owner-approval", approval_expires_at=1e12).checked()
+        self.ui.market.save_card(card)
+        self.ui.build_market_page()
+        return card
+
+    def test_update_re_registers_and_keeps_the_previous_revision(self):
+        url, payload = self.loopback_server()
+        first = self.installed_with_terms(url, hashlib.sha256(payload).hexdigest(),
+                                         len(payload))
+        self.ui.market_filter.set_active(0)
+        self.pick_card("fixture-update")
+        self.assertTrue(self.ui.market_update.get_sensitive())
+        self.click(self.ui.market_update)
+        self.until(lambda: not self.ui.busy)
+        card = self.ui.market.card("fixture-update")
+        self.assertEqual(card.state, "ACTIVE")
+        self.assertEqual(card.revision, 1)
+        history = self.ui.market.history("fixture-update")
+        self.assertEqual(len(history), 1)
+        self.assertEqual(history[0].revision, 0)
+        self.assertEqual(history[0].source_version, "1.0")
+        self.assertIn("ACTIVE", self.download_rows()[0])
+        self.assertIn("Updated.", self.download_rows()[0])
+
+    def test_update_of_an_uninstalled_item_is_not_offered(self):
+        url, payload = self.loopback_server()
+        card = self.discovered_with_terms(url, hashlib.sha256(payload).hexdigest(),
+                                         len(payload))
+        self.ui.market_filter.set_active(0)
+        self.pick_card(card.model_id)
+        self.assertFalse(self.ui.market_update.get_sensitive())
+        self.ui.market_update.emit("clicked")
+        self.assertEqual(self.ui.market.card(card.model_id).state, "DISCOVERED")
+
+    def test_update_without_a_transport_reports_an_honest_reason(self):
+        url, payload = self.loopback_server()
+        card = self.installed_with_terms(url, hashlib.sha256(payload).hexdigest(),
+                                        len(payload))
+        # An opaque source token has no transport in this build; the honest
+        # answer is a reason, not a silent success.
+        self.ui.market.save_card(market.replace(card, source_ref="catalog:fixture-update"))
+        self.ui.build_market_page()
+        self.ui.market_filter.set_active(0)
+        self.pick_card("fixture-update")
+        self.assertTrue(self.ui.market_update.get_sensitive())
+        self.click(self.ui.market_update)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "download_transport_not_available")
+        self.assertEqual(self.ui.market.card("fixture-update").state, "ACTIVE")
+        # The failed update replaced nothing; only the explicit rename revision exists.
+        self.assertEqual(len(self.ui.market.history("fixture-update")), 1)

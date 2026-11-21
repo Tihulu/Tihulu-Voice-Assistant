@@ -316,11 +316,11 @@ class UsageTests(unittest.TestCase):
         self.assertIn("unknown/not tested", empty.report())
 
 
-async def fake_fetch(path, note):
+async def fake_fetch(path, note, start=0):
     """A fixture transport: it writes into the isolated transfer directory."""
     with open(path, "wb") as f:
         f.write(b"weights")
-    note(len(b"weights"))
+    note(start + len(b"weights"))
     return len(b"weights")
 
 
@@ -680,3 +680,59 @@ class RevisionHistoryTests(unittest.TestCase):
         again = Registry(self.tmp)
         self.assertEqual([c.display_name for c in again.history("fixture-model")], ["First"])
         self.assertEqual(again.card("fixture-model").display_name, "Second")
+
+
+class UpdateTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp())
+        self.store = Registry(self.tmp)
+
+    def active_card(self, **kw):
+        current = card(**kw)
+        for state in ("REVIEWED", "APPROVED", "QUEUED", "DOWNLOADING", "VERIFIED",
+                      "REGISTERED", "TESTABLE", ACTIVE):
+            current = advance(current, state)
+        return current
+
+    async def test_an_installed_item_updates_and_keeps_its_history(self):
+        source = Source("catalog:fixture", hashlib.sha256(b"weights").hexdigest(),
+                        len(b"weights"), "2.0", "MIT", "owner-1", 1e12)
+        installed = self.active_card(model_id="fixture-model", category="stt",
+                                     engine="whisper.cpp", artifact_format="ggml",
+                                     installed=True, trust_level="curated",
+                                     disk_size_bytes=len(b"weights"),
+                                     storage_ref="sha256-" + hashlib.sha256(b"weights").hexdigest()[:32],
+                                     source_version="1.0")
+        self.store.save_card(installed)
+        transfer = Transfer(self.store, installed, source, fake_fetch, root=self.tmp)
+        done = await asyncio.wait_for(transfer.update(lambda count: None), 5)
+        self.assertEqual(done.state, "ACTIVE")
+        self.assertEqual(done.source_version, "2.0")
+        current = self.store.card("fixture-model")
+        self.assertEqual(current.revision, 1)
+        previous = self.store.history("fixture-model")
+        self.assertEqual(len(previous), 1)
+        self.assertEqual(previous[0].source_version, "1.0")
+        self.assertEqual(previous[0].revision, 0)
+
+    async def test_an_update_of_an_uninstalled_item_is_refused(self):
+        source = Source("catalog:fixture", hashlib.sha256(b"weights").hexdigest(),
+                        len(b"weights"), "2.0", "MIT", "owner-1", 1e12)
+        transfer = Transfer(self.store, card(), source, fake_fetch, root=self.tmp)
+        with self.assertRaisesRegex(Hold, "model_not_installed"):
+            await transfer.update(lambda count: None)
+
+    async def test_a_failed_update_keeps_the_previous_revision(self):
+        source = Source("catalog:fixture", "0" * 64, len(b"weights"), "2.0", "MIT",
+                        "owner-1", 1e12)
+        installed = self.active_card(installed=True)
+        self.store.save_card(installed)
+        transfer = Transfer(self.store, installed, source, fake_fetch, root=self.tmp)
+        with self.assertRaisesRegex(Hold, "transfer_checksum_mismatch"):
+            await transfer.update(lambda count: None)
+        # A failed update leaves the installed item and its settings intact.
+        current = self.store.card("fixture-model")
+        self.assertEqual(current.state, "ACTIVE")
+        self.assertEqual(current.source_version, "unknown")
+        # Nothing was replaced, so no revision was created either.
+        self.assertEqual(self.store.history("fixture-model"), ())
