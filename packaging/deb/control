@@ -1,0 +1,14 @@
+Package: tihulu-jarvis
+Version: 0.1.0
+Architecture: all
+Maintainer: TIHULU JARVIS maintainers <maintainers@tihulu.invalid>
+Installed-Size: 2048
+Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-4.0, gir1.2-pango-1.0, libcairo2
+Section: utils
+Priority: optional
+Homepage: https://github.com/Tihulu/Tihulu-Voice-Assistant
+Description: Offline-first multilingual desktop assistant
+ A local, private assistant with chat and voice, TR/EN/DE conversation
+ routing, an explicit local Jan connection and installed model choices.
+ It starts no listener, downloads nothing on its own and keeps its data
+ under the invoking user's XDG directories.
