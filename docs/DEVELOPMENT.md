@@ -74,3 +74,14 @@ endpoint is not a loopback address and this build refuses it. This build's only
 transport is a numeric loopback endpoint, so no configuration sends content off
 the machine — that is stated as a fact, not left to be inferred. Stating it is
 recorded in the audit trail with the boundary tokens and no message content.
+
+State is stated in words, never in colour alone. A row under the status line
+reads the live condition: local or cloud permitted, microphone idle, listening
+or transcribing, privileged tools may run, approval pending, no local model.
+The tokens come from the real stage and the real configuration — never from an
+animation and never from a colour. The row is refreshed while a turn runs, so
+"microphone listening" is visible exactly when a disabled control would
+otherwise hide it, and it is refreshed when a confirmation appears or closes.
+Controls carry screen-reader names where the GTK build can set them; where it
+cannot, the control is left untouched and the same words remain readable in the
+row.
