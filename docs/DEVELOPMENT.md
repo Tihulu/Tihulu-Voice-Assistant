@@ -171,3 +171,13 @@ inferred from the URL a second time. A submission without the right is refused
 in words and recorded as a receipt. Browsing itself — rendering, scripts,
 screenshots — is not part of this increment: this is the policy and the
 registry behind it.
+
+The Activity page lists the work this client runs, newest first. A task names
+its kind (a turn, a download, a transcription, a catalog fetch), its label, its
+state — queued, running, done, cancelled or failed — the reason it ended with,
+the elapsed time and the resource leases it holds. Progress is never guessed: a
+turn has no percentage and none is shown, a download counts bytes. A running
+turn is visible while it runs, not only after it ends, and the selected running
+task can be stopped, which cancels the turn through the real cancellation path
+and records the reason. This is the client's own work; an OpenCode project and
+session view is not part of this build and is not implied by the page.
