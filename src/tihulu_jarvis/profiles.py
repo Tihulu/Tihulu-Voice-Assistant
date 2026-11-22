@@ -252,6 +252,15 @@ def profile_dir():
     return folder / "tihulu-jarvis" / "profiles"
 
 
+KIND_OF = {
+    "host_shell": "shell_rules",
+    "external_network": "network_rules",
+    "filesystem_read": "filesystem_rules",
+    "filesystem_write": "filesystem_rules",
+    "publish_artifact": "cloud_disclosure_rules",
+}
+
+
 def template(key):
     """Permission-light starting point. Accepting one is the owner's decision."""
     specs = {
@@ -278,12 +287,18 @@ def template(key):
     if key not in specs:
         raise Hold("unknown_profile_template")
     name, mode, rules = specs[key]
+    # Each rule belongs to exactly one kind. Copying a rule into two lists
+    # would read as a duplicate when the kinds are concatenated, so the bucket
+    # is decided by the action rather than by repeating the rule.
+    buckets = {kind: [] for kind in RULE_KINDS}
+    for rule in rules:
+        buckets[KIND_OF.get(rule.action, "tool_rules")].append(rule)
     return Profile(id=key, name=name, based_on_mode=mode, version=1,
-                  tool_rules=tuple(r for r in rules if r.action not in ("host_shell",)),
-                  shell_rules=tuple(r for r in rules if r.action == "host_shell"),
-                  network_rules=tuple(r for r in rules if r.action == "external_network"),
-                  filesystem_rules=tuple(r for r in rules if r.action.startswith("filesystem_")),
-                  cloud_disclosure_rules=tuple(r for r in rules if r.action == "publish_artifact"),
+                  tool_rules=tuple(buckets["tool_rules"]),
+                  shell_rules=tuple(buckets["shell_rules"]),
+                  network_rules=tuple(buckets["network_rules"]),
+                  filesystem_rules=tuple(buckets["filesystem_rules"]),
+                  cloud_disclosure_rules=tuple(buckets["cloud_disclosure_rules"]),
                   voice_activation="push_to_talk" if key in ("private-assistant", "daily-assistant") else "off",
                   background_processing_enabled=False).checked()
 

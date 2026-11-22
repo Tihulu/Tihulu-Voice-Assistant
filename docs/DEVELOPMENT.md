@@ -283,3 +283,17 @@ offered. The page says that the client runs its own turns, downloads and
 transcriptions on the Activity page, and that nothing here can start an agent,
 sign in to a provider or send work to another host. The gates are data rather
 than prose, so the page cannot drift from what the client actually ships.
+
+A clean-machine install is a gate, not a claim. The package job builds the wheel,
+installs it into a fresh virtual environment and then runs `tools/smoke.py` from
+outside the source tree: the smoke test imports the installed package, points
+the local state and preference directories at a private temporary directory, and
+exercises the public API the way the client does — preferences round-trip, a
+refused preference stays refused, profiles are created and escalated, the audit
+trail records and reads back one decision, the state and receipt vocabulary
+answers, a bound shortcut exists, a task starts, a query is remembered, a
+registered site plans a GET, a folder is validated, readiness states the mixed
+truth, and an export renders. The same smoke runs against the Debian package's
+own bundled interpreter, so an installed deb is verified too. An empty
+configuration states what is missing and why rather than reporting everything
+ready.
