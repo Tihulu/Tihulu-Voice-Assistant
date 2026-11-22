@@ -332,3 +332,14 @@ validated on read, an unknown id or an impossible override is refused rather
 than ignored, and a preset takes no overrides — they live in Custom. Keeping a
 model warm is opt-in and says it costs memory until released; the client never
 starts an engine on its own to honour a profile.
+
+## Language of this repository
+
+Everything published here is English: commit messages, pull request titles and
+bodies, issue text, and this documentation. The one exception is deliberate and
+marked: the product is a Turkish/English/German assistant, so `desktop.py` and
+the voice layer carry the three user-facing languages, and a few tests use real
+Turkish words as data (the casefolding example above, the language-routing
+cases). Those are the product, not the project's own prose — a new user-facing
+string goes in `tr(...)`, and anything written *about* the project goes in
+English.

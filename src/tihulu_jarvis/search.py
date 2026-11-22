@@ -18,9 +18,10 @@ SNIPPET_WIDTH = 90
 def _normal(text):
     """Casefold and drop combining marks.
 
-    A search must match "kelimem" against "KELİMEM" without depending on the
-    platform locale: casefold alone leaves the dotted capital İ with its
-    combining dot, so the mark is removed rather than guessed at.
+    A search must match the Turkish example word "kelimem" against "KELİMEM"
+    without depending on the platform locale: casefold alone leaves the dotted
+    capital İ with its combining dot, so the mark is removed rather than guessed
+    at. (The words are test data, not a user-facing string.)
     """
     folded = "".join(ch for ch in text.casefold() if not unicodedata.combining(ch))
     return folded
