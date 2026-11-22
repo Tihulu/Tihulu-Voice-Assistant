@@ -5,7 +5,7 @@ on:
                'feat/market-ui', 'feat/mode-endpoint', 'feat/action-enforcement',
                'feat/loopback-transport', 'feat/market-consolidated',
                'feat/transfer-resume', 'feat/market-history', 'feat/update-flow',
-               'feat/queue-persistence', 'feat/catalog-trust', 'feat/deb-packaging', 'feat/remote-catalog', 'feat/audit-trail', 'feat/escalation-consent', 'feat/transcribe-file', 'feat/route-policy', 'feat/resource-locks', 'feat/privacy-disclosure', 'feat/state-labels', 'feat/chat-search', 'feat/attachments', 'feat/routing-table', 'feat/audit-filters', 'feat/streaming', 'feat/a11y-scale', 'feat/keyboard-nav', 'feat/receipts', 'feat/web-targets', 'feat/activity-board', 'feat/spoken-text', 'feat/files-research', 'feat/readiness', 'feat/search-history', 'feat/topbar', 'feat/quick-stop', 'feat/queue-summary', 'feat/settings-page', 'feat/transcript-export', 'feat/mute', 'feat/keys-help', 'feat/agents-gates', 'feat/clean-install']
+               'feat/queue-persistence', 'feat/catalog-trust', 'feat/deb-packaging', 'feat/remote-catalog', 'feat/audit-trail', 'feat/escalation-consent', 'feat/transcribe-file', 'feat/route-policy', 'feat/resource-locks', 'feat/privacy-disclosure', 'feat/state-labels', 'feat/chat-search', 'feat/attachments', 'feat/routing-table', 'feat/audit-filters', 'feat/streaming', 'feat/a11y-scale', 'feat/keyboard-nav', 'feat/receipts', 'feat/web-targets', 'feat/activity-board', 'feat/spoken-text', 'feat/files-research', 'feat/readiness', 'feat/search-history', 'feat/topbar', 'feat/quick-stop', 'feat/queue-summary', 'feat/settings-page', 'feat/transcript-export', 'feat/mute', 'feat/keys-help', 'feat/agents-gates', 'feat/clean-install', 'feat/stack-check']
 permissions:
   contents: read
 jobs:
