@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, agents, attachments, files, keys, queries, readiness, receipts, tasks, transcript, web
+from . import a11y, agents, attachments, files, keys, queries, readiness, receipts, resources, tasks, transcript, web
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -53,33 +53,119 @@ LOOK = (".workspace {padding:20px;} .hero {font-size:24px;font-weight:bold;}"
         " .user {border-left:3px solid #39a68f;} .assistant {border-left:3px solid #787ee0;}")
 
 
+# 83 wakeups a second while working; 25 while idle. The idle number is a
+# measured compromise: a slower one saves more CPU but adds its own latency to
+# every handoff between a GTK callback and a waiting coroutine, which the test
+# suite showed as a four-fold slowdown.
+BUSY_TICK_MS = 12
+IDLE_TICK_MS = 40
+
+
+class Bridge:
+    """The asyncio slices on the GTK thread, and how often it wakes.
+
+    A fixed 12 ms timer wakes the process more than eighty times a second even
+    when nothing is happening, which is exactly the idle cost this replaces: a
+    fast tick runs while work is pending, a slow one runs while the client is
+    idle, and ``wake()`` remembers when work was last submitted so the interface
+    can state how long it has been quiet.
+    """
+
+    def __init__(self):
+        self.interval = IDLE_TICK_MS
+        self.busy_at = None
+        self._wake = None
+
+    def attach(self, wake):
+        """Give the bridge the re-arm callback the GLib loop provides."""
+        self._wake = wake
+        return self
+
+    def wake(self):
+        """Ask for the fast tick, and remember when work was submitted."""
+        self.busy_at = time.monotonic()
+        if self._wake is not None:
+            self._wake()
+        self.interval = BUSY_TICK_MS
+        return self.interval
+
+    def pause(self):
+        """Called by the loop when it has no work left: the fast tick stops."""
+        self.interval = IDLE_TICK_MS
+        return self.interval
+
+    def idle_for(self, now=None):
+        """How long the client has been idle, in whole seconds."""
+        if self.busy_at is None:
+            return 0
+        return max(0, int((now or time.monotonic()) - self.busy_at))
+
+
 @contextmanager
 def gtk_asyncio(loop):
-    """Run small asyncio slices on the GTK thread until the window closes."""
-    _, GLib, _ = _gtk()
+    """Run small asyncio slices on the GTK thread until the window closes.
 
-    def tick():
+    The slow tick always runs; the fast tick is added when the client submits
+    work and stops itself when the loop drains. A source is never removed from
+    inside its own callback: that is undefined behaviour in GLib, and it is what
+    made an earlier version of this bridge hang under load.
+    """
+    _, GLib, _ = _gtk()
+    bridge = Bridge()
+    fast = [None]
+
+    def drain():
         loop.call_soon(loop.stop)
         loop.run_forever()
+        if asyncio.all_tasks(loop):
+            return True
+        # Nothing pending: stop the fast tick until the next wake.
+        fast[0] = None
+        bridge.pause()
+        return False
+
+    def slow():
+        loop.call_soon(loop.stop)
+        loop.run_forever()
+        if asyncio.all_tasks(loop):
+            # Work appeared without a wake: go fast again rather than making
+            # the loop wait out an idle tick that no longer describes it.
+            wake()
         return True
 
-    source = GLib.timeout_add(12, tick)
+    def wake():
+        if fast[0] is None:
+            fast[0] = GLib.timeout_add(BUSY_TICK_MS, drain)
+
+    slow_source = GLib.timeout_add(IDLE_TICK_MS, slow)
     try:
-        yield
+        bridge.attach(wake)
+        yield bridge
     finally:
-        GLib.source_remove(source)
+        if slow_source is not None:
+            GLib.source_remove(slow_source)
+        if fast[0] is not None:
+            GLib.source_remove(fast[0])
+            fast[0] = None
 
+def create_window(app, loop, bridge=None):
+    """Construct the native window on the caller's GTK thread.
 
-def create_window(app, loop):
-    """Construct the native window on the caller's GTK thread."""
+    ``bridge`` is the asyncio/GLib bridge the caller entered, when it has one:
+    the window then wakes it promptly when work is submitted and states how long
+    it has been idle. A window without a bridge still runs; it simply cannot
+    state idleness.
+    """
     _, GLib, Gtk = _gtk()
+    from gi.repository import GObject
     lang = (locale.getlocale()[0] or "en").split("_")[0]
     def tr(en, tur, de):
         return {"tr":tur, "de":de}.get(lang,en)
 
     class Desktop:
-        def __init__(self, app, loop=None):
+        def __init__(self, app, loop=None, bridge=None):
             self.loop = loop
+            self.bridge = bridge
             self.confirmations = []
             self.leases = locks.Leases()
             self.search_matches = ()
@@ -308,6 +394,7 @@ def create_window(app, loop):
             self.tools_available = None
             self.build_files_page()
             self.build_settings_page()
+            self.build_resources_page()
             self.build_agents_page()
             self.turn_note = ""
             self.build_activity_page()
@@ -954,7 +1041,7 @@ def create_window(app, loop):
 
         def refresh_state_row(self):
             """State the live condition in words: local or cloud, microphone,
-            privileged tools, a pending approval and connection state."""
+            privileged tools, a pending approval, connection and idle state."""
             try:
                 profile = self.active_profile()
                 data = disclosure.facts(profile, self.url.get_text().strip())
@@ -977,6 +1064,13 @@ def create_window(app, loop):
                        "approval_pending": tr("approval pending", "onay bekliyor", "Bestätigung ausstehend"),
                        "muted": tr("audio output muted", "ses çıkışı sessiz", "Audioausgabe stumm"),
                        "offline": tr("no local model", "yerel model yok", "kein lokales Modell")}
+            # A threshold-free statement stays true whichever refresh shows it,
+            # so the row never has to be repainted by a timer to be honest.
+            idle = self.bridge.idle_for() if self.bridge is not None else 0
+            if not self.busy:
+                words = words + (("waiting",))
+            caption["waiting"] = tr("no work pending", "bekleyen iş yok",
+                                    "keine Arbeit ausstehend")
             text = tr("State: ", "Durum: ", "Zustand: ") + " · ".join(
                 caption.get(token, token) for token in words)
             self.state_row.set_text(text)
@@ -1063,6 +1157,149 @@ def create_window(app, loop):
                     # A preview speaks only the locale that is actually selected.
                     widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
                                          and audio.tools_ready("piper","aplay"))
+
+        def build_resources_page(self):
+            """Resource profiles: what the client may use, and what it lets go.
+
+            A profile is stated in words before it is chosen, including what it
+            costs: performance keeps a model warm and pays for it in memory,
+            resource-optimized releases quickly and pays for it in cold starts.
+            Nothing here starts a process or touches a device.
+            """
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            view = Gtk.ScrolledWindow(vexpand=True)
+            view.set_child(page)
+            self.stack.add_titled(view, "resources", tr("Resources", "Kaynaklar", "Ressourcen"))
+            row = Gtk.Box(spacing=8)
+            page.append(row)
+            row.append(Gtk.Label(label=tr("Profile", "Profil", "Profil"), xalign=0))
+            self.resource_profile = Gtk.ComboBoxText()
+            for value, caption in (("performance", tr("Performance", "Performans", "Leistung")),
+                                   ("balance", tr("Balance", "Denge", "Ausgewogen")),
+                                   ("resource_optimized", tr("Resource-optimized",
+                                                             "Kaynak odaklı",
+                                                             "Ressourcenoptimiert")),
+                                   ("custom", tr("Custom", "Özel", "Benutzerdefiniert"))):
+                self.resource_profile.append_text(caption)
+            row.append(self.resource_profile)
+            stored = self.cfg.get("resources", {})
+            chosen = stored.get("profile", "balance")
+            self.resource_profile.set_active(resources.PROFILE_IDS.index(chosen))
+            self.resource_profile.connect("changed", self.choose_resource_profile)
+            page.append(Gtk.Label(label=tr(
+                "Performance keeps a model warm for the session and uses all cores; "
+                "Balance releases a warm model after two idle minutes; "
+                "Resource-optimized releases after fifteen seconds.",
+                "Performans modeli oturum boyunca sıcak tutar ve tüm çekirdekleri kullanır; "
+                "Denge iki boşta dakikadan sonra bırakır; "
+                "Kaynak odaklı on beş saniyede bırakır.",
+                "Leistung hält ein Modell die Sitzung über warm und nutzt alle Kerne; "
+                "Ausgewogen gibt nach zwei untätigen Minuten frei; "
+                "Ressourcenoptimiert nach fünfzehn Sekunden."),
+                xalign=0, wrap=True))
+            page.append(Gtk.Label(label=tr("Custom profile", "Özel profil",
+                                           "Benutzerdefiniertes Profil"), xalign=0))
+            self.resource_threads = Gtk.SpinButton.new_with_range(1, 256, 1)
+            self.resource_threads.set_value(self.effective_resource().threads_for(resources.cores()))
+            self.resource_threads.connect("value-changed", self.choose_resource_profile)
+            page.append(Gtk.Label(label=tr("Threads for a local engine",
+                                           "Yerel motor için iş parçacığı",
+                                           "Threads für eine lokale Engine"), xalign=0))
+            page.append(self.resource_threads)
+            self.resource_gpu = Gtk.ComboBoxText()
+            for value, caption in (("auto", tr("Automatic", "Otomatik", "Automatisch")),
+                                   ("cuda", tr("CUDA (NVIDIA)", "CUDA (NVIDIA)",
+                                               "CUDA (NVIDIA)")),
+                                   ("vulkan", tr("Vulkan (AMD / other)",
+                                                 "Vulkan (AMD / diğer)",
+                                                 "Vulkan (AMD / andere)")),
+                                   ("cpu", tr("Processor only", "Yalnızca işlemci",
+                                              "Nur Prozessor"))):
+                self.resource_gpu.append_text(caption)
+            stored_gpu = self.effective_resource().gpu
+            self.resource_gpu.set_active(resources.GPUS.index(stored_gpu))
+            self.resource_gpu.connect("changed", self.choose_resource_profile)
+            page.append(Gtk.Label(label=tr("Preferred device",
+                                           "Tercih edilen aygıt",
+                                           "Bevorzugtes Gerät"), xalign=0))
+            page.append(self.resource_gpu)
+            self.resource_warm = Gtk.CheckButton(
+                label=tr("Keep models warm in the background (costs memory until released)",
+                         "Modelleri arka planda sıcak tut (bırakılana kadar bellek harcar)",
+                         "Modelle im Hintergrund warm halten (kostet Speicher bis zur Freigabe)"))
+            self.resource_warm.set_active(self.effective_resource().keep_warm)
+            self.resource_warm.connect("toggled", self.choose_resource_profile)
+            page.append(self.resource_warm)
+            self.resource_idle = Gtk.SpinButton.new_with_range(0, 86400, 5)
+            self.resource_idle.set_value(self.effective_resource().idle_release)
+            self.resource_idle.connect("value-changed", self.choose_resource_profile)
+            page.append(Gtk.Label(label=tr("Release after this many idle seconds (0 = never)",
+                                           "Bu kadar boşta saniyeden sonra bırak (0 = hiç)",
+                                           "Nach so vielen untätigen Sekunden freigeben (0 = nie)"),
+                                  xalign=0))
+            page.append(self.resource_idle)
+            self.resource_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.resource_note)
+            self.refresh_resources_note()
+
+        def effective_resource(self):
+            return resources.effective(self.cfg.get("resources", {}))
+
+        def refresh_resources_note(self):
+            profile = self.effective_resource()
+            count = resources.cores() or 4
+            self.resource_note.set_text(tr(
+                "Now: %s — %d threads, %s, %s."
+                % ({"performance": "Performance", "balance": "Balance",
+                    "resource_optimized": "Resource-optimized", "custom": "Custom"}[profile.id],
+                   profile.threads_for(count),
+                   {"auto": "automatic device", "cuda": "CUDA", "vulkan": "Vulkan",
+                    "cpu": "processor only"}[profile.gpu],
+                   "kept warm" if profile.keep_warm else
+                   ("never released" if not profile.releases_after()
+                    else "released after %d idle seconds" % profile.idle_release)),
+                "Şimdi: %s — %d iş parçacığı, %s, %s."
+                % (resources.LABELS[profile.id], profile.threads_for(count),
+                   {"auto": "otomatik aygıt", "cuda": "CUDA", "vulkan": "Vulkan",
+                    "cpu": "yalnızca işlemci"}[profile.gpu],
+                   "sıcak tutuluyor" if profile.keep_warm else
+                   ("hiç bırakılmıyor" if not profile.releases_after()
+                    else "%d boşta saniyeden sonra bırakılıyor" % profile.idle_release)),
+                "Jetzt: %s — %d Threads, %s, %s."
+                % (resources.LABELS[profile.id], profile.threads_for(count),
+                   {"auto": "automatisches Gerät", "cuda": "CUDA", "vulkan": "Vulkan",
+                    "cpu": "nur Prozessor"}[profile.gpu],
+                   "warm gehalten" if profile.keep_warm else
+                   ("nie freigegeben" if not profile.releases_after()
+                    else "nach %d untätigen Sekunden freigegeben" % profile.idle_release))))
+            idle = self.bridge.idle_for() if self.bridge is not None else 0
+            if not self.busy:
+                # The measured time since the last submitted work; 0 is a true
+                # answer immediately after a turn, not a placeholder.
+                self.resource_note.set_text(self.resource_note.get_text() + " " + tr(
+                    "Last work %ds ago: no engine is running." % idle,
+                    "Son iş %d s önce: hiçbir motor çalışmıyor." % idle,
+                    "Letzte Arbeit vor %d s: keine Engine läuft." % idle))
+
+        def choose_resource_profile(self, *_):
+            """Apply the chosen profile now; a restart is never required."""
+            chosen = resources.PROFILE_IDS[self.resource_profile.get_active()]
+            stored = {"profile": chosen}
+            if chosen == "custom":
+                stored = {"profile": chosen,
+                          "threads": int(self.resource_threads.get_value()),
+                          "gpu": resources.GPUS[self.resource_gpu.get_active()],
+                          "keep_warm": bool(self.resource_warm.get_active()),
+                          "idle_release": int(self.resource_idle.get_value())}
+            try:
+                resources.effective(stored)
+                self.cfg["resources"] = stored
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
+            self.save()
+            self.refresh_resources_note()
+            self.refresh()
 
         def keys_help(self):
             """The bound shortcuts, stated where a reader can find them.
@@ -2486,6 +2723,10 @@ def create_window(app, loop):
             if self.busy:
                 return
             self.busy=True
+            # Work is being submitted: ask for the fast tick instead of the
+            # idle one, so a turn is answered promptly and an idle window is not.
+            if self.bridge is not None:
+                self.bridge.wake()
             task=self.session.own(work, loop=loop)
             epoch=self.session.epoch
             self.set_state("starting")
@@ -2807,7 +3048,7 @@ def create_window(app, loop):
                 GLib.timeout_add(30,drained)
             return True
 
-    return Desktop(app, loop)
+    return Desktop(app, loop, bridge)
 
 
 def main():

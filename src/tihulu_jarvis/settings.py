@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from . import files, queries, web
+from . import files, queries, resources, web
 from .voice.m1 import Hold
 
 LOCALES = ("tr", "en", "de")
@@ -16,7 +16,7 @@ def empty():
     return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": "",
             "market_refs": {}, "allowed_hosts": [], "text_scale": "normal",
             "web_targets": [], "show_spoken_text": False, "research_root": "",
-            "search_history": []}
+            "search_history": [], "resources": {"profile": "balance"}}
 
 
 def config_path():
@@ -78,6 +78,13 @@ def checked(obj):
     # A stored history is re-validated here, so a corrupt one is refused rather
     # than loaded as a promise of queries that cannot be run again.
     out["search_history"] = list(queries.checked(tuple(history)))
+    stored = obj.get("resources", {"profile": "balance"})
+    # The resource profile is validated on read: an unknown id, or a custom
+    # profile carrying an impossible override, is refused rather than ignored.
+    if not isinstance(stored, dict):
+        raise Hold("invalid_local_settings")
+    resources.checked(stored)
+    out["resources"] = stored
     root = obj.get("research_root", "")
     # A stored folder is validated on read: a path that is no longer a folder
     # is a bounded reason later, never a silently empty listing.
