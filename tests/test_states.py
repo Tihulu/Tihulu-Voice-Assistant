@@ -3,6 +3,7 @@
 """State-token tests: no widget, device or connection is used."""
 import unittest
 
+from tihulu_jarvis import states
 from tihulu_jarvis.disclosure import facts
 from tihulu_jarvis.profiles import Profile, Rule
 from tihulu_jarvis.states import (APPROVAL_PENDING, CLOUD, MICROPHONE_ACTIVE, LOCAL,
@@ -58,3 +59,17 @@ class TokenTests(unittest.TestCase):
         quiet = tokens(facts(profile(), "http://127.0.0.1:9876/"),
                       "ready", frozenset(), False, True)
         self.assertEqual(quiet, (LOCAL, "idle"))
+
+
+class MutedTokenTests(unittest.TestCase):
+    def test_muted_is_a_word_not_a_colour(self):
+        self.assertEqual(states.muted(True), states.MUTED)
+        self.assertEqual(states.muted(False), "")
+
+    def test_the_muted_token_joins_the_row(self):
+        data = facts(profile(), "http://127.0.0.1:9876/")
+        quiet = states.tokens(data, "ready", frozenset(), False, True, True)
+        self.assertIn(states.MUTED, quiet)
+        loud = states.tokens(data, "ready", frozenset(), False, True, False)
+        self.assertNotIn(states.MUTED, loud)
+        self.assertEqual(loud, (states.LOCAL, "idle"))

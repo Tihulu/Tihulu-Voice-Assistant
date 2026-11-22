@@ -15,6 +15,7 @@ PRIVILEGED_TOOL = "privileged_tool"
 MICROPHONE_ACTIVE = "microphone_active"
 APPROVAL_PENDING = "approval_pending"
 OFFLINE = "offline"
+MUTED = "muted"
 
 def privacy(data):
     """Whether the active configuration can reach a provider at all."""
@@ -39,11 +40,16 @@ def approval_pending(pending):
     return APPROVAL_PENDING if pending else ""
 
 
+def muted(state):
+    """Audio output is suppressed while a reply is still shown in text."""
+    return MUTED if state else ""
+
+
 def network(connected):
     return OFFLINE if not connected else ""
 
 
-def tokens(data, stage, grants, pending, connected):
+def tokens(data, stage, grants, pending, connected, muted_state=False):
     """The state as an ordered token list; empty means nothing to say."""
     out = [privacy(data)]
     if stage == "listening":
@@ -51,5 +57,6 @@ def tokens(data, stage, grants, pending, connected):
     out.append(microphone(stage))
     out.append(privileged(grants))
     out.append(approval_pending(pending))
+    out.append(muted(muted_state))
     out.append(network(connected))
     return tuple(t for t in out if t)
