@@ -358,10 +358,11 @@ before a single turn runs.
 
 The Resources page states what the process itself uses, read from
 `/proc/self/status` when it exists and said to be unreadable when it does not —
-never a comfortable number. Measured on the development machine: importing the
-package alone costs about 10 MiB and one thread; with the GTK window, D-Bus and
-the accessibility bridge loaded, the process reaches roughly 140 MiB and about
-42 threads. The client adds no thread and no engine of its own: an idle window
+never a comfortable number. The number is the *running* process, which is the
+point: a fresh window measures about 140 MiB and roughly 42 threads (GTK, D-Bus
+and the accessibility bridge; importing the package alone is about 10 MiB and
+one thread), and a process that has run a long suite is larger because it is
+that same process. The client adds no thread and no engine of its own: an idle window
 runs no engine, so it allocates no VRAM, and the wakeups it costs are the 25 a
 second described above rather than the 83 it used to. A local engine that stays
 warm is the only thing that holds memory between turns, which is why keeping
