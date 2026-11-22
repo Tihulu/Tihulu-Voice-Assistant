@@ -62,3 +62,16 @@ class ForgetTests(unittest.TestCase):
             self.assertFalse(settings.forget(path))
             # A missing file is not an error, and nothing else is touched.
             self.assertTrue(settings.load(path)["text_scale"] == "normal")
+
+
+class SourceSettingsTests(unittest.TestCase):
+    def test_a_stored_source_is_revalidated_on_read(self):
+        entry = {"host": "huggingface.co", "kind": "hf", "filter": "whisper"}
+        self.assertEqual(settings.checked({"sources": [entry]})["sources"], [entry])
+        for bad in ([{"host": "localhost", "kind": "hf"}], [{"host": "huggingface.co",
+                                                             "kind": "magnet"}],
+                    ["huggingface.co"], [{"host": "huggingface.co", "kind": "hf",
+                                          "filter": "x" * 97}], None, {}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(Hold):
+                    settings.checked({"sources": bad})

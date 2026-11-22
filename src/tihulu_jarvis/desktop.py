@@ -2,6 +2,7 @@
 # Distributed without warranty; see LICENSE for the full terms.
 """Opt-in GTK 4 desktop client. No listener, background capture or provider login."""
 import asyncio
+import json
 import locale
 import os
 import time
@@ -9,8 +10,8 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import (a11y, agents, attachments, files, keys, queries, readiness,
-                 receipts, resources, tasks, transcript, usage, web)
+from . import (a11y, agents, attachments, catalog_sources, files, keys, queries,
+                 readiness, receipts, resources, tasks, transcript, usage, web)
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -397,6 +398,7 @@ def create_window(app, loop, bridge=None):
             self.build_files_page()
             self.build_settings_page()
             self.build_resources_page()
+            self.build_sources_page()
             self.build_agents_page()
             self.turn_note = ""
             self.build_activity_page()
@@ -2212,6 +2214,181 @@ def create_window(app, loop, bridge=None):
                 "This client runs its own turns, downloads and transcriptions; those are on the Activity page. Nothing here can start an agent, sign in to a provider, or send work to another host.",
                 "Bu istemci kendi turlarını, indirmelerini ve yazıya çevirmelerini çalıştırır; onlar Etkinlik sayfasındadır. Buradaki hiçbir şey bir ajan başlatamaz, sağlayıcıda oturum açamaz veya işi başka bir konakla gönderemez.",
                 "Dieser Client führt eigene Runden, Downloads und Transkriptionen aus; die stehen auf der Aktivitätsseite. Nichts hier kann einen Agenten starten, sich bei einem Anbieter anmelden oder Arbeit an einen anderen Host senden."))
+
+        def build_sources_page(self):
+            """Approved sources: metadata only, and what that means.
+
+            A source is registered by the owner, listed and searched; a card
+            from a listing carries only what the listing states. Installing is
+            another matter: this build's approved transport is a numeric
+            loopback endpoint, so a remote listing yields cards to inspect, not
+            weights to fetch. The page says that instead of offering a button
+            that would fail.
+            """
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            view = Gtk.ScrolledWindow(vexpand=True)
+            view.set_child(page)
+            self.stack.add_titled(view, "sources", tr("Approved sources",
+                                                      "Onaylı kaynaklar",
+                                                      "Genehmigte Quellen"))
+            page.append(Gtk.Label(label=tr(
+                "A source is a host you register, with the filters you choose. Searching reads its public listing over HTTPS, without credentials and without downloading a single byte of a model.",
+                "Kaynak, seçtiğin süzgeçlerle kaydettiğin bir konaktır. Arama, kimlik bilgisi olmadan ve modelin tek bir baytını indirmeden herkese açık listelesini HTTPS üzerinden okur.",
+                "Eine Quelle ist ein von dir registrierter Host mit den von dir gewählten Filtern. Eine Suche liest ihr öffentliches Listing über HTTPS, ohne Anmeldedaten und ohne ein einziges Byte eines Modells herunterzuladen."),
+                xalign=0, wrap=True))
+            row = Gtk.Box(spacing=8)
+            page.append(row)
+            self.source_host = Gtk.Entry(hexpand=True,
+                                         placeholder_text="huggingface.co")
+            row.append(self.source_host)
+            self.source_kind = Gtk.ComboBoxText()
+            for value, caption in (("hf", "Hugging Face Hub"), ("http", tr("other", "diğer", "andere"))):
+                self.source_kind.append_text(caption)
+            self.source_kind.set_active(0)
+            row.append(self.source_kind)
+            self.source_filter = Gtk.Entry(hexpand=True,
+                                           placeholder_text=tr("filter, e.g. whisper ggml",
+                                                               "süzgeç, ör. whisper ggml",
+                                                               "Filter, z. B. whisper ggml"))
+            row.append(self.source_filter)
+            self.source_register = self.button(row, tr("Register source", "Kaynağı kaydet",
+                                                        "Quelle registrieren"),
+                                               self.register_source)
+            self.source_list = Gtk.ListBox()
+            self.source_list.connect("row-selected", lambda *_: self.refresh_source_buttons())
+            page.append(self.source_list)
+            controls = Gtk.Box(spacing=8)
+            page.append(controls)
+            self.source_search = self.button(controls, tr("Search the selected source",
+                                                          "Seçili kaynağı ara",
+                                                          "Ausgewählte Quelle suchen"),
+                                             self.search_source)
+            self.source_forget = self.button(controls, tr("Forget source", "Kaynağı unut",
+                                                          "Quelle vergessen"), self.forget_source)
+            self.source_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.source_note)
+            self.source_cards = Gtk.ListBox()
+            self.source_cards.connect("row-selected", lambda *_: self.refresh_source_buttons())
+            page.append(self.source_cards)
+            self.refresh_source_list()
+
+        def source_entries(self):
+            return catalog_sources.entries(self.cfg.get("sources", []))
+
+        def selected_source(self):
+            row = self.source_list.get_selected_row()
+            return row.source if row is not None else None
+
+        def register_source(self):
+            host = self.source_host.get_text().strip()
+            entry = {"host": host, "kind": "hf" if self.source_kind.get_active() == 0 else "http",
+                     "filter": self.source_filter.get_text().strip()}
+            try:
+                self.cfg["sources"] = catalog_sources.register(self.cfg.get("sources", []),
+                                                              entry)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return None
+            self.save()
+            self.source_host.set_text("")
+            self.source_filter.set_text("")
+            self.refresh_source_list()
+            self.set_state("ready", tr("Source registered.", "Kaynak kaydedildi.",
+                                       "Quelle registriert."))
+            return entry
+
+        def forget_source(self):
+            source = self.selected_source()
+            if source is None:
+                return None
+            try:
+                self.cfg["sources"] = catalog_sources.forget(self.cfg.get("sources", []),
+                                                            {"host": source.host,
+                                                             "kind": source.kind,
+                                                             "filter": source.filter})
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return None
+            self.save()
+            self.refresh_source_list()
+            return source
+
+        def refresh_source_list(self):
+            rows, item = [], self.source_list.get_first_child()
+            while item is not None:
+                nxt = item.get_next_sibling()
+                self.source_list.remove(item)
+                item = nxt
+            for source in self.source_entries():
+                row = Gtk.ListBoxRow()
+                row.source = source
+                row.set_child(Gtk.Label(label="%s · %s · %s"
+                                        % (source.host, source.kind, source.filter or "-"),
+                                        xalign=0, wrap=True))
+                row.set_activatable(True)
+                self.source_list.append(row)
+            self.refresh_source_buttons()
+
+        def refresh_source_buttons(self):
+            chosen = self.selected_source()
+            self.source_search.set_sensitive(not self.busy and chosen is not None)
+            self.source_forget.set_sensitive(chosen is not None)
+
+        def search_source(self):
+            """List a registered source's public metadata, bounded and verified.
+
+            The same HTTPS policy as a catalog fetch applies: the host must be
+            allowed, TLS is verified against the system store, no redirect is
+            followed and no credential is sent. The opener is injectable so the
+            policy is tested without a socket.
+            """
+            if self.busy:
+                return None
+            source = self.selected_source()
+            if source is None:
+                return None
+            url = catalog_sources.safe_url(source)
+            try:
+                profiles.require_tool(self.active_profile(), "external_network", ("catalog",))
+                raw = self.loop.run_until_complete(
+                    catalog_sources.fetch(source, self.source_opener()))
+                cards, refused = catalog_sources.cards(
+                    json.loads(raw), source)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return None
+            self.show_source_cards(cards, refused)
+            return cards
+
+        def source_opener(self):
+            """The listing opener; the default verifies TLS like a catalog."""
+            return catalog_fetch.urlopen_opener()
+
+        def show_source_cards(self, cards, refused):
+            rows, item = [], self.source_cards.get_first_child()
+            while item is not None:
+                nxt = item.get_next_sibling()
+                self.source_cards.remove(item)
+                item = nxt
+            for card in cards:
+                row = Gtk.ListBoxRow()
+                row.card = card
+                caption = "%s · %s · %s · %s · %d MiB" % (
+                    card.display_name, card.category, card.artifact_format,
+                    ",".join(card.languages) or "-",
+                    card.source_size // (1024 * 1024))
+                row.set_child(Gtk.Label(label=caption, xalign=0, wrap=True))
+                self.source_cards.append(row)
+            stated = tr("%d cards, %d rows refused as unverifiable."
+                        % (len(cards), refused),
+                        "%d kart, %d satır doğrulanamaz diye reddedildi."
+                        % (len(cards), refused),
+                        "%d Karten, %d Zeilen als unverifizierbar abgelehnt."
+                        % (len(cards), refused))
+            self.source_note.set_text(stated + " " + tr(
+                "Nothing here is installed: this build's approved transport is a loopback endpoint, so a remote listing is inspected, not fetched.",
+                "Buradaki hiçbir şey kurulmaz: bu sürümün onaylı taşıması geri döngü uç noktasıdır, uzak listeleme incelenir, çekilmez.",
+                "Hier wird nichts installiert: der genehmigte Transport dieses Builds ist ein Loopback-Endpunkt, ein entferntes Listing wird geprüft, nicht geladen."))
 
         def remember_hosts(self):
             hosts = [h for h in self.catalog_hosts.get_text().split() if h]

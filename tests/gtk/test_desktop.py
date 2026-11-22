@@ -3807,3 +3807,139 @@ class UsageReportTests(VoiceResourceTests):
         with patch("builtins.open", side_effect=unreadable):
             self.ui.refresh_resources_note()
         self.assertIn("not readable here", self.ui.resource_note.get_text())
+
+
+class ApprovedSourcesTests(DesktopTests):
+    """A registered source is searched; a remote listing is inspected, not fetched."""
+
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        self.fetched = []
+
+    def rows(self):
+        out, item = [], self.ui.source_list.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def cards(self):
+        out, item = [], self.ui.source_cards.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def register(self, host="huggingface.co", kind=0, filter_text="whisper"):
+        self.ui.source_host.set_text(host)
+        self.ui.source_kind.set_active(kind)
+        self.ui.source_filter.set_text(filter_text)
+        self.click(self.ui.source_register)
+        self.until(lambda: len(self.rows()) == 1)
+
+    def opener(self, payload):
+        async def runtime(url, timeout):
+            self.fetched.append((url, timeout))
+            return payload
+        return runtime
+
+    def listing(self):
+        import hashlib
+        digest = hashlib.sha256(b"fixture").hexdigest()
+        return [{"modelId": "ggerganov/whisper.cpp",
+                 "pipeline_tag": "automatic-speech-recognition",
+                 "tags": ["ggml", "tr", "en", "license:mit"],
+                 "files": [{"path": "ggml-base.bin", "size": 141000000,
+                            "lfs": {"sha256": digest}}]},
+                {"modelId": "broken/no-digest", "pipeline_tag": "text-to-speech",
+                 "tags": ["ggml"], "files": []}]
+
+    def test_a_registered_source_is_listed_and_stored(self):
+        self.register()
+        self.assertEqual(self.ui.cfg.get("sources"),
+                         [{"host": "huggingface.co", "kind": "hf", "filter": "whisper"}])
+        self.ui.source_list.select_row(self.rows()[0])
+        self.assertTrue(self.ui.source_search.get_sensitive())
+
+    def test_a_private_host_is_not_a_source(self):
+        self.ui.source_host.set_text("localhost")
+        self.ui.source_filter.set_text("x")
+        self.click(self.ui.source_register)
+        self.assertEqual(self.ui.status.get_text(), "target_not_public")
+        self.assertEqual(self.ui.cfg.get("sources"), [])
+
+    def test_searching_a_source_shows_cards_and_says_nothing_is_installed(self):
+        self.register()
+        payload = json.dumps(self.listing())
+        opener = self.opener(payload)
+        self.ui.source_opener = lambda: opener
+        self.ui.source_list.select_row(self.rows()[0])
+        self.click(self.ui.source_search)
+        self.until(lambda: len(self.cards()) == 1)
+        card = self.cards()[0].card
+        self.assertEqual((card.model_id, card.category, card.source_size),
+                         ("ggerganov:whisper.cpp", "stt", 141000000))
+        note = self.ui.source_note.get_text()
+        self.assertIn("1 cards, 1 rows refused", note)
+        self.assertIn("Nothing here is installed", note)
+        self.assertEqual(self.fetched[0][0],
+                         "https://huggingface.co/api/models?search=whisper&limit=20")
+
+    def test_a_profile_that_forbids_network_is_never_fetched(self):
+        self.register()
+        self.add_profile(profiles.Profile(
+            id="offline", name="Offline", based_on_mode="LOCAL_ONLY",
+            network_rules=(profiles.Rule("external_network", ("catalog",), "deny"),),
+        ).checked())
+        self.escalate("offline")
+        opener = self.opener(json.dumps(self.listing()))
+        self.ui.source_opener = lambda: opener
+        self.ui.source_list.select_row(self.rows()[0])
+        self.click(self.ui.source_search)
+        self.until(lambda: self.ui.status.get_text() == "profile_forbids_external_network")
+        self.assertEqual(self.fetched, [])
+
+    def add_profile(self, profile):
+        self.ui.store.save(profile)
+        self.ui.refresh_profiles()
+        return profile
+
+    def escalate(self, profile_id):
+        """Switch to a profile, confirming only when privileges are added."""
+        self.pick_profile(profile_id)
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.ui.confirmations or self.ui.cfg["profile"] == profile_id)
+        if self.ui.confirmations:
+            self.confirm("Confirm")
+        self.until(lambda: self.ui.cfg["profile"] == profile_id)
+
+    def pick_profile(self, profile_id):
+        for item, entry in self.ui.policy_rows.items():
+            if entry.id == profile_id:
+                self.ui.profile_list.select_row(item)
+                return entry
+        raise AssertionError("missing profile: " + profile_id)
+
+    def confirm(self, prefix):
+        self.until(lambda: self.ui.confirmations)
+        for widget in self.widgets_of(self.ui.confirmations[-1]):
+            if type(widget).__name__ == "Button" and (widget.get_label() or "").startswith(prefix):
+                widget.emit("clicked")
+                return
+        raise AssertionError("confirmation button missing: " + prefix)
+
+    def widgets_of(self, widget):
+        out, item = [], widget.get_first_child()
+        while item is not None:
+            out.append(item)
+            out.extend(self.widgets_of(item))
+            item = item.get_next_sibling()
+        return out
+
+    def test_forgetting_a_source_removes_it(self):
+        self.register()
+        self.ui.source_list.select_row(self.rows()[0])
+        self.click(self.ui.source_forget)
+        self.until(lambda: not self.rows())
+        self.assertEqual(self.ui.cfg.get("sources"), [])

@@ -6,7 +6,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from . import files, queries, resources, web
+from . import catalog_sources, files, queries, resources, web
 from .voice.m1 import Hold
 
 LOCALES = ("tr", "en", "de")
@@ -16,7 +16,7 @@ def empty():
     return {"endpoint": "", "llm": "", "stt": "", "voices": {}, "profile": "",
             "market_refs": {}, "allowed_hosts": [], "text_scale": "normal",
             "web_targets": [], "show_spoken_text": False, "research_root": "",
-            "search_history": [], "resources": {"profile": "balance"}}
+            "search_history": [], "resources": {"profile": "balance"}, "sources": []}
 
 
 def config_path():
@@ -85,6 +85,12 @@ def checked(obj):
         raise Hold("invalid_local_settings")
     resources.checked(stored)
     out["resources"] = stored
+    sources = obj.get("sources", [])
+    # A stored source is re-validated on read: a host the policy would refuse
+    # today is refused, not carried as a promise of a fetch that cannot happen.
+    if not isinstance(sources, list) or len(sources) > 32:
+        raise Hold("invalid_local_settings")
+    out["sources"] = catalog_sources.store(catalog_sources.entries(sources))
     root = obj.get("research_root", "")
     # A stored folder is validated on read: a path that is no longer a folder
     # is a bounded reason later, never a silently empty listing.

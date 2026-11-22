@@ -67,3 +67,30 @@ machine.
 | 2 | Remote transport accepted on a real network | a real fetch on the owner's machine | no (physical) |
 | 3 | Physical microphone/output/model quality | real devices and models | no (physical) |
 | 4 | OpenCode sessions, provider sign-in, real browser | integrations | no (not implemented) |
+
+## Implemented: approved sources, metadata only
+
+The plan above is now partly built (`feat/approved-sources`):
+
+- **`src/tihulu_jarvis/catalog_sources.py`**: a `Source` (host, kind, filter) with
+  `register`/`forget`/`entries`/`store`, `slug(repo_id)` — an *injective*
+  escaping of a repository id into the registry's slug space, so `a/b` and
+  `a-b` can never collide — and `cards(payload, source)` mapping a
+  Hugging Face-shaped listing onto truthful cards: category from the pipeline
+  tag, format and languages from the tags, license from the `license:` tag, and
+  size plus a **64-hex digest** from the file list. A row without a size, a valid
+  digest or a categorisable task yields **no card**; rows beyond the bound are
+  counted as refused, so a truncated listing says so.
+- **`safe_url`/`fetch`**: the one URL a source may be read from — HTTPS with the
+  `search`/`limit` query this client builds, no fragment, no credentials, no
+  non-ASCII, and a filter that is a search term rather than a URL fragment. The
+  opener verifies TLS against the system store; a body is bounded and must parse
+  as JSON before any use.
+- **Client**: an *Approved sources* page — register, list, search and forget. A
+  search appends cards and states how many rows were refused plus the honest
+  limit: **nothing is installed**, because this build's approved transport is a
+  numeric loopback endpoint; a remote listing is inspected, not fetched.
+- **Settings**: `sources` stored and re-validated on read.
+
+Still open from the plan: an approved *remote* transport for artifacts (its own
+gate), and the richer filters (author, format) once a source needs them.
