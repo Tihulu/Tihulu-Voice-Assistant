@@ -1,24 +1,4 @@
-
-## Merge log
-
-With the owner's approval, the documented order in `docs/STACK.md` is being
-executed one pull request at a time; nothing merges automatically and `main` is
-never overwritten or force-pushed (only feature branches are force-pushed, with
-approval, to publish a rebase).
-
-| Step | PR | Branch | Result | Verified by |
-| --- | --- | --- | --- | --- |
-| 1 | #4 | `feat/m1-portable-core` | fast-forward into `main` at `2011643` | `tests` 39/39 OK on the merged `main`; CI green on the PR |
-| 2 | #8 | `feat/modes-and-profiles` | fast-forward into `main` at `6a21bf7`; PR closed (head already in `main`) | `tests` 58/58 OK on the merged `main`; CI green on the PR |
-| 3 | #9 | `feat/profile-ui` | rebased onto the updated `main` (its previous base's rebuild was dropped, not duplicated), then fast-forward into `main` at `6273094`; PR closed | `tests` 64/64 OK and `tests/gtk` 17/17 OK on the merged `main`; CI `test (3.10)`, `test (3.12)`, `gtk` green on the branch (run 45065806032) |
-| 4 | #12 | `feat/market-ui` | real merge commit into `main` at `151b100` (a documentation commit had moved `main`, so a fast-forward was no longer possible and nothing was rewritten); PR closed | `tests` 97/97 OK on the merged `main`; CI green on the branch before the merge |
-| 5 | #73 | `feat/merge-log` | merged into `main` at `d398dad` (documentation) | documentation only |
-| 6 | #74 | `feat/merge-log-2` | merged into `main` at `ebd6cc7` (documentation) | documentation only |
-| 7 | #19 | `feat/market-consolidated` | fast-forward into `main` at `29cc369` (its first parent is the previous `main`, so the PR #19 merge commit is `main`'s tip); on GitHub the pull request itself was merged into its stacked base `feat/market-ui` at `c9e8c87` | `tests` 122/122 and `tests/gtk` 59/59 OK on the merged `main`; CI `test (3.10)`, `test (3.12)` and `gtk` green on the PR |
-
-`main` now carries the portable multilingual core, the mode and profile policy core, the profiles page with policy-gated controls, the AI Market page with the approved-source download flow, and the consolidated line: curated catalog discovery, mode and endpoint enforcement, tool-rule enforcement, the approved loopback transport and the download queue. Steps 1-7 are closed: #4, #73 and #74 MERGED; #8, #9 and #12 CLOSED with the evidence recorded above; #19 landed on `main` as `29cc369`. The next steps land the chain root below the open stack (`feat/web-targets`), then open pull requests #43 upward in order, each rebase-based onto the updated `main` and verified before the next merge.
-
-## Build, install and recovery (development release process)
+# Build, install and recovery (development release process)
 
 This document describes how the development artefact is produced and how it is
 removed again. It does not claim a verified end-user installer.
@@ -131,3 +111,36 @@ them in this order, and stop at the first red one.
 
 Gates 1–4 are automated and repeatable; 5 is automated but machine-specific; 6
 is not automated and is never claimed to be.
+
+## Rehearse the merge before making it
+
+`stack_check.py` answers whether the topology is right. `conflict_check.py`
+answers the question that actually blocks a merge — does this branch's change
+still apply to what is below it — by running `git merge-tree --write-tree` in
+memory for every branch in the order, so nothing is checked out, merged or
+pushed:
+
+```sh
+# one step, or the whole verified order from the stack check
+python3 tools/conflict_check.py --step <head> <base>
+python3 tools/conflict_check.py --from-file chain.json     # from --markdown output
+```
+
+A clean rehearsal is not a guarantee: it proves the trees do not overlap, not
+that CI will pass. A conflicted one is proof that it will not.
+
+**Rehearsal result after the fix:** `conflict rehearsal: 51 branches checked, 0
+problems`. Two branches were found conflicting and were fixed (with the owner's
+approval to force-push feature branches): `#9 feat/profile-ui` and
+`#12 feat/market-ui` both carried tracked `__pycache__` from before the hygiene
+pass, which collided add/add with the pass that removed it. Both were rebased
+onto their current bases, the bytecode was dropped, `.gitignore` now excludes it,
+and CI is green on both (`97` and `64` core cases, `38` and `17` GTK cases).
+
+The rehearsal also had to learn one thing the hard way: a branch that carries a
+whole forked line — `#19 feat/market-consolidated`, a merge pull request — reports
+"conflicts" on a rebase because rebasing it replays history the base already has.
+That is the wrong operation, not a conflict: the tool now says "merge it, do not
+rebase (6 commits already in base)", which is what the merge procedure in
+`docs/STACK.md` has always said. A clean rehearsal is not a guarantee: it proves
+the trees do not overlap, not that CI will pass.

@@ -123,7 +123,7 @@ def main(argv):
         print(__doc__.strip(), file=sys.stderr)
         return 2
     order = [name for name in argv[3:] if name != "--"] or None
-    if "--markdown" in order:
+    if order and "--markdown" in order:
         order = [name for name in order if name != "--markdown"]
         merge_order, problems = chain(prs, order)
         for problem in problems:
