@@ -43,3 +43,27 @@ Use an isolated development install and operator-chosen existing models. Record 
 10. Disconnect a device or stop Jan during a turn. Verify a bounded error and successful next attempt after recovery.
 
 Record PASS / FAIL / UNKNOWN per scenario with the exact build. Keep hardware/model acceptance distinct from fixture CI. Clean-machine install and rollback require their own packaging gate.
+
+## Pre-flight before touching a microphone
+
+`tools/preflight.py` answers what a checklist asks before a person starts
+tapping buttons, and says what is missing rather than leaving a failed attempt
+to explain itself. It is read-only: nothing is downloaded, started or recorded.
+
+```sh
+PYTHONPATH=src /usr/bin/python3 tools/preflight.py
+```
+
+It states the interpreter it checked, because the answer is about that Python —
+GTK 4 with PyGObject importable, `arecord`, `whisper-cli`, `piper` and `aplay`
+on PATH, the stored choices readable, and an endpoint, an STT model file and a
+voice file actually chosen. A missing import, an unreadable file and an absent
+model are three different reasons and are reported as such. The exit code is `1`
+when anything is missing, so it can gate a script.
+
+This is the state of the machine this was written on, with the interpreter named
+in the first line: GTK 4.14, all four audio tools present, stored choices
+readable — and **three missing**: no Jan endpoint chosen, no STT model file
+chosen, no voice file chosen. Those three are exactly what the physical
+acceptance needs the owner to point at, and the pre-flight is what says so
+before anyone starts.
