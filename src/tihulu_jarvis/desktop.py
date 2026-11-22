@@ -9,7 +9,8 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, agents, attachments, files, keys, queries, readiness, receipts, resources, tasks, transcript, web
+from . import (a11y, agents, attachments, files, keys, queries, readiness,
+                 receipts, resources, tasks, transcript, usage, web)
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -1281,6 +1282,24 @@ def create_window(app, loop, bridge=None):
                     "Last work %ds ago: no engine is running." % idle,
                     "Son iş %d s önce: hiçbir motor çalışmıyor." % idle,
                     "Letzte Arbeit vor %d s: keine Engine läuft." % idle))
+            # What the process itself uses, measured on demand rather than
+            # polled: the row is refreshed when the owner opens the page.
+            mib = usage.resident_mib()
+            count = usage.threads()
+            if mib is None:
+                measured = tr("this process: resident memory is not readable here",
+                              "bu süreç: yerleşik bellek burada okunamıyor",
+                              "dieser Prozess: residenter Speicher hier nicht lesbar")
+            elif count is None:
+                measured = tr("this process: %d MiB resident" % mib,
+                              "bu süreç: %d MiB yerleşik bellek" % mib,
+                              "dieser Prozess: %d MiB resident" % mib)
+            else:
+                measured = tr("this process: %d MiB resident, %d threads" % (mib, count),
+                              "bu süreç: %d MiB yerleşik bellek, %d iş parçacığı"
+                              % (mib, count),
+                              "dieser Prozess: %d MiB resident, %d Threads" % (mib, count))
+            self.resource_note.set_text(self.resource_note.get_text() + " " + measured + ".")
 
         def choose_resource_profile(self, *_):
             """Apply the chosen profile now; a restart is never required."""

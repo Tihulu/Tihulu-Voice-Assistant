@@ -22,7 +22,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tihulu_jarvis import (a11y, agents, catalog_fetch, desktop, keys, market,
-                           profiles, receipts, resources, settings)
+                           profiles, receipts, resources, settings, usage)
 from tihulu_jarvis.profiles import Profile, Rule
 from tihulu_jarvis.voice.m1 import Hold
 
@@ -3767,3 +3767,37 @@ class VoiceResourceTests(ResourceProfileTests):
         # A profile is process state, so it is not left behind for the next test.
         desktop.audio.configure(None)
         super().tearDown()
+
+
+class UsageReportTests(VoiceResourceTests):
+    """What the process uses is measured, not claimed."""
+
+    def test_the_resources_note_states_the_measured_usage(self):
+        self.ui.refresh_resources_note()
+        text = self.ui.resource_note.get_text()
+        self.assertIn("resident", text)
+        if usage.resident_mib() is None:
+            self.assertIn("not readable here", text)
+        else:
+            self.assertIn("%d MiB resident" % usage.resident_mib(), text)
+            self.assertIn("%d threads" % usage.threads(), text)
+
+    def test_the_measured_usage_is_stated_within_honest_bounds(self):
+        # Measured on this machine: the package alone is ~10 MiB and one thread;
+        # GTK, D-Bus and the accessibility bridge bring the process to roughly
+        # 140 MiB and ~42 threads. The client adds no thread and no engine.
+        mib, count = usage.resident_mib(), usage.threads()
+        if mib is not None:
+            self.assertLess(mib, 256)
+            self.assertGreaterEqual(mib, 8)
+        if count is not None:
+            self.assertLess(count, 64)
+        self.ui.refresh_resources_note()
+        self.assertNotIn("GB resident", self.ui.resource_note.get_text())
+
+    def test_an_unreadable_procfs_is_stated_not_guessed(self):
+        def unreadable(*_args, **_kwargs):
+            raise OSError("no procfs in this sandbox")
+        with patch("builtins.open", side_effect=unreadable):
+            self.ui.refresh_resources_note()
+        self.assertIn("not readable here", self.ui.resource_note.get_text())

@@ -353,3 +353,16 @@ AMD one). A profile never selects the executable, the flags or the model — tho
 stay fixed — and with no profile configured nothing is set on an engine's behalf,
 so the engine keeps its own defaults. The Resources page states the thread count
 before a single turn runs.
+
+## What the process uses, measured
+
+The Resources page states what the process itself uses, read from
+`/proc/self/status` when it exists and said to be unreadable when it does not —
+never a comfortable number. Measured on the development machine: importing the
+package alone costs about 10 MiB and one thread; with the GTK window, D-Bus and
+the accessibility bridge loaded, the process reaches roughly 140 MiB and about
+42 threads. The client adds no thread and no engine of its own: an idle window
+runs no engine, so it allocates no VRAM, and the wakeups it costs are the 25 a
+second described above rather than the 83 it used to. A local engine that stays
+warm is the only thing that holds memory between turns, which is why keeping
+one warm is opt-in and says it costs memory until released.
