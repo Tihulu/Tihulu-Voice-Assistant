@@ -297,3 +297,12 @@ truth, and an export renders. The same smoke runs against the Debian package's
 own bundled interpreter, so an installed deb is verified too. An empty
 configuration states what is missing and why rather than reporting everything
 ready.
+
+Traceability is a document that checks itself. `docs/TRACEABILITY.md` maps each
+requirement area to the code that implements it and the test classes that prove
+it, and `tools/trace_check.py` reads the document, the source tree and the test
+suite: a row pointing at a module, a script or a test class that no longer exists
+is reported, so the table cannot quietly become a claim. The real document is
+also the test fixture — one test runs the check against the repository itself
+and fails on any dangling reference, and three tests use a synthetic tree to
+prove the check actually bites.
