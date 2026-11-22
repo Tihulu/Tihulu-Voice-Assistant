@@ -93,4 +93,15 @@ clean-machine install and rollback, remote transport and catalog trust are **not
 established by the above. `docs/NATIVE_ACCEPTANCE.md` is the physical checklist and
 `docs/RELEASE.md` the release process; both remain unexecuted on a target machine.
 
+## Next increments
+
+- **Approved remote catalog sources** — `docs/CATALOG_SOURCES.md`. Hugging Face Hub's
+  public `/api/models` (including the `ggml-format` Whisper models used by whisper.cpp
+  and the Piper voice repos), the local Jan inventory, and the owner-signed curated
+  catalog, as registered sources with an allowlist and digest-gated install. The gate is
+  nothing: it is next in line.
+- The remaining gates are physical (network transport, devices, model quality) and
+  unbuilt integrations (OpenCode, provider sign-in, real browser); both are listed in
+  `docs/CATALOG_SOURCES.md` and `docs/RELEASE.md`.
+
 ## Recovery
