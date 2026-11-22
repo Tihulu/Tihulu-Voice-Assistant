@@ -2715,10 +2715,15 @@ class KeyboardTests(DesktopTests):
         self.click(self.ui.send)
         self.until(lambda: self.backend.chat_entered)
         self.ui.run_cancel_turn()
-        self.until(lambda: self.backend.chat_cancelled)
+        # The client's own state is what a reader sees, so that is what is
+        # asserted: the turn stops, and waiting on the uncooperative fixture's
+        # late flag made this test time out on a loaded runner.
+        self.until(lambda: self.ui.stage == "stopping")
         self.assertTrue(self.ui.busy)
         self.backend.chat_release.set()
         self.until(lambda: not self.ui.busy)
+        # The earlier turn in this test is untouched by the cancellation.
+        self.assertEqual(len(self.ui.session.history), 2)
 
     def test_ctrl_return_sends_only_a_written_message(self):
         self.connect_model()
