@@ -401,3 +401,28 @@ class AuditFilterTests(unittest.TestCase):
             profiles.read_audit(self.tmp, decision=7)
         with self.assertRaisesRegex(Hold, "audit_profile_filter"):
             profiles.read_audit(self.tmp, profile="a" * 100)
+
+
+class TemplateTests(unittest.TestCase):
+    def test_every_template_builds_without_duplicate_rules(self):
+        for key in profiles.TEMPLATES:
+            with self.subTest(key=key):
+                profile = profiles.template(key)
+                self.assertEqual(profile.id, key)
+                # The concatenation of the kinds holds each rule exactly once.
+                actions = [rule.action for rule in profile.rules()]
+                self.assertEqual(len(actions), len(set(actions)))
+
+    def test_a_rule_lands_in_the_kind_the_policy_reads_it_from(self):
+        agent = profiles.template("coding-agent")
+        self.assertEqual([r.action for r in agent.shell_rules], ["host_shell"])
+        self.assertEqual([r.action for r in agent.filesystem_rules], ["filesystem_write"])
+        self.assertEqual([r.action for r in agent.cloud_disclosure_rules],
+                         ["publish_artifact"])
+        # A shell rule is never left in the generic tool rules as well.
+        self.assertEqual([r.action for r in agent.tool_rules], [])
+        self.assertEqual(profiles.KIND_OF["publish_artifact"], "cloud_disclosure_rules")
+
+    def test_a_template_is_refused_when_its_rules_cannot_land(self):
+        with self.assertRaises(profiles.Profile.__init__.__globals__["Hold"]):
+            profiles.template("unknown-template")
