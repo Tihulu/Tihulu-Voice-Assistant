@@ -21,8 +21,8 @@ from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import patch
 
-from tihulu_jarvis import (a11y, catalog_fetch, desktop, keys, market, profiles,
-                           receipts, settings)
+from tihulu_jarvis import (a11y, agents, catalog_fetch, desktop, keys, market,
+                           profiles, receipts, settings)
 from tihulu_jarvis.profiles import Profile, Rule
 from tihulu_jarvis.voice.m1 import Hold
 
@@ -3582,3 +3582,50 @@ class KeysHelpTests(SettingsPageTests):
         text = self.ui.keys_help_note.get_text()
         self.assertIn("Send the message", text)
         self.assertNotIn("Focus the conversation search", text)
+
+
+class AgentsPageTests(DesktopTests):
+    """What this build cannot do is stated, and nothing is offered that would fail."""
+
+    def rows(self):
+        out, item = [], self.ui.agents_list.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def labels(self):
+        return [row.get_child().get_text() for row in self.rows()]
+
+    def test_every_gate_is_listed_with_its_reason(self):
+        self.assertEqual([row.gate.token for row in self.rows()], list(agents.TOKENS))
+        for label in self.labels():
+            self.assertIn("not implemented in this build", label)
+        self.assertIn("no OpenCode session is reachable from this build", self.labels()[0])
+        self.assertIn("no provider credential is accepted", self.labels()[1])
+
+    def test_nothing_on_the_page_claims_a_capability(self):
+        # Each row names the gate, the reason and the marker that it is closed:
+        # a capability is never stated without saying it is not implemented.
+        for text, gate in zip(self.labels(), agents.closed()):
+            self.assertIn(gate.why, text)
+            self.assertIn("not implemented in this build", text)
+        # Every row is disabled: a control that would only fail is not offered.
+        for row in self.rows():
+            self.assertFalse(row.get_sensitive())
+
+    def test_the_page_points_to_the_work_the_client_does_run(self):
+        note = self.ui.agents_note.get_text()
+        # The page points at the work the client does run, and says what it cannot do.
+        self.assertIn("Activity", note)
+        self.assertIn("runs its own", note)
+
+    def test_the_client_still_runs_its_own_tasks(self):
+        self.connect_model()
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.ui.board.busy())
+        self.assertEqual(self.ui.board.busy()[0].kind, "turn")
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
