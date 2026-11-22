@@ -332,3 +332,24 @@ validated on read, an unknown id or an impossible override is refused rather
 than ignored, and a preset takes no overrides — they live in Custom. Keeping a
 model warm is opt-in and says it costs memory until released; the client never
 starts an engine on its own to honour a profile.
+
+## Language of this repository
+
+Everything published here is English: commit messages, pull request titles and
+bodies, issue text, and this documentation. The one exception is deliberate and
+marked: the product is a Turkish/English/German assistant, so `desktop.py` and
+the voice layer carry the three user-facing languages, and a few tests use real
+Turkish words as data (the casefolding example above, the language-routing
+cases). Those are the product, not the project's own prose — a new user-facing
+string goes in `tr(...)`, and anything written *about* the project goes in
+English.
+
+A resource profile reaches the layer that starts the local engines. Choosing
+one hands it to the voice module, which merges it into the environment of the
+audio tools it spawns: `OMP_NUM_THREADS` and `TIHULU_THREADS` carry the thread
+count the profile allows on this machine's cores, and `TIHULU_DEVICE` carries a
+preferred device when one is chosen (CUDA for the NVIDIA card, Vulkan for the
+AMD one). A profile never selects the executable, the flags or the model — those
+stay fixed — and with no profile configured nothing is set on an engine's behalf,
+so the engine keeps its own defaults. The Resources page states the thread count
+before a single turn runs.

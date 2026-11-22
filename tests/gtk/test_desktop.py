@@ -3729,3 +3729,41 @@ class IdleCostTests(ActivityBoardTests):
         self.ui.refresh_resources_note()
         self.assertIn("released after", self.ui.resource_note.get_text())
         self.assertIn("Last work", self.ui.resource_note.get_text())
+
+
+class VoiceResourceTests(ResourceProfileTests):
+    """A chosen profile reaches the layer that starts the local engines."""
+
+    def test_the_chosen_profile_reaches_the_voice_layer(self):
+        self.assertEqual(desktop.audio.PROFILE.id, "balance")
+        self.ui.resource_profile.set_active(0)          # performance
+        self.until(lambda: desktop.audio.PROFILE.id == "performance")
+        self.assertEqual(desktop.audio.spawn_environment()["TIHULU_DEVICE"], "cuda")
+        self.ui.resource_profile.set_active(2)          # resource-optimized
+        self.until(lambda: desktop.audio.PROFILE.id == "resource_optimized")
+        self.assertNotIn("TIHULU_DEVICE", desktop.audio.spawn_environment())
+
+    def test_a_custom_profile_carries_its_own_settings_to_the_engines(self):
+        self.ui.resource_profile.set_active(3)
+        self.until(lambda: self.ui.cfg["resources"]["profile"] == "custom")
+        self.ui.resource_threads.set_value(3)
+        self.ui.resource_gpu.set_active(2)              # Vulkan
+        self.until(lambda: desktop.audio.PROFILE.threads == 3)
+        self.assertEqual(desktop.audio.spawn_environment(),
+                         {"OMP_NUM_THREADS": "3", "TIHULU_THREADS": "3",
+                          "TIHULU_DEVICE": "vulkan"})
+
+    def test_the_threads_a_local_engine_gets_are_stated_before_use(self):
+        self.ui.resource_profile.set_active(0)
+        self.until(lambda: self.ui.cfg["resources"] == {"profile": "performance"})
+        self.assertIn("%d threads" % (resources.cores() or 1),
+                      self.ui.resource_note.get_text())
+        self.ui.resource_profile.set_active(2)
+        self.until(lambda: self.ui.cfg["resources"] == {"profile": "resource_optimized"})
+        self.assertIn("%d threads" % max(1, int((resources.cores() or 1) * 0.5)),
+                      self.ui.resource_note.get_text())
+
+    def tearDown(self):
+        # A profile is process state, so it is not left behind for the next test.
+        desktop.audio.configure(None)
+        super().tearDown()

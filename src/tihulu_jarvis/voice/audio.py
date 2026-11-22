@@ -4,6 +4,7 @@
 import asyncio
 import json
 import math
+import os
 import shutil
 import signal
 import struct
@@ -13,7 +14,34 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
 
+from .. import resources
 from .m1 import Hold, Voice
+
+
+PROFILE = None
+
+
+def configure(profile=None):
+    """Hold the resource profile the local engines are started with.
+
+    The profile decides how many threads a local engine gets and which device it
+    prefers; it never selects the executable, the flags or the model. Calling it
+    with nothing restores the balance defaults.
+    """
+    global PROFILE
+    PROFILE = profile if profile is not None else None
+    return PROFILE
+
+
+def spawn_environment():
+    """The environment a local engine is spawned with, as a plain dict.
+
+    An empty dict is the honest answer when no profile is configured: the engine
+    then uses its own defaults, and nothing is set on the user's behalf.
+    """
+    if PROFILE is None:
+        return {}
+    return resources.environment(PROFILE)
 
 
 def selected_file(value, suffix):
@@ -86,7 +114,8 @@ async def child(name, *args, stdin=False):
         raise Hold("missing_" + name)
     spawn = asyncio.create_task(asyncio.create_subprocess_exec(binary, *map(str,args),
         stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL))
+        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+        env={**os.environ, **spawn_environment()}))
     try:
         p = await asyncio.shield(spawn)
     except asyncio.CancelledError:

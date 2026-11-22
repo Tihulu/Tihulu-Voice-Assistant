@@ -391,6 +391,7 @@ def create_window(app, loop, bridge=None):
             self.set_state("ready",read_error or tr("Open Installed models to connect.","Bağlantı için Kurulu modeller’i aç.","Zum Verbinden Installierte Modelle öffnen."))
             self.bind_keys()
             self.board = tasks.Board()
+            self.apply_resource_profile()
             self.tools_available = None
             self.build_files_page()
             self.build_settings_page()
@@ -1298,8 +1299,21 @@ def create_window(app, loop, bridge=None):
                 self.set_state("ready", str(exc))
                 return
             self.save()
+            self.apply_resource_profile()
             self.refresh_resources_note()
             self.refresh()
+
+        def apply_resource_profile(self):
+            """Hand the chosen profile to the voice layer, which starts the
+            local engines. A profile chooses threads and the device only — never
+            the executable, the flags or the model."""
+            try:
+                profile = self.effective_resource()
+            except Hold:
+                audio.configure(None)
+                return None
+            audio.configure(profile)
+            return profile
 
         def keys_help(self):
             """The bound shortcuts, stated where a reader can find them.
