@@ -3487,3 +3487,74 @@ class TranscriptExportTests(DesktopTests):
             out.append(item)
             item = item.get_next_sibling()
         return out
+
+
+class MuteTests(DesktopTests):
+    """Mute suppresses audio output, never the answer."""
+
+    def labels_of(self, widget):
+        out, item = [], widget.get_first_child()
+        while item is not None:
+            if hasattr(item, "get_text"):
+                out.append(item)
+            item = item.get_next_sibling()
+        return out
+
+    def voice_turn(self):
+        self.connect_model()
+        self.backend.answers.append("Merhaba!")
+        self.backend.transcript = "naber nasilsin"
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: self.ui.stage == self.backend.playback_stage)
+
+    def test_an_unmuted_turn_speaks_and_shows_the_reply(self):
+        self.voice_turn()
+        self.assertEqual([s.text for s in self.backend.speeches], ["Merhaba!"])
+        self.assertIn("JARVIS\nMerhaba!", self.labels_of(self.ui.log)[-1].get_text())
+
+    def test_a_muted_turn_shows_the_reply_and_speaks_nothing(self):
+        self.mute_turn()
+        self.assertEqual(self.backend.speeches, [])
+        self.assertIn("JARVIS\nMerhaba!", self.labels_of(self.ui.log)[-1].get_text())
+        self.assertEqual(self.ui.status.get_text(), "Reply muted; shown as text.")
+
+    def mute_turn(self):
+        self.connect_model()
+        self.backend.answers.append("Merhaba!")
+        self.backend.transcript = "naber nasilsin"
+        self.ui.mute.set_active(True)
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: not self.ui.busy)
+
+    def test_muting_while_speaking_stops_the_output_now(self):
+        self.voice_turn()
+        self.assertTrue(self.backend.speeches)
+        self.ui.mute.set_active(True)
+        self.until(lambda: self.backend.playback_cleaning)
+        self.backend.playback_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.assertIn("audio output muted", self.ui.state_row.get_text())
+
+    def test_mute_is_state_and_never_a_preference(self):
+        self.ui.mute.set_active(True)
+        self.until(lambda: "audio output muted" in self.ui.state_row.get_text())
+        self.assertEqual(self.ui.cfg.get("muted", None), None)
+        # A new window starts unmuted, because mute is not stored.
+        self.ui.win.close()
+        self.until(lambda: not self.app.get_windows())
+        self.ui = desktop.create_window(self.app, self.loop)
+        self.until(lambda: self.ui.win.get_mapped())
+        self.assertFalse(self.ui.mute.get_active())
+        self.assertNotIn("audio output muted", self.ui.state_row.get_text())
+
+    def test_mute_is_available_when_idle_and_while_playing(self):
+        self.voice_turn()
+        self.assertTrue(self.ui.mute.get_sensitive())
+        self.click(self.ui.end)
+        # Ending a conversation awaits the playback cleanup like the rest.
+        self.until(lambda: self.backend.playback_cleaning)
+        self.backend.playback_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(self.ui.mute.get_sensitive())
