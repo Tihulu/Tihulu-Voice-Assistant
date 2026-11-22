@@ -192,9 +192,13 @@ class DesktopFixture(unittest.TestCase):
 
         The budget covers a slow shared runner, not a hung client: it is still a
         hard deadline, and a condition that never becomes true fails the test.
+        The measured runner is roughly a third slower than this machine, and the
+        budget is per condition: a condition that is ready returns at once, so
+        this only widens how long a failure takes to declare.
         """
         pump = GLib.MainLoop()
-        deadline = time.monotonic() + 15
+        deadline = time.monotonic() + 25
+
         outcome = []
 
         def inspect():
