@@ -274,3 +274,12 @@ client could not apply is not listed as though it were available, so a shortcut
 that is not on that page is not bound in this build. The list is regenerated
 from `keys.BINDINGS` and the applied bindings rather than hand-written, so it
 cannot drift from the real bindings.
+
+The Agents page states what this build does not do. Five gates — an OpenCode
+project and session list, provider sign-in, starting an agent, calling a tool on
+another host, and task cost reporting — are listed as data with the reason each
+is closed, and every row is disabled: a control that would only fail is not
+offered. The page says that the client runs its own turns, downloads and
+transcriptions on the Activity page, and that nothing here can start an agent,
+sign in to a provider or send work to another host. The gates are data rather
+than prose, so the page cannot drift from what the client actually ships.

@@ -9,7 +9,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 
-from . import a11y, attachments, files, keys, queries, readiness, receipts, tasks, transcript, web
+from . import a11y, agents, attachments, files, keys, queries, readiness, receipts, tasks, transcript, web
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from . import locks, search, states
@@ -308,6 +308,7 @@ def create_window(app, loop):
             self.tools_available = None
             self.build_files_page()
             self.build_settings_page()
+            self.build_agents_page()
             self.turn_note = ""
             self.build_activity_page()
             self.win.present()
@@ -1887,6 +1888,60 @@ def create_window(app, loop):
                 return self.active_profile().id
             except Hold:
                 return self.cfg.get("profile", "")
+
+        def build_agents_page(self):
+            """The capabilities this build does not ship, stated and disabled.
+
+            An item that would only fail is not offered as a control. Each gate
+            is named with the reason it is closed, and the tasks the client does
+            run live on the Activity page rather than here.
+            """
+            page = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=10)
+            view = Gtk.ScrolledWindow(vexpand=True)
+            view.set_child(page)
+            self.stack.add_titled(view, "agents", tr("Agents", "Ajanlar", "Agenten"))
+            self.agents_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.agents_note)
+            self.agents_list = Gtk.ListBox()
+            page.append(self.agents_list)
+            self.refresh_agents_page()
+
+        def refresh_agents_page(self):
+            rows, item = [], self.agents_list.get_first_child()
+            while item is not None:
+                nxt = item.get_next_sibling()
+                self.agents_list.remove(item)
+                item = nxt
+            caption = {"opencode_session_list": tr("OpenCode project and session list",
+                                                   "OpenCode proje ve oturum listesi",
+                                                   "OpenCode-Projekt- und Sitzungsliste"),
+                       "provider_login": tr("Provider sign-in",
+                                            "Sağlayıcı oturumu",
+                                            "Anbieter-Anmeldung"),
+                       "agent_spawn": tr("Starting an agent",
+                                         "Ajan başlatma",
+                                         "Einen Agenten starten"),
+                       "remote_tool_call": tr("Calling a tool on another host",
+                                              "Başka bir konakta araç çağırma",
+                                              "Ein Werkzeug auf anderem Host aufrufen"),
+                       "task_cost_reporting": tr("Task cost and token reporting",
+                                                 "Görev maliyeti ve jeton raporu",
+                                                 "Aufgabenkosten- und Token-Bericht")}
+            for gate in agents.closed():
+                row = Gtk.ListBoxRow()
+                row.gate = gate
+                label = Gtk.Label(label="%s — %s (%s)" % (caption[gate.token], gate.why,
+                                                          tr("not implemented in this build",
+                                                             "bu sürümde uygulanmadı",
+                                                             "in diesem Build nicht implementiert")),
+                                  xalign=0, wrap=True)
+                row.set_child(label)
+                row.set_sensitive(False)
+                self.agents_list.append(row)
+            self.agents_note.set_text(tr(
+                "This client runs its own turns, downloads and transcriptions; those are on the Activity page. Nothing here can start an agent, sign in to a provider, or send work to another host.",
+                "Bu istemci kendi turlarını, indirmelerini ve yazıya çevirmelerini çalıştırır; onlar Etkinlik sayfasındadır. Buradaki hiçbir şey bir ajan başlatamaz, sağlayıcıda oturum açamaz veya işi başka bir konakla gönderemez.",
+                "Dieser Client führt eigene Runden, Downloads und Transkriptionen aus; die stehen auf der Aktivitätsseite. Nichts hier kann einen Agenten starten, sich bei einem Anbieter anmelden oder Arbeit an einen anderen Host senden."))
 
         def remember_hosts(self):
             hosts = [h for h in self.catalog_hosts.get_text().split() if h]
