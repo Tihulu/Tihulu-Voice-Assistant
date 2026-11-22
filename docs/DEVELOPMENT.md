@@ -260,3 +260,10 @@ atomic, the file is private by mode (0600), the total is bounded by messages
 (500) and bytes (1 MiB) with a stated truncation, and a relative path is
 refused rather than written somewhere unstated. The export is recorded as a
 receipt, and an empty log offers no export button at all.
+
+Mute suppresses audio output, never the answer. A muted voice turn still shows
+its reply as text and speaks nothing; muting while output is already playing
+stops that output now. Mute is state, not a preference: it is never stored, so
+a restart never begins muted, and the state row names it in words rather than
+only changing a button's colour. A turn that states its own outcome keeps it, so
+a muted reply is not overwritten by a generic "ready" when the turn ends.

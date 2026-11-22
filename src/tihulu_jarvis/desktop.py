@@ -191,6 +191,13 @@ def create_window(app, loop):
             self.talk = self.button(controls,tr("Talk","Konuş","Sprechen"),self.voice)
             self.finish_btn = self.button(controls,tr("Finish recording","Kaydı bitir","Aufnahme beenden"),lambda:self.finish.set() if self.finish else None)
             self.stop = self.button(controls,tr("Stop speaking","Sesi durdur","Wiedergabe stoppen"),self.stop_speaking)
+            # Muting suppresses audio output, never the answer: the reply is
+            # still shown, and the microphone still works.
+            self.mute = Gtk.ToggleButton(label=tr("Mute","Sessiz","Stumm"))
+            self.mute.connect("toggled", self.toggle_mute)
+            controls.append(self.mute)
+            accessible_name(self.mute, tr("Mute audio output", "Ses çıkışını sessize al",
+                                          "Audioausgabe stummschalten"))
             self.cancel = self.button(controls,tr("Cancel turn","Turu iptal et","Antwort abbrechen"),lambda:self.interrupt(False))
             self.end = self.button(controls,tr("End conversation","Sohbeti bitir","Gespräch beenden"),lambda:self.interrupt(True))
             self.hard = self.button(controls,tr("Hard stop","Tümünü durdur","Alles stoppen"),lambda:self.interrupt(False))
@@ -957,7 +964,9 @@ def create_window(app, loop):
                 return
             words = states.tokens(data, self.stage, grants,
                                   bool(self.confirmations),
-                                  self.cfg["llm"] in self.inventory)
+                                  self.cfg["llm"] in self.inventory,
+                                  bool(getattr(self, "mute", None)
+                                       and self.mute.get_active()))
             caption = {"local": tr("local", "yerel", "lokal"),
                        "cloud": tr("cloud permitted", "buluta izinli", "Cloud erlaubt"),
                        "listening": tr("microphone listening", "mikrofon dinliyor", "Mikrofon hört zu"),
@@ -965,6 +974,7 @@ def create_window(app, loop):
                        "idle": tr("microphone idle", "mikrofon boşta", "Mikrofon untätig"),
                        "privileged_tool": tr("privileged tools may run", "ayrıcalıklı araçlar çalabilir", "Privilegierte Werkzeuge können laufen"),
                        "approval_pending": tr("approval pending", "onay bekliyor", "Bestätigung ausstehend"),
+                       "muted": tr("audio output muted", "ses çıkışı sessiz", "Audioausgabe stumm"),
                        "offline": tr("no local model", "yerel model yok", "kein lokales Modell")}
             text = tr("State: ", "Durum: ", "Zustand: ") + " · ".join(
                 caption.get(token, token) for token in words)
@@ -1035,6 +1045,8 @@ def create_window(app, loop):
                 and bool(self.cfg["stt"]) and bool(self.cfg["voices"]) \
                 and audio.tools_ready("arecord","whisper-cli","piper","aplay"))
             self.stop.set_sensitive(self.stage in ("synthesizing","speaking") and self.playback is not None)
+            # Muting is available while a turn is idle or while output plays.
+            self.mute.set_sensitive(not self.busy or self.playback is not None)
             self.finish_btn.set_sensitive(self.stage=="listening" and self.finish is not None)
             self.cancel.set_sensitive(self.busy)
             self.hard.set_sensitive(self.busy)
@@ -2394,6 +2406,7 @@ def create_window(app, loop):
             # percentage: its state is the truth until it ends.
             board_id = self.board.start("turn", self.turn_label(), now=time.time())
             self.active_task = board_id
+            self.turn_outcome = ""
             # A running task is visible while it runs, not only after it ends.
             self.refresh_activity()
             def finished(t):
@@ -2412,6 +2425,10 @@ def create_window(app, loop):
                 self.finish=self.playback=None
                 self.finish_task(board_id, t, message)
                 self.refresh_activity()
+                # A turn that stated its own outcome keeps it: a generic
+                # "ready" must not overwrite "reply muted; shown as text".
+                if not message and self.turn_outcome:
+                    message = self.turn_outcome
                 if epoch==self.session.epoch:
                     self.set_state("ready",message)
                 else:
@@ -2504,6 +2521,24 @@ def create_window(app, loop):
                 return
             self.growing[label]=grown
             label.set_text(speaker+"\n"+grown)
+
+        def toggle_mute(self, *_):
+            """Suppress audio output while every reply is still shown.
+
+            Mute is state, not a preference: it is never stored, so a restart
+            never begins muted, and a muted reply still appears as text.
+            """
+            if self.mute.get_active():
+                if self.playback is not None:
+                    # A turn already speaking stops its output now.
+                    self.stop_speaking()
+                self.set_state("ready", tr("Audio output muted.",
+                                           "Ses çıkışı sessize alındı.",
+                                           "Audioausgabe stummgeschaltet."))
+            else:
+                self.set_state("ready", tr("Audio output on.", "Ses çıkışı açık.",
+                                           "Audioausgabe an."))
+            self.refresh()
 
         def stop_speaking(self):
             task = self.playback
@@ -2640,6 +2675,16 @@ def create_window(app, loop):
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
                 self.spoken_line(speech, epoch)
+                if self.mute.get_active():
+                    # Muted: the reply is shown, and nothing is spoken.
+                    self.turn_outcome = tr("Reply muted; shown as text.",
+                                           "Yanıt sessiz; metin olarak gösterildi.",
+                                           "Antwort stumm; als Text angezeigt.")
+                    self.session.check(epoch)
+                    self.set_state("ready", tr("Reply muted; shown as text.",
+                                               "Yanıt sessiz; metin olarak gösterildi.",
+                                               "Antwort stumm; als Text angezeigt."))
+                    return
                 async with self.leases.hold("audio_playback", "voice-turn-%d" % epoch):
                     self.note_leases()
                     playback = loop.create_task(audio.speak(speech, progress))
