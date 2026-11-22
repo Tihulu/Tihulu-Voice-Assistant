@@ -22,7 +22,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from tihulu_jarvis import (a11y, agents, catalog_fetch, desktop, keys, market,
-                           profiles, receipts, settings)
+                           profiles, receipts, resources, settings)
 from tihulu_jarvis.profiles import Profile, Rule
 from tihulu_jarvis.voice.m1 import Hold
 
@@ -154,16 +154,15 @@ class DesktopFixture(unittest.TestCase):
         self.stack.enter_context(patch.object(
             sys, "excepthook", side_effect=lambda *args: self.callback_errors.append(args[1])))
         self.loop.set_exception_handler(lambda loop, ctx: self.callback_errors.append(ctx.get("exception", ctx.get("message"))))
-        self.bridge = desktop.gtk_asyncio(self.loop)
-        self.bridge.__enter__()
-        self.addCleanup(self.close_bridge)
-        self.ui = desktop.create_window(self.app, self.loop)
+        # The fixture keeps the yielded bridge, not the context manager: the
+        # window wakes it when work is submitted and states how long it is idle.
+        self.bridge = self.stack.enter_context(desktop.gtk_asyncio(self.loop))
+        self.ui = desktop.create_window(self.app, self.loop, self.bridge)
         self.until(lambda: self.ui.win.get_mapped())
 
     def close_bridge(self):
-        if self.bridge is not None:
-            bridge, self.bridge = self.bridge, None
-            bridge.__exit__(None, None, None)
+        """Drop the bridge reference; the exit stack owns closing it."""
+        self.bridge = None
 
     def tearDown(self):
         try:
@@ -1534,7 +1533,7 @@ class QueueRestoreTests(DownloadFixture):
     def test_a_restart_restores_a_resumable_entry(self):
         self.partial_on_disk("fixture-restore", b"partial bytes")
         # A fresh window is a restart: the queue is rebuilt from disk only.
-        fresh = desktop.create_window(self.app, self.loop)
+        fresh = desktop.create_window(self.app, self.loop, self.bridge)
         self.addCleanup(fresh.win.close)
         restored = [e for e in fresh.downloads if e["id"] == "fixture-restore"]
         self.assertEqual(len(restored), 1)
@@ -1549,7 +1548,7 @@ class QueueRestoreTests(DownloadFixture):
 
     def test_an_installed_item_is_not_reported_as_pending(self):
         self.partial_on_disk("fixture-installed", b"leftover", state="ACTIVE")
-        fresh = desktop.create_window(self.app, self.loop)
+        fresh = desktop.create_window(self.app, self.loop, self.bridge)
         self.addCleanup(fresh.win.close)
         self.assertEqual([e["id"] for e in fresh.downloads], [])
         fresh.win.close()
@@ -1559,7 +1558,7 @@ class QueueRestoreTests(DownloadFixture):
         transfers = Path(self.market_home, "transfers")
         transfers.mkdir(parents=True, exist_ok=True)
         (transfers / "partial-unknown-model").write_bytes(b"orphan")
-        fresh = desktop.create_window(self.app, self.loop)
+        fresh = desktop.create_window(self.app, self.loop, self.bridge)
         self.addCleanup(fresh.win.close)
         self.assertEqual(fresh.downloads, [])
         fresh.win.close()
@@ -2654,7 +2653,7 @@ class TextScaleUITests(DesktopTests):
         settings.save(cfg)
         self.ui.win.close()
         self.until(lambda: not self.app.get_windows())
-        self.ui = desktop.create_window(self.app, self.loop)
+        self.ui = desktop.create_window(self.app, self.loop, self.bridge)
         self.until(lambda: self.ui.win.get_mapped())
         self.assertEqual(self.ui.settings_scale.get_active(), 1)
         self.assertIsNotNone(self.ui.scale_provider)
@@ -3049,7 +3048,7 @@ class SpokenTextUITests(DesktopTests):
         self.assertEqual(settings.load()["show_spoken_text"], True)
         self.ui.win.close()
         self.until(lambda: not self.app.get_windows())
-        self.ui = desktop.create_window(self.app, self.loop)
+        self.ui = desktop.create_window(self.app, self.loop, self.bridge)
         self.until(lambda: self.ui.win.get_mapped())
         self.assertTrue(self.ui.settings_spoken.get_active())
         self.ui.cfg["show_spoken_text"] = False
@@ -3546,7 +3545,7 @@ class MuteTests(DesktopTests):
         # A new window starts unmuted, because mute is not stored.
         self.ui.win.close()
         self.until(lambda: not self.app.get_windows())
-        self.ui = desktop.create_window(self.app, self.loop)
+        self.ui = desktop.create_window(self.app, self.loop, self.bridge)
         self.until(lambda: self.ui.win.get_mapped())
         self.assertFalse(self.ui.mute.get_active())
         self.assertNotIn("audio output muted", self.ui.state_row.get_text())
@@ -3631,3 +3630,99 @@ class AgentsPageTests(DesktopTests):
         self.assertEqual(self.ui.board.busy()[0].kind, "turn")
         self.backend.chat_release.set()
         self.until(lambda: not self.ui.busy)
+
+
+class ResourceProfileTests(SettingsPageTests):
+    """A resource profile is chosen in words, and applied without a restart."""
+
+    def profiles(self):
+        return [self.ui.resource_profile.get_model()[self.ui.resource_profile.get_model()
+                .iter_nth_child(None, index)][0]
+                for index in range(self.ui.resource_profile.get_model().iter_n_children(None))]
+
+    def test_the_four_profiles_are_offered_and_balance_is_the_default(self):
+        self.assertEqual(tuple(self.profiles()),
+                         ("Performance", "Balance", "Resource-optimized", "Custom"))
+        self.assertEqual(self.ui.cfg.get("resources"), {"profile": "balance"})
+        self.assertIn("Balance", self.ui.resource_note.get_text())
+
+    def test_choosing_a_profile_applies_it_now(self):
+        self.ui.resource_profile.set_active(0)          # performance
+        self.until(lambda: self.ui.cfg["resources"] == {"profile": "performance"})
+        self.assertIn("kept warm", self.ui.resource_note.get_text())
+        self.ui.resource_profile.set_active(2)          # resource-optimized
+        self.until(lambda: self.ui.cfg["resources"] == {"profile": "resource_optimized"})
+        self.assertIn("released after 15 idle seconds", self.ui.resource_note.get_text())
+
+    def test_a_custom_profile_carries_only_its_own_settings(self):
+        self.ui.resource_profile.set_active(3)          # custom
+        self.until(lambda: self.ui.cfg["resources"]["profile"] == "custom")
+        self.ui.resource_idle.set_value(45)
+        self.ui.resource_warm.set_active(True)
+        self.ui.resource_gpu.set_active(1)              # CUDA
+        self.until(lambda: self.ui.cfg["resources"].get("idle_release") == 45)
+        stored = self.ui.cfg["resources"]
+        # The thread count is the machine's: this machine's share of its cores.
+        self.assertEqual(stored, {"profile": "custom", "idle_release": 45,
+                                  "keep_warm": True, "gpu": "cuda",
+                                  "threads": 6 * (resources.cores() or 8) // 8})
+        # A restart honours it, because it is stored and re-validated.
+        self.ui.win.close()
+        self.until(lambda: not self.app.get_windows())
+        # A restarted window becomes the fixture's window, so teardown closes
+        # the newest one and the next test starts from an empty application.
+        self.ui = desktop.create_window(self.app, self.loop, self.bridge)
+        self.until(lambda: self.ui.win.get_mapped())
+        self.assertEqual(self.ui.cfg.get("resources"), stored)
+        self.assertEqual(self.ui.resource_profile.get_active(), 3)
+
+    def test_the_stored_choice_survives_a_restart(self):
+        self.ui.resource_profile.set_active(0)
+        self.until(lambda: self.ui.cfg["resources"] == {"profile": "performance"})
+        self.ui.win.close()
+        self.until(lambda: not self.app.get_windows())
+        # A restarted window becomes the fixture's window, so teardown closes
+        # the newest one and the next test starts from an empty application.
+        self.ui = desktop.create_window(self.app, self.loop, self.bridge)
+        self.until(lambda: self.ui.win.get_mapped())
+        self.assertEqual(self.ui.cfg.get("resources"), {"profile": "performance"})
+        self.assertEqual(self.ui.resource_profile.get_active(), 0)
+
+
+class IdleCostTests(ActivityBoardTests):
+    """An idle window is not a spinning loop."""
+
+    def test_the_bridge_is_fast_while_working_and_slow_when_idle(self):
+        # The saving is a real number of wakeups: 83 a second while working,
+        # 25 while idle — and the idle number is a measured compromise, because
+        # a slower one adds its own latency to every coroutine handoff.
+        self.assertGreater(desktop.IDLE_TICK_MS, desktop.BUSY_TICK_MS)
+        self.assertAlmostEqual(1000 / desktop.BUSY_TICK_MS, 83, delta=1)
+        self.assertAlmostEqual(1000 / desktop.IDLE_TICK_MS, 25, delta=1)
+        self.connect_model()
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.chat_entered)
+        self.assertEqual(self.bridge.interval, desktop.BUSY_TICK_MS)
+        self.assertGreater(self.bridge.idle_for(), -1)
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+        # When the loop has no work, the bridge drops to the idle tick on its own.
+        self.until(lambda: self.bridge.interval == desktop.IDLE_TICK_MS)
+        self.assertGreater(desktop.IDLE_TICK_MS, desktop.BUSY_TICK_MS)
+
+    def test_the_state_row_states_idleness_in_words(self):
+        self.connect_model()
+        self.text("Merhaba! Benim kelimem mavi.")
+        self.until(lambda: "no work pending" in self.ui.state_row.get_text())
+        # The microphone is not busy either, and neither row claims it is.
+        self.assertIn("microphone idle", self.ui.state_row.get_text())
+
+    def test_the_resources_note_states_the_idle_time_and_what_it_costs(self):
+        self.connect_model()
+        self.text("Merhaba! Benim kelimem mavi.")
+        self.until(lambda: "no work pending" in self.ui.state_row.get_text())
+        self.ui.refresh_resources_note()
+        self.assertIn("released after", self.ui.resource_note.get_text())
+        self.assertIn("Last work", self.ui.resource_note.get_text())

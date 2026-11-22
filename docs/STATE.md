@@ -73,12 +73,12 @@ Nothing here overwrites `main` or force-pushes.
 At the top of the stack (`feat/traceability`, run
 [44987654028](https://github.com/Tihulu/Tihulu-Voice-Assistant/actions/runs/44987654028)):
 
-- Core suite: **309/309** per interpreter (Python 3.10 and 3.12).
-- Native GTK suite: **480/480** under Xvfb/D-Bus with `G_DEBUG=fatal-criticals`, under
+- Core suite: **314/314** per interpreter (Python 3.10 and 3.12).
+- Native GTK suite: **519/519** under Xvfb/D-Bus with `G_DEBUG=fatal-criticals`, under
   both `tr_TR` and `C` locales.
 - Package job: sdist + wheel built (37 entries verified, no leaks), the wheel installed
   into a clean venv, the deterministic suite run against the **installed** artefact
-  (309/309), `tools/smoke.py` **21/21 checks**, the Debian package built, extracted and
+  (314/314), `tools/smoke.py` **21/21 checks**, the Debian package built, extracted and
   imported, and the smoke run again against the deb root.
 - Read-only checks: `tools/stack_check.py` → 44 branches mergeable in order, 0 problems;
   `tools/trace_check.py` → 38 rows, 0 problems; `tools/preflight.py` states 3 missing

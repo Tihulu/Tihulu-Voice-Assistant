@@ -306,3 +306,29 @@ is reported, so the table cannot quietly become a claim. The real document is
 also the test fixture — one test runs the check against the repository itself
 and fails on any dangling reference, and three tests use a synthetic tree to
 prove the check actually bites.
+
+## Cost of an idle window
+
+An idle window is not a spinning loop. The GLib/asyncio bridge ticks 83 times a
+second while work is pending and 25 times while the client is idle, so an idle
+window costs about a quarter of the wakeups it used to; the instant work appears
+the fast tick is armed again, and a user action is answered in the same frame as
+before. The idle number is a measured compromise — a slower one saves more CPU
+but adds its own latency to every handoff between a GTK callback and a waiting
+coroutine, which showed up as a four-fold slowdown of the whole GTK suite, so it
+was not taken. The state row says "no work pending" while idle and the Resources
+page states the measured time since the last work.
+
+## Resource profiles
+
+Four profiles, chosen on the Resources page and applied without a restart:
+**Performance** (all cores, keeps a model warm for the session, prefers CUDA),
+**Balance** (three quarters of the cores, releases a warm model after two idle
+minutes, automatic device), **Resource-optimized** (half the cores, releases
+after fifteen seconds) and **Custom** (the owner's own threads, device, warm
+setting and idle release, on a machine with two GPUs: CUDA for the NVIDIA card,
+Vulkan for the AMD one, or automatic). A profile is data: the stored form is
+validated on read, an unknown id or an impossible override is refused rather
+than ignored, and a preset takes no overrides — they live in Custom. Keeping a
+model warm is opt-in and says it costs memory until released; the client never
+starts an engine on its own to honour a profile.
