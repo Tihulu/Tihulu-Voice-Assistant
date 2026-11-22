@@ -267,3 +267,10 @@ stops that output now. Mute is state, not a preference: it is never stored, so
 a restart never begins muted, and the state row names it in words rather than
 only changing a button's colour. A turn that states its own outcome keeps it, so
 a muted reply is not overwritten by a generic "ready" when the turn ends.
+
+The Settings page lists the keyboard shortcuts, drawn from the same table the
+client binds: each trigger, what it does and where it applies. A binding the
+client could not apply is not listed as though it were available, so a shortcut
+that is not on that page is not bound in this build. The list is regenerated
+from `keys.BINDINGS` and the applied bindings rather than hand-written, so it
+cannot drift from the real bindings.

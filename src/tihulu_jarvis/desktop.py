@@ -1063,6 +1063,34 @@ def create_window(app, loop):
                     widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
                                          and audio.tools_ready("piper","aplay"))
 
+        def keys_help(self):
+            """The bound shortcuts, stated where a reader can find them.
+
+            A binding is never silent: the same table the client binds is what
+            the page lists, so a shortcut that is not here is not bound.
+            """
+            caption = {"send": tr("Send the message", "Mesajı gönder", "Nachricht senden"),
+                       "focus_search": tr("Focus the conversation search",
+                                          "Sohbet aramasına odaklan", "Gesprächsuche fokussieren"),
+                       "cancel_turn": tr("Cancel the current turn", "Geçerli turu iptal et",
+                                         "Aktuelle Runde abbrechen"),
+                       "hard_stop": tr("Stop everything", "Her şeyi durdur", "Alles stoppen"),
+                       "attach": tr("Attach a file", "Dosya ekle", "Datei anhängen")}
+            target = {"entry": tr("in the message field", "mesaj alanında", "im Nachrichtenfeld"),
+                      "search": tr("in the search field", "arama alanında", "im Suchfeld"),
+                      "window": tr("anywhere in the window", "pencerenin her yerinde",
+                                   "überall im Fenster")}
+            lines = []
+            for name, _, where, trigger, _ in keys.BINDINGS:
+                if name not in self.shortcuts:
+                    # A binding the client could not apply is not listed as if
+                    # it were available.
+                    continue
+                lines.append("%s — %s (%s)" % (trigger, caption[name], target[where]))
+            return "\n".join(lines) or tr("No shortcuts are bound in this build.",
+                                         "Bu sürümde bağlı kısayol yok.",
+                                         "In diesem Build sind keine Tastenkürzel gebunden.")
+
         def choose_spoken_text(self, *_):
             """Store the choice immediately; a restart is never required."""
             self.cfg["show_spoken_text"] = bool(self.settings_spoken.get_active())
@@ -1813,8 +1841,12 @@ def create_window(app, loop):
             page.append(Gtk.Label(label=tr(
                 "Models, approved sites and profiles have their own pages; nothing here reaches a device or a provider.",
                 "Modeller, onaylı siteler ve profillerin kendi sayfaları var; buradaki hiçbir şey aygıta veya sağlayıcıya erişmez.",
-                "Modelle, genehmigte Seiten und Profile haben eigene Seiten; nichts hier erreicht ein Gerät oder einen Anbieter."),
+                "Modelle, genehmigte Seiten und Profile haben eigene Seiten; nichts hier erreicht ein Gerät oder keinen Anbieter."),
                 xalign=0, wrap=True))
+            page.append(Gtk.Label(label=tr("Keyboard", "Klavye", "Tastatur"), xalign=0))
+            self.keys_help_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.keys_help_note)
+            self.keys_help_note.set_text(self.keys_help())
             forget = Gtk.Box(spacing=8)
             page.append(forget)
             self.settings_forget = self.button(forget, tr("Forget local choices",
