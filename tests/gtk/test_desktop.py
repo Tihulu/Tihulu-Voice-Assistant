@@ -3555,3 +3555,27 @@ class MuteTests(DesktopTests):
         self.backend.playback_release.set()
         self.until(lambda: not self.ui.busy)
         self.assertTrue(self.ui.mute.get_sensitive())
+
+
+class KeysHelpTests(SettingsPageTests):
+    """The settings page lists exactly the shortcuts that are bound."""
+
+    def test_the_bound_shortcuts_are_listed_with_their_triggers(self):
+        text = self.ui.keys_help_note.get_text()
+        self.assertIn("<ctrl>Return — Send the message", text)
+        self.assertIn("<ctrl>f — Focus the conversation search", text)
+        self.assertIn("Escape — Cancel the current turn", text)
+        self.assertIn("<ctrl>Escape — Stop everything", text)
+        self.assertIn("<ctrl>o — Attach a file", text)
+
+    def test_only_bound_shortcuts_are_listed(self):
+        self.assertEqual(tuple(self.ui.shortcuts), keys.names())
+        listed = self.ui.keys_help_note.get_text().count(" — ")
+        self.assertEqual(listed, len(self.ui.shortcuts))
+
+    def test_the_help_is_refreshed_from_the_bound_table(self):
+        self.ui.shortcuts = ("send",)
+        self.ui.keys_help_note.set_text(self.ui.keys_help())
+        text = self.ui.keys_help_note.get_text()
+        self.assertIn("Send the message", text)
+        self.assertNotIn("Focus the conversation search", text)
