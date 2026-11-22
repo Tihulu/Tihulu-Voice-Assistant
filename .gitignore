@@ -1,0 +1,8 @@
+# Bytecode and build output never belong in the repository: they collide
+# add/add between branches, and they change with every interpreter build.
+__pycache__/
+*.py[cod]
+build/
+dist/
+*.egg-info/
+.release-work/
