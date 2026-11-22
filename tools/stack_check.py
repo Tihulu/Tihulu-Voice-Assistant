@@ -101,6 +101,19 @@ def report(prs, order=None, out=None, err=None):
     return 1 if problems else 0
 
 
+def markdown(merge_order, out=None):
+    """The verified chain as a markdown table, for `docs/STATE.md`."""
+    out = out or sys.stdout
+    print("| # | PR | Branch | Based on | Contents |", file=out)
+    print("| --- | --- | --- | --- | --- |", file=out)
+    for position, pr in enumerate(merge_order, 1):
+        title = pr.get("title", "").replace("|", "/")
+        print("| %d | #%s | `%s` | `%s` | %s |"
+              % (position, pr.get("number"), pr.get("headRefName"),
+                 pr.get("baseRefName"), title), file=out)
+    return out
+
+
 def main(argv):
     if len(argv) >= 3 and argv[1] == "--from-gh":
         prs = from_gh(argv[2])
@@ -110,6 +123,13 @@ def main(argv):
         print(__doc__.strip(), file=sys.stderr)
         return 2
     order = [name for name in argv[3:] if name != "--"] or None
+    if "--markdown" in order:
+        order = [name for name in order if name != "--markdown"]
+        merge_order, problems = chain(prs, order)
+        for problem in problems:
+            print("  problem: %s" % problem, file=sys.stderr)
+        markdown(merge_order)
+        return 1 if problems else 0
     return report(prs, order)
 
 

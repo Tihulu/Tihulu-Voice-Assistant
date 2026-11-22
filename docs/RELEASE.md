@@ -101,3 +101,33 @@ every shared model remain.
 What a green package job does not prove: installation on a real desktop,
 launch under COSMIC, physical audio, or clean-machine installation on a
 different machine. Those remain separate gates and require a target system.
+
+## The gates before a release, in order
+
+A release is not a green job; it is the sequence of gates that produces it. Run
+them in this order, and stop at the first red one.
+
+1. **The stack is mergeable.** `python3 tools/stack_check.py --from-gh
+   <owner>/<repo> [branch order]` — every branch based on its predecessor,
+   every PR a draft, every head commit's run green. A branch rebased onto the
+   wrong parent or a lost green run is reported, not re-ordered.
+2. **Every increment is verified.** The CI matrix runs the deterministic suite
+   on 3.10 and 3.12, the GTK suite, and the package job. A merge step never
+   leaves the stack on a red branch.
+3. **A clean-machine install works.** `tools/smoke.py` runs from outside the
+   source tree against the installed wheel and against the Debian root, so the
+   artefact is exercised rather than only imported.
+4. **The requirements map is true.** `python3 tools/trace_check.py` — 38 rows
+   pointing at code and test classes that all exist. A dangling reference fails
+   the release.
+5. **The target machine says what it is missing.**
+   `PYTHONPATH=src /usr/bin/python3 tools/preflight.py` — GTK 4 with
+   PyGObject, the audio tools, a chosen endpoint, an STT model file and a voice
+   file. Exit code 1 means the physical acceptance cannot start yet.
+6. **Physical acceptance.** The owner's checklist in `docs/NATIVE_ACCEPTANCE.md`,
+   on the owner's machine, with the real artifacts. This is the only gate that
+   can certify devices, integration and model quality, and it cannot be run
+   here.
+
+Gates 1–4 are automated and repeatable; 5 is automated but machine-specific; 6
+is not automated and is never claimed to be.
