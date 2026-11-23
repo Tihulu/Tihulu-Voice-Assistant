@@ -22,10 +22,11 @@ def private_home():
     return tmp
 
 
-def checks():
-    from tihulu_jarvis import (a11y, agents, attachments, disclosure, files, keys,
-                               profiles, queries, readiness, receipts, settings,
-                               states, tasks, transcript, web)
+def checks():  # noqa: C901  (one check per shipped capability)
+    from tihulu_jarvis import (a11y, agents, attachments, catalog_sources,
+                               disclosure, files, keys, locks, profiles, queries,
+                               readiness, receipts, resources, routing, search,
+                               settings, states, tasks, transcript, usage, web)
     from tihulu_jarvis.voice import audio, jan, m1, session  # noqa: F401  (import side effects)
 
     out = []
@@ -77,6 +78,79 @@ def checks():
     out.append(readiness.report({}, (), None, "")[0].state == readiness.MISSING)
     out.append(transcript.render(session.Session().history, started=1.0).endswith("\n"))
     out.append(attachments.MAX_BYTES > 0)
+    # Resource profiles, and what they let a local engine use.
+    out.append(resources.preset("performance").keep_warm is True)
+    out.append(resources.preset("resource_optimized").idle_release == 15)
+    out.append(resources.environment(resources.preset("balance"), 8)["OMP_NUM_THREADS"] == "6")
+    custom = resources.effective({"profile": "custom", "threads": 3, "gpu": "vulkan"})
+    out.append(resources.environment(custom, 8)["TIHULU_DEVICE"] == "vulkan")
+    audio.configure(resources.preset("balance"))
+    # The thread count is this machine's, never a hardcoded eight cores.
+    out.append(audio.spawn_environment()["TIHULU_THREADS"]
+               == str(resources.preset("balance").threads_for(resources.cores() or 1)))
+    audio.configure(None)
+    out.append(audio.spawn_environment() == {})
+
+    # What this process uses, measured rather than claimed.
+    out.append(usage.resident_mib() is None or usage.resident_mib() >= 1)
+    out.append(usage.threads() is None or usage.threads() >= 1)
+
+    # An approved source maps a listing onto truthful cards, or refuses it.
+    source = catalog_sources.Source("huggingface.co", "hf", "whisper")
+    out.append(catalog_sources.listing_url(source).startswith("https://huggingface.co/api/models?"))
+    out.append(catalog_sources.slug("ggerganov/whisper.cpp") == "ggerganov:whisper.cpp")
+    payload = [{"modelId": "ggerganov/whisper.cpp",
+                "pipeline_tag": "automatic-speech-recognition",
+                "tags": ["ggml", "tr", "license:mit"],
+                "files": [{"path": "ggml-base.bin", "size": 141000000,
+                           "lfs": {"sha256": "0" * 64}}]}]
+    cards, refused = catalog_sources.cards(payload, source)
+    out.append(len(cards) == 1 and refused == 0)
+    out.append(cards[0].category == "stt" and cards[0].artifact_format == "ggml")
+    bad, bad_refused = catalog_sources.cards([{"modelId": "x/no-digest",
+                                               "pipeline_tag": "automatic-speech-recognition",
+                                               "tags": ["ggml"], "files": []}], source)
+    out.append(bad == () and bad_refused == 1)
+    try:
+        catalog_sources.checked({"host": "localhost", "kind": "hf"})
+        out.append(False)
+    except m1.Hold:
+        out.append(True)
+
+    # Routing: a local route is local, a cloud route in a local mode is refused.
+    route = routing.Route("llm", "fixture-chat", "local", "jan", "http://127.0.0.1:9876/")
+    out.append(routing.permitted(local, route)[0] is True)
+    cloud_route = routing.Route("llm", "fixture-provider", "cloud", "fixture-provider")
+    try:
+        routing.select(local, routing.Preference("llm", (cloud_route,)))
+        out.append(False)
+    except m1.Hold:
+        out.append(True)
+
+    # Searching the conversation is local, bounded and a snippet.
+    history = tuple(m1.Message("user" if index % 2 == 0 else "assistant", item)
+                    for index, item in enumerate(("naber nasilsin", "Merhaba!")))
+    out.append(len(search.find(history, "nasilsin")) == 1)
+    out.append(search.snippet("naber nasilsin", "nasil") == "naber nasilsin")
+
+    # Locks: one holder per resource, and the caller cannot steal one.
+    leases = locks.Leases()
+    leases.acquire("microphone", "turn-1")
+    try:
+        leases.acquire("microphone", "turn-2")
+        out.append(False)
+    except m1.Hold:
+        out.append(True)
+
+    # A stored profile that cannot be honoured is refused, not ignored.
+    out.append(settings.checked({**settings.empty(), "resources": {"profile": "balance"}})
+               ["resources"] == {"profile": "balance"})
+    try:
+        settings.checked({**settings.empty(), "sources": [{"host": "localhost", "kind": "hf"}]})
+        out.append(False)
+    except m1.Hold:
+        out.append(True)
+
     return out
 
 

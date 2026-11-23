@@ -21,7 +21,8 @@ CI performs the same steps and additionally:
 1. verifies the wheel contains every shipped module, the LICENSE, the entry point and the two `share/` metadata files;
 2. asserts that no `tests/`, `docs/` or `data/` path leaked into the wheel;
 3. installs the wheel into a clean virtual environment and runs the whole deterministic suite against the **installed** artefact, so a missing module or entry point fails the job;
-4. imports the installed package and the desktop entry module.
+4. imports the installed package and the desktop entry module;
+5. runs `tools/smoke.py` from outside the source tree against the installed wheel — 42 checks, one per shipped capability: preferences round-trip and refuse, profiles created and escalated, the audit trail recording, every vocabulary (state, disclosure, receipts, keys, sources, routing, search, locks), the resource profiles handed to the voice layer, the measured process usage, an approved source's cards and refusals, and the readiness report's mixed truth.
 
 ## Install into an isolated prefix
 
