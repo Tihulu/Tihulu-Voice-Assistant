@@ -45,3 +45,19 @@ unverified HOLD gates.
 
 This section supersedes the historical candidate matrix below for the current stack; the
 original evidence is kept unchanged.
+
+## Current stack (after the full landing, main at 939a567)
+
+| Group | Passed | Failed/errors | Not run |
+| --- | ---: | ---: | ---: |
+| Core suite on `main` | 356 | 0 | 0 |
+| Native GTK suite on `main` | 602 | 0 | 0 |
+| CI: test (3.10), test (3.12), gtk, triggers, package | green | 0 | 0 |
+
+Local recipe: `xvfb-run -a /usr/bin/python3` with `PYTHONPATH=src` (the system
+interpreter carries PyGObject and GTK 4; the anaconda interpreter does not), default
+and `C` locales. Real Jan, microphone, output, COSMIC/Wayland integration and a
+clean-system install or rollback remain unverified HOLD gates.
+
+This section supersedes the earlier matrices for the current stack; the historical
+evidence is kept unchanged.

@@ -145,3 +145,22 @@ That is the wrong operation, not a conflict: the tool now says "merge it, do not
 rebase (6 commits already in base)", which is what the merge procedure in
 `docs/STACK.md` has always said. A clean rehearsal is not a guarantee: it proves
 the trees do not overlap, not that CI will pass.
+
+
+## Merge log — continuation after the initial stack
+
+| # | PR | What | How it landed | Evidence |
+|---|----|------|---------------|----------|
+| 8 | chain root | the feature line below the open stack (`feat/web-targets`, 23 features) | rebased onto the updated `main` at `19e0134`, landed as a fast-forward at `c540b4c`; two accepted test fixes landed with it (the condition-based wait budget, the sticky `chat_entered` flag) | 245 core / 268 GTK green locally; CI green on the published head |
+| 9 | #43 – #72 | the open stack, one increment at a time | each increment replayed onto the updated `main` (its own commits, or its whole tree diff where its tip carried CI scaffolding), verified locally, published on its branch, then fast-forwarded into `main` once its own CI was green; #68 and #69 were rebuilt from their tree diffs after placeholder commits had marked them merged | see the section below; the stack completes at `939a567` with 356 core and 602 native GTK tests, every CI job green |
+
+## The stack landing (the continuation after #19)
+
+With the owner's approval, the documented order continued after #19 with the chain root below the open stack and then open pull requests #43 upward, one verified increment at a time; `main` was never overwritten or force-pushed, and every merge waited for its own CI.
+
+1. The chain root: the feature line the open stack stands on (transfer resume, item revisions, update flow, queue persistence, catalog trust, Debian packaging, owner-scoped HTTPS catalog fetch, audit trail, escalation consent, file transcription, explicit routing, resource leases, privacy disclosure, state labels, conversation search, attachments, routing page, audit filters, streaming replies, text scale, keyboard navigation, receipts, approved web targets) was rebased onto `main` and landed as a fast-forward.
+2. #43 (activity board) through #59 (traceability), then #60 (release runbook and gates), #61 (approved remote catalog sources), #62 (resource profiles and idle wakeups), #63 (repository language policy), #64 (voice-layer resource hand-off), #65 (measured process usage), #66 (approved catalog sources with truthful cards) and #67 (the merge rehearsal, `tools/conflict_check.py` and its tests): each increment was replayed onto the updated `main`, verified locally, published on its branch, and landed as a fast-forward once its own CI was green.
+3. #68 and #69 had been marked merged by placeholder commits during one batch; the real increments were rebuilt from the branches' tree diffs and landed with the correction recorded on both pull requests.
+4. #70 (CI trigger automation: `tools/ci_triggers.py`, its tests, the regenerated trigger list and the CI `triggers` job), #71 (pre-flight GPU probes) and #72 (record-card provenance) completed the stack. `main` now carries the whole stack: 356 core tests and 602 native GTK tests pass and every CI job is green.
+
+What remains: physical acceptance on the owner's machine (`docs/NATIVE_ACCEPTANCE.md`) and the real-network transport gate. Neither is claimed here.
