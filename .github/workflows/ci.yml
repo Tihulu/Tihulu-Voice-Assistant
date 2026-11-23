@@ -16,12 +16,13 @@ on:
                'feat/search-history', 'feat/topbar', 'feat/quick-stop', 'feat/queue-summary',
                'feat/settings-page', 'feat/transcript-export', 'feat/mute', 'feat/keys-help',
                'feat/agents-gates', 'feat/clean-install', 'feat/stack-check', 'feat/preflight',
-               'feat/traceability', 'feat/release-runbook', 'feat/remote-catalog-sources',
-               'feat/performance-modes', 'feat/repo-english', 'feat/voice-resources',
+               'feat/traceability', 'feat/repo-english', 'feat/voice-resources',
                'feat/usage-report', 'feat/approved-sources', 'feat/conflict-rehearsal',
                'feat/smoke-coverage', 'feat/state-refresh', 'docs/initial-public-scaffold',
                'feat/ai-market', 'feat/download-queue', 'feat/market-catalog',
-               'feat/native-voice-controls', 'feat/release-packaging', 'feat/ci-triggers']
+               'feat/native-voice-controls', 'feat/release-packaging', 'feat/ci-triggers',
+               'feat/merge-log', 'feat/merge-log-2', 'feat/merge-log-3', 'feat/preflight-gpu',
+               'feat/record-card']
 permissions:
   contents: read
 jobs:
