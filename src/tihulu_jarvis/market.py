@@ -169,9 +169,12 @@ class ModelCard:
         return UNKNOWN
 
     def approved_source(self):
-        """True only when every download term the owner must approve is present."""
-        return bool(self.source_ref and self.source_checksum and self.source_size
-                    and self.network_approval)
+        """True only when every required download term is present.
+
+        A stated size is not required: an unstated size stays unknown and the
+        transport's own limit still bounds the transfer.
+        """
+        return bool(self.source_ref and self.source_checksum and self.network_approval)
 
     def checked(self):
         if not isinstance(self.model_id, str) or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", self.model_id):
@@ -197,7 +200,12 @@ class ModelCard:
         for key in ("source_ref", "source_checksum", "source_version"):
             if not isinstance(getattr(self, key), str) or len(getattr(self, key)) > 256:
                 raise Hold("invalid_source_reference")
-        if self.source_ref and not re.fullmatch(r"[A-Za-z0-9:._-]{1,256}", self.source_ref):
+        if self.source_ref and not re.fullmatch(r"[A-Za-z0-9:._~/-]{1,256}", self.source_ref):
+            raise Hold("invalid_source_reference")
+        # An opaque token or an approved endpoint, never a workstation path.
+        if (self.source_ref.startswith(("/", "~")) or "/home/" in self.source_ref
+                or "/Users/" in self.source_ref or ".." in self.source_ref
+                or self.source_ref.endswith("/")):
             raise Hold("invalid_source_reference")
         if self.source_checksum and not re.fullmatch(r"[0-9a-f]{64}", self.source_checksum):
             raise Hold("checksum_required_before_download")
@@ -312,11 +320,16 @@ class Source:
     approval_expires_at: float = 0.0
 
     def checked(self):
-        if not re.fullmatch(r"[A-Za-z0-9:._-]{1,256}", self.reference):
+        if not re.fullmatch(r"[A-Za-z0-9:._~/-]{1,256}", self.reference):
+            raise Hold("invalid_source_reference")
+        if (self.reference.startswith(("/", "~")) or "/home/" in self.reference
+                or "/Users/" in self.reference or ".." in self.reference
+                or self.reference.endswith("/")):
             raise Hold("invalid_source_reference")
         if not re.fullmatch(r"[0-9a-f]{64}", self.checksum):
             raise Hold("checksum_required_before_download")
-        if not 0 < self.size <= DIGEST_LIMIT:
+        if not 0 <= self.size <= DIGEST_LIMIT:
+            # 0 means the source does not state a size; it stays unknown, not zero.
             raise Hold("source_size_not_stated")
         if self.network_approval and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.network_approval):
             raise Hold("invalid_approval_reference")
@@ -329,12 +342,157 @@ class Source:
                                                 or self.approval_expires_at > now)
 
 
+CATALOG_LIMIT = 131072
+
+
+@dataclass(frozen=True)
+class Entry:
+    """One curated catalog line. It carries terms, never credentials or paths."""
+
+    model_id: str
+    display_name: str
+    category: str
+    engine: str = "unknown"
+    artifact_format: str = "other"
+    languages: tuple = ()
+    license_id: str = "unknown"
+    source_ref: str = ""
+    source_checksum: str = ""
+    source_size: int = 0
+    source_version: str = "unknown"
+    requires_gpu: bool = False
+    disk_size_bytes: int = 0
+    trust_level: str = "curated"
+    publisher: str = "unknown"
+
+    def checked(self):
+        if not re.fullmatch(r"[A-Za-z0-9:._-]{1,256}", self.source_ref):
+            raise Hold("invalid_source_reference")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.source_checksum):
+            raise Hold("checksum_required_before_download")
+        if not 0 < self.source_size <= DIGEST_LIMIT:
+            raise Hold("source_size_not_stated")
+        if any(lang != lang.lower() or not lang.isalpha() for lang in self.languages):
+            raise Hold("unsupported_language_tag")
+        return ModelCard(
+            model_id=self.model_id, display_name=self.display_name, category=self.category,
+            engine=self.engine, artifact_format=self.artifact_format, languages=self.languages,
+            license_id=self.license_id, installed=False, registered=False,
+            trust_level=self.trust_level, disk_size_bytes=self.disk_size_bytes,
+            requires_gpu=self.requires_gpu, state="DISCOVERED", source_ref=self.source_ref,
+            source_checksum=self.source_checksum, source_size=self.source_size,
+            source_version=self.source_version, provider=self.publisher).checked()
+
+    def terms(self, approval="", expires_at=0.0):
+        """Published terms. The owner's approval is supplied separately."""
+        return Source(self.source_ref, self.source_checksum, self.source_size,
+                      self.source_version, self.license_id, approval, expires_at)
+
+
+@dataclass(frozen=True)
+class Catalog:
+    """An owner-supplied curated catalog. It is never fetched."""
+
+    entries: tuple = ()
+    source_name: str = "unknown"
+
+    def checked(self):
+        seen = set()
+        for entry in self.entries:
+            entry.checked()
+            if entry.model_id in seen:
+                raise Hold("duplicate_catalog_entry")
+            seen.add(entry.model_id)
+        return self
+
+    def search(self, category="", language="", engine="", text=""):
+        """Filter by the fields the owner can see; nothing is ranked or guessed."""
+        out = []
+        for entry in self.entries:
+            if category and entry.category != category:
+                continue
+            if language and language not in entry.languages:
+                continue
+            if engine and engine and entry.engine != engine:
+                continue
+            if text and not (text.casefold() in entry.display_name.casefold()
+                             or text.casefold() in entry.model_id.casefold()):
+                continue
+            out.append(entry)
+        return tuple(out)
+
+    def card(self, model_id):
+        for entry in self.entries:
+            if entry.model_id == model_id:
+                return entry.checked()
+        raise Hold("catalog_entry_not_found")
+
+    def cards(self):
+        return tuple(entry.checked() for entry in self.entries)
+
+
+def parse_catalog(text, source_name="owner-supplied"):
+    """Parse and validate a curated catalog document."""
+    if len(text) > CATALOG_LIMIT:
+        raise Hold("catalog_too_large")
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise Hold("invalid_catalog") from None
+    raw = data.get("entries", []) if isinstance(data, dict) else None
+    if not isinstance(raw, list) or len(raw) > 512:
+        raise Hold("invalid_catalog")
+    entries = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise Hold("invalid_catalog")
+        try:
+            entry = Entry(
+                model_id=item["model_id"], display_name=item["display_name"],
+                category=item["category"], engine=item.get("engine", "unknown"),
+                artifact_format=item.get("artifact_format", "other"),
+                languages=tuple(item.get("languages", ())), license_id=item.get("license_id", "unknown"),
+                source_ref=item["source_ref"], source_checksum=item["source_checksum"],
+                source_size=item.get("source_size", 0),
+                source_version=item.get("source_version", "unknown"),
+                requires_gpu=bool(item.get("requires_gpu", False)),
+                disk_size_bytes=item.get("disk_size_bytes", 0),
+                trust_level=item.get("trust_level", "curated"),
+                publisher=item.get("publisher", "unknown"))
+        except (KeyError, TypeError, ValueError):
+            raise Hold("invalid_catalog") from None
+        entry.checked()  # validate; the entry is stored, not its derived card
+        entries.append(entry)
+    return Catalog(tuple(entries), str(data.get("source_name", source_name))[:64]).checked()
+
+
+def catalog_path():
+    """The catalog lives with the rest of the market data, under the owner's XDG dir."""
+    return market_dir() / "catalog.json"
+
+
 def source_of(card):
     """Build the approved download terms recorded on a card."""
     if not card.approved_source():
         raise Hold("download_terms_not_approved")
     return Source(card.source_ref, card.source_checksum, card.source_size, card.source_version,
                  card.license_id, card.network_approval, card.approval_expires_at).checked()
+
+
+def transport_for(reference):
+    """Build a download transport for an approved source, if one is available.
+
+    Only a numeric loopback http endpoint is supported here. Anything else has
+    no transport in this build, which is the honest answer.
+    """
+    try:
+        from .transfer_http import loopback_fetch
+    except ImportError:
+        return None
+    try:
+        return loopback_fetch(reference)
+    except Hold:
+        return None
 
 
 class Transfer:

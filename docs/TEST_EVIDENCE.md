@@ -10,3 +10,19 @@ Isolated CPython 3.12.7, Pyodide 0.27.7 (Emscripten). The four unmodified baseli
 | Session, synthetic audio and local choices | 5 | 0 | 0 |
 
 Candidate total: 38 passed of 39; JanTests.test_fixture_chat_over_loopback requires a native TCP socket and was not run in WASM. All 13 Python source/test files compiled. Do not sum the original and migrated baseline groups. The source archive SHA-256 is 7c958c2e4263dc9d535591ce488b6197a9a9bc1c04f269808e21fbcabe3c8da3. Its 21 file payloads matched the add-only patch exactly. This branch adds the evidence document and updates the status. Standard unittest discovery on the Ubuntu CI runner, real Jan, mic, output, COSMIC and clean-system install/rollback remain unverified.
+
+## Stack evidence (engineering record)
+
+- Core suite growth: 29 original → 39 core → 64 (native controls + cancellation) → 85
+  (policy core) → 97 (market core and settings) tests per interpreter, all green on
+  Python 3.10 and 3.12 in GitHub CI.
+- Native GTK suite: 11 (desktop controls) → 17 (profiles) → 22 (market) → 31 (discovery,
+  preview, storage) → 38 (download flow) cases, all green under Xvfb/D-Bus.
+- Package job: wheel content verified (19 entries; every shipped module, LICENSE, entry
+  point and desktop metadata), installed into a clean venv, suite 97/97 against the
+  installed artefact, imports and console script verified.
+- Repository hygiene: 30 tracked `__pycache__/*.pyc` files were removed and a `.gitignore`
+  now keeps build artefacts out.
+
+These are fixture-level results. Physical acceptance, real transport and clean-machine
+installation remain open; see `docs/NATIVE_ACCEPTANCE.md` and `docs/RELEASE.md`.
