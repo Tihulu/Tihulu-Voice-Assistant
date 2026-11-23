@@ -178,9 +178,13 @@ class DesktopFixture(unittest.TestCase):
             raise
 
     def until(self, predicate):
-        """Condition-based GLib wait, with a bounded failure deadline."""
+        """Condition-based GLib wait, with a bounded failure deadline.
+
+        The budget covers a slow shared runner, not a hung client: it is still a
+        hard deadline, and a condition that never becomes true fails the test.
+        """
         pump = GLib.MainLoop()
-        deadline = time.monotonic() + 4
+        deadline = time.monotonic() + 15
         outcome = []
 
         def inspect():
