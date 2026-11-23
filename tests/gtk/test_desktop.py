@@ -2700,6 +2700,9 @@ class KeyboardTests(DesktopTests):
         self.assertEqual(self.ui.search_entry.get_text(), "")
         # With a turn running, Escape cancels it and leaves the field alone.
         self.backend.hold_chat = True
+        # The flags survive the first turn: reset them so the wait below
+        # observes this turn entering the backend, not the previous one.
+        self.backend.chat_entered = False
         self.ui.entry.set_text("naber nasilsin")
         self.click(self.ui.send)
         self.until(lambda: self.backend.chat_entered)
