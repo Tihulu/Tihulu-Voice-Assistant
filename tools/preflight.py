@@ -57,6 +57,29 @@ def _load_settings():
     return settings.load()
 
 
+def _probe(tool, exe):
+    """A device tool's presence on PATH, as a (state, detail) pair."""
+    path = exe(tool)
+    if path:
+        return READY, path
+    return MISSING, "not found on PATH"
+
+
+def device_rows(exe=None):
+    """The two devices this build can prefer, as questions a pre-flight asks.
+
+    Presence is not capability: a driver being installed does not mean the
+    device works, and a missing tool does not mean the machine has no GPU. The
+    pre-flight states what it can see and stops there.
+    """
+    exe = exe or which
+    rows = []
+    for token, tool in (("cuda_tools", "nvidia-smi"), ("vulkan_tools", "vulkaninfo")):
+        state, detail = _probe(tool, exe)
+        rows.append((token, state, detail))
+    return tuple(rows)
+
+
 def rows(exe=None, importer=None, cfg=None, loader=None, interpreter=None):
     """(token, state, detail) for every pre-flight question.
 
@@ -72,6 +95,7 @@ def rows(exe=None, importer=None, cfg=None, loader=None, interpreter=None):
         path = exe(tool)
         out.append((tool, READY if path else MISSING,
                     path if path else "not found on PATH"))
+    out.extend(device_rows(exe))
     try:
         cfg = configuration(cfg, loader)
     except Exception as exc:

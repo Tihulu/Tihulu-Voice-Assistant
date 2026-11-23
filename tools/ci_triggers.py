@@ -67,21 +67,29 @@ def rewrite(text, names, indent="               "):
     return text[:match.start()] + block + text[match.end():]
 
 
-def check(path=WORKFLOW, remote="origin"):
-    """(missing, stale): branches the workflow should list, and stale names."""
+def check(path=WORKFLOW, remote="origin", ignore=()):
+    """(missing, stale): branches the workflow should list, and stale names.
+
+    ``ignore`` names branches to leave out — a pull request's own branch, which
+    can only be added to the list by the very commit being tested, and would
+    otherwise fail its own first run. The repository's *other* branches are
+    still checked, which is the drift this catches.
+    """
     text = Path(path).read_text(encoding="utf-8")
     listed = set(current(text))
-    live = set(remote_branches(remote))
+    live = set(remote_branches(remote)) - set(ignore)
     # `main` is the default branch and is never reported stale, whatever the
     # remote happens to list; it is still reported when it is missing.
-    stale = listed - live - {MAIN}
+    stale = listed - live - {MAIN} - set(ignore)
     return tuple(sorted(live - listed)), tuple(sorted(stale))
 
 
 def main(argv):
     args = [name for name in argv[1:] if not name.startswith("-")]
     remote = args[0] if args else "origin"
-    missing, stale = check(WORKFLOW, remote)
+    ignore = [name for name in argv if name.startswith("--ignore=")]
+    ignore = [name.split("=", 1)[1] for name in ignore]
+    missing, stale = check(WORKFLOW, remote, ignore)
     if "--check" in argv:
         print("ci triggers: %d missing, %d stale" % (len(missing), len(stale)))
         for name in missing:

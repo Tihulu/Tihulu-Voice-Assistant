@@ -5,6 +5,9 @@ import unittest
 from io import StringIO
 from pathlib import Path
 
+from tihulu_jarvis import settings
+
+from tools import preflight
 from tools.preflight import MISSING, READY, rows, verdict
 
 
@@ -16,8 +19,10 @@ class RowsTests(unittest.TestCase):
     def test_a_ready_machine_reports_every_question(self):
         items = rows(exe=lambda name: "/usr/bin/" + name, importer=lambda: (4, 14),
                      cfg={"endpoint": "http://127.0.0.1:9876/", "stt": "/none/x", "voices": {}})
-        self.assertEqual([token for token, _, _ in items][:6],
-                         ["gtk", "arecord", "whisper-cli", "piper", "aplay", "settings"])
+        # The two device probes join after the audio tools, before the choices.
+        self.assertEqual([token for token, _, _ in items][:7],
+                         ["gtk", "arecord", "whisper-cli", "piper", "aplay",
+                          "cuda_tools", "vulkan_tools"])
         # An unreadable or absent model is said to be missing, with the reason.
         by_token = dict((token, (state, detail)) for token, state, detail in items)
         self.assertEqual(by_token["gtk"], (READY, "GTK 4.14"))
@@ -71,3 +76,27 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("2 questions, 1 missing", out.getvalue())
         out = StringIO()
         self.assertEqual(verdict([("gtk", READY, "GTK 4.14")], out=out), 0)
+
+
+class DeviceRowTests(unittest.TestCase):
+    def test_both_devices_are_asked_about(self):
+        rows = {token: (state, detail) for token, state, detail
+                in preflight.device_rows(exe=lambda name: "/usr/bin/" + name)}
+        self.assertEqual(set(rows), {"cuda_tools", "vulkan_tools"})
+        self.assertEqual(rows["cuda_tools"], (preflight.READY, "/usr/bin/nvidia-smi"))
+
+    def test_a_missing_tool_is_missing_not_a_capability_claim(self):
+        rows = {token: (state, detail) for token, state, detail
+                in preflight.device_rows(exe=lambda name: None)}
+        self.assertEqual(rows["cuda_tools"], (preflight.MISSING, "not found on PATH"))
+        self.assertEqual(rows["vulkan_tools"], (preflight.MISSING, "not found on PATH"))
+
+    def test_the_rows_join_the_whole_preflight(self):
+        rows = preflight.rows(exe=lambda name: None,
+                             importer=lambda: (4, 14),
+                             cfg=settings.empty())
+        tokens = [token for token, _, _ in rows]
+        self.assertIn("cuda_tools", tokens)
+        self.assertIn("vulkan_tools", tokens)
+        self.assertEqual(tokens[:6], ["gtk", "arecord", "whisper-cli", "piper",
+                                      "aplay", "cuda_tools"])

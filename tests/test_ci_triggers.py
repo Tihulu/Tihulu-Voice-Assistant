@@ -77,3 +77,19 @@ class CheckTests(unittest.TestCase):
                 missing, stale = ci_triggers.check(path)
         self.assertEqual(missing, ("feat/extra",))
         self.assertEqual(stale, ("feat/market",))
+
+
+class IgnoreTests(unittest.TestCase):
+    def test_a_pull_request_can_ignore_its_own_branch(self):
+        import tempfile
+        from pathlib import Path
+        from tools import ci_triggers
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ci.yml"
+            path.write_text(SAMPLE, encoding="utf-8")
+            with patch.object(ci_triggers, "remote_branches",
+                              return_value=("feat/core", "feat/ui", "feat/this-pr")):
+                plain, _ = ci_triggers.check(path)
+                ignored, _ = ci_triggers.check(path, ignore=("feat/this-pr",))
+        self.assertEqual(plain, ("feat/this-pr",))
+        self.assertEqual(ignored, ())

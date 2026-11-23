@@ -367,3 +367,10 @@ runs no engine, so it allocates no VRAM, and the wakeups it costs are the 25 a
 second described above rather than the 83 it used to. A local engine that stays
 warm is the only thing that holds memory between turns, which is why keeping
 one warm is opt-in and says it costs memory until released.
+
+The pre-flight asks about the two devices this build can prefer, not just the
+audio tools: `nvidia-smi` for CUDA (the NVIDIA card) and `vulkaninfo` for Vulkan
+(the AMD integrated GPU). Presence is stated as presence and nothing more — a
+driver being installed does not mean the device works, and a missing tool does
+not mean the machine has no GPU. The Resources page's device choice is the same
+vocabulary: CUDA, Vulkan, processor only, or automatic.
