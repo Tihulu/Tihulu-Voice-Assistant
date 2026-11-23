@@ -94,3 +94,12 @@ The plan above is now partly built (`feat/approved-sources`):
 
 Still open from the plan: an approved *remote* transport for artifacts (its own
 gate), and the richer filters (author, format) once a source needs them.
+
+Recording what a listing stated is possible; fetching it is not. A searched card
+can be recorded in the registry as DISCOVERED — provenance only, nothing
+installed — keeping the digest and size the listing stated, marked trust
+"unknown" (a source is not a curator) and carrying the source's host as an
+approval reference slug. `registry_card` refuses a card without a digest or a
+size: a card that could never be verified later is not recorded. The market row
+then states *why* its download is unavailable — "no approved transport" —
+instead of leaving a dead button to be discovered by clicking.

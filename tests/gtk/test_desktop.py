@@ -3947,3 +3947,51 @@ class ApprovedSourcesTests(DesktopTests):
         self.click(self.ui.source_forget)
         self.until(lambda: not self.rows())
         self.assertEqual(self.ui.cfg.get("sources"), [])
+
+
+class RecordCardTests(ApprovedSourcesTests):
+    """A listed card is recorded as provenance; nothing is installed."""
+
+    def search(self):
+        self.register()
+        payload = json.dumps(self.listing())
+        self.ui.source_opener = lambda: self.opener(payload)
+        self.ui.source_list.select_row(self.rows()[0])
+        self.click(self.ui.source_search)
+        self.until(lambda: self.cards())
+        self.ui.source_cards.select_row(self.cards()[0])
+        return self.cards()[0].card
+
+    def test_a_searched_card_is_recorded_and_shown_in_the_market(self):
+        card = self.search()
+        self.assertTrue(self.ui.source_record.get_sensitive())
+        self.click(self.ui.source_record)
+        self.until(lambda: "Recorded in the registry" in self.ui.status.get_text())
+        stored = self.ui.market.card(card.model_id)
+        self.assertEqual((stored.state, stored.installed), ("DISCOVERED", False))
+        self.assertEqual(stored.network_approval, "huggingface-co")
+        self.assertEqual(stored.source_checksum, card.source_checksum)
+
+    def test_the_market_still_cannot_download_it(self):
+        # Recording is provenance, not a transport: the download path refuses
+        # with its own reason, so the card is never a silently dead button.
+        card = self.search()
+        self.click(self.ui.source_record)
+        self.until(lambda: "Recorded in the registry" in self.ui.status.get_text())
+        for row in self.market_rows():
+            if getattr(row, 'card_id', None) == card.model_id:
+                self.ui.market_list.select_row(row)
+                # The download is not offered at all, and the row says why:
+                # a dead button is not a capability.
+                self.assertFalse(self.ui.market_fetch.get_sensitive())
+                self.assertIn("no approved transport",
+                              row.get_child().get_text())
+                return
+        self.fail("the recorded card is not in the market")
+
+    def market_rows(self):
+        out, item = [], self.ui.market_list.get_first_child()
+        while item is not None:
+            out.append(item)
+            item = item.get_next_sibling()
+        return out

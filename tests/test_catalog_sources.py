@@ -97,3 +97,49 @@ class CardTests(unittest.TestCase):
         cards, refused = cs.cards(rows, cs.Source("huggingface.co", "hf"))
         self.assertEqual(len(cards), 50)
         self.assertGreater(refused, 0)
+
+
+class RegistryCardTests(unittest.TestCase):
+    def approval(self, host="huggingface.co"):
+        return cs.Source(host, "hf", "whisper")
+
+    def card(self, repo="ggerganov/whisper.cpp"):
+        import hashlib
+        from tihulu_jarvis.market import ModelCard
+        digest = hashlib.sha256(b"fixture").hexdigest()
+        return ModelCard(model_id=cs.slug(repo), display_name=repo, category="stt",
+                         provider=self.approval().host, artifact_format="ggml",
+                         source_ref="https://%s/%s" % (self.approval().host, repo),
+                         source_checksum=digest, source_size=141000000,
+                         license_id="mit").checked()
+
+    def test_the_recorded_card_installs_nothing(self):
+        source, card = self.approval(), self.card()
+        recorded = cs.registry_card(card, source)
+        self.assertEqual(recorded.state, "DISCOVERED")
+        self.assertFalse(recorded.installed)
+        self.assertTrue(recorded.registered)
+        # Trust stays honest: a listing is not a curator.
+        self.assertEqual(recorded.trust_level, "unknown")
+        # What the listing stated is kept verbatim.
+        self.assertEqual(recorded.source_checksum, card.source_checksum)
+        self.assertEqual(recorded.source_size, card.source_size)
+
+    def test_the_approval_reference_is_a_slug_of_the_source(self):
+        self.assertEqual(cs.approval_ref(self.approval()), "huggingface-co")
+        self.assertEqual(cs.approval_ref(self.approval("example.test")), "example-test")
+        recorded = cs.registry_card(self.card(), self.approval())
+        self.assertEqual(recorded.network_approval, "huggingface-co")
+        self.assertTrue(recorded.approved_source())
+
+    def test_a_card_without_a_digest_cannot_be_recorded(self):
+        source, card = self.approval(), self.card()
+        stripped = cs.replace(card, source_checksum="")
+        from tihulu_jarvis.voice.m1 import Hold
+        with self.assertRaises(Hold):
+            cs.registry_card(stripped, source)
+
+    def test_a_private_source_is_not_a_registry_approval(self):
+        from tihulu_jarvis.voice.m1 import Hold
+        with self.assertRaises(Hold):
+            cs.registry_card(self.card(), self.approval("127.0.0.1"))

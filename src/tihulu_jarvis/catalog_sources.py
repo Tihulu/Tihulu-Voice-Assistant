@@ -230,3 +230,33 @@ async def fetch(source, opener, timeout=15.0):
     except ValueError:
         raise Hold("invalid_source_listing") from None
     return body
+
+
+def approval_ref(source):
+    """An opaque approval reference for a source, as a registry-safe slug.
+
+    A host name carries dots, which the registry's approval reference does not
+    allow; the dots become dashes, so the reference names the source without
+    pretending to be an address.
+    """
+    return source.host.replace(".", "-")[:64]
+
+
+def registry_card(card, source):
+    """A listed card recorded as provenance, with nothing installed.
+
+    The card keeps what the listing stated — digest, size, category — and is
+    marked DISCOVERED: the owner's registration of the source is recorded as
+    the approval reference, but a remote transport is a separate gate, so
+    downloading it later is refused with its own reason rather than attempted.
+    """
+    card = card.checked()
+    source = source.checked()
+    if not card.source_checksum or not card.source_size:
+        # A card without a digest or a size could never be verified later, so
+        # it is not recorded: the registry is a promise a transport can keep.
+        raise Hold("checksum_required_before_download")
+    # Trust stays "unknown": the listing states the digest, this client has
+    # not verified anything yet, and a source is not a curator.
+    return replace(card, state="DISCOVERED", installed=False, registered=True,
+                   trust_level="unknown", network_approval=approval_ref(source)).checked()

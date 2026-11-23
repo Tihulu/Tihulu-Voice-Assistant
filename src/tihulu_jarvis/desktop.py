@@ -1506,15 +1506,25 @@ def create_window(app, loop, bridge=None):
             wanted = self.market_filter.get_active_text() or "stt"
             rows = [c for c in self.market.cards() if c.category == wanted]
             for card in sorted(rows, key=lambda c: (c.state, c.model_id)):
-                label = Gtk.Label(label="%s · %s · %s · %s · %s" % (
+                extra = ""
+                if card.approved_source() and market.transport_for(card.source_ref) is None:
+                    # The card is verifiable but there is no approved transport
+                    # to fetch it with; the reason is stated, not left implied.
+                    extra = tr(" · no approved transport",
+                               " · onaylı taşıma yok",
+                               " · kein genehmigter Transport")
+                label = Gtk.Label(label="%s · %s · %s · %s · %s%s" % (
                     card.display_name, card.engine, card.artifact_format,
-                    card.compatibility_status, card.state), xalign=0, wrap=True)
+                    card.compatibility_status, card.state, extra), xalign=0, wrap=True)
                 item = Gtk.ListBoxRow()
                 item.set_child(label)
                 item.set_activatable(True)
                 item.connect("activate", lambda *_: self.use_selected_card())
                 self.market_list.append(item)
                 self.market_row_ids[item] = card.model_id
+                # The row carries its card's id, so a keyboard activation and a
+                # test both reach the same model rather than the label text.
+                item.card_id = card.model_id
             self.market_note.set_text(tr(
                 "Installed models and voices known to this computer. Unknown values stay unknown/not tested. Import happens in Installed models.",
                 "Bu bilgisayarda bilinen kurulu modeller ve sesler. Bilinmeyen değerler bilinmiyor/denenmedi olarak kalır. İçe alma Kurulu modeller bölümünde yapılır.",
@@ -2265,6 +2275,10 @@ def create_window(app, loop, bridge=None):
                                              self.search_source)
             self.source_forget = self.button(controls, tr("Forget source", "Kaynağı unut",
                                                           "Quelle vergessen"), self.forget_source)
+            self.source_record = self.button(controls, tr("Record selected card",
+                                                       "Seçili kartı kaydet",
+                                                       "Ausgewählte Karte erfassen"),
+                                              self.record_card)
             self.source_note = Gtk.Label(xalign=0, wrap=True)
             page.append(self.source_note)
             self.source_cards = Gtk.ListBox()
@@ -2331,8 +2345,10 @@ def create_window(app, loop, bridge=None):
 
         def refresh_source_buttons(self):
             chosen = self.selected_source()
+            card = self.source_cards.get_selected_row()
             self.source_search.set_sensitive(not self.busy and chosen is not None)
             self.source_forget.set_sensitive(chosen is not None)
+            self.source_record.set_sensitive(not self.busy and card is not None)
 
         def search_source(self):
             """List a registered source's public metadata, bounded and verified.
@@ -2389,6 +2405,33 @@ def create_window(app, loop, bridge=None):
                 "Nothing here is installed: this build's approved transport is a loopback endpoint, so a remote listing is inspected, not fetched.",
                 "Buradaki hiçbir şey kurulmaz: bu sürümün onaylı taşıması geri döngü uç noktasıdır, uzak listeleme incelenir, çekilmez.",
                 "Hier wird nichts installiert: der genehmigte Transport dieses Builds ist ein Loopback-Endpunkt, ein entferntes Listing wird geprüft, nicht geladen."))
+
+        def record_card(self):
+            """Record a listed card as provenance, with nothing installed.
+
+            The card keeps what the source's listing stated — digest, size,
+            category — and is stored as DISCOVERED so the market can show it and
+            a later transport can verify it. Nothing is downloaded here, and the
+            button says so.
+            """
+            if self.busy:
+                return None
+            source = self.selected_source()
+            row = self.source_cards.get_selected_row()
+            card = row.card if row is not None else None
+            if source is None or card is None:
+                return None
+            try:
+                recorded = catalog_sources.registry_card(card, source)
+                self.market.save_card(recorded)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return None
+            self.build_market_page()
+            self.set_state("ready", tr("Recorded in the registry; nothing installed.",
+                                       "Kayda alındı; hiçbir şey kurulmadı.",
+                                       "In der Registry erfasst; nichts installiert."))
+            return recorded
 
         def remember_hosts(self):
             hosts = [h for h in self.catalog_hosts.get_text().split() if h]
