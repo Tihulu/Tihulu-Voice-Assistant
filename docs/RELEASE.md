@@ -11,17 +11,12 @@ approval, to publish a rebase).
 | 1 | #4 | `feat/m1-portable-core` | fast-forward into `main` at `2011643` | `tests` 39/39 OK on the merged `main`; CI green on the PR |
 | 2 | #8 | `feat/modes-and-profiles` | fast-forward into `main` at `6a21bf7`; PR closed (head already in `main`) | `tests` 58/58 OK on the merged `main`; CI green on the PR |
 | 3 | #9 | `feat/profile-ui` | rebased onto the updated `main` (its previous base's rebuild was dropped, not duplicated), then fast-forward into `main` at `6273094`; PR closed | `tests` 64/64 OK and `tests/gtk` 17/17 OK on the merged `main`; CI `test (3.10)`, `test (3.12)`, `gtk` green on the branch (run 45065806032) |
+| 4 | #12 | `feat/market-ui` | real merge commit into `main` at `151b100` (a documentation commit had moved `main`, so a fast-forward was no longer possible and nothing was rewritten); PR closed | `tests` 97/97 OK on the merged `main`; CI green on the branch before the merge |
+| 5 | #73 | `feat/merge-log` | merged into `main` at `d398dad` (documentation) | documentation only |
+| 6 | #74 | `feat/merge-log-2` | merged into `main` at `ebd6cc7` (documentation) | documentation only |
+| 7 | #19 | `feat/market-consolidated` | fast-forward into `main` at `29cc369` (its first parent is the previous `main`, so the PR #19 merge commit is `main`'s tip); on GitHub the pull request itself was merged into its stacked base `feat/market-ui` at `c9e8c87` | `tests` 122/122 and `tests/gtk` 59/59 OK on the merged `main`; CI `test (3.10)`, `test (3.12)` and `gtk` green on the PR |
 
-`main` now carries the portable core, the mode/profile policy core, the
-profiles page with the native GTK cancellation tests, and the AI Market page
-with the verified download flow (`151b100`, a real merge commit: `main` had
-taken one documentation commit forward in the meantime, so a fast-forward was no
-longer possible and nothing was rewritten). Steps 1–5 are closed: #4 MERGED,
-#8, #9 and #12 CLOSED with the evidence recorded above, and #73 MERGED. The
-remaining stack stands on `main` in the documented order, each step rebased
-onto the updated `main` and verified before the next merge; the next merge is
-#19, which the rehearsal identifies as a merge pull request (merge commit, not a
-rebase).
+`main` now carries the portable multilingual core, the mode and profile policy core, the profiles page with policy-gated controls, the AI Market page with the approved-source download flow, and the consolidated line: curated catalog discovery, mode and endpoint enforcement, tool-rule enforcement, the approved loopback transport and the download queue. Steps 1-7 are closed: #4, #73 and #74 MERGED; #8, #9 and #12 CLOSED with the evidence recorded above; #19 landed on `main` as `29cc369`. The next steps land the chain root below the open stack (`feat/web-targets`), then open pull requests #43 upward in order, each rebase-based onto the updated `main` and verified before the next merge.
 
 ## Build, install and recovery (development release process)
 

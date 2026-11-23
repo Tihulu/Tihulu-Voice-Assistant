@@ -26,3 +26,22 @@ Candidate total: 38 passed of 39; JanTests.test_fixture_chat_over_loopback requi
 
 These are fixture-level results. Physical acceptance, real transport and clean-machine
 installation remain open; see `docs/NATIVE_ACCEPTANCE.md` and `docs/RELEASE.md`.
+
+## Current stack (main at 29cc369, the PR #19 merge commit)
+
+| Group | Passed | Failed/errors | Not run |
+| --- | ---: | ---: | ---: |
+| Core suite on `main` | 122 | 0 | 0 |
+| Native GTK suite on `main` | 59 | 0 | 0 |
+| PR #19 CI `test (3.10)` | green | 0 | 0 |
+| PR #19 CI `test (3.12)` | green | 0 | 0 |
+| PR #19 CI `gtk` | green | 0 | 0 |
+
+Local recipe: `xvfb-run -a /usr/bin/python3` with `PYTHONPATH=src` (the system interpreter
+carries PyGObject and GTK 4; the anaconda interpreter does not), default and `C` locales;
+the `tr_TR` locale was unavailable on the verification machine. Real Jan, microphone,
+output, COSMIC/Wayland integration and a clean-system install or rollback remain
+unverified HOLD gates.
+
+This section supersedes the historical candidate matrix below for the current stack; the
+original evidence is kept unchanged.
