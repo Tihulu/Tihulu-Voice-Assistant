@@ -8,6 +8,7 @@ from pathlib import Path
 
 from tihulu_jarvis.profiles import (ALLOW, ASK, DENY, MODES, Profile, Rule, Store,
                                     clone_to_custom, decide, effective, sanitized)
+from tihulu_jarvis import profiles
 from tihulu_jarvis.voice.m1 import Hold
 
 
@@ -214,3 +215,77 @@ class StoreTests(unittest.TestCase):
                                 "approval": "", "expires_at": 0.0}]})
         with self.assertRaisesRegex(Hold, "global_deny_not_weakable"):
             Store._parse(text)
+
+
+class EndpointEnforcementTests(unittest.TestCase):
+    def profile(self, **kw):
+        values = {"id": "local-only", "name": "Assistant", "based_on_mode": "LOCAL_ONLY", "version": 1}
+        values.update(kw)
+        return Profile(**values).checked()
+
+    def test_local_only_accepts_a_loopback_endpoint(self):
+        for url in ("http://127.0.0.1:9876/v1", "http://[::1]:1337"):
+            with self.subTest(url=url):
+                self.assertEqual(profiles.enforce_endpoint(self.profile(), url),
+                                 url)
+
+    def test_local_only_refuses_a_remote_address(self):
+        with self.assertRaisesRegex(Hold, "local_only_forbids_non_loopback"):
+            profiles.enforce_endpoint(self.profile(), "https://api.example.test/v1")
+        with self.assertRaisesRegex(Hold, "local_only_forbids_non_loopback"):
+            profiles.enforce_endpoint(self.profile(), "http://localhost:9876/v1")
+
+    def test_cloud_modes_do_not_promise_a_missing_transport(self):
+        with self.assertRaisesRegex(Hold, "cloud_transport_not_available"):
+            profiles.enforce_endpoint(self.profile(based_on_mode="CLOUD_CHAT"),
+                                      "https://provider.example/v1")
+
+    def test_cloud_providers_must_be_approved_by_name(self):
+        chat = self.profile(based_on_mode="CLOUD_CHAT", allowed_providers=("fixture-provider",))
+        with self.assertRaisesRegex(Hold, "approved_provider_required"):
+            profiles.enforce_endpoint(chat, "http://127.0.0.1:9876/v1")
+
+    def test_local_only_cannot_carry_a_cloud_provider(self):
+        local = self.profile(allowed_providers=("fixture-provider",))
+        with self.assertRaisesRegex(Hold, "local_only_forbids_providers"):
+            profiles.enforce_endpoint(local, "http://127.0.0.1:9876/v1")
+
+    def test_empty_or_oversize_endpoints_are_rejected(self):
+        for bad in ("", "   ", "x" * 5000, None):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(Hold, "invalid_local_settings"):
+                    profiles.enforce_endpoint(self.profile(), bad)
+
+
+class ActionEnforcementTests(unittest.TestCase):
+    def profile(self, **kw):
+        values = {"id": "local-only", "name": "Assistant", "based_on_mode": "LOCAL_ONLY", "version": 1}
+        values.update(kw)
+        return Profile(**values).checked()
+
+    def test_an_explicit_deny_refuses_the_action(self):
+        denied = self.profile(tool_rules=(Rule("local_audio_device", ("push_to_talk",), DENY),))
+        with self.assertRaisesRegex(Hold, "profile_forbids_local_audio_device"):
+            profiles.require_tool(denied, "local_audio_device", ("push_to_talk",))
+
+    def test_a_grant_or_ask_is_allowed_to_proceed(self):
+        granting = self.profile(tool_rules=(Rule("local_audio_device", ("push_to_talk",), ALLOW),))
+        self.assertEqual(profiles.require_tool(granting, "local_audio_device", ("push_to_talk",))[0], ALLOW)
+        asking = self.profile(tool_rules=(Rule("local_audio_device", ("push_to_talk",), ASK),))
+        self.assertEqual(profiles.require_tool(asking, "local_audio_device", ("push_to_talk",))[0], ASK)
+
+    def test_no_rule_is_not_a_silent_denial(self):
+        # Absence of a rule is not an explicit forbid; the mode still decides.
+        self.assertEqual(profiles.require_tool(self.profile(), "local_audio_device", ("push_to_talk",))[1],
+                         "no_rule_matches")
+
+    def test_an_expired_approval_asks_again(self):
+        expired = self.profile(tool_rules=(Rule("host_shell", ("jan-qwen",), ALLOW,
+                                             approval="owner-1", expires_at=5.0),))
+        with self.assertRaisesRegex(Hold, "approval_expired"):
+            profiles.require_tool(expired, "host_shell", ("jan-qwen",), now=10.0)
+        self.assertEqual(profiles.require_tool(expired, "host_shell", ("jan-qwen",), now=1.0)[0], ALLOW)
+
+    def test_a_global_law_is_never_granted_by_a_rule(self):
+        with self.assertRaisesRegex(Hold, "global_deny"):
+            profiles.require_tool(self.profile(), "credential_material_in_profile_data", ("any",))

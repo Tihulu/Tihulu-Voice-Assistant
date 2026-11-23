@@ -6,3 +6,8 @@ build/
 dist/
 *.egg-info/
 .release-work/
+
+# workspace tooling (carried from PR #19)
+# Build and packaging artefacts never belong in the repository.
+.tox/
+.venv/
