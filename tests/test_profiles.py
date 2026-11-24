@@ -594,3 +594,53 @@ class SharedPolicyClockTests(unittest.TestCase):
         for copied in (clone_to_custom(source, "Clone"), sanitized(source)):
             self.assertEqual(copied.voice_activation, "off")
             self.assertFalse(copied.background_processing_enabled)
+
+
+class BoundedProfileReadTests(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.store = Store(Path(root.name))
+        self.path = self.store._path("local-only")
+
+    def test_fifo_symlink_and_oversize_refused_before_content_reader(self):
+        import os
+        from unittest.mock import patch
+        target = self.store.root / "fixture"
+        target.write_text(Store._dump(base()), encoding="utf-8")
+        for kind in ("fifo", "symlink", "oversize"):
+            with self.subTest(kind=kind):
+                if kind == "fifo":
+                    os.mkfifo(self.path)
+                elif kind == "symlink":
+                    self.path.symlink_to(target)
+                else:
+                    self.path.write_bytes(b"x" * (Store.LIMIT * 4 + 1))
+                try:
+                    with patch.object(profiles, "read_selected_bytes") as reader:
+                        with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                            self.store.load("local-only")
+                        with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                            self.store.bind_live("local-only")
+                        reader.assert_not_called()
+                finally:
+                    self.path.unlink()
+
+    def test_replacement_between_stamp_and_read_is_refused(self):
+        from unittest.mock import patch
+        self.store.save(base())
+        reader = profiles.read_selected_bytes
+        def replaced(path, **kwargs):
+            self.path.rename(self.path.with_suffix(".old"))
+            self.path.write_text(Store._dump(base(version=2)), encoding="utf-8")
+            return reader(path, **kwargs)
+        with patch.object(profiles, "read_selected_bytes", side_effect=replaced):
+            with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                self.store.load("local-only")
+
+    def test_malformed_fields_and_encoding_fail_closed(self):
+        for raw in (b"{}", b"[]", b"\xff"):
+            with self.subTest(raw=raw):
+                self.path.write_bytes(raw)
+                with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                    self.store.load("local-only")

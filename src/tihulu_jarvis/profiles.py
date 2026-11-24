@@ -24,6 +24,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .voice.m1 import Hold
+from .selected_csv import read_selected_bytes
 
 MODES = ("LOCAL_ONLY", "CLOUD_CHAT", "SECURE_HYBRID", "CUSTOM")
 LANGUAGES = ("tr", "en", "de")
@@ -636,6 +637,8 @@ class Store:
         if len(text) > cls.LIMIT:
             raise Hold("profile_too_large")
         data = json.loads(text)
+        if not isinstance(data, dict):
+            raise Hold("profile_unreadable")
         by_kind = {"tool_rules": [], "network_rules": [], "filesystem_rules": [],
                    "shell_rules": [], "cloud_disclosure_rules": []}
         for item in data.get("rules", []):
@@ -680,12 +683,29 @@ class Store:
             if tmp:
                 Path(tmp).unlink(missing_ok=True)
 
+    def _read_profile(self, path):
+        """Read a bounded regular inode, never a FIFO, device or symlink.
+
+        Reuse the pinned local reader; policy storage has a stricter byte
+        ceiling (four UTF-8 bytes per allowed JSON character). This guards
+        file identity, not hostile same-UID or mount namespaces.
+        """
+        before = _policy_stamp(path)
+        try:
+            raw = read_selected_bytes(str(path.absolute()), authorized=lambda: True,
+                                      allow_empty=True, expected_identity=before)
+            if _policy_stamp(path) != before:
+                raise Hold("profile_changed")
+        except Hold:
+            raise Hold("profile_unreadable") from None
+        return self._parse(raw.decode("utf-8"))
+
     def save(self, profile):
         profile = profile.checked()
         target = self._path(profile.id)
         if target.is_file():
             try:
-                if self._parse(target.read_text(encoding="utf-8")).version >= profile.version:
+                if self._read_profile(target).version >= profile.version:
                     raise Hold("version_must_increase")
             except FileNotFoundError:
                 pass
@@ -697,10 +717,10 @@ class Store:
 
     def load(self, profile_id):
         try:
-            return self._parse(self._path(profile_id).read_text(encoding="utf-8"))
+            return self._read_profile(self._path(profile_id))
         except FileNotFoundError:
             raise Hold("profile_not_found") from None
-        except (ValueError, OSError):
+        except (ValueError, OSError, KeyError, TypeError, RecursionError):
             raise Hold("profile_unreadable") from None
 
     def policy_now(self):
@@ -728,8 +748,8 @@ class Store:
         out = []
         for path in sorted(self.history.glob(stem + "-v*.json")):
             try:
-                out.append(self._parse(path.read_text(encoding="utf-8")))
-            except (Hold, ValueError, OSError):
+                out.append(self._read_profile(path))
+            except (Hold, ValueError, OSError, KeyError, TypeError, RecursionError):
                 out.append(path.name)
         return tuple(out)
 
