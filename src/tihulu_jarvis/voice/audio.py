@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .. import resources
+from ..owned_wait import OperationDeadline, await_with_deadline
 from ..owned_wait import await_authorized as owned_wait
 from ..selected_csv import selection_identity, copy_selected_to
 from .m1 import Hold, Voice
@@ -117,11 +118,13 @@ async def child(name, *args, stdin=False, checkpoint=lambda: None):
     checkpoint()
     async def start():
         # This runs in the scheduled spawn task, not merely before queuing it.
+        argv = tuple(map(str, args))
+        env = {**os.environ, **spawn_environment()}
         checkpoint()
-        return await asyncio.create_subprocess_exec(binary, *map(str,args),
+        return await asyncio.create_subprocess_exec(binary, *argv,
             stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            env={**os.environ, **spawn_environment()})
+            env=env)
     spawn = asyncio.create_task(start())
     try:
         p = await asyncio.shield(spawn)
@@ -168,6 +171,48 @@ async def await_authorized(factory, timeout, checkpoint):
     return await owned_wait(factory, timeout, checkpoint, interval=AUTH_POLL)
 
 
+async def _capture(wav, finish, publish, *, checkpoint):
+    # Include queued spawn and capture in the existing 33-second budget.
+    # Startup is observable only when the child returns and WAV data is seen.
+    deadline = OperationDeadline(33, checkpoint)
+    heard_start = False
+
+    def check():
+        deadline.check()
+        if not heard_start and deadline.remaining() <= 29:
+            raise Hold("capture_timeout")
+
+    async def run():
+        nonlocal heard_start
+        async with child("arecord", "-q", "-t", "wav", "-f", "S16_LE", "-r",
+                         "16000", "-c", "1", "-d", "30", wav, checkpoint=check) as p:
+            check()
+            while p.returncode is None:
+                check()
+                if not heard_start and wav.exists() and wav.stat().st_size > 44:
+                    # Recheck after filesystem work and before publishing.
+                    check()
+                    heard_start = True
+                    publish("listening")
+                if finish.is_set():
+                    check()
+                    try:
+                        p.send_signal(signal.SIGINT)
+                    except ProcessLookupError:
+                        pass
+                    break
+                await asyncio.sleep(.04)
+            check()
+            # Keep the existing short finish wait, bounded by the stage.
+            await await_authorized(p.wait, min(2, deadline.remaining()), check)
+            check()
+
+    try:
+        await await_with_deadline(run, deadline, interval=AUTH_POLL)
+    except asyncio.TimeoutError:
+        raise Hold("capture_timeout") from None
+
+
 async def listen(model, finish, publish, *, checkpoint):
     checkpoint()
     model = selected_file(model, ".bin")
@@ -175,30 +220,7 @@ async def listen(model, finish, publish, *, checkpoint):
         raise Hold("capture_backend_missing")
     with tempfile.TemporaryDirectory(prefix="tihulu-capture-") as tmp:
         wav, stem = Path(tmp)/"input.wav", Path(tmp)/"transcript"
-        checkpoint()
-        async with child("arecord","-q","-t","wav","-f","S16_LE","-r","16000","-c","1","-d","30",wav, checkpoint=checkpoint) as p:
-            heard_start = False
-            began = asyncio.get_running_loop().time()
-            next_check = began
-            while p.returncode is None:
-                now = asyncio.get_running_loop().time()
-                if now >= next_check:
-                    checkpoint()
-                    next_check = now + AUTH_POLL
-                if not heard_start and wav.exists() and wav.stat().st_size > 44:
-                    heard_start = True
-                    publish("listening")
-                if finish.is_set():
-                    try:
-                        p.send_signal(signal.SIGINT)
-                    except ProcessLookupError:
-                        pass
-                    break
-                age = asyncio.get_running_loop().time() - began
-                if (not heard_start and age > 4) or age > 33:
-                    raise Hold("capture_timeout")
-                await asyncio.sleep(.04)
-            await await_authorized(p.wait, 2, checkpoint)
+        await _capture(wav, finish, publish, checkpoint=checkpoint)
         checkpoint()
         if not await asyncio.to_thread(has_signal, wav):
             raise Hold("no_speech_signal")
