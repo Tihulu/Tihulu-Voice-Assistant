@@ -4469,6 +4469,17 @@ class PickerLifecycleTests(DesktopFixture):
         self.assertIsNone(self.ui.owned_picker)
         self.assertEqual(self.ui.status.get_text(), "picker_context_changed")
 
+    def test_same_version_replacement_rejects_picker_acceptance(self):
+        self.ui.choose("stt")
+        self.assertIsNotNone(self.ui.owned_picker)
+        old = self.ui.active_profile()
+        self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+        with patch.object(self.ui, "register_choice") as register:
+            self.ui.owned_picker.emit("response", Gtk.ResponseType.ACCEPT)
+            register.assert_not_called()
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertEqual(self.ui.status.get_text(), "picker_context_changed")
+
     def test_cloud_mode_denies_legacy_attachment_read(self):
         self.connect_model()
         profile = Profile(id="cloud-file-test", name="Cloud", based_on_mode="CLOUD_CHAT")
@@ -4560,6 +4571,21 @@ class HistoryRouteTests(DesktopFixture):
         self.text("Naber nasılsın?")
         self.assert_no_failed_turn()
         self.assertGreater(len(self.backend.requests), count)
+        self.assertFalse(any("SYNTHETIC-PRIVATE-CASE-9E37" in m.content
+                             for m in self.backend.requests[-1]))
+
+    def test_same_version_file_replacement_blocks_text_history(self):
+        self.seed_history()
+        count = len(self.backend.requests)
+        old = self.ui.active_profile()
+        self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+        self.text("Naber nasılsın?")
+        self.assertEqual(len(self.backend.requests), count)
+        self.assertEqual(str(self.ui.session.active.exception()),
+                         "conversation_route_changed_end_conversation")
+        self.ui.interrupt(True)
+        self.text("Naber nasılsın?")
+        self.assert_no_failed_turn()
         self.assertFalse(any("SYNTHETIC-PRIVATE-CASE-9E37" in m.content
                              for m in self.backend.requests[-1]))
 

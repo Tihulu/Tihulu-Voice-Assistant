@@ -644,10 +644,10 @@ def create_window(app, loop, bridge=None):
             self.refresh_profile_buttons()
 
         def picker_context(self):
-            profile = self.active_profile()
+            profile, stamp = self.store.snapshot(self.cfg.get("profile"))
             if profile.state != "active":
                 raise Hold("profile_not_active")
-            return (profile.id, profile.version, profile.based_on_mode, self.session.epoch)
+            return (profile.id, profile.version, profile.based_on_mode, self.session.epoch, stamp)
 
         def dismiss_picker(self):
             dialog, handler = self.owned_picker, self.owned_picker_handler
@@ -704,9 +704,11 @@ def create_window(app, loop, bridge=None):
             self.attachment_note.set_text("")
 
         def attachment_route(self):
-            profile = self.active_profile()
+            profile, stamp = self.store.snapshot(self.cfg.get("profile"))
+            if profile.state != "active":
+                raise Hold("profile_not_active")
             return (profile.id, profile.version, profile.based_on_mode,
-                    self.url.get_text().strip(), self.cfg["llm"])
+                    self.url.get_text().strip(), self.cfg["llm"], stamp)
 
         def activate_profile(self, profile_id, quiet=False, expected=None):
             entry, stamp = self.store.snapshot(profile_id)
@@ -3063,14 +3065,27 @@ def create_window(app, loop, bridge=None):
 
             Every decision is appended to the local audit trail.
             """
-            profile = self.active_profile()
+            active = self.cfg.get("profile")
+            profile, stamp = self.store.snapshot(active)
+            def unchanged():
+                return (self.cfg.get("profile") == active
+                        and self.store.snapshot(active) == (profile, stamp))
             for action, scope in requests:
                 try:
-                    decision, reason = profiles.require_tool(profile, action, scope, self.store.policy_now(), selected=selected)
+                    now = self.store.policy_now()
+                    if not unchanged():
+                        raise Hold("profile_changed")
+                    decision, reason = profiles.require_tool(profile, action, scope, now, selected=selected)
+                    if not unchanged():
+                        raise Hold("profile_changed")
                 except Hold as exc:
                     self.record_policy(action, scope, "deny", str(exc))
                     raise
                 self.record_policy(action, scope, decision, reason)
+                # Audit I/O may take time; do not allow a stale generation
+                # to leave this synchronous authorization boundary.
+                if not unchanged():
+                    raise Hold("profile_changed")
 
         def record_disclosure(self):
             """Record that the boundary was stated before the message was sent."""
@@ -3108,12 +3123,13 @@ def create_window(app, loop, bridge=None):
 
         def conversation_backend(self):
             """Bind prior messages to current profile version and endpoint/model."""
-            endpoint = self.require_endpoint()
-            profile = self.active_profile()
-            model = self.cfg["llm"]
-            route = (profile.id, profile.version, profile.based_on_mode, endpoint, model)
+            route = self.attachment_route()
+            endpoint = self.require_endpoint(route[3])
+            model = route[4]
+            if endpoint != route[3] or self.attachment_route() != route:
+                raise Hold("profile_changed")
             self.session.require_route(route)
-            if self.session.has_attachment_history and not self.conversation_authorized(route):
+            if not self.conversation_authorized(route):
                 raise Hold("attachment_context_changed")
             return Jan(endpoint, model), route
 
@@ -3126,7 +3142,10 @@ def create_window(app, loop, bridge=None):
 
         def conversation_authorized(self, route):
             try:
-                if self.closing or self.attachment_route() != route or self.active_profile().state != "active":
+                if self.closing or self.attachment_route() != route:
+                    return False
+                profiles.enforce_endpoint(self.active_profile(), route[3])
+                if self.attachment_route() != route:
                     return False
                 if self.session.has_attachment_history:
                     self.attachment_policy()
@@ -3381,6 +3400,7 @@ def create_window(app, loop, bridge=None):
                                 and live.policy.profile_id == route[0]
                                 and live.policy.version == route[1]
                                 and live.policy.mode == route[2]
+                                and live.stamp == route[5]
                                 and self.attachment_live_allowed(live))
                     except Hold:
                         return False
