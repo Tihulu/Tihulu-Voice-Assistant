@@ -109,7 +109,9 @@ jobs:
           CHECK
           python -m venv .runvenv
           .runvenv/bin/pip install -q dist/*.whl
-          (cd /tmp && "$GITHUB_WORKSPACE/.runvenv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
+          # Repository root exposes the test-only tools namespace, not src.
+          (cd /tmp && PYTHONPATH="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.runvenv/bin/python" -c 'import pathlib, sys, tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve())')
+          (cd /tmp && PYTHONPATH="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.runvenv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
           .runvenv/bin/python -c "import tihulu_jarvis; print('installed import ok')"
           .runvenv/bin/python -c "import tihulu_jarvis.market as m; print('installed market ok', m.CATEGORIES)"
           .runvenv/bin/python -c "import tihulu_jarvis.desktop as d; print('entry module ok', hasattr(d, 'main'))"
@@ -149,4 +151,5 @@ jobs:
           test -x "$launcher"
           (cd /tmp && GDK_BACKEND=x11 GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a "$launcher" --check-runtime)
           (cd /tmp && PYTHONPATH="$runtime" /usr/bin/python3 "$GITHUB_WORKSPACE/tools/smoke.py")
-          (cd /tmp && PYTHONPATH="$runtime" /usr/bin/python3 -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
+          (cd /tmp && PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -c 'import pathlib, os, tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).resolve().is_relative_to(pathlib.Path(os.environ["PYTHONPATH"].split(":")[0]).resolve())')
+          (cd /tmp && PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
