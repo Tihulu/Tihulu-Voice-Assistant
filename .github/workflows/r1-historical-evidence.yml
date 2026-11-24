@@ -35,7 +35,7 @@ jobs:
               'feat/usage-report': '60f237df43631a1c4ec3619ac3e6f409935a251a',
               'feat/approved-sources': '36cc9fdf9d0103cb6a6101d3a37cdb7d6456d3a2',
               'feat/profile-ui': '627309491c568cef3d799fcbd1853ebc8c106f96',
-              'feat/modes-and-profiles': '6a21bf7003039d8d63684c9e5692859ad22ec5a2',
+              'feat/modes-and-profiles': '6a21bf7003039d8d63684c9e5572859ad22ec5a2',
               'feat/market-ui': 'c9e8c87bb52505f21532f94025307962feaeb220',
               'feat/market-consolidated': '29cc369acd052efb526d9c3c51320a9323f5a0bb',
           }
