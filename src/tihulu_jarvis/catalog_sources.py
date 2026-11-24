@@ -210,9 +210,8 @@ def safe_url(source, path=None):
 async def fetch(source, opener, timeout=15.0):
     """Read a source's listing, bounded and without credentials.
 
-    ``opener(url, timeout)`` returns the body as text; the default verifies TLS
-    against the system trust store. A caller may inject one for tests; a
-    production caller must not disable verification.
+    ``opener(url, timeout)`` returns the body as text; the production transport
+    currently refuses before network access. A trusted fixture may inject one.
     """
     url = safe_url(source)
     if not callable(opener):

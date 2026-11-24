@@ -11,8 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .voice.m1 import Hold
+from .selected_csv import MAX_BYTES, read_selected_bytes
 
-MAX_BYTES = 262144
 MAX_CHARS = 60000
 ACTION = "filesystem_read"
 SCOPE = ("attachment",)
@@ -34,20 +34,31 @@ class Attachment:
         return self
 
 
-def load(path):
-    """Read a text attachment, bounded and identified by name only."""
+def load(path, *, authorized=lambda: True, expected_identity=None):
+    """Read one bounded, pinned snapshot after trusted caller authorization.
+
+    The default is retained for local standalone readers; it is not a model
+    capability or a permission grant. The desktop supplies a scoped callback.
+    """
     if not isinstance(path, str) or not path:
         raise Hold("attachment_not_found")
     raw = Path(path)
-    if not raw.is_absolute() or not raw.is_file():
-        raise Hold("attachment_not_found")
-    size = raw.stat().st_size
-    if size > MAX_BYTES:
-        raise Hold("attachment_too_large")
     try:
-        data = raw.read_bytes()
-    except OSError:
-        raise Hold("attachment_unreadable") from None
+        data = read_selected_bytes(path, authorized=authorized, allow_empty=True,
+                                   expected_identity=expected_identity)
+    except Hold as exc:
+        reason = {
+            "csv_invalid_selection": "attachment_not_found",
+            "csv_not_regular_file": "attachment_not_found",
+            "csv_selection_unreadable": "attachment_not_found",
+            "csv_invalid_size": "attachment_too_large",
+            "csv_changed_during_read": "attachment_changed_during_read",
+            "csv_selection_changed": "attachment_selection_changed",
+            "csv_secure_reader_unavailable": "attachment_secure_reader_unavailable",
+            "csv_selection_not_authorized": "attachment_not_authorized",
+        }.get(str(exc), "attachment_unreadable")
+        raise Hold(reason) from None
+    size = len(data)
     if b"\x00" in data[:MAX_BYTES]:
         # A binary file is refused before it is decoded, not after.
         raise Hold("attachment_not_text")
@@ -75,8 +86,8 @@ def describe(attachment):
 def prompt_block(attachment):
     """The attachment as a bounded, clearly delimited block in the message.
 
-    The block states its own boundaries so the model cannot read past it, and
-    it carries no path: a directory structure is not part of the conversation.
+    The block describes the data boundaries, not a security barrier against
+    prompt injection. It carries a filename, not the source directory.
     """
     return ("[attached file: %s, %d characters%s]\n%s\n[end of attached file]"
             % (attachment.name, attachment.chars,

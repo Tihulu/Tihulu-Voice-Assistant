@@ -48,6 +48,8 @@ def rewrite(text, names, indent="               "):
     wrapped line; the wrapper keeps the file readable and the list valid.
     """
     match = _block(text)
+    if current(text) == ("**",):
+        return text
     # `main` is always kept: it is the branch every pull request may target.
     names = list(names) + [MAIN]
     keep = [name for name in current(text) if name in names]
@@ -77,6 +79,10 @@ def check(path=WORKFLOW, remote="origin", ignore=()):
     """
     text = Path(path).read_text(encoding="utf-8")
     listed = set(current(text))
+    # GitHub Actions matches every PR base branch with this exact glob.
+    # No remote branch enumeration is needed, so branch creation cannot race CI.
+    if listed == {"**"}:
+        return (), ()
     live = set(remote_branches(remote)) - set(ignore)
     # `main` is the default branch and is never reported stale, whatever the
     # remote happens to list; it is still reported when it is missing.

@@ -17,6 +17,7 @@ import json
 import os
 import re
 import tempfile
+import stat
 import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -70,8 +71,10 @@ class Rule:
         return self.action == action and set(scope) >= set(self.scope)
 
 
-def decide(profile_rules, action, scope=(), now=0.0):
+def decide(profile_rules, action, scope=(), now=None):
     """Return (decision, reason). Unmatched or unknown actions are denied."""
+    if now is None:
+        now = time.time()
     if action in GLOBAL_DENIES:
         return DENY, "global_deny"
     if action not in RULE_ACTIONS:
@@ -80,11 +83,14 @@ def decide(profile_rules, action, scope=(), now=0.0):
     for rule in profile_rules:
         if not rule.matches(action, scope):
             continue
-        if len(rule.scope) > best_len or (len(rule.scope) == best_len and rule.decision == DENY):
+        rank = {ALLOW: 0, ASK: 1, DENY: 2}
+        if len(rule.scope) > best_len or (len(rule.scope) == best_len and
+                rank[rule.decision] > rank[best.decision]):
             best, best_len = rule, len(rule.scope)
     if best is None:
         return DENY, "no_rule_matches"
-    if best.decision == ALLOW and best.approval and best.expires_at <= now:
+    if (best.decision == ALLOW and (best.approval or best.expires_at > 0)
+            and best.expires_at <= now):
         return ASK, "approval_expired"
     return best.decision, "rule"
 
@@ -181,7 +187,7 @@ class EffectivePolicy:
     def supports(self, action):
         return action in self.capabilities
 
-    def evaluate(self, action, scope=(), now=0.0):
+    def evaluate(self, action, scope=(), now=None):
         if action in GLOBAL_DENIES:
             return DENY, "global_deny"
         if action not in RULE_ACTIONS:
@@ -204,6 +210,40 @@ def effective(profile):
         unsupported |= {"external_network", "browser_navigate"}
     return EffectivePolicy(profile.id, profile.version, profile.based_on_mode, profile.rules(),
                            tuple(sorted(set(RULE_ACTIONS) - unsupported)))
+
+
+def _policy_stamp(path):
+    info = os.stat(path, follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode) or info.st_size > Store.LIMIT * 4:
+        raise Hold("profile_unreadable")
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode)
+
+
+@dataclass(frozen=True)
+class LivePolicy:
+    """Bounded policy snapshot checked without GTK or model access.
+
+    External edits/replacements are detected at each checkpoint. A monotonic
+    floor prevents a backward wall-clock adjustment extending a grant.
+    """
+    policy: EffectivePolicy
+    path: Path
+    stamp: tuple
+    wall: float
+    monotonic: float
+
+    def unchanged(self):
+        try:
+            return _policy_stamp(self.path) == self.stamp
+        except (OSError, Hold):
+            return False
+
+    def evaluate(self, action, scope=()):
+        if not self.unchanged():
+            return DENY, "policy_changed"
+        now = max(time.time(), self.wall + max(0, time.monotonic() - self.monotonic))
+        return self.policy.evaluate(action, scope, now)
 
 
 def clone_to_custom(profile, name):
@@ -399,16 +439,31 @@ def audit_actions(root, limit=40):
     return tuple(seen[:limit])
 
 
-def require_tool(profile, action, scope=(), now=0.0):
-    """Refuse an action the active profile explicitly denies, at the moment it
-    is attempted — not only when a control was enabled."""
+def require_tool(profile, action, scope=(), now=None, *, selected=False):
+    """Explicit ASK is not permission; absent rules require a trusted selection.
+
+    selected=True is only for an owner-initiated, narrowly scoped local picker
+    or an already selected UI object, never for an agent or background action.
+    It cannot override a denial, expired approval or mode restriction.
+    """
+    if profile.state != "active":
+        raise Hold("profile_not_active")
+    # Preserve a specific explicit refusal reason even when the mode also
+    # forbids that action. Never treat a mode denial as an approval.
     decision, reason = decide(profile.rules(), action, scope, now)
-    if decision == ASK and reason == "approval_expired":
-        raise Hold("approval_expired")
-    # Only an absent rule is not a forbiddance; law and unknown actions never pass.
-    if decision == DENY and reason != "no_rule_matches":
-        raise Hold("profile_forbids_" + action if reason == "rule" else reason)
-    return decision, reason
+    if decision == DENY and reason == "rule":
+        raise Hold("profile_forbids_" + action)
+    decision, reason = effective(profile).evaluate(action, scope, now)
+    if decision == ASK:
+        raise Hold("approval_expired" if reason == "approval_expired"
+                   else "approval_required")
+    if decision == ALLOW:
+        return decision, reason
+    if (reason == "no_rule_matches" and selected is True and action == "filesystem_read"
+            and scope in (("folder",), ("file",), ("recording",))):
+        return ALLOW, "explicit_selection"
+    raise Hold("profile_forbids_" + action if reason == "rule" else
+               "approval_required" if reason == "no_rule_matches" else reason)
 
 
 PRIVILEGES = {
@@ -421,23 +476,32 @@ PRIVILEGES = {
 }
 
 
-def granted(profile):
-    """Privileges the profile's policy actually grants, as stable tokens."""
+def granted(profile, now=None):
+    """Conservative capability summary for escalation/UI, not an I/O grant."""
+    if profile.state != "active":
+        return frozenset()
+    if now is None:
+        now = time.time()
+    policy = effective(profile)
     rules = profile.rules()
     out = set()
-    # A mode grants a capability; a rule can still deny it.
+    # A mode may advertise a future cloud capability; runtime remains gated.
     if profile.based_on_mode in ("CLOUD_CHAT", "SECURE_HYBRID", "CUSTOM"):
         out |= {"cloud_inference", "cloud_disclosure"}
-    for action in PRIVILEGES:
-        # A scoped allow still grants the capability; a deny removes it.
-        if any(rule.action == action and rule.decision == "allow" for rule in rules):
-            out.add(action)
-        elif any(rule.action == action and rule.decision == "deny" for rule in rules):
-            out.discard(action)
     if profile.voice_activation == "wake_word":
         out.add("wake_word")
     if profile.background_processing_enabled:
         out.add("background_processing")
+    for action in PRIVILEGES:
+        scoped = tuple(rule for rule in rules if rule.action == action)
+        if not policy.supports(action):
+            out.discard(action)
+        elif scoped:
+            # Expired and ASK rules cannot suppress a subsequent escalation.
+            if any(policy.evaluate(action, rule.scope, now)[0] == ALLOW for rule in scoped):
+                out.add(action)
+            else:
+                out.discard(action)
     return frozenset(out)
 
 
@@ -462,6 +526,8 @@ def enforce_endpoint(profile, endpoint):
     modes make that explicit instead of promising capabilities that do not
     exist here.
     """
+    if profile.state != "active":
+        raise Hold("profile_not_active")
     if not isinstance(endpoint, str) or len(endpoint) > ENDPOINT_LIMIT or not endpoint.strip():
         raise Hold("invalid_local_settings")
     raw = endpoint.strip()
@@ -593,6 +659,18 @@ class Store:
         except FileNotFoundError:
             raise Hold("profile_not_found") from None
         except (ValueError, OSError):
+            raise Hold("profile_unreadable") from None
+
+    def bind_live(self, profile_id):
+        """Bind a checked active policy to the exact stored file generation."""
+        path = self._path(profile_id)
+        try:
+            before = _policy_stamp(path)
+            profile = self.load(profile_id)
+            if profile.id != profile_id or profile.state != "active" or _policy_stamp(path) != before:
+                raise Hold("profile_changed")
+            return LivePolicy(effective(profile), path, before, time.time(), time.monotonic())
+        except OSError:
             raise Hold("profile_unreadable") from None
 
     def ids(self):

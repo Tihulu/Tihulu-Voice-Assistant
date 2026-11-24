@@ -268,23 +268,43 @@ class ActionEnforcementTests(unittest.TestCase):
         with self.assertRaisesRegex(Hold, "profile_forbids_local_audio_device"):
             profiles.require_tool(denied, "local_audio_device", ("push_to_talk",))
 
-    def test_a_grant_or_ask_is_allowed_to_proceed(self):
+    def test_grant_allows_but_explicit_ask_requires_approval(self):
         granting = self.profile(tool_rules=(Rule("local_audio_device", ("push_to_talk",), ALLOW),))
         self.assertEqual(profiles.require_tool(granting, "local_audio_device", ("push_to_talk",))[0], ALLOW)
         asking = self.profile(tool_rules=(Rule("local_audio_device", ("push_to_talk",), ASK),))
-        self.assertEqual(profiles.require_tool(asking, "local_audio_device", ("push_to_talk",))[0], ASK)
+        for selected in (False, True):
+            with self.assertRaisesRegex(Hold, "^approval_required$"):
+                profiles.require_tool(asking, "local_audio_device", ("push_to_talk",), selected=selected)
 
-    def test_no_rule_is_not_a_silent_denial(self):
-        # Absence of a rule is not an explicit forbid; the mode still decides.
-        self.assertEqual(profiles.require_tool(self.profile(), "local_audio_device", ("push_to_talk",))[1],
-                         "no_rule_matches")
+    def test_missing_rule_requires_a_trusted_selection(self):
+        with self.assertRaisesRegex(Hold, "^approval_required$"):
+            profiles.require_tool(self.profile(), "local_audio_device", ("push_to_talk",))
+        self.assertEqual(profiles.require_tool(self.profile(), "filesystem_read", ("file",),
+                                               selected=True), (ALLOW, "explicit_selection"))
 
     def test_an_expired_approval_asks_again(self):
-        expired = self.profile(tool_rules=(Rule("host_shell", ("jan-qwen",), ALLOW,
-                                             approval="owner-1", expires_at=5.0),))
+        expired = self.profile(based_on_mode="SECURE_HYBRID",
+                               shell_rules=(Rule("host_shell", ("jan-qwen",), ALLOW,
+                                                 approval="owner-1", expires_at=5.0),))
         with self.assertRaisesRegex(Hold, "approval_expired"):
             profiles.require_tool(expired, "host_shell", ("jan-qwen",), now=10.0)
         self.assertEqual(profiles.require_tool(expired, "host_shell", ("jan-qwen",), now=1.0)[0], ALLOW)
+
+    def test_default_clock_is_current_time_and_selection_cannot_override_expiry(self):
+        from unittest.mock import patch
+        profile = self.profile(tool_rules=(Rule("local_audio_device", ("push_to_talk",),
+                                               ALLOW, approval="fixture", expires_at=50.0),))
+        with patch.object(profiles.time, "time", return_value=51.0):
+            self.assertEqual(effective(profile).evaluate("local_audio_device", ("push_to_talk",)),
+                             (ASK, "approval_expired"))
+            for selected in (False, True):
+                with self.assertRaisesRegex(Hold, "^approval_expired$"):
+                    profiles.require_tool(profile, "local_audio_device", ("push_to_talk",),
+                                          selected=selected)
+
+    def test_mode_restriction_cannot_be_overridden_by_selection(self):
+        with self.assertRaisesRegex(Hold, "^mode_without_capability$"):
+            profiles.require_tool(self.profile(), "host_shell", ("jan-qwen",), selected=True)
 
     def test_a_global_law_is_never_granted_by_a_rule(self):
         with self.assertRaisesRegex(Hold, "global_deny"):
@@ -357,6 +377,14 @@ class EscalationTests(unittest.TestCase):
         self.assertEqual(sorted(lines), ["Cloud reasoning", "Sending content to a provider"])
         self.assertEqual(profiles.escalation(chat, local), frozenset())
 
+    def test_expired_grant_cannot_hide_new_escalation(self):
+        expired = self.profile(based_on_mode="SECURE_HYBRID",
+            shell_rules=(Rule("host_shell", ("jan-qwen",), ALLOW, "old", 1.0),))
+        fresh = self.profile(based_on_mode="SECURE_HYBRID",
+            shell_rules=(Rule("host_shell", ("jan-qwen",), ALLOW, "new", 1e12),))
+        self.assertNotIn("host_shell", profiles.granted(expired))
+        self.assertIn("host_shell", profiles.escalation(expired, fresh))
+
     def test_a_denial_never_counts_as_an_escalation(self):
         local = self.profile()
         denied = self.profile(tool_rules=(Rule("host_shell", ("bridge",), "deny"),))
@@ -426,3 +454,39 @@ class TemplateTests(unittest.TestCase):
     def test_a_template_is_refused_when_its_rules_cannot_land(self):
         with self.assertRaises(profiles.Profile.__init__.__globals__["Hold"]):
             profiles.template("unknown-template")
+
+
+class LivePolicyTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.store = Store(Path(temporary.name))
+        self.profile = base(filesystem_rules=(Rule("filesystem_read", ("csv_analysis",),
+                              ALLOW, approval="fixture", expires_at=100.0),))
+        self.store.save(self.profile)
+
+    def test_expiry_and_backward_clock(self):
+        from unittest.mock import patch
+        with patch.object(profiles.time, "time", return_value=90.0), \
+             patch.object(profiles.time, "monotonic", return_value=10.0):
+            live = self.store.bind_live(self.profile.id)
+            self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",))[0], ALLOW)
+        with patch.object(profiles.time, "time", return_value=80.0), \
+             patch.object(profiles.time, "monotonic", return_value=21.0):
+            self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
+                             (ASK, "approval_expired"))
+
+    def test_external_policy_generation_change_refuses_even_same_version(self):
+        live = self.store.bind_live(self.profile.id)
+        path = self.store._path(self.profile.id)
+        path.write_text(Store._dump(base(filesystem_rules=(Rule("filesystem_read",
+                        ("csv_analysis",), DENY),))), encoding="utf-8")
+        self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
+                         (DENY, "policy_changed"))
+
+    def test_removed_policy_fails_closed(self):
+        live = self.store.bind_live(self.profile.id)
+        self.store._path(self.profile.id).unlink()
+        self.assertFalse(live.unchanged())
+        self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
+                         (DENY, "policy_changed"))

@@ -14,6 +14,9 @@ from . import (a11y, agents, attachments, catalog_sources, files, keys, queries,
                  readiness, receipts, resources, tasks, transcript, usage, web)
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
+from .analysis_ui import AnalysisView
+from .selected_csv import selection_identity
+from . import analysis_intent
 from . import locks, search, states
 from . import market, profiles, settings
 from .voice import audio
@@ -169,6 +172,11 @@ def create_window(app, loop, bridge=None):
             self.loop = loop
             self.bridge = bridge
             self.confirmations = []
+            self.owned_picker = None
+            self.owned_picker_handler = None
+            self.attachment_context = None
+            self.attachment_live = None
+            self.history_attachment_live = None
             self.leases = locks.Leases()
             self.search_matches = ()
             self.growing = {}
@@ -207,7 +215,7 @@ def create_window(app, loop, bridge=None):
             # composer's, reachable without looking for it.
             self.quick_stop = Gtk.Button(label=tr("Hard stop","Tümünü durdur","Alles stoppen"))
             self.quick_stop.add_css_class("badge")
-            self.quick_stop.connect("clicked", lambda *_: self.interrupt(False))
+            self.quick_stop.connect("clicked", lambda *_: self.hard_stop())
             self.quick_stop.set_sensitive(False)
             accessible_name(self.quick_stop, tr("Stop everything now",
                                                  "Her şeyi şimdi durdur",
@@ -270,6 +278,7 @@ def create_window(app, loop, bridge=None):
             self.send = self.button(entryrow,tr("Send","Gönder","Senden"),self.send_text)
             self.attach = self.button(entryrow,tr("Attach a file","Dosya ekle","Datei anhängen"),self.attach_file)
             self.entry.connect("activate",lambda *_:self.send_text())
+            self.entry.connect("changed", lambda *_: self.refresh_send())
             self.attachment_note = Gtk.Label(xalign=0, wrap=True)
             chat.append(entryrow)
             chat.append(self.attachment_note)
@@ -288,7 +297,7 @@ def create_window(app, loop, bridge=None):
                                           "Audioausgabe stummschalten"))
             self.cancel = self.button(controls,tr("Cancel turn","Turu iptal et","Antwort abbrechen"),lambda:self.interrupt(False))
             self.end = self.button(controls,tr("End conversation","Sohbeti bitir","Gespräch beenden"),lambda:self.interrupt(True))
-            self.hard = self.button(controls,tr("Hard stop","Tümünü durdur","Alles stoppen"),lambda:self.interrupt(False))
+            self.hard = self.button(controls,tr("Hard stop","Tümünü durdur","Alles stoppen"),self.hard_stop)
             for widget, caption in ((self.talk, tr("Start listening on the microphone",
                                                    "Mikrofonda dinlemeyi başlat",
                                                    "Zuhören mit dem Mikrofon starten")),
@@ -402,6 +411,8 @@ def create_window(app, loop, bridge=None):
             self.build_agents_page()
             self.turn_note = ""
             self.build_activity_page()
+            self.analysis = AnalysisView(self, chat, Gtk, GLib, tr, lang)
+            self.refresh()
             self.win.present()
 
         def apply_text_scale(self):
@@ -459,7 +470,7 @@ def create_window(app, loop, bridge=None):
             return True
 
         def run_cancel_turn(self, *_):
-            if self.busy:
+            if self.busy or self.owned_picker is not None or (hasattr(self, "analysis") and self.analysis.dialog is not None):
                 self.interrupt(False)
             elif self.search_entry.get_text().strip():
                 self.clear_search()
@@ -468,6 +479,8 @@ def create_window(app, loop, bridge=None):
         def run_hard_stop(self, *_):
             if self.busy:
                 self.interrupt(True)
+            elif hasattr(self, "analysis"):
+                self.hard_stop()
             return True
 
         def run_attach(self, *_):
@@ -484,6 +497,11 @@ def create_window(app, loop, bridge=None):
 
         def set_state(self, state, detail=""):
             self.stage = state
+            if detail == "conversation_route_changed_end_conversation":
+                detail = tr(
+                    "Connection or profile changed. End the conversation or restore the previous connection before continuing.",
+                    "Bağlantı veya profil değişti. Devam etmek için sohbeti sonlandırın veya önceki bağlantıya dönün.",
+                    "Verbindung oder Profil geändert. Beenden Sie das Gespräch oder stellen Sie die vorherige Verbindung wieder her.")
             self.status.set_text(detail or state.replace("_"," ").capitalize())
             self.refresh()
 
@@ -621,10 +639,79 @@ def create_window(app, loop, bridge=None):
                     break
             self.refresh_profile_buttons()
 
+        def picker_context(self):
+            profile = self.active_profile()
+            if profile.state != "active":
+                raise Hold("profile_not_active")
+            return (profile.id, profile.version, profile.based_on_mode, self.session.epoch)
+
+        def dismiss_picker(self):
+            dialog, handler = self.owned_picker, self.owned_picker_handler
+            self.owned_picker = self.owned_picker_handler = None
+            if dialog is not None:
+                if handler is not None:
+                    dialog.disconnect(handler)
+                dialog.destroy()
+
+        def show_owned_picker(self, dialog, response):
+            """Keep a strong reference and reject late or cross-context callbacks."""
+            if (self.busy or self.closing or self.owned_picker is not None
+                    or (hasattr(self, "analysis") and self.analysis.dialog is not None)):
+                dialog.destroy()
+                return
+            try:
+                context = self.picker_context()
+            except Hold as exc:
+                dialog.destroy()
+                self.set_state("ready", str(exc))
+                return
+            self.owned_picker = dialog
+            dialog.set_modal(True)
+
+            def dispatch(d, res):
+                if d is not self.owned_picker:
+                    return
+                handler = self.owned_picker_handler
+                self.owned_picker = self.owned_picker_handler = None
+                if handler is not None:
+                    d.disconnect(handler)
+                try:
+                    valid = (not self.busy and not self.closing
+                             and self.picker_context() == context)
+                except Hold:
+                    valid = False
+                if not valid:
+                    d.destroy()
+                    self.set_state("ready", "picker_context_changed")
+                    return
+                # Each original response owns destruction in its finally block.
+                try:
+                    response(d, res)
+                except Exception:
+                    self.set_state("ready", "local_operation_failed")
+                self.refresh()
+
+            self.owned_picker_handler = dialog.connect("response", dispatch)
+            dialog.show()
+            self.refresh()
+
+        def clear_attachment(self):
+            self.attachment = self.attachment_context = self.attachment_live = None
+            self.attachment_note.set_text("")
+
+        def attachment_route(self):
+            profile = self.active_profile()
+            return (profile.id, profile.version, profile.based_on_mode,
+                    self.url.get_text().strip(), self.cfg["llm"])
+
         def activate_profile(self, profile_id, quiet=False):
             entry = self.store.load(profile_id).checked()
             if entry.state != "active":
                 raise Hold("profile_not_active")
+            self.dismiss_picker()
+            self.clear_attachment()
+            if hasattr(self, "analysis"):
+                self.analysis.reset()
             self.cfg["profile"] = entry.id
             self.policy = profiles.effective(entry)
             self.save()
@@ -797,8 +884,7 @@ def create_window(app, loop, bridge=None):
                     self.set_state("ready", "profile_import_rejected")
                 finally:
                     d.destroy()
-            dialog.connect("response", response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def export_selected(self):
             chosen = self.selected_profile()
@@ -986,8 +1072,7 @@ def create_window(app, loop, bridge=None):
                     self.write_export(path)
                 finally:
                     d.destroy()
-            dialog.connect("response", response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
             return None
 
         def write_export(self, path):
@@ -1114,6 +1199,13 @@ def create_window(app, loop, bridge=None):
                           "Inhalt bleibt auf diesem Computer.")
             self.disclosure_note.set_text(tr("Privacy: ", "Gizlilik: ", "Privatsphäre: ") + body)
 
+        def refresh_send(self):
+            text = self.entry.get_text()
+            connected = self.cfg["llm"] in self.inventory
+            direct = analysis_intent.direct(text) is not None
+            local = getattr(self, "policy", None) is not None and self.policy.mode == "LOCAL_ONLY"
+            self.send.set_sensitive(not self.busy and (connected or (local and direct)))
+
         def refresh(self):
             connected = self.cfg["llm"] in self.inventory
             # Whether the audio tools exist is asked once per refresh, and the
@@ -1137,9 +1229,9 @@ def create_window(app, loop, bridge=None):
             self.export_chat.set_sensitive(not self.busy and bool(self.session.history))
             self.attach.set_sensitive(not self.busy and self.cfg["llm"] in self.inventory)
             self.entry.set_sensitive(not self.busy)
-            self.send.set_sensitive(not self.busy and connected)
+            self.refresh_send()
             allowed = getattr(self, "policy", None) is not None and \
-                self.policy.evaluate("local_audio_device", ("push_to_talk",))[0] == profiles.ALLOW
+                self.policy.evaluate("local_audio_device", ("push_to_talk",), time.time())[0] == profiles.ALLOW
             self.talk.set_sensitive(not self.busy and connected and allowed \
                 and bool(self.cfg["stt"]) and bool(self.cfg["voices"]) \
                 and audio.tools_ready("arecord","whisper-cli","piper","aplay"))
@@ -1150,7 +1242,12 @@ def create_window(app, loop, bridge=None):
             self.cancel.set_sensitive(self.busy)
             self.hard.set_sensitive(self.busy)
             # The topbar stop is the composer stop, so its state matches.
-            self.quick_stop.set_sensitive(self.busy)
+            self.quick_stop.set_sensitive(self.busy or self.owned_picker is not None)
+            if hasattr(self, "analysis"):
+                self.analysis.refresh()
+                analysis_live = bool(self.analysis.dialog is not None or self.analysis.last or self.owned_picker is not None)
+                self.hard.set_sensitive(self.busy or analysis_live)
+                self.quick_stop.set_sensitive(self.busy or analysis_live)
             for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,
                       self.transcribe_button,*self.previews):
                 w.set_sensitive(not self.busy)
@@ -1784,10 +1881,9 @@ def create_window(app, loop, bridge=None):
             except Hold as exc:
                 self.web_note.set_text(str(exc))
                 return
-            self.require_tools(("browser_navigate", ("approved_target",)))
-            self.web_note.set_text(tr("Reading %s (%s)…" % (url, method),
-                                      "%s okunuyor (%s)…" % (url, method),
-                                      "%s wird gelesen (%s)…" % (url, method)))
+            self.web_note.set_text(tr("Plan only: %s (%s); no network request." % (url, method),
+                                      "Yalnızca plan: %s (%s); ağ isteği yok." % (url, method),
+                                      "Nur Plan: %s (%s); keine Netzwerkanfrage." % (url, method)))
 
         def submit_target(self):
             target = self.selected_target()
@@ -1800,10 +1896,9 @@ def create_window(app, loop, bridge=None):
                 self.web_note.set_text(str(exc))
                 self.receipt("refused", "submitting to %s (submission_not_approved)" % target.url)
                 return
-            self.require_tools(("browser_navigate", ("submission",)))
-            self.web_note.set_text(tr("Submitting to %s (POST)…" % target.url,
-                                      "%s adresine gönderiliyor (POST)…" % target.url,
-                                      "Senden an %s (POST)…" % target.url))
+            self.web_note.set_text(tr("Plan only: %s (POST); no network request." % target.url,
+                                      "Yalnızca plan: %s (POST); ağ isteği yok." % target.url,
+                                      "Nur Plan: %s (POST); keine Netzwerkanfrage." % target.url))
 
         def build_activity_page(self):
             """The tasks this client runs, stated without a guessed percentage.
@@ -1982,8 +2077,7 @@ def create_window(app, loop, bridge=None):
                     self.read_folder(path)
                 finally:
                     d.destroy()
-            dialog.connect("response", response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def read_folder(self, path):
             """Store a chosen folder and list it; nothing is read yet."""
@@ -2003,7 +2097,7 @@ def create_window(app, loop, bridge=None):
                 return
             root = root or self.folder_root.get_text().strip()
             try:
-                self.require_tools(("filesystem_read", ("folder",)))
+                self.require_tools(("filesystem_read", ("folder",)), selected=True)
                 folder = files.list_dir(root)
             except Hold as exc:
                 # A refused or unreadable folder is a bounded reason.
@@ -2049,7 +2143,7 @@ def create_window(app, loop, bridge=None):
             if entry.directory:
                 return None
             try:
-                self.require_tools(("filesystem_read", ("file",)))
+                self.require_tools(("filesystem_read", ("file",)), selected=True)
                 text = files.preview(self.cfg.get("research_root", ""), entry.name)
             except Hold as exc:
                 if "profile_forbids" in str(exc):
@@ -2353,10 +2447,9 @@ def create_window(app, loop, bridge=None):
         def search_source(self):
             """List a registered source's public metadata, bounded and verified.
 
-            The same HTTPS policy as a catalog fetch applies: the host must be
-            allowed, TLS is verified against the system store, no redirect is
-            followed and no credential is sent. The opener is injectable so the
-            policy is tested without a socket.
+            The same scoped network policy as a catalog fetch applies. The
+            production opener is held before network I/O; trusted synthetic
+            fixtures may inject a transport.
             """
             if self.busy:
                 return None
@@ -2365,7 +2458,7 @@ def create_window(app, loop, bridge=None):
                 return None
             url = catalog_sources.safe_url(source)
             try:
-                profiles.require_tool(self.active_profile(), "external_network", ("catalog",))
+                self.require_tools(("external_network", ("catalog", source.host)))
                 raw = self.loop.run_until_complete(
                     catalog_sources.fetch(source, self.source_opener()))
                 cards, refused = catalog_sources.cards(
@@ -2377,7 +2470,7 @@ def create_window(app, loop, bridge=None):
             return cards
 
         def source_opener(self):
-            """The listing opener; the default verifies TLS like a catalog."""
+            """The listing opener shares the catalog transport HOLD."""
             return catalog_fetch.urlopen_opener()
 
         def show_source_cards(self, cards, refused):
@@ -2459,8 +2552,8 @@ def create_window(app, loop, bridge=None):
         def require_catalog_fetch(self, url, hosts):
             if not hosts:
                 raise Hold("catalog_host_not_allowed")
-            profiles.require_tool(self.active_profile(), "external_network", ("catalog",))
-            catalog_fetch.allowed(url, hosts)
+            host = catalog_fetch.allowed(url, hosts)
+            self.require_tools(("external_network", ("catalog", host)))
 
         def import_catalog(self):
             if self.busy:
@@ -2484,8 +2577,7 @@ def create_window(app, loop, bridge=None):
                     self.set_state("ready", "catalog_import_rejected")
                 finally:
                     d.destroy()
-            dialog.connect("response", response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def selected_card(self):
             row = self.market_list.get_selected_row()
@@ -2838,8 +2930,7 @@ def create_window(app, loop, bridge=None):
                     self.status.set_text(str(exc))
                 finally:
                     d.destroy()
-            dialog.connect("response",response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def preview(self, lang):
             if self.busy or self.cfg["llm"] not in self.inventory:
@@ -2847,8 +2938,12 @@ def create_window(app, loop, bridge=None):
             sample = {"tr": "Bu bir ses önizlemesidir.",
                       "en": "This is a voice preview.",
                       "de": "Das ist eine Stimmprobe."}[lang]
-            self.require_tools(("local_audio_device", ("push_to_talk",)))
-            speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"][lang], lang).id)
+            try:
+                self.require_tools(("local_audio_device", ("push_to_talk",)))
+                speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"][lang], lang).id)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
             async def run(epoch):
                 def progress(stage):
                     if epoch == self.session.epoch:
@@ -2856,6 +2951,7 @@ def create_window(app, loop, bridge=None):
                 # A preview shares the playback lease with a turn, never the
                 # device: a refused lease is a bounded reason.
                 async with self.leases.hold("audio_playback", "preview"):
+                    self.require_tools(("local_audio_device", ("push_to_talk",)))
                     await audio.speak(speech, progress)
             self.submit(run)
 
@@ -2905,12 +3001,12 @@ def create_window(app, loop, bridge=None):
                     self.run_transcribe(p)
                 finally:
                     d.destroy()
-            dialog.connect("response",response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def run_transcribe(self, path):
             """Transcribe an owner-supplied recording; nothing is captured here."""
             try:
+                self.require_tools(("filesystem_read", ("recording",)), selected=True)
                 self.set_state("ready", "transcribing")
                 raw = self.loop.run_until_complete(
                     audio.transcribe(self.cfg["stt"], path, runner=self.transcribe_runner))
@@ -2924,7 +3020,7 @@ def create_window(app, loop, bridge=None):
             self.set_state("ready", "transcribed")
             return raw
 
-        def require_tools(self, *requests):
+        def require_tools(self, *requests, selected=False):
             """Refuse an action the active profile denies, at the moment it runs.
 
             Every decision is appended to the local audit trail.
@@ -2932,11 +3028,11 @@ def create_window(app, loop, bridge=None):
             profile = self.active_profile()
             for action, scope in requests:
                 try:
-                    profiles.require_tool(profile, action, scope)
+                    decision, reason = profiles.require_tool(profile, action, scope, time.time(), selected=selected)
                 except Hold as exc:
                     self.record_policy(action, scope, "deny", str(exc))
                     raise
-                self.record_policy(action, scope, "allow", "rule_or_absent")
+                self.record_policy(action, scope, decision, reason)
 
         def record_disclosure(self):
             """Record that the boundary was stated before the message was sent."""
@@ -2972,9 +3068,39 @@ def create_window(app, loop, bridge=None):
         def backend_for_test(self):
             return Jan(self.require_endpoint(), self.cfg["llm"])
 
+        def conversation_backend(self):
+            """Bind prior messages to current profile version and endpoint/model."""
+            endpoint = self.require_endpoint()
+            profile = self.active_profile()
+            model = self.cfg["llm"]
+            route = (profile.id, profile.version, profile.based_on_mode, endpoint, model)
+            self.session.require_route(route)
+            if self.session.has_attachment_history and not self.conversation_authorized(route):
+                raise Hold("attachment_context_changed")
+            return Jan(endpoint, model), route
+
+        @staticmethod
+        def attachment_live_allowed(live):
+            if live is None:
+                return False
+            decision, reason = live.evaluate(attachments.ACTION, attachments.SCOPE)
+            return decision == profiles.ALLOW or reason == "no_rule_matches"
+
+        def conversation_authorized(self, route):
+            try:
+                if self.closing or self.attachment_route() != route or self.active_profile().state != "active":
+                    return False
+                if self.session.has_attachment_history:
+                    self.attachment_policy()
+                    return self.attachment_live_allowed(self.history_attachment_live)
+                return True
+            except Hold:
+                return False
+
         def submit(self, work):
             if self.busy:
                 return
+            self.dismiss_picker()
             self.busy=True
             # Work is being submitted: ask for the fast tick instead of the
             # idle one, so a turn is answered promptly and an idle window is not.
@@ -3014,6 +3140,8 @@ def create_window(app, loop, bridge=None):
                     self.set_state("ready",message)
                 else:
                     self.set_state("ready","Stopped")
+                if hasattr(self, "analysis"):
+                    self.analysis.open_pending(epoch)
             task.add_done_callback(finished)
 
         def discover(self):
@@ -3132,9 +3260,24 @@ def create_window(app, loop, bridge=None):
             if self.stage != "stopping":
                 self.set_state("stopping_playback")
 
+        def hard_stop(self):
+            self.clear_attachment()
+            if hasattr(self, "analysis"):
+                self.analysis.reset()
+            self.interrupt(False)
+
         def interrupt(self, clear):
+            self.dismiss_picker()
+            if clear:
+                self.clear_attachment()
+            if hasattr(self, "analysis"):
+                if clear:
+                    self.analysis.reset()
+                else:
+                    self.analysis.cancel()
             self.session.invalidate(clear=clear)
             if clear:
+                self.history_attachment_live = None
                 child=self.log.get_first_child()
                 while child is not None:
                     nxt=child.get_next_sibling()
@@ -3142,22 +3285,31 @@ def create_window(app, loop, bridge=None):
                     child=nxt
             self.set_state("stopping" if self.busy else "ready")
 
-        def require_attachment(self):
-            """The policy gate for an attachment, decided before any dialog.
+        def attachment_policy(self):
+            """Only the verified local route is available in this preview."""
+            profile = self.active_profile()
+            if profile.state != "active" or profile.based_on_mode != "LOCAL_ONLY":
+                raise Hold("attachment_mode_denied")
+            decision, reason = profiles.effective(profile).evaluate(
+                attachments.ACTION, attachments.SCOPE, time.time())
+            if decision == profiles.ALLOW or reason == "no_rule_matches":
+                return
+            if decision == profiles.ASK:
+                raise Hold("attachment_approval_required")
+            raise Hold("profile_forbids_filesystem_read")
 
-            Returning None means the active profile denies the read, and the
-            audit trail already carries the decision. A caller must not open a
-            chooser in that case: a denied read never reaches a file picker.
-            """
+        def require_attachment(self):
+            """Gate the picker and every actual read/send; absence needs a picker."""
             if self.busy or self.cfg["llm"] not in self.inventory:
                 return None
             try:
-                self.require_tools((attachments.ACTION, attachments.SCOPE))
+                self.attachment_policy()
             except Hold as exc:
-                # A refused read is a receipt, not a silent menu item.
+                self.record_policy(attachments.ACTION, attachments.SCOPE, "deny", str(exc))
                 self.receipt("refused", "read a file (filesystem_read)")
                 self.set_state("ready", str(exc))
                 return None
+            self.record_policy(attachments.ACTION, attachments.SCOPE, "allow", "rule_or_absent")
             return True
 
         def attach_file(self):
@@ -3167,38 +3319,58 @@ def create_window(app, loop, bridge=None):
             dialog=Gtk.FileChooserNative.new("Attach a text file", self.win,Gtk.FileChooserAction.OPEN,"Attach","Cancel")
             def response(d, res):
                 try:
-                    if res!=Gtk.ResponseType.ACCEPT or self.busy:
+                    if res != Gtk.ResponseType.ACCEPT:
                         return
-                    file=d.get_file()
-                    p=file.get_path() if file else None
-                    item = attachments.load(p)
-                    self.attachment = item
-                    self.attachment_note.set_text(tr("Attached: %s" % attachments.describe(item),
-                                                     "Eklendi: %s" % attachments.describe(item),
-                                                     "Angehängt: %s" % attachments.describe(item)))
-                except Hold as exc:
-                    self.attachment = None
-                    self.attachment_note.set_text("")
-                    self.set_state("ready", str(exc))
-                except Exception:
-                    self.attachment = None
-                    self.attachment_note.set_text("")
-                    self.set_state("ready", "local_operation_failed")
+                    file = d.get_file()
+                    self.read_attachment(file.get_path() if file else None)
                 finally:
                     d.destroy()
-            dialog.connect("response",response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def read_attachment(self, path):
-            """Read one attachment from a chosen path; the chooser calls this."""
+            """Trusted chooser acceptance: recheck policy at the actual read."""
+            if self.require_attachment() is None:
+                self.clear_attachment()
+                return None
             try:
-                item = attachments.load(path)
+                route = self.attachment_route()
+                live = self.store.bind_live(route[0])
+                def authorized():
+                    try:
+                        self.attachment_policy()
+                        return (not self.busy and not self.closing
+                                and self.attachment_route() == route
+                                and live.policy.profile_id == route[0]
+                                and live.policy.version == route[1]
+                                and live.policy.mode == route[2]
+                                and self.attachment_live_allowed(live))
+                    except Hold:
+                        return False
+                # Capture identity at the trusted callback before opening data.
+                # The synchronous loader still rechecks the same identity.
+                try:
+                    identity = selection_identity(path, authorized=authorized, allow_empty=True)
+                except Hold as exc:
+                    raise Hold({
+                        "csv_invalid_selection": "attachment_not_found",
+                        "csv_not_regular_file": "attachment_not_found",
+                        "csv_selection_unreadable": "attachment_not_found",
+                        "csv_invalid_size": "attachment_too_large",
+                        "csv_selection_not_authorized": "attachment_not_authorized",
+                        "csv_secure_reader_unavailable": "attachment_secure_reader_unavailable",
+                    }.get(str(exc), "attachment_unreadable")) from None
+                item = attachments.load(path, authorized=authorized, expected_identity=identity)
             except Hold as exc:
-                self.attachment = None
-                self.attachment_note.set_text("")
+                self.clear_attachment()
                 self.set_state("ready", str(exc))
                 return None
+            except Exception:
+                self.clear_attachment()
+                self.set_state("ready", "local_operation_failed")
+                return None
             self.attachment = item
+            self.attachment_context = route
+            self.attachment_live = live
             self.attachment_note.set_text(tr("Attached: %s" % attachments.describe(item),
                                              "Eklendi: %s" % attachments.describe(item),
                                              "Angehängt: %s" % attachments.describe(item)))
@@ -3206,29 +3378,74 @@ def create_window(app, loop, bridge=None):
 
         def send_text(self):
             text=self.entry.get_text().strip()
-            if self.busy or not text or self.cfg["llm"] not in self.inventory:
+            if self.busy or not text:
+                return
+            if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
+                if self.attachment is not None:
+                    self.set_state("ready", tr("Local CSV analysis uses its own picker, not text attachments.",
+                        "Yerel CSV analizi kendi dosya seçicisini kullanır.",
+                        "Lokale CSV-Analyse verwendet einen eigenen Dateidialog."))
+                    return
+                if self.analysis.dialog is not None:
+                    return
+                self.entry.set_text("")
+                self.turn_note = tr("Local analysis request", "Yerel analiz isteği", "Lokale Analyseanfrage")
+                async def task_run(epoch):
+                    self.bubble("You", text)
+                    await self.analysis.command(text, epoch)
+                self.submit(task_run)
+                return
+            if self.cfg["llm"] not in self.inventory:
                 return
             self.record_disclosure()
-            # The attachment is a bounded block in the same message, and it is
-            # cleared afterwards so it can never be sent twice.
             item = self.attachment
-            if item is not None:
-                text = text + "\n\n" + attachments.prompt_block(item)
-                self.attachment = None
-                self.attachment_note.set_text("")
-            self.entry.set_text("")
+            selected_route = self.attachment_context
+            selected_live = self.attachment_live
+            def allowed():
+                if item is None:
+                    return True
+                try:
+                    self.attachment_policy()
+                    return (not self.closing and self.attachment_route() == selected_route
+                            and self.attachment_live_allowed(selected_live))
+                except Hold:
+                    return False
+            if item is not None and (not allowed() or self.require_attachment() is None):
+                self.clear_attachment()
+                self.set_state("ready", "attachment_context_changed")
+                return
+            # Validate language and total wire size before consuming the draft.
+            # The file is data, never a source of host language instructions.
+            try:
+                _, message = self.session.prepare_text(text, attachment=item, model=self.cfg["llm"])
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
             self.turn_note = text[:80]
             async def run(epoch):
-                self.bubble("You",text)
+                self.session.check(epoch)
+                backend, route = self.conversation_backend()
+                def permitted():
+                    return allowed() and self.conversation_authorized(route)
+                if not permitted():
+                    raise Hold("attachment_context_changed")
+                self.session.prepare_text(text, attachment=item, model=self.cfg["llm"])
+                self.entry.set_text("")
+                if item is not None:
+                    self.clear_attachment()
+                self.bubble("You",message.content)
                 self.set_state("thinking")
                 answer=self.bubble("JARVIS","")
                 def grow(piece):
-                    # Only what the server actually sent is shown, in order.
                     if epoch == self.session.epoch:
                         self.extend(answer,"JARVIS",piece)
-                result,_=await self.session.reply(text,Jan(self.require_endpoint(), self.cfg["llm"]),
-                                                  epoch,on_delta=grow)
+                result,_=await self.session.reply(text,backend,
+                                                  epoch,on_delta=grow,route=route,
+                                                  attachment=item,model=self.cfg["llm"],
+                                                  authorize=permitted)
                 self.session.check(epoch)
+                if item is not None and self.history_attachment_live is None:
+                    self.history_attachment_live = selected_live
                 self.extend(answer,"JARVIS",result,replace=True)
             self.submit(run)
 
@@ -3245,14 +3462,22 @@ def create_window(app, loop, bridge=None):
                 # The microphone is exclusive: a turn that cannot get the lease
                 # is refused before capture starts, never after it fails.
                 async with self.leases.hold("microphone", "voice-turn-%d" % epoch):
+                    self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
                     text=await audio.listen(self.cfg["stt"],self.finish,progress)
                 # The microphone is free again the moment the capture ends.
                 self.note_leases()
                 self.session.check(epoch)
                 self.bubble("You",text)
+                if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
+                    if self.analysis.dialog is not None:
+                        raise Hold("analysis_picker_busy")
+                    await self.analysis.command(text, epoch)
+                    return
                 self.set_state("thinking")
-                result,speech=await self.session.reply(text,Jan(self.require_endpoint(),self.cfg["llm"]),epoch,voices)
+                backend, route = self.conversation_backend()
+                result,speech=await self.session.reply(text,backend,epoch,voices,route=route,
+                    authorize=lambda: self.conversation_authorized(route))
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
                 self.spoken_line(speech, epoch)
@@ -3267,6 +3492,7 @@ def create_window(app, loop, bridge=None):
                                                "Antwort stumm; als Text angezeigt."))
                     return
                 async with self.leases.hold("audio_playback", "voice-turn-%d" % epoch):
+                    self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
                     playback = loop.create_task(audio.speak(speech, progress))
                     self.playback = playback
@@ -3288,6 +3514,10 @@ def create_window(app, loop, bridge=None):
             self.submit(run)
 
         def close(self,*_):
+            self.dismiss_picker()
+            self.clear_attachment()
+            if hasattr(self, "analysis"):
+                self.analysis.reset()
             if not self.busy:
                 return False
             if not self.closing:
