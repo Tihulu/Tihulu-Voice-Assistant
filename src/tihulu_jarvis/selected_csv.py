@@ -32,10 +32,11 @@ def _identity(info):
             info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
 
 
-def read_selected_csv(path, *, authorized, cancelled=lambda: False):
+def read_selected_bytes(path, *, authorized, cancelled=lambda: False, allow_empty=False):
     """Return a bounded immutable snapshot; never send a path to the model.
 
-    All path components are opened without following symlinks. The selected
+    Shared internal reader for CSV and selected text. Legacy CSV reason codes
+    are preserved at the boundary. All path components are opened without following symlinks. The selected
     pathname is resolved at open time; once open, all reads and checks concern
     the same descriptor. Reject detectable mutation, short reads and oversize
     files. This does not prove the inode was unchanged BEFORE the open; a
@@ -70,7 +71,7 @@ def read_selected_csv(path, *, authorized, cancelled=lambda: False):
         before = os.fstat(pinned)
         if not stat.S_ISREG(before.st_mode):
             raise Hold("csv_not_regular_file")
-        if before.st_size <= 0 or before.st_size > MAX_BYTES:
+        if (before.st_size == 0 and not allow_empty) or before.st_size > MAX_BYTES:
             raise Hold("csv_invalid_size")
         _check(authorized, cancelled)
         # Linux procfs resolves this process's held descriptor, not the path
@@ -92,7 +93,7 @@ def read_selected_csv(path, *, authorized, cancelled=lambda: False):
         if _identity(before) != _identity(after) or len(data) != before.st_size:
             raise Hold("csv_changed_during_read")
         _check(authorized, cancelled)
-        return SelectedCSV(bytes(data))
+        return bytes(data)
     except OSError:
         # Do not propagate private paths or raw system diagnostics.
         raise Hold("csv_selection_unreadable") from None
@@ -103,3 +104,9 @@ def read_selected_csv(path, *, authorized, cancelled=lambda: False):
             os.close(pinned)
         if directory is not None:
             os.close(directory)
+
+
+def read_selected_csv(path, *, authorized, cancelled=lambda: False):
+    """Preserve the strict nonempty CSV snapshot contract."""
+    return SelectedCSV(read_selected_bytes(path, authorized=authorized,
+                                          cancelled=cancelled))
