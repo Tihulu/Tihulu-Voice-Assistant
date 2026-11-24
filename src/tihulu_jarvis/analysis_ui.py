@@ -102,7 +102,7 @@ class AnalysisView:
     def refresh(self):
         policy = getattr(self.ui, "policy", None)
         enabled = (not self.ui.busy and not self.controller.busy
-                   and self.dialog is None and policy is not None
+                   and self.dialog is None and self.ui.owned_picker is None and policy is not None
                    and policy.mode == "LOCAL_ONLY")
         self.choose_button.set_sensitive(enabled)
         self.color.set_sensitive(enabled)
@@ -142,7 +142,7 @@ class AnalysisView:
         self.refresh()
 
     def choose(self, *, language=None, speak=False):
-        if self.ui.busy or self.dialog is not None or self.controller.busy:
+        if self.ui.busy or self.dialog is not None or self.ui.owned_picker is not None or self.controller.busy:
             return
         try:
             context = self._activate()
@@ -364,7 +364,7 @@ class AnalysisView:
 
     def choose_export(self):
         """A local save dialog grants one destination, never an overwrite."""
-        if self.ui.busy or self.dialog is not None or self.last is None:
+        if self.ui.busy or self.dialog is not None or self.ui.owned_picker is not None or self.last is None:
             return
         context, ident = self.context, self.last
         kind = self.export_format.get_active_id()
