@@ -34,7 +34,7 @@ def _identity(info):
 
 
 @contextmanager
-def _pin(path, *, authorized, cancelled, allow_empty):
+def _pin(path, *, authorized, cancelled, allow_empty, max_bytes=MAX_BYTES):
     """Open only metadata, never the file contents or a special device."""
     _check(authorized, cancelled)
     if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
@@ -64,7 +64,7 @@ def _pin(path, *, authorized, cancelled, allow_empty):
         before = os.fstat(pinned)
         if not stat.S_ISREG(before.st_mode):
             raise Hold("csv_not_regular_file")
-        if (before.st_size == 0 and not allow_empty) or before.st_size > MAX_BYTES:
+        if (before.st_size == 0 and not allow_empty) or before.st_size > max_bytes:
             raise Hold("csv_invalid_size")
         _check(authorized, cancelled)
         yield pinned, before
@@ -77,14 +77,15 @@ def _pin(path, *, authorized, cancelled, allow_empty):
             os.close(directory)
 
 
-def selection_identity(path, *, authorized, cancelled=lambda: False, allow_empty=False):
+def selection_identity(path, *, authorized, cancelled=lambda: False, allow_empty=False,
+                       max_bytes=MAX_BYTES):
     """Capture regular-file identity at trusted picker acceptance, without data I/O.
 
     GTK returns a pathname, not a descriptor. This records identity at the
     acceptance callback, not at an earlier highlight in a native dialog.
     """
     with _pin(path, authorized=authorized, cancelled=cancelled,
-              allow_empty=allow_empty) as (_, before):
+              allow_empty=allow_empty, max_bytes=max_bytes) as (_, before):
         _check(authorized, cancelled)
         return _identity(before)
 
@@ -135,3 +136,45 @@ def read_selected_csv(path, *, authorized, cancelled=lambda: False, expected_ide
     """Preserve strict nonempty CSV contract and optional picker identity."""
     return SelectedCSV(read_selected_bytes(path, authorized=authorized,
                                           cancelled=cancelled, expected_identity=expected_identity))
+
+
+async def copy_selected_to(path, target, *, authorized, expected_identity, max_bytes):
+    """Copy a pinned regular file to a caller-owned private temporary path.
+
+    Yield between bounded chunks so the owning desktop task can be cancelled.
+    This is cooperative, not a bound on blocking filesystem latency.
+    The caller owns destination cleanup even when cancelled.
+    """
+    import asyncio
+    fd = None
+    try:
+        with _pin(path, authorized=authorized, cancelled=lambda: False,
+                  allow_empty=False, max_bytes=max_bytes) as (pinned, before):
+            if expected_identity is None or _identity(before) != expected_identity:
+                raise Hold("csv_selection_changed")
+            _check(authorized, lambda: False)
+            fd = os.open("/proc/self/fd/%d" % pinned,
+                         os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            if _identity(os.fstat(fd)) != expected_identity:
+                raise Hold("csv_selection_changed")
+        size = 0
+        with open(target, "xb") as out:
+            os.fchmod(out.fileno(), 0o600)
+            while True:
+                _check(authorized, lambda: False)
+                chunk = os.read(fd, min(262144, max_bytes + 1 - size))
+                if not chunk:
+                    break
+                size += len(chunk)
+                if size > max_bytes:
+                    raise Hold("csv_invalid_size")
+                out.write(chunk)
+                await asyncio.sleep(0)
+        if _identity(os.fstat(fd)) != expected_identity or size != before.st_size:
+            raise Hold("csv_changed_during_read")
+        _check(authorized, lambda: False)
+    except OSError:
+        raise Hold("csv_selection_unreadable") from None
+    finally:
+        if fd is not None:
+            os.close(fd)

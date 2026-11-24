@@ -65,7 +65,7 @@ class Backend:
                 await self.chat_release.wait()
         return self.answers.popleft() if self.answers else "Merhaba!"
 
-    async def listen(self, model, finish, publish):
+    async def listen(self, model, finish, publish, *, checkpoint):
         if self.capture_error:
             raise Hold("capture_fixture_failure")
         try:
@@ -82,7 +82,7 @@ class Backend:
             self.capture_cleaned = True
             raise
 
-    async def speak(self, speech, publish):
+    async def speak(self, speech, publish, *, checkpoint):
         self.speeches.append(speech)
         publish(self.playback_stage)
         try:
@@ -901,6 +901,24 @@ class PreviewTests(MarketFixture):
         self.ui.cfg["llm"] = "fixture-chat"
         self.ui.refresh()
         self.assertTrue(self.ui.test_chat_button.get_sensitive())
+
+    def test_preview_checkpoint_refuses_replaced_profile(self):
+        self.connect_model()
+        reached = []
+        async def engine(speech, publish, *, checkpoint):
+            checkpoint()
+            reached.append("synthesis")
+            old = self.ui.active_profile()
+            self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+            checkpoint()
+            reached.append("playback")
+        with patch.object(desktop.audio, "speak", side_effect=engine):
+            self.click(self.preview_of("tr"))
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(reached, ["synthesis"])
+        self.assertEqual(str(self.ui.session.active.exception()), "profile_changed")
+        self.assertIsNone(self.ui.leases.owner("audio_playback"))
+        self.assertFalse(self.ui.session.history)
 
     def test_preview_speaks_only_the_selected_locale(self):
         self.connect_model()
@@ -2087,16 +2105,85 @@ class TranscribeFileUITests(DownloadFixture):
             Path(str(stem) + ".txt").write_text(text, encoding="utf-8")
         return runtime, calls
 
+    def test_recording_checkpoint_refuses_replaced_profile_before_publication(self):
+        clip = self.clip()
+        reached = []
+        async def engine(model, wav, stem):
+            reached.append("transcription")
+            old = self.ui.active_profile()
+            self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+            stem.with_suffix(".txt").write_text("SYNTHETIC-CANARY")
+        self.ui.transcribe_runner = engine
+        self.ui.run_transcribe(str(clip))
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(reached, ["transcription"])
+        self.assertEqual(self.ui.status.get_text(), "profile_changed")
+        self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
+
     def test_a_recording_is_transcribed_into_the_conversation(self):
         runner, calls = self.runner()
         clip = self.clip()
         self.ui.transcribe_runner = runner
         # The file chooser is native; the action it triggers runs here.
-        result = self.ui.run_transcribe(str(clip))
-        self.assertEqual(result, "Merhaba!", self.ui.status.get_text())
+        self.ui.run_transcribe(str(clip))
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.session.active.result(), "Merhaba!", self.ui.status.get_text())
         self.until(lambda: any(b.startswith("Recording") for b in self.bubbles()))
-        self.assertEqual(calls, [(self.ui.cfg["stt"], str(clip))])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], self.ui.cfg["stt"])
+        self.assertNotEqual(calls[0][1], str(clip))
+        self.assertFalse(Path(calls[0][1]).exists())
         self.assertIn("Merhaba!", self.bubbles()[-1])
+
+    def test_hard_stop_cancels_recording_transcription_and_drains(self):
+        clip = self.clip()
+        reached = []
+        async def engine(model, wav, stem):
+            reached.append(str(wav))
+            try:
+                await asyncio.Future()
+            finally:
+                reached.append("drained")
+        self.ui.transcribe_runner = engine
+        self.ui.run_transcribe(str(clip))
+        self.until(lambda: bool(reached))
+        self.assertTrue(self.ui.busy)
+        self.assertTrue(self.ui.hard.get_sensitive())
+        self.ui.hard_stop()
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(reached[-1], "drained")
+        self.assertFalse(Path(reached[0]).exists())
+        self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
+
+    def test_recording_generation_change_during_task_binding_refused(self):
+        clip = self.clip()
+        runner, calls = self.runner()
+        self.ui.transcribe_runner = runner
+        bind = self.ui.tool_checkpoint
+        selection_epoch = self.ui.session.epoch
+        def replace_on_bind(action, scope, epoch, **kwargs):
+            if epoch != selection_epoch:
+                old = self.ui.active_profile()
+                self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+            return bind(action, scope, epoch, **kwargs)
+        with patch.object(self.ui, "tool_checkpoint", side_effect=replace_on_bind):
+            self.ui.run_transcribe(str(clip))
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "profile_changed")
+        self.assertFalse(calls)
+        self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
+
+    def test_recording_replacement_after_submission_refused(self):
+        clip = self.clip()
+        runner, calls = self.runner()
+        self.ui.transcribe_runner = runner
+        self.ui.run_transcribe(str(clip))
+        clip.unlink()
+        self.clip()
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "recording_changed")
+        self.assertFalse(calls)
+        self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
 
     def test_a_rejected_recording_is_a_bounded_reason(self):
         runner, calls = self.runner()
@@ -4345,6 +4432,23 @@ class LocalAnalysisTests(DesktopFixture):
         self.assertEqual(self.ui.board.rows[-1].state, "failed")
         self.assertIn("analysis_invalid_proposal", self.ui.board.rows[-1].reason)
 
+    def test_analysis_speech_checkpoint_refuses_replaced_profile(self):
+        reached = []
+        async def engine(speech, publish, *, checkpoint):
+            checkpoint()
+            reached.append("synthesis")
+            old = self.ui.active_profile()
+            self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+            checkpoint()
+            reached.append("playback")
+        with patch.object(desktop.audio, "speak", side_effect=engine):
+            self.ui.analysis.start_selected(str(self.fixture()), language="en", speak=True)
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(reached, ["synthesis"])
+        self.assertEqual(self.ui.status.get_text(), "analysis_speech_failed")
+        self.assertIsNone(self.ui.leases.owner("audio_playback"))
+        self.assertFalse(self.backend.requests)
+
     def test_selected_file_spoken_summary_can_be_stopped(self):
         self.ui.analysis.start_selected(str(self.fixture()), language="en", speak=True)
         self.until(lambda: self.ui.stage == "speaking")
@@ -4801,6 +4905,26 @@ class ReviewSecurityTests(DesktopFixture):
                         if row["profile"] == profile.id and row["action"] == "local_audio_device"]
                 self.assertTrue(rows)
                 self.assertTrue(all(row["decision"] == "deny" for row in rows))
+
+    def test_voice_capture_checkpoint_refuses_replacement_inside_engine(self):
+        self.connect_model()
+        reached = []
+        async def engine(model, finish, publish, *, checkpoint):
+            checkpoint()
+            reached.append("capture")
+            old = self.ui.active_profile()
+            self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+            checkpoint()
+            reached.append("transcription")
+            return "SYNTHETIC-CANARY"
+        with patch.object(desktop.audio, "listen", side_effect=engine):
+            self.click(self.ui.talk)
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(reached, ["capture"])
+        self.assertEqual(str(self.ui.session.active.exception()), "profile_changed")
+        self.assertIsNone(self.ui.leases.owner("microphone"))
+        self.assertFalse(self.bubbles())
+        self.assertFalse(self.backend.requests)
 
     def test_voice_expiry_between_submission_and_capture(self):
         self.connect_model()

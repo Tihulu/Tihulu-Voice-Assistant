@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .. import resources
+from ..selected_csv import selection_identity, copy_selected_to
 from .m1 import Hold, Voice
 
 
@@ -104,7 +105,7 @@ async def terminate(p):
 
 
 @asynccontextmanager
-async def child(name, *args, stdin=False):
+async def child(name, *args, stdin=False, checkpoint=lambda: None):
     # A desktop user chooses model data only. Executable names below are fixed;
     # neither transcripts nor model replies can select executables or flags.
     if name not in ("arecord","whisper-cli","piper","aplay"):
@@ -112,10 +113,15 @@ async def child(name, *args, stdin=False):
     binary = shutil.which(name)
     if not binary:
         raise Hold("missing_" + name)
-    spawn = asyncio.create_task(asyncio.create_subprocess_exec(binary, *map(str,args),
-        stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-        env={**os.environ, **spawn_environment()}))
+    checkpoint()
+    async def start():
+        # This runs in the scheduled spawn task, not merely before queuing it.
+        checkpoint()
+        return await asyncio.create_subprocess_exec(binary, *map(str,args),
+            stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            env={**os.environ, **spawn_environment()})
+    spawn = asyncio.create_task(start())
     try:
         p = await asyncio.shield(spawn)
     except asyncio.CancelledError:
@@ -126,6 +132,7 @@ async def child(name, *args, stdin=False):
     except OSError:
         raise Hold("audio_start_failed") from None
     try:
+        checkpoint()
         yield p
     finally:
         await terminate(p)
@@ -152,16 +159,57 @@ def has_signal(path):
     return False
 
 
-async def listen(model, finish, publish):
+# Only active audio operations poll. The deadline includes polling time.
+AUTH_POLL = .25
+
+
+async def await_authorized(factory, timeout, checkpoint):
+    """Await owned work with bounded grant checks and drain on refusal.
+
+    checkpoint is a trusted synchronous callback that raises Hold on denial.
+    The caller's child context owns process termination and reaping.
+    """
+    checkpoint()
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    async def start():
+        checkpoint()
+        return await factory()
+    task = asyncio.create_task(start())
+    try:
+        while True:
+            checkpoint()
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise asyncio.TimeoutError
+            done, _ = await asyncio.wait((task,), timeout=min(AUTH_POLL, remaining))
+            checkpoint()
+            if done:
+                return task.result()
+    finally:
+        if not task.done():
+            task.cancel()
+        # Retrieve exceptions even when authorization failed simultaneously.
+        await asyncio.gather(task, return_exceptions=True)
+
+
+async def listen(model, finish, publish, *, checkpoint):
+    checkpoint()
     model = selected_file(model, ".bin")
     if not tools_ready("arecord","whisper-cli"):
         raise Hold("capture_backend_missing")
     with tempfile.TemporaryDirectory(prefix="tihulu-capture-") as tmp:
         wav, stem = Path(tmp)/"input.wav", Path(tmp)/"transcript"
-        async with child("arecord","-q","-t","wav","-f","S16_LE","-r","16000","-c","1","-d","30",wav) as p:
+        checkpoint()
+        async with child("arecord","-q","-t","wav","-f","S16_LE","-r","16000","-c","1","-d","30",wav, checkpoint=checkpoint) as p:
             heard_start = False
             began = asyncio.get_running_loop().time()
+            next_check = began
             while p.returncode is None:
+                now = asyncio.get_running_loop().time()
+                if now >= next_check:
+                    checkpoint()
+                    next_check = now + AUTH_POLL
                 if not heard_start and wav.exists() and wav.stat().st_size > 44:
                     heard_start = True
                     publish("listening")
@@ -175,75 +223,122 @@ async def listen(model, finish, publish):
                 if (not heard_start and age > 4) or age > 33:
                     raise Hold("capture_timeout")
                 await asyncio.sleep(.04)
-            await asyncio.wait_for(p.wait(), 2)
+            await await_authorized(p.wait, 2, checkpoint)
+        checkpoint()
         if not await asyncio.to_thread(has_signal, wav):
             raise Hold("no_speech_signal")
+        checkpoint()
         publish("transcribing")
-        async with child("whisper-cli","-m",model,"-f",wav,"-l","auto","-otxt","-of",stem) as p:
-            if await asyncio.wait_for(p.wait(), 120):
+        checkpoint()
+        async with child("whisper-cli","-m",model,"-f",wav,"-l","auto","-otxt","-of",stem, checkpoint=checkpoint) as p:
+            if await await_authorized(p.wait, 120, checkpoint):
                 raise Hold("transcription_failed")
+        checkpoint()
         output = stem.with_suffix(".txt")
         if not output.is_file() or output.stat().st_size > 64000:
             raise Hold("invalid_transcript")
         text = output.read_text(encoding="utf-8").strip()
         if not text or len(text)>16000 or not any(ch.isalnum() for ch in text):
             raise Hold("empty_transcript")
+        checkpoint()
         return text
 
 
 MAX_TRANSCRIPT = 64000
 
 
-async def transcribe(model, recording, runner=None, publish=None):
-    """Transcribe an owner-supplied recording without touching the microphone.
+MAX_RECORDING = 256 * 1024 * 1024
 
-    ``runner(model, wav, stem)`` is the speech engine; the default uses
-    whisper-cli, and tests inject a fixture. Nothing is recorded here.
-    """
-    model = selected_file(model, ".bin")
-    recording = Path(recording)
-    if not recording.is_absolute() or not recording.is_file():
+
+def recording_identity(recording, *, checkpoint):
+    checkpoint()
+    if not isinstance(recording, str) or not Path(recording).is_absolute():
         raise Hold("recording_not_found")
-    if recording.suffix.lower() != ".wav" or recording.stat().st_size > 256 * 1024 * 1024:
+    if Path(recording).suffix.lower() != ".wav":
         raise Hold("unsupported_recording")
-    if not await asyncio.to_thread(has_signal, recording):
-        raise Hold("no_speech_signal")
-    runner = runner or _whisper
-    if publish:
-        publish("transcribing")
+    def authorized():
+        checkpoint()
+        return True
+    try:
+        return selection_identity(recording, authorized=authorized, max_bytes=MAX_RECORDING)
+    except Hold as exc:
+        if str(exc) == "csv_selection_unreadable":
+            raise Hold("recording_not_found") from None
+        if str(exc) in ("csv_invalid_size", "csv_not_regular_file", "csv_invalid_selection"):
+            raise Hold("unsupported_recording") from None
+        raise
+
+
+async def transcribe(model, recording, runner=None, publish=None, *, checkpoint,
+                     expected_identity=None):
+    """Transcribe a bounded private copy of an explicitly selected recording."""
+    checkpoint()
+    model = selected_file(model, ".bin")
+    identity = recording_identity(recording, checkpoint=checkpoint)
+    if expected_identity is not None and identity != expected_identity:
+        raise Hold("recording_changed")
+    def authorized():
+        checkpoint()
+        return True
     with tempfile.TemporaryDirectory(prefix="tihulu-transcribe-") as tmp:
         stem = Path(tmp) / "transcript"
-        await runner(model, recording, stem)
+        snapshot = Path(tmp) / "selected.wav"
+        try:
+            await copy_selected_to(recording, snapshot, authorized=authorized,
+                                   expected_identity=identity, max_bytes=MAX_RECORDING)
+        except Hold as exc:
+            if str(exc) in ("csv_selection_changed", "csv_changed_during_read"):
+                raise Hold("recording_changed") from None
+            raise
+        checkpoint()
+        if not await asyncio.to_thread(has_signal, snapshot):
+            raise Hold("no_speech_signal")
+        checkpoint()
+        if publish:
+            publish("transcribing")
+        checkpoint()
+        if runner is None:
+            await _whisper(model, snapshot, stem, checkpoint=checkpoint)
+        else:
+            await await_authorized(lambda: runner(model, snapshot, stem), 120, checkpoint)
+        checkpoint()
         output = stem.with_suffix(".txt")
         if not output.is_file() or output.stat().st_size > MAX_TRANSCRIPT:
             raise Hold("invalid_transcript")
         text = output.read_text(encoding="utf-8").strip()
         if not text or len(text) > 16000 or not any(ch.isalnum() for ch in text):
             raise Hold("empty_transcript")
+        checkpoint()
         return text
 
 
-async def _whisper(model, wav, stem):
+async def _whisper(model, wav, stem, *, checkpoint):
+    checkpoint()
     if not tools_ready("whisper-cli"):
         raise Hold("transcription_backend_missing")
     async with child("whisper-cli", "-m", model, "-f", wav, "-l", "auto",
-                     "-otxt", "-of", stem) as p:
-        if await asyncio.wait_for(p.wait(), 120):
+                     "-otxt", "-of", stem, checkpoint=checkpoint) as p:
+        if await await_authorized(p.wait, 120, checkpoint):
             raise Hold("transcription_failed")
 
 
-async def speak(speech, publish):
+async def speak(speech, publish, *, checkpoint):
+    checkpoint()
     model = voice_for(speech.voice_id, speech.language)
     if not tools_ready("piper","aplay"):
         raise Hold("playback_backend_missing")
     with tempfile.TemporaryDirectory(prefix="tihulu-playback-") as tmp:
         wav = Path(tmp)/"reply.wav"
         publish("synthesizing")
-        async with child("piper","--model",model.id,"--output_file",wav, stdin=True) as p:
-            await asyncio.wait_for(p.communicate((speech.text+"\n").encode("utf-8")), 90)
+        checkpoint()
+        async with child("piper","--model",model.id,"--output_file",wav, stdin=True, checkpoint=checkpoint) as p:
+            await await_authorized(lambda: p.communicate((speech.text+"\n").encode("utf-8")), 90, checkpoint)
             if p.returncode or not wav.is_file() or wav.stat().st_size <= 44:
                 raise Hold("synthesis_failed")
-        async with child("aplay","-q",wav) as p:
+        checkpoint()
+        async with child("aplay","-q",wav, checkpoint=checkpoint) as p:
+            checkpoint()
             publish("speaking")
-            if await asyncio.wait_for(p.wait(),180):
+            if await await_authorized(p.wait, 180, checkpoint):
                 raise Hold("playback_failed")
+        checkpoint()

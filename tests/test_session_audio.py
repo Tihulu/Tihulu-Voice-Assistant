@@ -106,7 +106,7 @@ class TranscribeFileTests(unittest.IsolatedAsyncioTestCase):
         clip = self.recording()
         seen = []
         result = await audio.transcribe(str(self.model), str(clip), await self.fixture_runner("Merhaba!"),
-                                        publish=seen.append)
+                                        publish=seen.append, checkpoint=lambda: None)
         self.assertEqual(result, "Merhaba!")
         self.assertEqual(seen, ["transcribing"])
 
@@ -122,13 +122,13 @@ class TranscribeFileTests(unittest.IsolatedAsyncioTestCase):
             f.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
             f.writeframes(b"\x00\x00" * 800)
         with self.assertRaisesRegex(Hold, "no_speech_signal"):
-            await audio.transcribe(str(self.model), str(silent), counting)
+            await audio.transcribe(str(self.model), str(silent), counting, checkpoint=lambda: None)
         with self.assertRaisesRegex(Hold, "recording_not_found"):
-            await audio.transcribe(str(self.model), str(self.tmp / "missing.wav"), counting)
+            await audio.transcribe(str(self.model), str(self.tmp / "missing.wav"), counting, checkpoint=lambda: None)
         unsupported = self.tmp / "clip.mp3"
         unsupported.write_bytes(b"not audio")
         with self.assertRaisesRegex(Hold, "unsupported_recording"):
-            await audio.transcribe(str(self.model), str(unsupported), counting)
+            await audio.transcribe(str(self.model), str(unsupported), counting, checkpoint=lambda: None)
         self.assertEqual(calls, [])
 
     async def test_a_failed_engine_is_bounded(self):
@@ -136,8 +136,8 @@ class TranscribeFileTests(unittest.IsolatedAsyncioTestCase):
             raise OSError("fixture")
 
         with self.assertRaises(OSError):
-            await audio.transcribe(str(self.model), str(self.recording()), broken)
+            await audio.transcribe(str(self.model), str(self.recording()), broken, checkpoint=lambda: None)
         # A whitespace-only transcript is empty, which is the precise reason.
         with self.assertRaisesRegex(Hold, "empty_transcript"):
             await audio.transcribe(str(self.model), str(self.recording()),
-                                   await self.fixture_runner("   "))
+                                   await self.fixture_runner("   "), checkpoint=lambda: None)

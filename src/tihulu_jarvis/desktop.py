@@ -2994,7 +2994,10 @@ def create_window(app, loop, bridge=None):
                 # device: a refused lease is a bounded reason.
                 async with self.leases.hold("audio_playback", "preview"):
                     self.require_tools(("local_audio_device", ("push_to_talk",)))
-                    await audio.speak(speech, progress)
+                    checkpoint = self.tool_checkpoint("local_audio_device", ("push_to_talk",),
+                                                     epoch, selection=lambda: self.cfg["voices"].get(lang),
+                                                     expected=speech.voice_id)
+                    await audio.speak(speech, progress, checkpoint=checkpoint)
             self.submit(run)
 
         def test_chat(self):
@@ -3046,21 +3049,60 @@ def create_window(app, loop, bridge=None):
             self.show_owned_picker(dialog, response)
 
         def run_transcribe(self, path):
-            """Transcribe an owner-supplied recording; nothing is captured here."""
+            """Own selected-recording transcription as an ordinary cancellable task."""
+            if self.busy or self.closing:
+                return
             try:
                 self.require_tools(("filesystem_read", ("recording",)), selected=True)
-                self.set_state("ready", "transcribing")
-                raw = self.loop.run_until_complete(
-                    audio.transcribe(self.cfg["stt"], path, runner=self.transcribe_runner))
+                model = self.cfg["stt"]
+                context = self.picker_context()
+                selection = self.tool_checkpoint("filesystem_read", ("recording",),
+                                                 self.session.epoch, selected=True,
+                                                 selection=lambda: self.cfg["stt"], expected=model,
+                                                 expected_generation=(context[0], context[4]))
+                identity = audio.recording_identity(path, checkpoint=selection)
             except Hold as exc:
                 self.set_state("ready", str(exc))
-                return None
-            except Exception:
-                self.set_state("ready", "local_operation_failed")
-                return None
-            self.bubble("Recording", raw)
-            self.set_state("ready", "transcribed")
-            return raw
+                return
+            async def run(epoch):
+                # submit owns a new epoch; compare the other selection fields.
+                current = self.picker_context()
+                if current[:3] != context[:3] or current[4] != context[4]:
+                    raise Hold("profile_changed")
+                checkpoint = self.tool_checkpoint("filesystem_read", ("recording",),
+                                                 epoch, selected=True,
+                                                 selection=lambda: self.cfg["stt"], expected=model,
+                                                 expected_generation=(context[0], context[4]))
+                checkpoint()
+                self.set_state("transcribing")
+                raw = await audio.transcribe(model, path, runner=self.transcribe_runner,
+                                             checkpoint=checkpoint, expected_identity=identity)
+                checkpoint()
+                self.bubble("Recording", raw)
+                self.turn_outcome = "transcribed"
+                return raw
+            self.turn_note = tr("Transcribe selected recording", "Seçili kaydı yazıya çevir",
+                                "Ausgewählte Aufnahme transkribieren")
+            self.submit(run)
+
+        def tool_checkpoint(self, action, scope, epoch, *, selected=False,
+                            selection=lambda: None, expected=None, expected_generation=None):
+            """Bind a trusted operation to its exact generation and selection."""
+            active = self.cfg.get("profile")
+            profile, stamp = self.store.snapshot(active)
+            if expected_generation is not None and (active, stamp) != expected_generation:
+                raise Hold("profile_changed")
+            def identity():
+                self.session.check(epoch)
+                if (self.closing or self.cfg.get("profile") != active
+                        or selection() != expected or not self.store.is_current(active, stamp)):
+                    raise Hold("profile_changed")
+            def check():
+                identity()
+                profiles.require_tool(profile, action, scope, self.store.policy_now(), selected=selected)
+                identity()
+            check()
+            return check
 
         def require_tools(self, *requests, selected=False):
             """Refuse an action the active profile denies, at the moment it runs.
@@ -3541,9 +3583,13 @@ def create_window(app, loop, bridge=None):
                 if capture_live.stamp != capture_route[5]:
                     raise Hold("profile_changed")
 
+                stt_choice = self.cfg["stt"]
+                voice_choices = dict(self.cfg["voices"])
+
                 def check_voice_grant():
                     self.session.check(epoch)
-                    if not self.route_current(capture_route):
+                    if (not self.route_current(capture_route)
+                            or self.cfg["stt"] != stt_choice or self.cfg["voices"] != voice_choices):
                         raise Hold("profile_changed")
                     decision, reason = capture_live.evaluate("local_audio_device", ("push_to_talk",))
                     if decision != profiles.ALLOW:
@@ -3569,7 +3615,7 @@ def create_window(app, loop, bridge=None):
                     self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
                     check_voice_grant()
-                    text=await audio.listen(self.cfg["stt"],self.finish,progress)
+                    text=await audio.listen(stt_choice,self.finish,progress, checkpoint=check_voice_grant)
                 # Already captured samples cannot be undone. Refuse to display
                 # or dispatch the returned transcription after revocation.
                 self.note_leases()
@@ -3607,7 +3653,7 @@ def create_window(app, loop, bridge=None):
                     self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
                     check_voice_grant()
-                    playback = loop.create_task(audio.speak(speech, progress))
+                    playback = loop.create_task(audio.speak(speech, progress, checkpoint=check_voice_grant))
                     self.playback = playback
                     try:
                         # Stop Speaking preserves the turn. Cancel Turn invalidates

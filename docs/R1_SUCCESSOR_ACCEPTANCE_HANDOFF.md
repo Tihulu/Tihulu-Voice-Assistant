@@ -56,3 +56,30 @@ paused capture and paused backend cases separately. A reply committed while
 still authorized is not retroactively erased by later expiry. The disclosure
 UI reports only the direct loopback transport and explicitly unknown upstream
 processing. Physical verification of the service and isolation remain HOLD.
+
+## ADJ-04 successor (PR #101)
+
+The frozen #100 remains unchanged. The successor requires an explicit trusted
+checkpoint for every listen, speak and transcribe call; ordinary voice, preview,
+selected recording and analysis speech supply existing profile-generation and
+epoch checks. Active subprocess waits poll at a nominal 250 ms and each stage
+checks before spawn, inside the scheduled spawn task, after spawn and before
+publication. Test both transitions, active capture/playback drain, refused
+spawn, timeout/cancellation, and all four native call sites. This is a nominal
+polling interval, not a measured device cutoff deadline. OS spawn and cleanup
+latency, hostile same-UID processes, existing captured/played data and real
+hardware remain outside this guarantee. Low-level standalone child tests retain
+their trusted default callback; production audio entrypoints have no default.
+
+## Selected recording cancellation and identity
+
+Selected recording now uses the same owned task/epoch and Hard Stop lifecycle.
+A regular WAV is identified at selection, bound to the exact policy generation
+through task binding, copied using descriptor-relative traversal to a private
+mode-0600 snapshot, and checked again before invoking Whisper. Maximum source
+size 256 MiB; copy chunks 256 KiB with cooperative yields. Test selection-to-task
+replacement, same-version profile replacement during binding, FIFO rejection,
+snapshot privacy/cleanup, and cancellation while transcription is paused.
+The private copy is removed on ordinary completion or cancellation; hard
+process/host crash cleanup and filesystem blocking latency are not certified.
+No physical timing or full independent test reproduction claim.

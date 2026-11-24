@@ -324,7 +324,13 @@ class AnalysisView:
                 def progress(stage):
                     if epoch == self.ui.session.epoch and not self.ui.playback_stopping:
                         self.ui.set_state(stage)
-                playback = asyncio.create_task(audio.speak(speech, progress))
+                def checkpoint():
+                    self.ui.session.check(epoch)
+                    self._matches(context)
+                    if (self.live_policy.evaluate("local_audio_device", ("push_to_talk",))[0] != profiles.ALLOW
+                            or self.ui.cfg["voices"].get(artifact.language) != speech.voice_id):
+                        raise Hold("analysis_audio_denied")
+                playback = asyncio.create_task(audio.speak(speech, progress, checkpoint=checkpoint))
                 self.ui.playback = playback
                 try:
                     await asyncio.shield(playback)
