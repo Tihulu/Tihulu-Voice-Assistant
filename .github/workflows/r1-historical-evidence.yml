@@ -1,0 +1,59 @@
+name: Exact R1 historical evidence
+on:
+  pull_request:
+    branches: ['review/r1-deadline-and-qa-consolidated']
+    paths: ['.github/workflows/r1-historical-evidence.yml']
+permissions:
+  contents: read
+jobs:
+  historical:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: f84ff73911c7e9456dd59044de3302048c5f0b00
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify pinned source and historical refs; run exact tests
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import unittest
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          head = 'f84ff73911c7e9456dd59044de3302048c5f0b00'
+          assert git('rev-parse', 'HEAD') == head
+          assert git('rev-parse', '--is-shallow-repository') == 'false'
+          assert not git('status', '--porcelain')
+          pins = {
+              'feat/usage-report': '60f237df43631a1c4ec3619ac3e6f409935a251a',
+              'feat/approved-sources': '36cc9fdf9d0103cb6a6101d3a37cdb7d6456d3a2',
+              'feat/profile-ui': '627309491c568cef3d799fcbd1853ebc8c106f96',
+              'feat/modes-and-profiles': '6a21bf7003039d8d63684c9e5572859ad22ec5a2',
+              'feat/market-ui': 'c9e8c87bb52505f21532f94025307962feaeb220',
+              'feat/market-consolidated': '29cc369acd052efb526d9c3c51320a9323f5a0bb',
+          }
+          for name, sha in pins.items():
+              actual = git('rev-parse', 'refs/remotes/origin/' + name)
+              if actual != sha:
+                  raise SystemExit('Historical ref changed: ' + name)
+              git('cat-file', '-e', sha + '^{commit}')
+              git('branch', name, sha)
+              assert git('rev-parse', 'refs/heads/' + name) == sha
+              print('Verified', name, sha, flush=True)
+          failed = False
+          for pattern in ('test_conflict_check.py', 'test_rehearsal_gate.py'):
+              suite = unittest.TestLoader().discover('tests', pattern=pattern)
+              expected = 11 if pattern == 'test_conflict_check.py' else 9
+              assert suite.countTestCases() == expected
+              result = unittest.TextTestRunner(verbosity=2).run(suite)
+              print(pattern, 'ran', result.testsRun, 'skips', len(result.skipped), flush=True)
+              failed |= not result.wasSuccessful() or bool(result.skipped)
+          assert git('rev-parse', 'HEAD') == head
+          assert not git('status', '--porcelain')
+          raise SystemExit(int(failed))
+          PY
