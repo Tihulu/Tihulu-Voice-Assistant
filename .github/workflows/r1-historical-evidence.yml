@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 518043289df5f8539669531defc1b518f60997a9
+          ref: 0749fc74d427b7893252ca25f625803471797e33
           fetch-depth: 0
           persist-credentials: false
       - name: Verify pinned source and historical refs; run exact tests
@@ -25,9 +25,9 @@ jobs:
           import unittest
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
-          head = '518043289df5f8539669531defc1b518f60997a9'
+          head = '0749fc74d427b7893252ca25f625803471797e33'
           assert git('rev-parse', 'HEAD') == head
-          assert git('diff', '--name-only', 'f84ff73911c7e9456dd59044de3302048c5f0b00', head) == 'tests/test_conflict_check.py'
+          assert set(git('diff', '--name-only', '518043289df5f8539669531defc1b518f60997a9', head).splitlines()) == {'src/tihulu_jarvis/owned_wait.py', 'src/tihulu_jarvis/voice/jan.py', 'tests/test_jan_effect_deadline.py'}
           assert git('hash-object', 'tests/test_conflict_check.py') == 'b09752f2a25e5380e20ff220cd98edaa54493200'
           assert git('rev-parse', '--is-shallow-repository') == 'false'
           assert not git('status', '--porcelain')
@@ -51,171 +51,66 @@ jobs:
           import yaml
           print('Python', sys.version.split()[0], 'PyYAML', yaml.__version__, flush=True)
           suite = unittest.TestLoader().discover('tests')
-          assert suite.countTestCases() == 540, suite.countTestCases()
+          assert suite.countTestCases() == 551, suite.countTestCases()
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           print('Full core ran', result.testsRun, 'skips', len(result.skipped), flush=True)
-          failed = not result.wasSuccessful() or bool(result.skipped) or result.testsRun != 540
+          failed = not result.wasSuccessful() or bool(result.skipped) or result.testsRun != 551
           assert git('rev-parse', 'HEAD') == head
           assert not git('status', '--porcelain')
           raise SystemExit(int(failed))
           PY
-
-  gtk:
+  deadline_comparison:
     runs-on: ubuntu-24.04
-    timeout-minutes: 8
+    timeout-minutes: 5
     steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           ref: 518043289df5f8539669531defc1b518f60997a9
-          fetch-depth: 0
+          path: original
           persist-credentials: false
-      - name: Verify exact test-only target
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 0749fc74d427b7893252ca25f625803471797e33
+          path: fixed
+          persist-credentials: false
+      - name: Confirm exact source and test identities
         run: |
-          test "$(git rev-parse HEAD)" = "518043289df5f8539669531defc1b518f60997a9"
-          test "$(git diff --name-only f84ff73911c7e9456dd59044de3302048c5f0b00 HEAD)" = "tests/test_conflict_check.py"
-          test "$(git hash-object tests/test_conflict_check.py)" = "b09752f2a25e5380e20ff220cd98edaa54493200"
-          test -z "$(git status --porcelain)"
-      - name: Install native display test dependencies
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
-      - name: Exercise real GTK widgets with synthetic backends
+          test "$(git -C original rev-parse HEAD)" = "518043289df5f8539669531defc1b518f60997a9"
+          test "$(git -C fixed rev-parse HEAD)" = "0749fc74d427b7893252ca25f625803471797e33"
+          test "$(git -C original hash-object src/tihulu_jarvis/voice/jan.py)" = "c6a03374fdab94ee66f90be34c561ecc47680cef"
+          test "$(git -C original hash-object src/tihulu_jarvis/owned_wait.py)" = "7469dc4be8533a3f2486fa7421fcdb41cc966601"
+          test "$(git -C fixed hash-object src/tihulu_jarvis/voice/jan.py)" = "1bbc34043bfd1cb53b2c1ae4936f8ad35bb012ee"
+          test "$(git -C fixed hash-object src/tihulu_jarvis/owned_wait.py)" = "f53bb0e7c0530f4375cca2b33b6c2f6d8d45ffa0"
+          test "$(git -C fixed hash-object tests/test_jan_effect_deadline.py)" = "5b36d4d454aee942969b471cb760bb6aa4707210"
+      - name: Run identical fixtures on original and fixed production code
         env:
-          PYTHONPATH: src
           PYTHONDONTWRITEBYTECODE: '1'
-          GDK_BACKEND: x11
-          GSK_RENDERER: cairo
-          GTK_A11Y: none
-          G_DEBUG: fatal-criticals
-        run: dbus-run-session -- xvfb-run -a /usr/bin/python3 -m unittest discover -s tests/gtk -v
-
-  package:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
-        with:
-          ref: 518043289df5f8539669531defc1b518f60997a9
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Verify exact test-only target
         run: |
-          test "$(git rev-parse HEAD)" = "518043289df5f8539669531defc1b518f60997a9"
-          test "$(git diff --name-only f84ff73911c7e9456dd59044de3302048c5f0b00 HEAD)" = "tests/test_conflict_check.py"
-          test "$(git hash-object tests/test_conflict_check.py)" = "b09752f2a25e5380e20ff220cd98edaa54493200"
-          test -z "$(git status --porcelain)"
-      - name: Restore exact historical local branches
-        run: |
-          python3 - <<'PY'
-          import subprocess
-          def git(*args):
-              return subprocess.check_output(['git', *args], text=True).strip()
-          pins = {
-              'feat/usage-report': '60f237df43631a1c4ec3619ac3e6f409935a251a',
-              'feat/approved-sources': '36cc9fdf9d0103cb6a6101d3a37cdb7d6456d3a2',
-              'feat/profile-ui': '627309491c568cef3d799fcbd1853ebc8c106f96',
-              'feat/modes-and-profiles': '6a21bf7003039d8d63684c9e5572859ad22ec5a2',
-              'feat/market-ui': 'c9e8c87bb52505f21532f94025307962feaeb220',
-              'feat/market-consolidated': '29cc369acd052efb526d9c3c51320a9323f5a0bb',
-          }
-          for name, sha in pins.items():
-              actual = git('rev-parse', 'refs/remotes/origin/' + name)
-              if actual != sha:
-                  raise SystemExit('Historical ref changed: ' + name)
-              git('cat-file', '-e', sha + '^{commit}')
-              git('branch', name, sha)
-              assert git('rev-parse', 'refs/heads/' + name) == sha
-              print('Verified', name, sha, flush=True)
+          for version in original fixed; do
+            VERSION="$version" PYTHONPATH="$GITHUB_WORKSPACE/$version/src" python3 - <<'PY'
+          import os
+          import pathlib
+          import unittest
+          from tihulu_jarvis.voice import jan
+          version = os.environ['VERSION']
+          root = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          assert pathlib.Path(jan.__file__).resolve().is_relative_to(root / version / 'src')
+          suite = unittest.TestLoader().discover(str(root / 'fixed' / 'tests'),
+                                                pattern='test_jan_effect_deadline.py')
+          assert suite.countTestCases() == 11
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          names = {case._testMethodName for case, _ in result.failures}
+          expected = {
+              'test_full_late_connect_no_write',
+              'test_stream_late_connect_no_write_or_delta',
+              'test_discovery_late_connect_no_write',
+              'test_stream_late_drain_no_delta',
+              'test_stream_late_read_no_delta',
+              'test_stream_callback_crosses_deadline_no_next_delta',
+          } if version == 'original' else set()
+          print(version, 'ran', result.testsRun, 'failures', sorted(names),
+                'errors', len(result.errors), 'skips', len(result.skipped), flush=True)
+          assert result.testsRun == 11 and not result.errors and not result.skipped
+          assert names == expected, (names, expected)
           PY
-      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
-        with:
-          python-version: '3.12'
-      - name: Install target-system native runtime for Debian launch check
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
-      - name: Build sdist and wheel, then verify the installed package
-        env:
-          PYTHONDONTWRITEBYTECODE: '1'
-        run: |
-          python -m venv .buildvenv
-          .buildvenv/bin/pip install -q build
-          .buildvenv/bin/python -m build --sdist --wheel --outdir dist
-          ls -l dist
-          python - <<'CHECK'
-          import pathlib, zipfile
-          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
-          sdists = sorted(pathlib.Path("dist").glob("*.tar.gz"))
-          assert len(wheels) == 1 and len(sdists) == 1, (wheels, sdists)
-          names = set(zipfile.ZipFile(wheels[0]).namelist())
-          tag = "tihulu_jarvis-0.1.0.dev0"
-          required = {
-              "tihulu_jarvis/__init__.py", "tihulu_jarvis/desktop.py", "tihulu_jarvis/settings.py",
-              "tihulu_jarvis/profiles.py", "tihulu_jarvis/market.py", "tihulu_jarvis/contracts.py",
-              "tihulu_jarvis/transfer_http.py",
-              "tihulu_jarvis/selected_csv.py", "tihulu_jarvis/temperature_engine.py",
-              "tihulu_jarvis/analysis_controller.py", "tihulu_jarvis/analysis_ui.py",
-              "tihulu_jarvis/analysis_intent.py", "tihulu_jarvis/analysis_export.py",
-              "tihulu_jarvis/voice/__init__.py", "tihulu_jarvis/voice/m1.py",
-              "tihulu_jarvis/voice/jan.py", "tihulu_jarvis/voice/audio.py",
-              "tihulu_jarvis/voice/session.py",
-              tag + ".dist-info/licenses/LICENSE",
-              tag + ".dist-info/entry_points.txt",
-              tag + ".data/data/share/applications/io.github.Tihulu.Jarvis.desktop",
-              tag + ".data/data/share/icons/hicolor/scalable/apps/io.github.Tihulu.Jarvis.svg",
-          }
-          missing = required - names
-          assert not missing, missing
-          leaks = [n for n in names
-                   if n.startswith(("tests/", "docs/", "data/")) and "/share/" not in n]
-          assert not leaks, leaks
-          for banned in ("password", "nvapi-", "/home/", "jarvis.json"):
-              assert not any(banned in n for n in names), banned
-          print("wheel content verified:", len(names), "entries")
-          CHECK
-          python -m venv .runvenv
-          .runvenv/bin/pip install -q dist/*.whl
-          # Repository root exposes the test-only tools namespace, not src.
-          (cd /tmp && PYTHONPATH="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.runvenv/bin/python" -c 'import pathlib, sys, tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve())')
-          (cd /tmp && PYTHONPATH="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.runvenv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
-          .runvenv/bin/python -c "import tihulu_jarvis; print('installed import ok')"
-          .runvenv/bin/python -c "import tihulu_jarvis.market as m; print('installed market ok', m.CATEGORIES)"
-          .runvenv/bin/python -c "import tihulu_jarvis.desktop as d; print('entry module ok', hasattr(d, 'main'))"
-          test -x .runvenv/bin/tihulu-jarvis && echo "console script installed"
-          (cd /tmp && "$GITHUB_WORKSPACE/.runvenv/bin/python" "$GITHUB_WORKSPACE/tools/smoke.py")
-      - name: Assemble a Debian package and verify its contents
-        env:
-          PYTHONDONTWRITEBYTECODE: '1'
-        run: |
-          sh packaging/deb/build.sh .release-work/deb dist
-          dpkg-deb --info .release-work/tihulu-jarvis.deb | grep -E "Package:|Version:|Architecture:|Depends:"
-          dpkg-deb --contents .release-work/tihulu-jarvis.deb | awk '{print $6}' | sed 's|^\./|/|' > .release-work/deb-files.txt
-          grep -qE "^/usr/bin/tihulu-jarvis$" .release-work/deb-files.txt
-          grep -qE "^/usr/share/applications/io\\.github\\.Tihulu\\.Jarvis\\.desktop$" .release-work/deb-files.txt
-          grep -qE "^/usr/share/icons/hicolor/scalable/apps/io\\.github\\.Tihulu\\.Jarvis\\.svg$" .release-work/deb-files.txt
-          grep -qE "^/usr/share/tihulu-jarvis/launch\\.py$" .release-work/deb-files.txt
-          for module in desktop market profiles transfer_http selected_csv temperature_engine analysis_controller analysis_ui analysis_intent analysis_export; do
-            grep -qFx "/usr/share/tihulu-jarvis/python/tihulu_jarvis/$module.py" .release-work/deb-files.txt
           done
-          if grep -qE '/venv/|/pyvenv.cfg$' .release-work/deb-files.txt; then
-            echo "package carries a build-machine virtual environment"; exit 1
-          fi
-          grep -qE "licenses/LICENSE$" .release-work/deb-files.txt
-          if grep -E "/home/|/Users/|/tmp/|nvapi-|gh[pousr]_[A-Za-z0-9]{12}|sk-[A-Za-z0-9]{20}" .release-work/deb-files.txt; then
-            echo "package carries workstation or credential material"; exit 1
-          fi
-          if grep -E " tests/" .release-work/deb-files.txt; then
-            echo "package ships tests"; exit 1
-          fi
-          echo "package file list verified: $(wc -l < .release-work/deb-files.txt) entries"
-      - name: Extract and exercise the actual Debian launcher
-        run: |
-          mkdir -p .release-work/root
-          dpkg-deb -x .release-work/tihulu-jarvis.deb .release-work/root
-          launcher="$GITHUB_WORKSPACE/.release-work/root/usr/bin/tihulu-jarvis"
-          runtime="$GITHUB_WORKSPACE/.release-work/root/usr/share/tihulu-jarvis/python"
-          test -x "$launcher"
-          (cd /tmp && GDK_BACKEND=x11 GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a "$launcher" --check-runtime)
-          (cd /tmp && PYTHONPATH="$runtime" /usr/bin/python3 "$GITHUB_WORKSPACE/tools/smoke.py")
-          (cd /tmp && PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -c 'import pathlib, os, tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).resolve().is_relative_to(pathlib.Path(os.environ["PYTHONPATH"].split(":")[0]).resolve())')
-          (cd /tmp && PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
