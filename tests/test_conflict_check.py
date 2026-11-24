@@ -86,16 +86,6 @@ class RehearsalTests(unittest.TestCase):
         self.assertIn("#12 feat/market-ui                   applies cleanly", out)
         self.assertNotIn("CONFLICT", out)
 
-    def test_a_conflicted_path_list_never_contains_a_message(self):
-        # The parser reads only the path list: merge-tree's message section
-        # starts after a blank line and is never reported as a path.
-        self.need("feat/market-consolidated", "feat/market-ui")
-        _, out, _ = self.report_for([{"number": 19, "head": "feat/market-consolidated",
-                                   "base": "feat/market-ui"}])
-        self.assertIn("merge it, do not rebase", out)
-        self.assertNotIn("Auto-merging", out)
-        self.assertNotIn("CONFLICT (content)", out)
-
     def test_a_missing_head_is_not_silently_clean(self):
         self.need("feat/usage-report")
         code, out, _ = self.report_for([{"number": 7, "head": "no-such-head",
@@ -118,11 +108,18 @@ class MergePRTests(unittest.TestCase):
             self.skipTest("this clone does not carry %s"
                           % ", ".join(b for b in branches if b not in have))
 
-    def test_a_merge_pr_is_reported_as_merge_not_rebase(self):
+    def test_already_merged_pr_rehearses_cleanly(self):
+        # PR #19 has already been merged. Assert the actual historical
+        # topology rather than asking for advice on an already-contained head.
         self.need("feat/market-consolidated", "feat/market-ui")
-        out, _ = self.report_for([{"number": 19, "head": "feat/market-consolidated",
-                                   "base": "feat/market-ui"}])
-        self.assertIn("merge it, do not rebase", out)
+        subprocess.run(["git", "merge-base", "--is-ancestor",
+                        "feat/market-consolidated", "feat/market-ui"], check=True)
+        out, err = self.report_for([{"number": 19, "head": "feat/market-consolidated",
+                                     "base": "feat/market-ui"}])
+        self.assertIn("applies cleanly", out)
+        self.assertIn("1 branches checked, 0 problems", out)
+        self.assertNotIn("merge it, do not rebase", out)
+        self.assertEqual(err, "")
 
     def test_a_normal_branch_is_not_mistaken_for_a_merge(self):
         self.need("feat/approved-sources", "feat/usage-report")
@@ -177,4 +174,24 @@ class DisposableRehearsalTests(unittest.TestCase):
         self.assertEqual(merge_tree("main", "feature"), (False, ["shared.txt"]))
         self.assertEqual(self.git("rev-parse", "HEAD"), before)
         self.assertEqual((self.root / "shared.txt").read_text(), "main\n")
+        self.assertEqual(self.git("status", "--porcelain"), "")
+
+    def test_a_conflicted_path_list_never_contains_a_message(self):
+        # Exercise a genuine conflict; an already-merged historical PR
+        # cannot test the separation of path names and Git diagnostics.
+        self.git("switch", "-c", "feature")
+        self.commit("shared.txt", "feature\n", "feature")
+        self.git("switch", "main")
+        self.commit("shared.txt", "main\n", "main")
+        before = self.git("rev-parse", "HEAD")
+        out, err = StringIO(), StringIO()
+        code = report([{"number": 1, "head": "feature", "base": "main"}],
+                      out=out, err=err)
+        self.assertEqual(code, 1)
+        self.assertIn("CONFLICT in shared.txt", err.getvalue())
+        self.assertIn("1 branches checked, 1 problems", out.getvalue())
+        for stream in (out, err):
+            self.assertNotIn("Auto-merging", stream.getvalue())
+            self.assertNotIn("CONFLICT (content)", stream.getvalue())
+        self.assertEqual(self.git("rev-parse", "HEAD"), before)
         self.assertEqual(self.git("status", "--porcelain"), "")
