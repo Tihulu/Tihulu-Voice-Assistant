@@ -67,3 +67,36 @@ class AttachmentTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), 1)
         self.assertFalse(self.session.history)
 
+
+
+    async def test_exact_utf8_wire_limit_and_one_byte_over(self):
+        import json
+        from tihulu_jarvis.voice.jan import LIMIT
+        attachment = item('ü😀\n"')
+        self.session.history = (Message("user", "seed"),)
+        decision, message = self.session.prepare_text("Hello!", attachment=attachment,
+                                                      model="fixture")
+        request = (Message("system", self.session._text_instruction(decision, 1)),
+                   *self.session.history, message)
+        wire = json.dumps({"model": "fixture", "stream": False,
+                           "messages": [{"role": m.role, "content": m.content}
+                                        for m in request]}, ensure_ascii=False).encode("utf-8")
+        padding = LIMIT - len(wire)
+        self.session.history = (Message("user", "seed" + "x" * padding),)
+        self.session.prepare_text("Hello!", attachment=attachment, model="fixture")
+        self.session.history = (Message("user", "seed" + "x" * (padding + 1)),)
+        with self.assertRaisesRegex(Hold, "^jan_request_too_large$"):
+            self.session.prepare_text("Hello!", attachment=attachment, model="fixture")
+
+    async def test_voice_cannot_replay_attachment_history_after_revocation(self):
+        from tihulu_jarvis.voice.m1 import Voice
+        await self.send("Hello!", item("synthetic private canary"))
+        self.assertTrue(self.session.has_attachment_history)
+        count = len(self.requests)
+        with self.assertRaisesRegex(Hold, "^attachment_context_changed$"):
+            await self.session.own(lambda epoch: self.session.reply(
+                "Hello!", self.backend, epoch, {"en": Voice("fixture", "en")},
+                authorize=lambda: False))
+        self.assertEqual(len(self.requests), count)
+        self.session.invalidate(clear=True)
+        self.assertFalse(self.session.has_attachment_history)
