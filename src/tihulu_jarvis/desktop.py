@@ -845,9 +845,13 @@ def create_window(app, loop, bridge=None):
             if chosen is None or self.busy:
                 return
             try:
-                clone = profiles.clone_to_custom(chosen, chosen.name + " copy")
+                current, _ = self.store.snapshot(chosen.id)
+                if current != chosen:
+                    raise Hold("profile_changed")
+                clone = profiles.clone_to_custom(current, current.name + " copy")
                 self.store.save(clone, create_only=True)
-                self.activate_profile(clone.id)
+                self.refresh_profiles()
+                self.switch_profile(clone.id)
             except Hold as exc:
                 self.set_state("ready", str(exc))
 

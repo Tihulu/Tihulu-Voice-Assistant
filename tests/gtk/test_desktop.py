@@ -535,7 +535,23 @@ class ProfileUITests(DesktopFixture):
         clone = self.ui.store.load("private-assistant-custom")
         self.assertEqual(clone.based_on_mode, "CUSTOM")
         self.assertFalse([r for r in clone.rules() if r.approval])
-        self.assertEqual(self.ui.cfg["profile"], "private-assistant-custom")
+        # A CUSTOM mode advertises capabilities even though the runtime gates
+        # are closed; cloning does not silently confirm that mode switch.
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+        self.until(lambda: bool(self.ui.confirmations))
+        dialog = self.ui.confirmations[-1]
+        box = dialog.get_child()
+        child = box.get_first_child()
+        while child is not None:
+            if isinstance(child, Gtk.Box):
+                button = child.get_first_child()
+                while button is not None:
+                    if isinstance(button, Gtk.Button) and (button.get_label() or "").startswith("Confirm"):
+                        button.emit("clicked")
+                        break
+                    button = button.get_next_sibling()
+            child = child.get_next_sibling()
+        self.until(lambda: self.ui.cfg["profile"] == "private-assistant-custom")
         self.connect_model()
         # A CUSTOM clone never silently inherits a granted capability.
         self.assertFalse(self.ui.talk.get_sensitive())
@@ -550,6 +566,15 @@ class ProfileUITests(DesktopFixture):
         self.click(self.ui.profile_activate)
         self.until(lambda: self.ui.talk.get_sensitive())
         self.assertEqual(self.ui.store.load("private-assistant").based_on_mode, "LOCAL_ONLY")
+
+    def test_stale_clone_selection_cannot_create_copy(self):
+        self.save_profile(Profile(id="extra", name="Old"))
+        self.pick("extra")
+        self.ui.store.save(Profile(id="extra", version=2, name="New"))
+        self.click(self.ui.profile_clone)
+        self.assertNotIn("extra-custom", self.ui.store.ids())
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+        self.assertEqual(self.ui.status.get_text(), "profile_changed")
 
     def test_import_is_pending_review_and_cannot_be_activated(self):
         text = profiles.Store._dump(profiles.Profile(
