@@ -84,8 +84,9 @@ class FetchTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Hold, "transport_not_available"):
             catalog_fetch.default_opener()("https://catalog.example.test/l.json", 1)
 
-    def test_the_stdlib_opener_verifies_tls_by_default(self):
-        import inspect
-        source = inspect.getsource(catalog_fetch.urlopen_opener)
-        self.assertIn("ssl.create_default_context()", source)
-        self.assertIn("response.headers.get(\"Location\")", source)
+    async def test_the_legacy_stdlib_opener_holds_before_network(self):
+        from unittest.mock import patch
+        with patch("urllib.request.urlopen", side_effect=AssertionError("unexpected network")) as request:
+            with self.assertRaisesRegex(Hold, "^catalog_transport_not_verified$"):
+                await catalog_fetch.fetch(self.URL, ALLOWED, catalog_fetch.urlopen_opener())
+            request.assert_not_called()
