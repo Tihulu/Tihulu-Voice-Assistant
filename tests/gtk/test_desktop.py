@@ -2621,6 +2621,18 @@ class AuditFilterUITests(AuditTrailUITests):
         self.until(lambda: self.ui.audit_list.get_text()
                    == "No decision matches this filter.")
 
+    def test_corrupt_audit_is_not_reported_as_empty(self):
+        profiles.audit_path(self.ui.store.root).write_text("[]\n")
+        self.ui.refresh_audit()
+        self.assertEqual(self.ui.audit_list.get_text(), "audit_unavailable")
+
+    def test_rejected_endpoint_is_audited_without_raw_credentials(self):
+        with self.assertRaises(Hold):
+            self.ui.require_endpoint("http://user:fixture-secret@example.invalid")
+        row = profiles.read_audit(self.ui.store.root)[-1]
+        self.assertEqual(row["scope"], ["not_loopback"])
+        self.assertNotIn("fixture-secret", profiles.audit_path(self.ui.store.root).read_text())
+
     def test_an_empty_log_is_different_from_a_filter_with_no_match(self):
         self.assertEqual(self.ui.audit_list.get_text(),
                          "No policy decisions recorded yet.")

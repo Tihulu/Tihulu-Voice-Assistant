@@ -566,6 +566,8 @@ def create_window(app, loop, bridge=None):
             try:
                 self.rebuild_audit_filters()
                 self.show_audit_rows()
+            except Hold:
+                self.audit_list.set_text("audit_unavailable")
             finally:
                 self.audit_building = False
 
@@ -587,7 +589,8 @@ def create_window(app, loop, bridge=None):
                 rows = profiles.read_audit(self.store.root, 40, action=chosen,
                                            decision=decision)
             except Hold:
-                rows = ()
+                self.audit_list.set_text("audit_unavailable")
+                return
             if not rows:
                 # An empty log and a filter that matches nothing are different
                 # facts; the reader is told which one holds.
@@ -3095,9 +3098,9 @@ def create_window(app, loop, bridge=None):
             except KeyError:
                 raise Hold("no_active_profile") from None
             except Hold as exc:
-                self.record_policy("endpoint", (raw[:64],), "deny", str(exc))
+                self.record_policy("endpoint", (disclosure.endpoint_scope(raw),), "deny", str(exc))
                 raise
-            self.record_policy("endpoint", (raw[:64],), "allow", "mode_policy")
+            self.record_policy("endpoint", (disclosure.endpoint_scope(raw),), "allow", "mode_policy")
             return result
 
         def backend_for_test(self):

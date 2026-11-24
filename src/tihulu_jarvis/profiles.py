@@ -537,63 +537,131 @@ def audit_path(root):
     return Path(root) / "audit.jsonl"
 
 
+def _audit_rows(root):
+    """Read a bounded, pinned regular file; validate before UI or rewrite."""
+    path = audit_path(root)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return []
+    except OSError:
+        raise Hold("audit_unreadable") from None
+    if not stat.S_ISREG(info.st_mode) or info.st_size > AUDIT_BYTES:
+        raise Hold("audit_unreadable")
+    stamp = (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+             info.st_ctime_ns, info.st_mode)
+    try:
+        raw = read_selected_bytes(str(path.absolute()), authorized=lambda: True,
+                                  allow_empty=True, expected_identity=stamp)
+        rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line]
+        if len(rows) > AUDIT_LIMIT:
+            raise Hold("audit_unreadable")
+        for row in rows:
+            if (not isinstance(row, dict) or type(row.get("at")) not in (int, float)
+                    or not 0 <= row["at"] <= 1e12
+                    or not isinstance(row.get("profile"), str)
+                    or not ID.fullmatch(row["profile"])
+                    or any(not isinstance(row.get(k), str) or len(row[k]) > cap
+                           for k, cap in (("action", 64), ("decision", 64), ("reason", 80)))
+                    or not isinstance(row.get("scope"), list)
+                    or len(row["scope"]) > 64
+                    or any(not isinstance(x, str) or len(x) > 64 for x in row["scope"])):
+                raise Hold("audit_unreadable")
+            # Historic endpoint records may contain raw addresses. Never
+            # display or rewrite them; keep only the boundary classification.
+            if row["action"] == "endpoint":
+                row["scope"] = _audit_endpoint_scope(row["scope"])
+        return rows
+    except (Hold, ValueError, OSError, TypeError, KeyError, RecursionError):
+        raise Hold("audit_unreadable") from None
+
+
+def _audit_endpoint_scope(scope):
+    if len(scope) == 1 and scope[0] in ("loopback", "not_loopback", "redacted"):
+        return [scope[0]]
+    return ["redacted"]
+
+
+@contextmanager
+def _audit_lock(root):
+    # Separate from profile and clock locks; do not block GTK on contention.
+    directory = Path(root) / ".audit-lock"
+    fd = None
+    try:
+        directory.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY |
+                     os.O_CLOEXEC | os.O_NOFOLLOW)
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        if fd is not None:
+            os.close(fd)
+        raise Hold("audit_unavailable") from None
+    try:
+        yield
+    finally:
+        os.close(fd)
+
+
 def record_decision(root, profile_id, action, scope, decision, reason, now=0.0):
-    """Append one policy decision. No secret, path or transcript is recorded."""
+    """Append a bounded local decision, without raw endpoint addresses.
+
+    Callers must provide trusted categorical scopes and reason codes, not
+    free text or secret material. This is not a tamper-proof audit journal.
+    """
     if not isinstance(profile_id, str) or not ID.fullmatch(profile_id):
         raise Hold("invalid_profile_id")
+    stamp = now or time.time()
+    if type(stamp) not in (int, float) or not 0 <= stamp <= 1e12:
+        raise Hold("audit_unavailable")
     path = audit_path(root)
-    row = {"at": now or time.time(), "profile": profile_id, "action": str(action)[:64],
-           "scope": [str(s)[:64] for s in scope], "decision": str(decision),
+    row = {"at": stamp, "profile": profile_id, "action": str(action)[:64],
+           "scope": [str(s)[:64] for s in scope], "decision": str(decision)[:64],
            "reason": str(reason)[:80]}
-    rows = []
-    if path.is_file():
-        try:
-            rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-        except (ValueError, OSError):
-            raise Hold("audit_unreadable") from None
-    rows.append(row)
-    if len(rows) > AUDIT_LIMIT:
-        rows = rows[-AUDIT_LIMIT:]
-    text = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in rows)
-    if len(text.encode("utf-8")) > AUDIT_BYTES:
+    if len(row["scope"]) > 64:
         raise Hold("audit_too_large")
-    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix="tihulu-audit-", dir=str(path.parent))
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8") as f:
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-        tmp = None
-    finally:
-        if tmp:
-            Path(tmp).unlink(missing_ok=True)
+    if row["action"] == "endpoint":
+        row["scope"] = _audit_endpoint_scope(row["scope"])
+    with _audit_lock(root):
+        rows = _audit_rows(root)
+        rows.append(row)
+        rows = rows[-AUDIT_LIMIT:]
+        text = "".join(json.dumps(r, ensure_ascii=False, sort_keys=True) + "\n" for r in rows)
+        if len(text.encode("utf-8")) > AUDIT_BYTES:
+            raise Hold("audit_too_large")
+        fd, tmp = tempfile.mkstemp(prefix="tihulu-audit-", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(text)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, path)
+            tmp = None
+            fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY |
+                         os.O_CLOEXEC | os.O_NOFOLLOW)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        finally:
+            if tmp:
+                Path(tmp).unlink(missing_ok=True)
 
 
 def read_audit(root, limit=100, action=None, decision=None, profile=None):
-    """The most recent decisions, oldest first. Never invented.
-
-    A filter narrows the rows that already exist; it never adds one, and a
-    filter that is not a short string is refused rather than guessed at.
-    """
+    """The most recent decisions, oldest first. Never invented."""
+    if type(limit) is not int or not 1 <= limit <= AUDIT_LIMIT:
+        raise Hold("audit_invalid_limit")
     for value, name in ((action, "audit_action_filter"), (decision, "audit_decision_filter"),
                         (profile, "audit_profile_filter")):
         if value is not None and (not isinstance(value, str) or not value or len(value) > 64):
             raise Hold(name)
-    path = audit_path(root)
-    if not path.is_file():
-        return ()
-    try:
-        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-    except (ValueError, OSError):
-        raise Hold("audit_unreadable") from None
+    rows = _audit_rows(root)
     if action is not None:
-        rows = [r for r in rows if r.get("action") == action]
+        rows = [r for r in rows if r["action"] == action]
     if decision is not None:
-        rows = [r for r in rows if r.get("decision") == decision]
+        rows = [r for r in rows if r["decision"] == decision]
     if profile is not None:
-        rows = [r for r in rows if r.get("profile") == profile]
+        rows = [r for r in rows if r["profile"] == profile]
     return tuple(rows[-limit:])
 
 

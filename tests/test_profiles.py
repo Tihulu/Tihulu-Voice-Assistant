@@ -440,6 +440,53 @@ class AuditTrailTests(unittest.TestCase):
         with self.assertRaisesRegex(Hold, "audit_unreadable"):
             profiles.read_audit(self.tmp)
 
+    def test_audit_rejects_special_oversize_and_invalid_rows(self):
+        import os
+        from unittest.mock import patch
+        path = profiles.audit_path(self.tmp)
+        target = self.tmp / "fixture"
+        target.write_text("secret")
+        for kind in ("fifo", "symlink", "oversize"):
+            if kind == "fifo":
+                os.mkfifo(path)
+            elif kind == "symlink":
+                path.symlink_to(target)
+            else:
+                path.write_bytes(b"x" * (profiles.AUDIT_BYTES + 1))
+            try:
+                with patch.object(profiles, "read_selected_bytes") as reader:
+                    with self.assertRaisesRegex(Hold, "audit_unreadable"):
+                        profiles.read_audit(self.tmp)
+                    reader.assert_not_called()
+            finally:
+                path.unlink()
+        for raw in ("[]", '{"at":1}', '{"at":NaN}'):
+            path.write_text(raw + "\n")
+            with self.assertRaisesRegex(Hold, "audit_unreadable"):
+                profiles.read_audit(self.tmp)
+
+    def test_endpoint_credentials_not_recorded_or_rewritten(self):
+        path = profiles.audit_path(self.tmp)
+        old = {"at": 1, "profile": "local-only", "action": "endpoint",
+               "scope": ["http://user:fixture-secret@example.invalid"], "decision": "deny",
+               "reason": "mode_policy"}
+        path.write_text(json.dumps(old) + "\n")
+        self.assertEqual(profiles.read_audit(self.tmp)[0]["scope"], ["redacted"])
+        profiles.record_decision(self.tmp, "local-only", "endpoint",
+                                 ("http://fixture-new-secret@example.invalid",),
+                                 "deny", "mode_policy", now=2)
+        self.assertNotIn("fixture-secret", path.read_text())
+        self.assertNotIn("fixture-new-secret", path.read_text())
+
+    def test_contended_audit_writer_does_not_lose_previous_record(self):
+        profiles.record_decision(self.tmp, "local-only", "endpoint", ("loopback",),
+                                 "allow", "mode_policy", now=1)
+        with profiles._audit_lock(self.tmp):
+            with self.assertRaisesRegex(Hold, "audit_unavailable"):
+                profiles.record_decision(self.tmp, "local-only", "endpoint", ("not_loopback",),
+                                         "deny", "mode_policy", now=2)
+        self.assertEqual(len(profiles.read_audit(self.tmp)), 1)
+
     def test_the_log_carries_no_private_material(self):
         profiles.record_decision(self.tmp, "local-only", "local_audio_device", ("push_to_talk",), "deny", "profile_forbids_local_audio_device", now=9.0)
         text = profiles.audit_path(self.tmp).read_text(encoding="utf-8")
