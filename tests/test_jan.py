@@ -173,3 +173,212 @@ class JanStreamTests(unittest.IsolatedAsyncioTestCase):
         async with server:
             with self.assertRaisesRegex(Hold, "jan_invalid_response"):
                 await self.client(server).chat((Message("user", "hi"),), on_delta=lambda p: None)
+
+
+class JanAuthorizationTests(unittest.IsolatedAsyncioTestCase):
+    async def exercise(self, operation):
+        from types import SimpleNamespace
+        allowed = True
+        entered, release = asyncio.Event(), asyncio.Event()
+        writes, closed = [], []
+        def checkpoint():
+            if not allowed:
+                raise Hold("fixture_revoked")
+        jan = Jan("http://127.0.0.1:9876", "fixture", checkpoint=checkpoint)
+        class Writer:
+            def write(self, data):
+                writes.append(data)
+            async def drain(self):
+                pass
+            def close(self):
+                closed.append(True)
+        async def connect():
+            entered.set()
+            await release.wait()
+            return asyncio.StreamReader(), Writer()
+        with patch.object(jan, "_connect", side_effect=connect):
+            task = asyncio.create_task(operation(jan))
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                allowed = False
+            finally:
+                release.set()
+            with self.assertRaisesRegex(Hold, "fixture_revoked"):
+                await asyncio.wait_for(task, 1)
+        self.assertEqual(writes, [])
+        self.assertEqual(closed, [True])
+
+    async def test_revoke_while_connecting_full_chat_has_no_write(self):
+        await self.exercise(lambda jan: jan((Message("user", "SYNTHETIC-CANARY"),)))
+
+    async def test_revoke_while_connecting_stream_has_no_write(self):
+        await self.exercise(lambda jan: jan.chat((Message("user", "SYNTHETIC-CANARY"),),
+                                                on_delta=lambda _: None))
+
+    async def test_revoke_while_connecting_discovery_has_no_write(self):
+        await self.exercise(lambda jan: jan.models())
+
+    async def test_denial_before_connect_has_no_connection(self):
+        def deny():
+            raise Hold("fixture_revoked")
+        jan = Jan("http://127.0.0.1:9876", "fixture", checkpoint=deny)
+        with patch.object(jan, "_connect") as connect:
+            with self.assertRaisesRegex(Hold, "fixture_revoked"):
+                await jan.models()
+            connect.assert_not_called()
+
+
+class JanFramingTests(unittest.IsolatedAsyncioTestCase):
+    def reader(self, data):
+        reader = asyncio.StreamReader(limit=16384)
+        reader.feed_data(data)
+        reader.feed_eof()
+        return reader
+
+    def event(self):
+        return b'data: {"choices":[{"delta":{"content":"Ready."}}]}\n\ndata: [DONE]\n\n'
+
+    async def parse(self, headers, data):
+        client = Jan("http://127.0.0.1:9876", "fixture")
+        seen = []
+        result = await client._stream_body(
+            self.reader(b"HTTP/1.1 200 OK\r\n" + headers + b"\r\n" + data), seen.append)
+        return result, seen
+
+    async def test_stream_header_budget_and_count(self):
+        for header in ((b"X-fixture: " + b"x" * 1000 + b"\r\n") * 32,
+                       b"X: y\r\n" * 129):
+            with self.subTest(size=len(header)), self.assertRaisesRegex(Hold, "jan_invalid_http"):
+                await self.parse(header, self.event())
+
+    async def test_stream_conflicting_or_duplicate_framing(self):
+        for header in (b"Content-Length: 1\r\nTransfer-Encoding: chunked\r\n",
+                       b"Content-Length: 1\r\nContent-Length: 1\r\n",
+                       b"Transfer-Encoding: gzip\r\n",
+                       b"Content-Encoding: gzip\r\n"):
+            with self.subTest(header=header), self.assertRaisesRegex(Hold, "jan_invalid_http"):
+                await self.parse(header, self.event())
+
+    async def test_stream_malformed_delta_types_are_bounded(self):
+        for delta in (None, [], 7, {"content": []}):
+            raw = b"data: " + json.dumps({"choices": [{"delta": delta}]}).encode() + b"\n"
+            with self.subTest(delta=delta), self.assertRaisesRegex(Hold, "jan_invalid_response"):
+                await self.parse(b"", raw)
+
+    async def test_chunked_stream_reassembles_split_events(self):
+        data = self.event()
+        chunks = [data[:5], data[5:17], data[17:]]
+        wire = b"".join(("%x\r\n" % len(c)).encode() + c + b"\r\n" for c in chunks)
+        self.assertEqual(await self.parse(b"Transfer-Encoding: chunked\r\n",
+                                          wire + b"0\r\n\r\n"), ("Ready.", ["Ready."]))
+
+    async def test_fixed_length_and_close_delimited_lf_streams(self):
+        data = self.event()
+        self.assertEqual(await self.parse(b"Content-Length: %d\r\n" % len(data), data),
+                         ("Ready.", ["Ready."]))
+        self.assertEqual(await self.parse(b"", data), ("Ready.", ["Ready."]))
+
+    async def test_incomplete_frames_and_missing_done_refused(self):
+        data = self.event()
+        with self.assertRaisesRegex(Hold, "jan_invalid_http"):
+            await self.parse(b"Content-Length: %d\r\n" % (len(data)+1), data)
+        with self.assertRaisesRegex(Hold, "jan_invalid_response"):
+            await self.parse(b"", data.split(b"data: [DONE]")[0])
+        wire = ("%x\r\n" % len(data)).encode() + data + b"XX"
+        with self.assertRaisesRegex(Hold, "jan_invalid_http"):
+            await self.parse(b"Transfer-Encoding: chunked\r\n", wire)
+
+
+class JanActiveRevocationTests(unittest.IsolatedAsyncioTestCase):
+    async def exercise(self, *, stream=False, cancel=False):
+        allowed = True
+        written, closed = asyncio.Event(), asyncio.Event()
+        seen, writes = [], []
+        def checkpoint():
+            if not allowed:
+                raise Hold("fixture_revoked")
+        reader = asyncio.StreamReader()
+        class Writer:
+            def write(self, data):
+                writes.append(data)
+                written.set()
+            async def drain(self):
+                pass
+            def close(self):
+                closed.set()
+        client = Jan("http://127.0.0.1:9876", "fixture", timeout=5, checkpoint=checkpoint)
+        async def connect():
+            return reader, Writer()
+        from tihulu_jarvis.voice import jan as transport
+        with patch.object(client, "_connect", side_effect=connect), patch.object(transport, "AUTH_POLL", .01):
+            task = asyncio.create_task(client.chat((Message("user", "SYNTHETIC"),),
+                                                   on_delta=seen.append if stream else None))
+            try:
+                await asyncio.wait_for(written.wait(), 1)
+                if cancel:
+                    task.cancel()
+                    with self.assertRaises(asyncio.CancelledError):
+                        await asyncio.wait_for(task, 1)
+                else:
+                    allowed = False
+                    with self.assertRaisesRegex(Hold, "fixture_revoked"):
+                        await asyncio.wait_for(task, 1)
+            finally:
+                if not task.done():
+                    task.cancel()
+                    await asyncio.gather(task, return_exceptions=True)
+        self.assertTrue(closed.is_set())
+        self.assertEqual(len(writes), 1)  # Already written bytes cannot be recalled.
+        self.assertEqual(seen, [])
+        self.assertEqual(client._slots._value, 2)
+
+    async def test_full_response_stall_revocation_closes_transport(self):
+        await self.exercise()
+
+    async def test_stream_stall_revocation_closes_transport(self):
+        await self.exercise(stream=True)
+
+    async def test_cancel_stalled_stream_closes_transport(self):
+        await self.exercise(stream=True, cancel=True)
+
+    async def test_revocation_waiting_for_slot_does_not_connect(self):
+        allowed = True
+        def checkpoint():
+            if not allowed:
+                raise Hold("fixture_revoked")
+        client = Jan("http://127.0.0.1:9876", "fixture", checkpoint=checkpoint)
+        await client._slots.acquire()
+        await client._slots.acquire()
+        from tihulu_jarvis.voice import jan as transport
+        try:
+            with patch.object(client, "_connect") as connect, patch.object(transport, "AUTH_POLL", .01):
+                task = asyncio.create_task(client.models())
+                await asyncio.sleep(.02)
+                allowed = False
+                with self.assertRaisesRegex(Hold, "fixture_revoked"):
+                    await asyncio.wait_for(task, 1)
+                connect.assert_not_called()
+        finally:
+            client._slots.release()
+            client._slots.release()
+        self.assertEqual(client._slots._value, 2)
+
+    async def test_unrepresentable_stream_content_never_published(self):
+        for value in ("\ud800", "a\x00b"):
+            reader = asyncio.StreamReader()
+            reader.feed_data(b"HTTP/1.1 200 OK\r\n\r\n" + b"data: " +
+                             json.dumps({"choices": [{"delta": {"content": value}}]}).encode() +
+                             b"\n\ndata: [DONE]\n\n")
+            reader.feed_eof()
+            seen = []
+            with self.assertRaisesRegex(Hold, "jan_invalid_response"):
+                await Jan("http://127.0.0.1:9876")._stream_body(reader, seen.append)
+            self.assertEqual(seen, [])
+
+    async def test_unrepresentable_full_content_rejected(self):
+        client = Jan("http://127.0.0.1:9876", "fixture")
+        for value in ("\ud800", "a\x00b"):
+            answer = {"choices": [{"message": {"role": "assistant", "content": value}}]}
+            with patch.object(client, "_request", AsyncMock(return_value=answer)):
+                with self.assertRaisesRegex(Hold, "jan_invalid_response"):
+                    await client((Message("user", "fixture"),))

@@ -4926,6 +4926,16 @@ class ReviewSecurityTests(DesktopFixture):
         self.assertFalse(self.bubbles())
         self.assertFalse(self.backend.requests)
 
+    def test_jan_transport_checkpoint_refuses_changed_profile(self):
+        self.connect_model()
+        _, route = self.ui.conversation_backend()
+        checkpoint = self.jan.call_args.kwargs["checkpoint"]
+        checkpoint()
+        old = self.ui.active_profile()
+        self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+        with self.assertRaisesRegex(Hold, "attachment_context_changed"):
+            checkpoint()
+
     def test_voice_expiry_between_submission_and_capture(self):
         self.connect_model()
         clock = [time.time()]

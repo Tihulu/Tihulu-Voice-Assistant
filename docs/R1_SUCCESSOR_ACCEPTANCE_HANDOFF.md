@@ -83,3 +83,28 @@ snapshot privacy/cleanup, and cancellation while transcription is paused.
 The private copy is removed on ordinary completion or cancellation; hard
 process/host crash cleanup and filesystem blocking latency are not certified.
 No physical timing or full independent test reproduction claim.
+
+## ADJ-05 transport successor
+
+A paused-connect synthetic reproduction against frozen #101 showed a new
+request write after simulated revocation (both ordinary and streaming paths).
+The separate successor binds Jan to a trusted desktop route/epoch/operation
+checkpoint and rechecks after semaphore acquisition and connect, before write,
+after drain/response and before stream publication. Discovery, probe, analysis
+classifier and conversation use the same seam; selected attachment and voice
+operations add their existing live checks. No guarantee of recalling queued
+bytes, OS-level atomicity or upstream isolation. Standalone transport fixtures
+retain an explicit trusted default; production desktop constructors bind it.
+The successor also shares the bounded HTTP header/framing parser across JSON
+and SSE, decodes chunked/content-length/close-delimited bodies, bounds total
+body and header bytes/count, rejects conflicting framing and invalid delta
+types, and accepts LF or CRLF event lines. An explicit DONE marker is required;
+known-length/chunked frames are validated through their end. This is the
+supported single-JSON-data-line SSE subset, not a general-purpose HTTP client.
+CI and independent evidence remain separate.
+
+The shared owned-wait helper now also checks active Jan requests while awaiting
+slots/connect/response at the nominal 250 ms interval, cancelling and draining
+the owned task on denial. Already queued bytes cannot be recalled; writer close
+is not a remote server cancellation guarantee. Reject lone UTF-16 surrogates
+and NUL before native text publication in both response modes. No idle polling.

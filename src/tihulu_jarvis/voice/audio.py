@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .. import resources
+from ..owned_wait import await_authorized as owned_wait
 from ..selected_csv import selection_identity, copy_selected_to
 from .m1 import Hold, Voice
 
@@ -164,33 +165,7 @@ AUTH_POLL = .25
 
 
 async def await_authorized(factory, timeout, checkpoint):
-    """Await owned work with bounded grant checks and drain on refusal.
-
-    checkpoint is a trusted synchronous callback that raises Hold on denial.
-    The caller's child context owns process termination and reaping.
-    """
-    checkpoint()
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    async def start():
-        checkpoint()
-        return await factory()
-    task = asyncio.create_task(start())
-    try:
-        while True:
-            checkpoint()
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                raise asyncio.TimeoutError
-            done, _ = await asyncio.wait((task,), timeout=min(AUTH_POLL, remaining))
-            checkpoint()
-            if done:
-                return task.result()
-    finally:
-        if not task.done():
-            task.cancel()
-        # Retrieve exceptions even when authorization failed simultaneously.
-        await asyncio.gather(task, return_exceptions=True)
+    return await owned_wait(factory, timeout, checkpoint, interval=AUTH_POLL)
 
 
 async def listen(model, finish, publish, *, checkpoint):

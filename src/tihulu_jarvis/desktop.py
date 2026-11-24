@@ -2670,10 +2670,10 @@ def create_window(app, loop, bridge=None):
 
         def discover_market(self):
             async def run(epoch):
-                raw = self.require_endpoint()
-                client = Jan(raw, timeout=10)
+                client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 cards = await market.from_models(client, languages=(), now=0.0)
-                self.session.check(epoch)
+                checkpoint()
+                raw = route[3]
                 self.cfg["endpoint"] = raw
                 self.inventory = tuple(card.model_id for card in cards)
                 self.models.remove_all()
@@ -3017,8 +3017,9 @@ def create_window(app, loop, bridge=None):
                 text = tr("Hello there! In one short sentence, what can you do?",
                           "Merhaba! Tek cümleyle cevapla: neler yapabilirsin?",
                           "Hallo! Antworte in einem kurzen Satz: was kannst du?")
-                reply, _ = await probe.reply(text, self.backend_for_test(), epoch)
-                self.session.check(epoch)
+                backend, checkpoint, _ = self.bound_jan(epoch)
+                reply, _ = await probe.reply(text, backend, epoch)
+                checkpoint()
                 self.test_note.set_text("%s · %s" % (reply.strip()[:240], probe.context.response_language or "unknown"))
             self.submit(run)
 
@@ -3166,20 +3167,32 @@ def create_window(app, loop, bridge=None):
             self.record_policy("endpoint", (disclosure.endpoint_scope(raw),), "allow", "mode_policy")
             return result
 
-        def backend_for_test(self):
-            return Jan(self.require_endpoint(), self.cfg["llm"])
-
-        def conversation_backend(self):
-            """Bind prior messages to current profile version and endpoint/model."""
+        def bound_jan(self, epoch, *, discovery=False, conversation=False, extra=lambda: True):
+            """Bind the owned loopback operation to an exact route and live grant."""
             route = self.attachment_route()
             endpoint = self.require_endpoint(route[3])
-            model = route[4]
             if endpoint != route[3] or not self.route_current(route):
                 raise Hold("profile_changed")
-            self.session.require_route(route)
-            if not self.conversation_authorized(route):
-                raise Hold("attachment_context_changed")
-            return Jan(endpoint, model), route
+            if conversation:
+                self.session.require_route(route)
+            def checkpoint():
+                self.session.check(epoch)
+                if (not self.route_current(route)
+                        or (conversation and not self.conversation_authorized(route))
+                        or extra() is not True
+                        or not self.route_current(route)):
+                    raise Hold("attachment_context_changed" if conversation else "profile_changed")
+            checkpoint()
+            if discovery:
+                client = Jan(endpoint, timeout=10, checkpoint=checkpoint)
+            else:
+                client = Jan(endpoint, route[4], checkpoint=checkpoint)
+            return client, checkpoint, route
+
+        def conversation_backend(self, *, extra=lambda: True):
+            """Bind prior messages and the transport to the same live route."""
+            client, _, route = self.bound_jan(self.session.epoch, conversation=True, extra=extra)
+            return client, route
 
         @staticmethod
         def attachment_live_allowed(live):
@@ -3258,11 +3271,10 @@ def create_window(app, loop, bridge=None):
 
         def discover(self):
             async def run(epoch):
-                raw=self.require_endpoint()
-                client=Jan(raw,timeout=10)
+                client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 models=await client.models()
-                self.session.check(epoch)
-                self.cfg["endpoint"]=raw
+                checkpoint()
+                self.cfg["endpoint"]=route[3]
                 previous=self.cfg["llm"]
                 self.cfg["llm"]=""
                 self.inventory=models
@@ -3537,7 +3549,7 @@ def create_window(app, loop, bridge=None):
             self.turn_note = text[:80]
             async def run(epoch):
                 self.session.check(epoch)
-                backend, route = self.conversation_backend()
+                backend, route = self.conversation_backend(extra=allowed)
                 def permitted():
                     return allowed() and self.conversation_authorized(route)
                 if not permitted():
@@ -3624,10 +3636,16 @@ def create_window(app, loop, bridge=None):
                 if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
                     if self.analysis.dialog is not None:
                         raise Hold("analysis_picker_busy")
-                    await self.analysis.command(text, epoch)
+                    await self.analysis.command(text, epoch, extra=check_voice_grant)
                     return
                 self.set_state("thinking")
-                backend, route = self.conversation_backend()
+                def audio_allowed():
+                    try:
+                        check_voice_grant()
+                        return True
+                    except Hold:
+                        return False
+                backend, route = self.conversation_backend(extra=audio_allowed)
                 check_voice_grant()
                 result,speech=await self.session.reply(text,backend,epoch,voices,route=route,
                     authorize=lambda: voice_authorized(route))
