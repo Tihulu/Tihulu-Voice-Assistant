@@ -3536,6 +3536,30 @@ def create_window(app, loop, bridge=None):
                         self.set_state(stage)
 
                 self.require_tools(("local_audio_device", ("push_to_talk",)))
+                capture_route = self.attachment_route()
+                capture_live = self.store.bind_live(capture_route[0])
+                if capture_live.stamp != capture_route[5]:
+                    raise Hold("profile_changed")
+
+                def check_voice_grant():
+                    self.session.check(epoch)
+                    if not self.route_current(capture_route):
+                        raise Hold("profile_changed")
+                    decision, reason = capture_live.evaluate("local_audio_device", ("push_to_talk",))
+                    if decision != profiles.ALLOW:
+                        raise Hold("approval_expired" if reason == "approval_expired" else
+                                   "profile_changed" if reason == "policy_changed" else
+                                   "profile_forbids_local_audio_device")
+                    if not self.route_current(capture_route):
+                        raise Hold("profile_changed")
+
+                def voice_authorized(route):
+                    try:
+                        check_voice_grant()
+                        return self.conversation_authorized(route)
+                    except Hold:
+                        return False
+
                 self.turn_note = tr("a spoken turn", "sesli tur", "eine gesprochene Runde")
                 voices = audio.SelectedVoices(self.cfg["voices"])
                 self.finish=asyncio.Event()
@@ -3544,10 +3568,12 @@ def create_window(app, loop, bridge=None):
                 async with self.leases.hold("microphone", "voice-turn-%d" % epoch):
                     self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
+                    check_voice_grant()
                     text=await audio.listen(self.cfg["stt"],self.finish,progress)
-                # The microphone is free again the moment the capture ends.
+                # Already captured samples cannot be undone. Refuse to display
+                # or dispatch the returned transcription after revocation.
                 self.note_leases()
-                self.session.check(epoch)
+                check_voice_grant()
                 self.bubble("You",text)
                 if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
                     if self.analysis.dialog is not None:
@@ -3556,9 +3582,10 @@ def create_window(app, loop, bridge=None):
                     return
                 self.set_state("thinking")
                 backend, route = self.conversation_backend()
+                check_voice_grant()
                 result,speech=await self.session.reply(text,backend,epoch,voices,route=route,
-                    authorize=lambda: self.conversation_authorized(route))
-                self.session.check(epoch)
+                    authorize=lambda: voice_authorized(route))
+                check_voice_grant()
                 if not self.conversation_authorized(route):
                     raise Hold("attachment_context_changed")
                 self.bubble("JARVIS",result)
@@ -3579,6 +3606,7 @@ def create_window(app, loop, bridge=None):
                         raise Hold("attachment_context_changed")
                     self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
+                    check_voice_grant()
                     playback = loop.create_task(audio.speak(speech, progress))
                     self.playback = playback
                     try:

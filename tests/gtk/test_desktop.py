@@ -4820,6 +4820,38 @@ class ReviewSecurityTests(DesktopFixture):
         self.assertEqual(str(self.ui.session.active.exception()), "approval_expired")
 
 
+    def test_voice_expiry_during_capture_blocks_transcription_and_backend(self):
+        self.connect_model()
+        clock = [time.time()]
+        profile = Profile(id="review-expiring-voice", name="Review voice",
+            tool_rules=(Rule("local_audio_device", ("push_to_talk",), "allow",
+                             "fixture", clock[0] + 60),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch.object(profiles.time, "time", side_effect=lambda: clock[0]):
+            self.begin_voice()
+            clock[0] += 120
+            self.click(self.ui.finish_btn)
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "approval_expired")
+        self.assertFalse(self.backend.requests)
+        self.assertFalse(self.backend.speeches)
+        self.assertFalse(self.ui.session.history)
+        self.assertFalse(self.bubbles())
+
+    def test_voice_policy_replacement_during_capture_blocks_transcription(self):
+        self.connect_model()
+        self.begin_voice()
+        old = self.ui.active_profile()
+        self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+        self.click(self.ui.finish_btn)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "profile_changed")
+        self.assertFalse(self.backend.requests)
+        self.assertFalse(self.backend.speeches)
+        self.assertFalse(self.ui.session.history)
+        self.assertFalse(self.bubbles())
+
     def test_attachment_expiry_between_submission_and_backend(self):
         self.connect_model()
         clock = [time.time()]
