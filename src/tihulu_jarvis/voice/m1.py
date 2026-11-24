@@ -109,14 +109,14 @@ _WORDS = {
         merhaba selam naber nasilsin nasil ne yapiyorsun neden nerede
         hangi benim senin evet hayir lutfen tesekkurler tamam gunaydin
         iyi hatirla hatirliyor hatirliyorum hatirlayacagim musun bunu
-        kelimem kelimen kelimemi kelimenin peki hala cevap ver yanit
+        kelime kelimem kelimen kelimemi kelimenin peki hala cevap ver yanit
         yanitla konus bundan sonra dilimi takip et
     """.split()),
     "en": set("""
         hello hi how are you what where why when which was is the
         your my word remember remembered please answer respond reply
         speak yes no thanks thank good morning evening doing can
-        could does mean from now on match language use
+        could does mean from now on match language use summarize this note
     """.split()),
     "de": set("""
         hallo guten morgen abend wie geht es dir was machst du
