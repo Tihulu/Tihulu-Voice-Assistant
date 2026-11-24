@@ -906,6 +906,38 @@ class Store:
         with self._mutation_lock():
             return self._save_locked(profile, create_only=create_only)
 
+    def delete(self, profile_id, *, expected):
+        """Remove the displayed generation only, preserving historical records."""
+        with self._mutation_lock():
+            current, stamp = self.snapshot(profile_id)
+            if current != expected:
+                raise Hold("profile_changed")
+            self._ensure_current_archive_locked(current)
+            path = self._path(profile_id)
+            try:
+                if _policy_stamp(path) != stamp:
+                    raise Hold("profile_changed")
+                path.unlink()
+                fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY |
+                             os.O_CLOEXEC | os.O_NOFOLLOW)
+                try:
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+            except OSError:
+                raise Hold("profile_not_deletable") from None
+
+    def startup_profile(self, wanted):
+        """Resume an explicitly saved profile, or the permission-light default.
+
+        Do not silently select some other active profile if the saved one is
+        missing, disabled or malformed, or a different profile sorts first.
+        """
+        profile = self.load(wanted or "private-assistant")
+        if profile.state != "active":
+            raise Hold("profile_not_active")
+        return profile
+
     def import_file(self, path):
         """Read a trusted picker selection with the bounded regular-file reader."""
         if not isinstance(path, str) or not os.path.isabs(path):

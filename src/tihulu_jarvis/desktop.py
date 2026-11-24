@@ -381,20 +381,7 @@ def create_window(app, loop, bridge=None):
             self.build_market_page()
             try:
                 profiles.ensure_default(self.store)
-                wanted = self.cfg.get("profile") or ""
-                active = None
-                if wanted:
-                    candidate = self.store.load(wanted)
-                    if candidate.state == "active":
-                        active = candidate
-                if active is None:
-                    for pid in self.store.ids():
-                        found = self.store.load(pid)
-                        if found.state == "active":
-                            active = found
-                            break
-                if active is None:
-                    raise Hold("no_active_profile")
+                active = self.store.startup_profile(self.cfg.get("profile"))
                 self.activate_profile(active.id, quiet=True)
             except Hold as exc:
                 read_error = (read_error + " " if read_error else "") + str(exc)
@@ -512,6 +499,10 @@ def create_window(app, loop, bridge=None):
             self.stack.add_titled(view,"profiles",tr("Profiles","Profiller","Profile"))
             self.profile_note = Gtk.Label(xalign=0,wrap=True)
             page.append(self.profile_note)
+            self.profile_storage_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.profile_storage_note)
+            self.policy_clock_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.policy_clock_note)
             self.profile_list = Gtk.ListBox()
             self.profile_list.connect("row-selected", lambda *_: self.refresh_profile_buttons())
             page.append(self.profile_list)
@@ -625,8 +616,13 @@ def create_window(app, loop, bridge=None):
             for row in list(self.policy_rows):
                 self.profile_list.remove(row)
             self.policy_rows = {}
+            invalid = 0
             for pid in self.store.ids():
-                entry = self.store.load(pid)
+                try:
+                    entry = self.store.load(pid)
+                except Hold:
+                    invalid += 1
+                    continue
                 label = Gtk.Label(label="%s · %s · %s" % (entry.name, entry.based_on_mode, entry.state),xalign=0)
                 row = Gtk.ListBoxRow()
                 row.set_child(label)
@@ -637,6 +633,11 @@ def create_window(app, loop, bridge=None):
                 if entry.id == active:
                     self.profile_list.select_row(row)
                     break
+            self.profile_storage_note.set_text(tr(
+                "%d unreadable profile(s); skipped, not activated." % invalid,
+                "%d okunamayan profil; atlandı, etkinleştirilmedi." % invalid,
+                "%d unlesbare Profile; übersprungen, nicht aktiviert." % invalid
+            ) if invalid else "")
             self.refresh_profile_buttons()
 
         def picker_context(self):
@@ -855,10 +856,10 @@ def create_window(app, loop, bridge=None):
             if chosen is None or self.busy or chosen.id == self.cfg.get("profile"):
                 return
             try:
-                (self.store.root / (chosen.id + ".json")).unlink(missing_ok=True)
+                self.store.delete(chosen.id, expected=chosen)
                 self.refresh_profiles()
-            except OSError:
-                self.set_state("ready", "profile_not_deletable")
+            except Hold as exc:
+                self.set_state("ready", str(exc))
 
         def create_template(self):
             if self.busy:
@@ -1250,8 +1251,18 @@ def create_window(app, loop, bridge=None):
             self.attach.set_sensitive(not self.busy and self.cfg["llm"] in self.inventory)
             self.entry.set_sensitive(not self.busy)
             self.refresh_send()
-            allowed = getattr(self, "policy", None) is not None and \
-                self.policy.evaluate("local_audio_device", ("push_to_talk",), self.store.policy_now())[0] == profiles.ALLOW
+            now = self.store.policy_now()
+            self.policy_clock_note.set_text(tr(
+                "Permission clock unavailable. Timed permissions are blocked; restart after checking local storage.",
+                "İzin saati kullanılamıyor. Süreli izinler engellendi; yerel depolamayı kontrol edip yeniden başlatın.",
+                "Berechtigungsuhr nicht verfügbar. Befristete Berechtigungen sind gesperrt; lokalen Speicher prüfen und neu starten."
+            ) if now == float("inf") else "")
+            try:
+                active = self.active_profile()
+                allowed = (active.state == "active" and profiles.effective(active).evaluate(
+                    "local_audio_device", ("push_to_talk",), now)[0] == profiles.ALLOW)
+            except Hold:
+                allowed = False
             self.talk.set_sensitive(not self.busy and connected and allowed \
                 and bool(self.cfg["stt"]) and bool(self.cfg["voices"]) \
                 and audio.tools_ready("arecord","whisper-cli","piper","aplay"))

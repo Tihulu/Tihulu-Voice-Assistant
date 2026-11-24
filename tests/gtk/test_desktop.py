@@ -471,6 +471,29 @@ class ProfileUITests(DesktopFixture):
     def pick(self, profile_id):
         self.ui.profile_list.select_row(self.row_for(profile_id))
 
+    def test_invalid_profile_does_not_break_other_profile_controls(self):
+        self.ui.store._path("broken").write_text("{broken", encoding="utf-8")
+        self.ui.refresh_profiles()
+        self.assertEqual(self.rows(), ["private-assistant"])
+        self.assertIn("1 unreadable profile", self.ui.profile_storage_note.get_text())
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+
+    def test_clock_failure_is_visible_and_timed_audio_disabled(self):
+        self.connect_model()
+        self.assertTrue(self.ui.talk.get_sensitive())
+        with patch.object(self.ui.store._clock, "now", return_value=float("inf")):
+            self.ui.refresh()
+            self.assertIn("Timed permissions are blocked", self.ui.policy_clock_note.get_text())
+            self.assertFalse(self.ui.talk.get_sensitive())
+
+    def test_stale_delete_selection_preserves_newer_profile(self):
+        self.save_profile(Profile(id="extra", name="Old"))
+        self.pick("extra")
+        self.ui.store.save(Profile(id="extra", version=2, name="New"))
+        self.click(self.ui.profile_delete)
+        self.assertEqual(self.ui.store.load("extra").name, "New")
+        self.assertEqual(self.ui.status.get_text(), "profile_changed")
+
     def test_default_profile_is_permission_light_and_grants_push_to_talk(self):
         self.assertEqual(self.rows(), ["private-assistant"])
         self.assertEqual(self.ui.cfg["profile"], "private-assistant")

@@ -237,6 +237,31 @@ class StoreMutationTests(unittest.TestCase):
         self.assertEqual(self.other.load("local-only").name, "winner")
         self.assertEqual([p.version for p in self.other.versions("local-only")], [1, 2])
 
+    def test_delete_refuses_stale_or_contended_generation_and_preserves_history(self):
+        shown = self.store.load("local-only")
+        with self.store._mutation_lock():
+            with self.assertRaisesRegex(Hold, "profile_store_busy_or_unavailable"):
+                self.other.delete("local-only", expected=shown)
+        updated = self.store.save(base(version=2, name="new"))
+        with self.assertRaisesRegex(Hold, "profile_changed"):
+            self.other.delete("local-only", expected=shown)
+        self.other.delete("local-only", expected=updated)
+        self.assertNotIn("local-only", self.store.ids())
+        self.assertEqual([p.version for p in self.store.versions("local-only")], [1, 2])
+
+    def test_startup_does_not_select_arbitrary_or_disabled_profile(self):
+        self.store.save(base(id="privileged", based_on_mode="CUSTOM"))
+        with self.assertRaisesRegex(Hold, "profile_not_found"):
+            self.store.startup_profile("")
+        self.store.save(base(id="private-assistant"))
+        self.assertEqual(self.store.startup_profile("").id, "private-assistant")
+        self.assertEqual(self.store.startup_profile("privileged").id, "privileged")
+        self.store.save(base(id="privileged", version=2, state="disabled"))
+        with self.assertRaisesRegex(Hold, "profile_not_active"):
+            self.store.startup_profile("privileged")
+        with self.assertRaisesRegex(Hold, "profile_not_found"):
+            self.store.startup_profile("missing")
+
     def test_create_only_refuses_even_higher_version_of_existing_profile(self):
         with self.assertRaisesRegex(Hold, "profile_already_exists"):
             self.other.save(base(version=9, name="import"), create_only=True)
