@@ -4348,3 +4348,28 @@ class PickerLifecycleTests(DesktopFixture):
         self.ui.activate_profile(profile.id)
         self.assertIsNone(self.ui.attachment)
         self.assertEqual(self.ui.attachment_note.get_text(), "")
+
+
+    def test_hybrid_attachment_held_until_verified_route_exists(self):
+        self.connect_model()
+        profile = Profile(id="hybrid-file-test", name="Hybrid", based_on_mode="SECURE_HYBRID",
+                          filesystem_rules=(Rule("filesystem_read", ("attachment",), "allow"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch("tihulu_jarvis.attachments.load") as read:
+            self.assertIsNone(self.ui.read_attachment("/synthetic.txt"))
+            read.assert_not_called()
+        self.assertEqual(self.ui.status.get_text(), "attachment_mode_denied")
+
+    def test_explicit_ask_cannot_be_overridden_by_picker(self):
+        self.connect_model()
+        profile = Profile(id="ask-file-test", name="Ask",
+                          filesystem_rules=(Rule("filesystem_read", ("attachment",), "ask"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch("tihulu_jarvis.attachments.load") as read:
+            self.ui.attach_file()
+            self.assertIsNone(self.ui.owned_picker)
+            self.assertIsNone(self.ui.read_attachment("/synthetic.txt"))
+            read.assert_not_called()
+        self.assertEqual(self.ui.status.get_text(), "attachment_approval_required")
