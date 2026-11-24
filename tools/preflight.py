@@ -9,11 +9,14 @@ stored configuration readable. Nothing is downloaded, started or recorded here.
 """
 import shutil
 import sys
+import os
+import stat
 from pathlib import Path
 
 READY = "ready"
 MISSING = "missing"
 UNKNOWN = "unknown"
+OPTIONAL = frozenset(("cuda_tools", "vulkan_tools"))
 
 AUDIO_TOOLS = ("arecord", "whisper-cli", "piper", "aplay")
 
@@ -61,7 +64,7 @@ def _probe(tool, exe):
     """A device tool's presence on PATH, as a (state, detail) pair."""
     path = exe(tool)
     if path:
-        return READY, path
+        return READY, "found on PATH"
     return MISSING, "not found on PATH"
 
 
@@ -80,51 +83,106 @@ def device_rows(exe=None):
     return tuple(rows)
 
 
-def rows(exe=None, importer=None, cfg=None, loader=None, interpreter=None):
-    """(token, state, detail) for every pre-flight question.
+def _selected_model(value, suffix):
+    """Metadata-only check; no model weights opened or parsed."""
+    if not isinstance(value, str) or not value:
+        return False
+    try:
+        path = Path(value)
+        info = path.stat()
+        return (path.is_absolute() and path.suffix.lower() == suffix
+                and stat.S_ISREG(info.st_mode) and info.st_size > 0
+                and os.access(path, os.R_OK))
+    except (OSError, ValueError):
+        return False
 
-    ``interpreter`` is stated in the verdict, because the answer is about the
-    interpreter that runs this check — not about every Python on the machine.
+
+def _voice_metadata(value):
+    """Check the selected voice and presence of its regular bounded sidecar.
+
+    Do not parse metadata here: this is a read-only readiness hint, not proof
+    that Piper accepts the model or that its language matches.
     """
+    if not _selected_model(value, ".onnx"):
+        return False
+    try:
+        path = Path(value)
+        sidecar = path.with_name(path.name + ".json")
+        info = sidecar.stat()
+        return (stat.S_ISREG(info.st_mode) and 0 < info.st_size <= 1048576
+                and os.access(sidecar, os.R_OK))
+    except (OSError, ValueError):
+        return False
+
+
+def rows(exe=None, importer=None, cfg=None, loader=None, interpreter=None):
+    """Redacted metadata-only readiness, not hardware acceptance.
+
+    No endpoint connection, program launch, model contents or settings writes.
+    Required checks cover the full TR/EN/DE owner protocol; GPU tools are optional.
+    """
+    from tihulu_jarvis.voice.jan import endpoint as parse_endpoint, model_id
+
     exe = exe or which
     out = []
     version = gtk_available(importer)
     out.append(("gtk", READY if version else MISSING,
                 "GTK %s.%s" % version if version else "PyGObject or GTK 4 is missing"))
     for tool in AUDIO_TOOLS:
-        path = exe(tool)
-        out.append((tool, READY if path else MISSING,
-                    path if path else "not found on PATH"))
+        state, detail = _probe(tool, exe)
+        out.append((tool, state, detail))
     out.extend(device_rows(exe))
     try:
         cfg = configuration(cfg, loader)
-    except Exception as exc:
-        out.append(("settings", MISSING, "cannot read stored choices: %s" % exc))
-        cfg = None
-    if cfg is not None:
-        out.append(("settings", READY, "stored choices read"))
-        endpoint = cfg.get("endpoint", "")
-        out.append(("endpoint", READY if endpoint else MISSING,
-                    endpoint if endpoint else "no Jan endpoint chosen"))
-        stt = cfg.get("stt", "")
-        out.append(("stt", READY if stt and Path(stt).is_file() else MISSING,
-                    stt if stt and Path(stt).is_file() else "no STT model file chosen"))
-        voices = [lang for lang in ("tr", "en", "de") if cfg.get("voices", {}).get(lang)]
-        present = [lang for lang in voices if Path(cfg["voices"][lang]).is_file()]
-        out.append(("voices", READY if present else MISSING,
-                    ",".join(present) if present else "no voice file chosen"))
+        if not isinstance(cfg, dict):
+            raise ValueError
+    except Exception:
+        out.append(("settings", MISSING, "cannot read stored choices (details withheld)"))
+        return tuple(out)
+    out.append(("settings", READY, "stored choices read"))
+    raw = cfg.get("endpoint", "")
+    try:
+        parse_endpoint(raw)
+        valid = True
+    except Exception:
+        valid = False
+    out.append(("endpoint", READY if valid else MISSING,
+                "numeric loopback syntax valid; service untested" if valid else
+                "no Jan endpoint chosen" if not raw else "invalid or non-loopback Jan endpoint"))
+    llm = model_id(cfg.get("llm"))
+    out.append(("llm", READY if llm else MISSING,
+                "model ID selected; discovery untested" if llm else "no valid chat model selected"))
+    stt = _selected_model(cfg.get("stt"), ".bin")
+    out.append(("stt", READY if stt else MISSING,
+                "nonempty readable .bin file; inference untested" if stt else
+                "no compatible readable STT model file chosen"))
+    voices = cfg.get("voices", {})
+    if not isinstance(voices, dict):
+        voices = {}
+    present = [lang for lang in ("tr", "en", "de") if _voice_metadata(voices.get(lang))]
+    absent = [lang for lang in ("tr", "en", "de") if lang not in present]
+    out.append(("voices", READY if not absent else MISSING,
+                "TR/EN/DE file and sidecar metadata present; language and speech untested" if not absent else
+                "missing compatible model/sidecar: " + ",".join(absent)))
     return tuple(out)
 
 
 def verdict(items, out=None, interpreter=None):
-    """One line per question and an exit code a person can act on."""
+    """Report fixed categories, not private paths, addresses, or raw errors."""
     out = out or sys.stdout
-    print("preflight interpreter: %s" % (interpreter or sys.executable), file=out)
-    bad = [token for token, state, _ in items if state == MISSING]
+    # The basename and version identify the interpreter without a home path.
+    name = Path(interpreter or sys.executable).name
+    if not name or not name.isascii() or not all(c.isalnum() or c in "._-" for c in name):
+        name = "python"
+    print("preflight interpreter: %s (%s)" % (name, sys.version.split()[0]), file=out)
+    items = tuple(items)
+    bad = [token for token, state, _ in items if token not in OPTIONAL and state != READY]
+    optional = [token for token, state, _ in items if token in OPTIONAL and state != READY]
     for token, state, detail in items:
         print("%-12s %-8s %s" % (token, state, detail), file=out)
-    print("preflight: %d questions, %d missing"
-          % (len(items), len(bad)), file=out)
+    print("preflight: %d questions, %d required missing/unverified, %d optional missing"
+          % (len(items), len(bad), len(optional)), file=out)
+    print("Metadata readiness only; physical acceptance and Jan inference are untested.", file=out)
     return 1 if bad else 0
 
 

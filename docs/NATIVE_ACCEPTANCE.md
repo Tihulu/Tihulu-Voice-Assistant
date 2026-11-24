@@ -54,16 +54,13 @@ to explain itself. It is read-only: nothing is downloaded, started or recorded.
 PYTHONPATH=src /usr/bin/python3 tools/preflight.py
 ```
 
-It states the interpreter it checked, because the answer is about that Python —
-GTK 4 with PyGObject importable, `arecord`, `whisper-cli`, `piper` and `aplay`
-on PATH, the stored choices readable, and an endpoint, an STT model file and a
-voice file actually chosen. A missing import, an unreadable file and an absent
-model are three different reasons and are reported as such. The exit code is `1`
-when anything is missing, so it can gate a script.
-
-This is the state of the machine this was written on, with the interpreter named
-in the first line: GTK 4.14, all four audio tools present, stored choices
-readable — and **three missing**: no Jan endpoint chosen, no STT model file
-chosen, no voice file chosen. Those three are exactly what the physical
-acceptance needs the owner to point at, and the pre-flight is what says so
-before anyone starts.
+The pre-flight states the interpreter basename and Python version, GTK import,
+required audio tool presence, numeric loopback endpoint syntax, a selected chat
+model ID, nonempty readable STT file and the TR/EN/DE voice files with bounded
+regular sidecars. GPU tooling is optional and never blocks CPU-only readiness.
+A required missing or unverified check returns exit code 1. The report uses
+fixed categories rather than raw URLs, file paths, tool paths or exception text.
+It does not open model weights or parse voice sidecars, launch audio tools,
+contact Jan, verify model compatibility or certify physical acceptance. A zero
+exit status means metadata prerequisites only; still execute every owner test.
+Use the exact reviewed candidate with disposable XDG state and synthetic inputs.
