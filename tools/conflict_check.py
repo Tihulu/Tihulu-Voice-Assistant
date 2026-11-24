@@ -88,19 +88,19 @@ def report(plan, out=None, err=None):
             problems.append("#%s: commits cannot be compared" % number)
             print("  #%s %-32s could not be rehearsed" % (number, head), file=out)
             continue
-        if already:
-            # A merge PR carries a whole line: rebasing it replays what the base
-            # already has, so the answer is to merge it, not to rebase it.
-            print("  #%s %-32s merge it, do not rebase (%d commits already in base)"
-                  % (number, head, already), file=out)
-            continue
         clean, files = merge_tree(base, head)
         if clean is None:
             problems.append("#%s: %s" % (number, files[0] if files else "unknown"))
             print("  #%s %-32s could not be rehearsed" % (number, head), file=out)
             continue
         if clean:
-            print("  #%s %-32s applies cleanly" % (number, head), file=out)
+            if already:
+                # Equivalent patches advise against rebasing but never bypass
+                # an actual merge-tree rehearsal.
+                print("  #%s %-32s merge it, do not rebase (%d commits already in base)"
+                      % (number, head, already), file=out)
+            else:
+                print("  #%s %-32s applies cleanly" % (number, head), file=out)
             continue
         problems.append("#%s (%s) conflicts in %s" % (number, head, ", ".join(files)))
         print("  #%s %-32s CONFLICT in %s" % (number, head, ", ".join(files)), file=err)

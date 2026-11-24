@@ -1,10 +1,11 @@
+# SPDX-License-Identifier: AGPL-3.0-only
 import os
 import subprocess
 import tempfile
 import unittest
 from io import StringIO
 from pathlib import Path
-from tools.conflict_check import report, merge_tree
+from tools.conflict_check import report, merge_tree, contained
 
 class GateTests(unittest.TestCase):
     def setUp(self):
@@ -70,3 +71,29 @@ class GateTests(unittest.TestCase):
         rc, out, err = self.run_report([self.entry(head='')])
         self.assertEqual(rc, 1)
         self.assertIn('no head or base', err)
+    def add_equivalent_patch(self):
+        self.commit('equivalent.txt', 'same')
+        self.git('switch', 'feature')
+        self.commit('equivalent.txt', 'same')
+        self.git('switch', 'main')
+        self.assertGreater(contained('main', 'feature'), 0)
+
+    def test_equivalent_patch_does_not_hide_conflict(self):
+        self.add_equivalent_patch()
+        self.commit('shared.txt', 'main')
+        self.git('switch', 'feature')
+        self.commit('shared.txt', 'feature')
+        self.git('switch', 'main')
+        self.assertEqual(merge_tree('main', 'feature'), (False, ['shared.txt']))
+        rc, out, err = self.run_report([self.entry()])
+        self.assertEqual(rc, 1)
+        self.assertIn('CONFLICT in shared.txt', err)
+        self.assertNotIn('merge it, do not rebase', out)
+
+    def test_equivalent_patch_clean_merge_preserves_advice(self):
+        self.add_equivalent_patch()
+        self.assertEqual(merge_tree('main', 'feature'), (True, []))
+        rc, out, err = self.run_report([self.entry()])
+        self.assertEqual(rc, 0)
+        self.assertIn('merge it, do not rebase', out)
+        self.assertEqual(err, '')
