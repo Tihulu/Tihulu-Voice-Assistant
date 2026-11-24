@@ -8,7 +8,13 @@ if [ ! -d "$wheels" ]; then
     echo "no wheel directory: $wheels" >&2
     exit 2
 fi
-rm -rf "$work"
+# Never delete or reuse a caller-supplied staging directory.
+# mkdir (without -p for the leaf) also refuses an existing symlink.
+mkdir -p -- "$(dirname -- "$work")"
+if ! mkdir -m 0700 -- "$work"; then
+    echo "staging directory must not exist; choose a fresh path" >&2
+    exit 2
+fi
 mkdir -p "$work/DEBIAN" "$work/usr/share/tihulu-jarvis"
 cp "$root/packaging/deb/control" "$work/DEBIAN/control"
 cp "$root/packaging/deb/conffiles" "$work/DEBIAN/conffiles"
