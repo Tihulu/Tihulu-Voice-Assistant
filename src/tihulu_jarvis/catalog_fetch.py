@@ -1,15 +1,12 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Distributed without warranty; see LICENSE for the full terms.
-"""A deliberately narrow HTTPS transport for curated catalogs.
+"""Bounded curated-catalog validation and injectable transport.
 
-A catalog is fetched only from a host the owner explicitly allows, over
-HTTPS with default certificate verification, without credentials, without
-following redirects and with a hard size limit. ``opener`` is injectable so
-the policy can be tested without a socket.
+Production network transport is held until destination and redirect enforcement
+are verified. Local import and approved synthetic adapter tests remain usable.
 """
 import ipaddress
 import re
-import ssl
 from urllib.parse import urlsplit
 
 from .market import CATALOG_LIMIT
@@ -95,20 +92,12 @@ def default_opener():
 
 
 def urlopen_opener():
-    """An opener using the standard library with default TLS verification.
+    """Fail closed before network I/O until an audited transport is available.
 
-    It is created lazily so importing this module never touches the network.
+    The historical urllib opener followed redirects before checking Location
+    and performed blocking I/O before an await of its non-awaitable result.
+    Do not enable a new public network adapter in the R1 remediation.
     """
-    def open_url(url, timeout=TIMEOUT):
-        import urllib.request
-        context = ssl.create_default_context()
-        request = urllib.request.Request(url, headers={"Accept": "application/json",
-                                                       "User-Agent": "tihulu-jarvis-catalog"})
-        with urllib.request.urlopen(request, timeout=timeout, context=context) as response:
-            if response.headers.get("Location"):
-                raise Hold("catalog_redirect_rejected")
-            body = response.read(MAX_BYTES + 1)
-        if len(body) > MAX_BYTES:
-            raise Hold("catalog_too_large")
-        return body.decode("utf-8")
-    return open_url
+    async def held(url, timeout=TIMEOUT):
+        raise Hold("catalog_transport_not_verified")
+    return held
