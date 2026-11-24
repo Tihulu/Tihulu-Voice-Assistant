@@ -154,3 +154,14 @@ class BoundedAttachmentTests(unittest.TestCase):
         with patch("os.read", side_effect=grow):
             with self.assertRaisesRegex(Hold, "^attachment_too_large$"):
                 load(str(self.path))
+
+
+    def test_replacement_after_picker_identity_is_refused_before_read(self):
+        from tihulu_jarvis.selected_csv import selection_identity
+        identity = selection_identity(str(self.path), authorized=lambda: True,
+                                      allow_empty=True)
+        self.path.rename(self.root / "old.txt")
+        self.path.write_bytes(b"replacement")
+        with patch("os.read", side_effect=AssertionError("replacement read")):
+            with self.assertRaisesRegex(Hold, "^attachment_selection_changed$"):
+                load(str(self.path), expected_identity=identity)
