@@ -2,7 +2,7 @@
 
 > **Product name:** Tihulu Voice Assistant  
 > **Project codename:** Jarvis  
-> **Authoritative specs:** `/home/horseman/tihulu_jarvis/TIHULU_JARVIS_OPENCode_PACKAGE/` (files 01–19)
+> **Authoritative specs:** `TIHULU_JARVIS_OPENCode_PACKAGE/` (files 01–19)
 
 ---
 
@@ -39,14 +39,14 @@ Tihulu Voice Assistant is a **real, local-first, multimodal task assistant** for
 
 ## 4. Four operating modes
 
-| Mode | Reasoning | STT/TTS | Local tools | Network |
-|------|-----------|---------|-------------|---------|
-| `LOCAL_ONLY` | Fully local | Local only | Approved local bridge only | Optional public web; strict-offline denies |
-| `CLOUD_CHAT` | Cloud reasoning | Approved speech pipeline | **None** | Provider + approved cloud-safe research |
-| `SECURE_HYBRID` | Cloud + local worker | Configured, consented | Jan/Qwen local shell only | Scoped; locally minimized results |
-| `CUSTOM` | User-configured | Independent STT/LLM/TTS | Per-profile scoped | Per-profile |
+| Mode | Reasoning | Host tools | Disclosure |
+|---|---|---|---|
+| LOCAL_ONLY | Local | Scoped local | No cloud inference; optional web / strict offline |
+| CLOUD_CHAT (Cloud Only) | Cloud | None | Explicit chat content only |
+| STANDARD_HYBRID | Local + cloud coordination | Local executor; cloud proposals allowed subject to policy | Explicit scoped approval |
+| SECURE_HYBRID (Tihulu-Auto) | Local planner + cloud advice | Local planner and executor only | Mandatory minimum-necessary local filtering |
 
-> **Never** allow cloud models to execute host shell operations directly. All host operations are local authorized Jan/Qwen only.
+CUSTOM is an unlimited saved profile facility, not a bypass or fifth effective preset. Session Auto-Approve is OFF by default, scope-limited, revocable and reset on session/mode changes. Sudo uses OS authentication only; no model receives or types credentials. Native inference, Jan and OpenCode connectors, optional installed Application Engines, and official provider OAuth/API key flows are required, subject to verified compatibility and authorization. See the [authoritative recovery roadmap](RECOVERY_ROADMAP.md) for full contracts and gates.
 
 ## 5. Profiles and privacy
 
@@ -76,7 +76,7 @@ Rich chat output (charts, tables, images, citations) uses a **component evaluati
 
 | User need | Current status | Milestone | Observable acceptance |
 |-----------|---------------|-----------|----------------------|
-| Natural voice input (push-to-talk, VAD, VAD) | PLANNED | M1/M2 | Real mic capture, transcribe, speak |
+| Natural voice input (push-to-talk, VAD, optional wake word) | PLANNED | M1/M2 | Real mic capture, transcribe, speak |
 | Multilingual (TR/EN/DE) with context | PLANNED | M1 | 4-turn `mavi` with language switching |
 | Real task loop voice→model→tools→result→chat+voice | PLANNED | P1 vertical slice | End-to-end synthetic CSV → chart → speech |
 | Firefox / background research with citations | PLANNED | M7 | Browser adapter navigates, cites, screenshots |
@@ -87,8 +87,8 @@ Rich chat output (charts, tables, images, citations) uses a **component evaluati
 | Authorized local shell | SECURED in policy | M5/M7 | Jan/Qwen executes; cloud denied |
 | Desktop app control (COSMIC/Wayland) | PLANNED | M7 | App launch through portal; unauthorized denied |
 | OpenCode session delegation | PLANNED | M6 | Start/continue/stop visible with progress |
-| Four-mode isolation | PLANNED | M5 | LOCAL_ONLY offline; CLOUD_CHAT no shell; SECURE_HYBRID sanitized; CUSTOM isolated |
-| AI Market (model discovery, no dup downloads) | PLANNED | M3/M4 | Real STT/LLM/TTS discovered; independent selection |
+| Four-mode isolation | PLANNED | R3 | LOCAL_ONLY offline; CLOUD_CHAT no host tools; STANDARD_HYBRID authorized proposals; SECURE_HYBRID local-only planning and filtered disclosure |
+| AI Market (model discovery, reuse by default; optional explicit download) | PLANNED | M3/M4 | Real STT/LLM/TTS discovered; independent selection |
 | Provider credentials (secret store, never in chat) | PLANNED | M8 | API keys in OS store; exports clean |
 | Profile import safety | PLANNED | M5 | Import → disabled until re-authorized |
 | CI green before merge, no automerge | PLANNED | M10 | GitHub Actions pass; manual merge |
@@ -99,13 +99,27 @@ Rich chat output (charts, tables, images, citations) uses a **component evaluati
 ```
 User (voice):  "analiz et, bu dosyadaki veriyi grafige donustur"
 STT (Whisper): "analiz et, bu dosyadaki veriyi grafige donustur"
-LLM (Qwen):    parse CSV → compute stats → generate matplotlib chart → save PNG
-Local Shell:   execute computation (Jan executor) → verify result
+LLM (Qwen):    propose validated analyze_csv / plot_series actions
+Local worker:  execute typed deterministic computation → verify result
 Chat output:   display chart PNG + statistics table
-TTS (Piper):   "Veri analiz edildi. Ortalama 42.3, maksimum 98.7. Grafik sozlu ozet:"
+TTS (Piper):   "Veri analiz edildi. 5 ölçüm. Ortalama 24, maksimum 28."
 Follow-up:     "mavi rengi de ekle" → retains chart context → updates chart
 Cancel:        "dur" → stops speaking, returns to idle
 ```
+
+## 8a. Additional accepted requirements
+
+| Requirement | State | Gate |
+|---|---|---|
+| Native GGUF inference independent of Jan/OpenCode | PLANNED | R3 verified native backend |
+| Jan and OpenCode connectors | PLANNED (Jan adapter exists) | R1 real Jan; R4 real sessions |
+| Provider OAuth where officially supported and API keys | PLANNED | R3 account eligibility, isolation and revocation |
+| Application Engine registry and typed task chaining | PLANNED | R1 minimal contract; R4 real adapters |
+| Session permission switch and scoped revocation | PLANNED | R1 contract; R3 runtime negative tests |
+| OS-only privileged authentication | PLANNED | R3 isolated broker and owner test |
+| Independent routing/performance profiles | PLANNED | R3 policy-filtered routing |
+
+R0–R5 in RECOVERY_ROADMAP.md supersede earlier milestone labels and ordering without removing requirements.
 
 ## 9. Non-goals / prohibited
 
