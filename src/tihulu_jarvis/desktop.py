@@ -171,6 +171,9 @@ def create_window(app, loop, bridge=None):
             self.loop = loop
             self.bridge = bridge
             self.confirmations = []
+            self.owned_picker = None
+            self.owned_picker_handler = None
+            self.attachment_context = None
             self.leases = locks.Leases()
             self.search_matches = ()
             self.growing = {}
@@ -464,7 +467,7 @@ def create_window(app, loop, bridge=None):
             return True
 
         def run_cancel_turn(self, *_):
-            if self.busy:
+            if self.busy or self.owned_picker is not None or (hasattr(self, "analysis") and self.analysis.dialog is not None):
                 self.interrupt(False)
             elif self.search_entry.get_text().strip():
                 self.clear_search()
@@ -628,10 +631,77 @@ def create_window(app, loop, bridge=None):
                     break
             self.refresh_profile_buttons()
 
+        def picker_context(self):
+            profile = self.active_profile()
+            if profile.state != "active":
+                raise Hold("profile_not_active")
+            return (profile.id, profile.version, profile.based_on_mode, self.session.epoch)
+
+        def dismiss_picker(self):
+            dialog, handler = self.owned_picker, self.owned_picker_handler
+            self.owned_picker = self.owned_picker_handler = None
+            if dialog is not None:
+                if handler is not None:
+                    dialog.disconnect(handler)
+                dialog.destroy()
+
+        def show_owned_picker(self, dialog, response):
+            """Keep a strong reference and reject late or cross-context callbacks."""
+            if (self.busy or self.closing or self.owned_picker is not None
+                    or (hasattr(self, "analysis") and self.analysis.dialog is not None)):
+                dialog.destroy()
+                return
+            try:
+                context = self.picker_context()
+            except Hold as exc:
+                dialog.destroy()
+                self.set_state("ready", str(exc))
+                return
+            self.owned_picker = dialog
+            dialog.set_modal(True)
+
+            def dispatch(d, res):
+                if d is not self.owned_picker:
+                    return
+                handler = self.owned_picker_handler
+                self.owned_picker = self.owned_picker_handler = None
+                if handler is not None:
+                    d.disconnect(handler)
+                try:
+                    valid = (not self.busy and not self.closing
+                             and self.picker_context() == context)
+                except Hold:
+                    valid = False
+                if not valid:
+                    d.destroy()
+                    self.set_state("ready", "picker_context_changed")
+                    return
+                # Each original response owns destruction in its finally block.
+                try:
+                    response(d, res)
+                except Exception:
+                    self.set_state("ready", "local_operation_failed")
+                self.refresh()
+
+            self.owned_picker_handler = dialog.connect("response", dispatch)
+            dialog.show()
+            self.refresh()
+
+        def clear_attachment(self):
+            self.attachment = self.attachment_context = None
+            self.attachment_note.set_text("")
+
+        def attachment_route(self):
+            profile = self.active_profile()
+            return (profile.id, profile.version, profile.based_on_mode,
+                    self.url.get_text().strip(), self.cfg["llm"])
+
         def activate_profile(self, profile_id, quiet=False):
             entry = self.store.load(profile_id).checked()
             if entry.state != "active":
                 raise Hold("profile_not_active")
+            self.dismiss_picker()
+            self.clear_attachment()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             self.cfg["profile"] = entry.id
@@ -806,8 +876,7 @@ def create_window(app, loop, bridge=None):
                     self.set_state("ready", "profile_import_rejected")
                 finally:
                     d.destroy()
-            dialog.connect("response", response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def export_selected(self):
             chosen = self.selected_profile()
@@ -995,8 +1064,7 @@ def create_window(app, loop, bridge=None):
                     self.write_export(path)
                 finally:
                     d.destroy()
-            dialog.connect("response", response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
             return None
 
         def write_export(self, path):
@@ -1166,10 +1234,10 @@ def create_window(app, loop, bridge=None):
             self.cancel.set_sensitive(self.busy)
             self.hard.set_sensitive(self.busy)
             # The topbar stop is the composer stop, so its state matches.
-            self.quick_stop.set_sensitive(self.busy)
+            self.quick_stop.set_sensitive(self.busy or self.owned_picker is not None)
             if hasattr(self, "analysis"):
                 self.analysis.refresh()
-                analysis_live = bool(self.analysis.dialog is not None or self.analysis.last)
+                analysis_live = bool(self.analysis.dialog is not None or self.analysis.last or self.owned_picker is not None)
                 self.hard.set_sensitive(self.busy or analysis_live)
                 self.quick_stop.set_sensitive(self.busy or analysis_live)
             for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,
@@ -2003,8 +2071,7 @@ def create_window(app, loop, bridge=None):
                     self.read_folder(path)
                 finally:
                     d.destroy()
-            dialog.connect("response", response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def read_folder(self, path):
             """Store a chosen folder and list it; nothing is read yet."""
@@ -2505,8 +2572,7 @@ def create_window(app, loop, bridge=None):
                     self.set_state("ready", "catalog_import_rejected")
                 finally:
                     d.destroy()
-            dialog.connect("response", response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def selected_card(self):
             row = self.market_list.get_selected_row()
@@ -2859,8 +2925,7 @@ def create_window(app, loop, bridge=None):
                     self.status.set_text(str(exc))
                 finally:
                     d.destroy()
-            dialog.connect("response",response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def preview(self, lang):
             if self.busy or self.cfg["llm"] not in self.inventory:
@@ -2926,8 +2991,7 @@ def create_window(app, loop, bridge=None):
                     self.run_transcribe(p)
                 finally:
                     d.destroy()
-            dialog.connect("response",response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def run_transcribe(self, path):
             """Transcribe an owner-supplied recording; nothing is captured here."""
@@ -2996,6 +3060,7 @@ def create_window(app, loop, bridge=None):
         def submit(self, work):
             if self.busy:
                 return
+            self.dismiss_picker()
             self.busy=True
             # Work is being submitted: ask for the fast tick instead of the
             # idle one, so a turn is answered promptly and an idle window is not.
@@ -3156,11 +3221,15 @@ def create_window(app, loop, bridge=None):
                 self.set_state("stopping_playback")
 
         def hard_stop(self):
+            self.clear_attachment()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             self.interrupt(False)
 
         def interrupt(self, clear):
+            self.dismiss_picker()
+            if clear:
+                self.clear_attachment()
             if hasattr(self, "analysis"):
                 if clear:
                     self.analysis.reset()
@@ -3185,6 +3254,9 @@ def create_window(app, loop, bridge=None):
             if self.busy or self.cfg["llm"] not in self.inventory:
                 return None
             try:
+                profile = self.active_profile()
+                if profile.state != "active" or profile.based_on_mode == "CLOUD_CHAT":
+                    raise Hold("attachment_mode_denied")
                 self.require_tools((attachments.ACTION, attachments.SCOPE))
             except Hold as exc:
                 # A refused read is a receipt, not a silent menu item.
@@ -3200,38 +3272,32 @@ def create_window(app, loop, bridge=None):
             dialog=Gtk.FileChooserNative.new("Attach a text file", self.win,Gtk.FileChooserAction.OPEN,"Attach","Cancel")
             def response(d, res):
                 try:
-                    if res!=Gtk.ResponseType.ACCEPT or self.busy:
+                    if res != Gtk.ResponseType.ACCEPT:
                         return
-                    file=d.get_file()
-                    p=file.get_path() if file else None
-                    item = attachments.load(p)
-                    self.attachment = item
-                    self.attachment_note.set_text(tr("Attached: %s" % attachments.describe(item),
-                                                     "Eklendi: %s" % attachments.describe(item),
-                                                     "Angehängt: %s" % attachments.describe(item)))
-                except Hold as exc:
-                    self.attachment = None
-                    self.attachment_note.set_text("")
-                    self.set_state("ready", str(exc))
-                except Exception:
-                    self.attachment = None
-                    self.attachment_note.set_text("")
-                    self.set_state("ready", "local_operation_failed")
+                    file = d.get_file()
+                    self.read_attachment(file.get_path() if file else None)
                 finally:
                     d.destroy()
-            dialog.connect("response",response)
-            dialog.show()
+            self.show_owned_picker(dialog, response)
 
         def read_attachment(self, path):
-            """Read one attachment from a chosen path; the chooser calls this."""
+            """Trusted chooser acceptance: recheck policy at the actual read."""
+            if self.require_attachment() is None:
+                self.clear_attachment()
+                return None
             try:
+                route = self.attachment_route()
                 item = attachments.load(path)
             except Hold as exc:
-                self.attachment = None
-                self.attachment_note.set_text("")
+                self.clear_attachment()
                 self.set_state("ready", str(exc))
                 return None
+            except Exception:
+                self.clear_attachment()
+                self.set_state("ready", "local_operation_failed")
+                return None
             self.attachment = item
+            self.attachment_context = route
             self.attachment_note.set_text(tr("Attached: %s" % attachments.describe(item),
                                              "Eklendi: %s" % attachments.describe(item),
                                              "Angehängt: %s" % attachments.describe(item)))
@@ -3263,9 +3329,16 @@ def create_window(app, loop, bridge=None):
             # cleared afterwards so it can never be sent twice.
             item = self.attachment
             if item is not None:
+                try:
+                    if (self.attachment_context != self.attachment_route()
+                            or self.require_attachment() is None):
+                        raise Hold("attachment_context_changed")
+                except Hold as exc:
+                    self.clear_attachment()
+                    self.set_state("ready", str(exc))
+                    return
                 text = text + "\n\n" + attachments.prompt_block(item)
-                self.attachment = None
-                self.attachment_note.set_text("")
+                self.clear_attachment()
             self.entry.set_text("")
             self.turn_note = text[:80]
             async def run(epoch):
@@ -3343,6 +3416,8 @@ def create_window(app, loop, bridge=None):
             self.submit(run)
 
         def close(self,*_):
+            self.dismiss_picker()
+            self.clear_attachment()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             if not self.busy:
