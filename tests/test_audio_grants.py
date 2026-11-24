@@ -93,6 +93,45 @@ class AudioGrantTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Hold, "approval_expired"):
             await audio.transcribe(str(self.model), str(recording), runner, checkpoint=self.check)
 
+    async def test_spawn_task_rechecks_before_actual_subprocess(self):
+        checks = 0
+        def checkpoint():
+            nonlocal checks
+            checks += 1
+            if checks >= 2:
+                raise Hold("approval_expired")
+        with patch.object(audio.shutil, "which", return_value="/fixture/arecord"), \
+             patch.object(audio.asyncio, "create_subprocess_exec") as spawn:
+            with self.assertRaisesRegex(Hold, "approval_expired"):
+                async with audio.child("arecord", checkpoint=checkpoint):
+                    self.fail("unauthorized child")
+            spawn.assert_not_called()
+
+    async def test_active_capture_revocation_drains_context(self):
+        owner = self
+        entered, drained = asyncio.Event(), asyncio.Event()
+        @asynccontextmanager
+        async def child(name, *args, **kw):
+            owner.calls.append(name)
+            owner.wav(args[-1])
+            class Process:
+                returncode = None
+            try:
+                entered.set()
+                yield Process()
+            finally:
+                drained.set()
+        with patch.object(audio, "child", child), patch.object(audio, "tools_ready", return_value=True), \
+             patch.object(audio, "AUTH_POLL", .01):
+            task = asyncio.create_task(audio.listen(str(self.model), asyncio.Event(),
+                                                    lambda _: None, checkpoint=self.check))
+            await asyncio.wait_for(entered.wait(), 1)
+            self.allowed = False
+            with self.assertRaisesRegex(Hold, "approval_expired"):
+                await asyncio.wait_for(task, 1)
+        self.assertTrue(drained.is_set())
+        self.assertEqual(self.calls, ["arecord"])
+
     async def test_successful_wait_and_cancellation(self):
         async def done():
             return 7
