@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Native GTK adapter for the explicitly selected, local-only R1 task.
 
-No model receives paths, artifacts, or computed private summaries. The UI owns
+No model receives Jarvis-discovered paths, artifacts, or computed private summaries. The UI owns
 all grants; a model cannot call these entry points.
 """
 import asyncio
@@ -163,7 +163,7 @@ class AnalysisView:
                 self.ui.set_state("ready", "csv_selection_unreadable")
             finally:
                 self._drop_dialog()
-                self.refresh()
+                self.ui.refresh()
             if path is not None:
                 self.start_selected(path, language=language, speak=speak)
 
@@ -188,7 +188,7 @@ class AnalysisView:
             self.ui.set_state("ready", str(exc))
 
     def recolor(self):
-        if self.ui.busy or self.controller.busy or self.last is None:
+        if self.ui.busy or self.controller.busy or self.dialog is not None or self.last is None:
             return
         try:
             context = self._activate()
