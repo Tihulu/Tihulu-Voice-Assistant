@@ -3,31 +3,39 @@
 import asyncio
 
 
-async def await_authorized(factory, timeout, checkpoint, *, interval=.25):
-    """Await owned work with bounded grant checks and drain on refusal.
+class OperationDeadline:
+    """One operation-local monotonic budget shared by waits and effect checks."""
 
-    checkpoint is a trusted synchronous callback that raises Hold on denial.
-    The factory owns its transport or child cleanup; denial drains its task.
-    """
-    checkpoint()
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + timeout
-    async def start():
+    def __init__(self, timeout, checkpoint):
         checkpoint()
-        if loop.time() >= deadline:
+        self._checkpoint = checkpoint
+        self._loop = asyncio.get_running_loop()
+        self._expires = self._loop.time() + timeout
+
+    def remaining(self):
+        return self._expires - self._loop.time()
+
+    def check(self):
+        # Preserve authorization failure priority, including if both expire.
+        self._checkpoint()
+        if self.remaining() <= 0:
             raise asyncio.TimeoutError
+
+
+async def await_with_deadline(factory, deadline, *, interval=.25):
+    """Await and drain owned work; effect sites must also call deadline.check."""
+    async def start():
+        deadline.check()
         return await factory()
     task = asyncio.create_task(start())
     try:
         while True:
-            checkpoint()
-            remaining = deadline - loop.time()
+            deadline.check()
+            remaining = deadline.remaining()
             if remaining <= 0:
                 raise asyncio.TimeoutError
             done, _ = await asyncio.wait((task,), timeout=min(interval, remaining))
-            checkpoint()
-            if loop.time() >= deadline:
-                raise asyncio.TimeoutError
+            deadline.check()
             if done:
                 return task.result()
     finally:
@@ -37,3 +45,11 @@ async def await_authorized(factory, timeout, checkpoint, *, interval=.25):
         await asyncio.gather(task, return_exceptions=True)
 
 
+async def await_authorized(factory, timeout, checkpoint, *, interval=.25):
+    """Await owned work with bounded grant checks and drain on refusal.
+
+    For work with internal effect boundaries, share an OperationDeadline
+    explicitly with the worker rather than relying on the outer wait alone.
+    """
+    return await await_with_deadline(factory, OperationDeadline(timeout, checkpoint),
+                                     interval=interval)
