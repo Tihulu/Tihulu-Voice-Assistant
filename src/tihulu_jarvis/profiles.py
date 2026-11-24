@@ -89,9 +89,12 @@ def decide(profile_rules, action, scope=(), now=None):
         if not rule.matches(action, scope):
             continue
         rank = {ALLOW: 0, ASK: 1, DENY: 2}
-        if len(rule.scope) > best_len or (len(rule.scope) == best_len and
+        specificity = len(set(rule.scope))
+        if specificity != len(rule.scope):
+            return DENY, "invalid_rule_scope"
+        if specificity > best_len or (specificity == best_len and
                 rank[rule.decision] > rank[best.decision]):
-            best, best_len = rule, len(rule.scope)
+            best, best_len = rule, specificity
     if best is None:
         return DENY, "no_rule_matches"
     if (best.decision == ALLOW and (best.approval or best.expires_at > 0)
@@ -173,7 +176,10 @@ class Profile:
                 raise Hold("invalid_approval_reference")
             if not 0 <= rule.expires_at <= 1e12:
                 raise Hold("invalid_approval_expiry")
-            key = (rule.action, rule.scope)
+            semantic_scope = frozenset(rule.scope)
+            if len(semantic_scope) != len(rule.scope):
+                raise Hold("invalid_rule_scope")
+            key = (rule.action, semantic_scope)
             if key in seen:
                 raise Hold("duplicate_rule")
             seen.add(key)
@@ -439,7 +445,12 @@ PRIVATE = ("home", "users", "root")
 
 
 def sanitized(profile):
-    """Import/export view: no credentials, approvals, private paths or grants."""
+    """Portable copy: no grants, credentials or workstation model selections.
+
+    Model identifiers are opaque and may contain private paths. Require local
+    reselection rather than guessing which identifiers are portable.
+    """
+    profile = profile.checked()
     def clean(rules):
         out = []
         for rule in rules:
@@ -450,6 +461,7 @@ def sanitized(profile):
         return tuple(out)
 
     out = replace(profile, state="pending_review", credential_refs=(), allowed_providers=(),
+                  stt_model_id="", llm_model_id="", tts_model_id="", voice_by_language={},
                   tool_rules=clean(profile.tool_rules), network_rules=clean(profile.network_rules),
                   filesystem_rules=clean(profile.filesystem_rules), shell_rules=(),
                   cloud_disclosure_rules=clean(profile.cloud_disclosure_rules),
@@ -533,6 +545,16 @@ AUDIT_LIMIT = 512
 AUDIT_BYTES = 262144
 
 
+def _native_text(value):
+    if not isinstance(value, str) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        return False
+    return True
+
+
 def audit_path(root):
     return Path(root) / "audit.jsonl"
 
@@ -553,19 +575,21 @@ def _audit_rows(root):
     try:
         raw = read_selected_bytes(str(path.absolute()), authorized=lambda: True,
                                   allow_empty=True, expected_identity=stamp)
-        rows = [json.loads(line) for line in raw.decode("utf-8").splitlines() if line]
+        rows = [json.loads(line) for line in raw.decode("utf-8").split("\n") if line]
         if len(rows) > AUDIT_LIMIT:
             raise Hold("audit_unreadable")
         for row in rows:
-            if (not isinstance(row, dict) or type(row.get("at")) not in (int, float)
+            if (not isinstance(row, dict)
+                    or set(row) != {"at", "profile", "action", "scope", "decision", "reason"}
+                    or type(row.get("at")) not in (int, float)
                     or not 0 <= row["at"] <= 1e12
                     or not isinstance(row.get("profile"), str)
                     or not ID.fullmatch(row["profile"])
-                    or any(not isinstance(row.get(k), str) or len(row[k]) > cap
+                    or any(not _native_text(row.get(k)) or len(row[k]) > cap
                            for k, cap in (("action", 64), ("decision", 64), ("reason", 80)))
                     or not isinstance(row.get("scope"), list)
                     or len(row["scope"]) > 64
-                    or any(not isinstance(x, str) or len(x) > 64 for x in row["scope"])):
+                    or any(not _native_text(x) or len(x) > 64 for x in row["scope"])):
                 raise Hold("audit_unreadable")
             # Historic endpoint records may contain raw addresses. Never
             # display or rewrite them; keep only the boundary classification.
@@ -614,9 +638,13 @@ def record_decision(root, profile_id, action, scope, decision, reason, now=0.0):
     if type(stamp) not in (int, float) or not 0 <= stamp <= 1e12:
         raise Hold("audit_unavailable")
     path = audit_path(root)
-    row = {"at": stamp, "profile": profile_id, "action": str(action)[:64],
-           "scope": [str(s)[:64] for s in scope], "decision": str(decision)[:64],
-           "reason": str(reason)[:80]}
+    if not all(_native_text(value) for value in (action, decision, reason)):
+        raise Hold("audit_unavailable")
+    if not isinstance(scope, (tuple, list)) or any(not _native_text(s) for s in scope):
+        raise Hold("audit_unavailable")
+    row = {"at": stamp, "profile": profile_id, "action": action[:64],
+           "scope": [s[:64] for s in scope], "decision": decision[:64],
+           "reason": reason[:80]}
     if len(row["scope"]) > 64:
         raise Hold("audit_too_large")
     if row["action"] == "endpoint":
@@ -653,7 +681,7 @@ def read_audit(root, limit=100, action=None, decision=None, profile=None):
         raise Hold("audit_invalid_limit")
     for value, name in ((action, "audit_action_filter"), (decision, "audit_decision_filter"),
                         (profile, "audit_profile_filter")):
-        if value is not None and (not isinstance(value, str) or not value or len(value) > 64):
+        if value is not None and (not _native_text(value) or not value or len(value) > 64):
             raise Hold(name)
     rows = _audit_rows(root)
     if action is not None:
