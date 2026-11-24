@@ -723,6 +723,45 @@ class BoundedProfileReadTests(unittest.TestCase):
                     self.store.load("local-only")
 
 
+class StrictProfileDecodeTests(unittest.TestCase):
+    def test_no_implicit_conversion_of_security_relevant_fields(self):
+        original = json.loads(Store._dump(base()))
+        for key, value in (
+                ("background_processing_enabled", "false"),
+                ("background_processing_enabled", 1),
+                ("version", True), ("version", "1"), ("version", 1.5),
+                ("credential_refs", "key"), ("allowed_providers", {"x": True}),
+                ("voice_by_language", []), ("rules", {}),
+                ("created_at", float("inf")), ("updated_at", True)):
+            with self.subTest(key=key, value=value):
+                with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                    Store._parse(json.dumps(dict(original, **{key: value})))
+
+    def test_rule_fields_and_duplicate_keys_are_rejected(self):
+        original = json.loads(Store._dump(base()))
+        rule = {"action": "local_audio_device", "decision": ALLOW,
+                "scope": [], "approval": "", "expires_at": 0}
+        for key, value in (("scope", "push_to_talk"), ("scope", [True]),
+                           ("approval", 0), ("expires_at", True),
+                           ("expires_at", "120"), ("expires_at", float("nan")),
+                           ("action", [])):
+            with self.subTest(key=key, value=value):
+                with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                    Store._parse(json.dumps(dict(original, rules=[dict(rule, **{key: value})])))
+        for raw in ('{"id":"a","id":"b"}',
+                    '{"rules":[{"decision":"deny","decision":"allow"}]}'):
+            with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                Store._parse(raw)
+
+    def test_save_does_not_emit_non_roundtrippable_policy(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        store = Store(root.name)
+        with self.assertRaisesRegex(Hold, "profile_unreadable"):
+            store.save(base(background_processing_enabled="false"))
+        self.assertEqual(store.ids(), ())
+
+
 class RestartPolicyClockTests(unittest.TestCase):
     def setUp(self):
         root = tempfile.TemporaryDirectory()

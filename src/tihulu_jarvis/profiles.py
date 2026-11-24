@@ -767,12 +767,56 @@ class Store:
     def _parse(cls, text):
         if len(text) > cls.LIMIT:
             raise Hold("profile_too_large")
-        data = json.loads(text)
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise Hold("profile_unreadable")
+                result[key] = value
+            return result
+
+        def reject_constant(value):
+            raise Hold("profile_unreadable")
+
+        def numeric(value):
+            return type(value) in (int, float) and -1e12 <= value <= 1e12
+
+        data = json.loads(text, object_pairs_hook=unique_object,
+                          parse_constant=reject_constant)
         if not isinstance(data, dict):
+            raise Hold("profile_unreadable")
+        for key in ("id", "based_on_mode"):
+            if not isinstance(data.get(key), str):
+                raise Hold("profile_unreadable")
+        if type(data.get("version")) is not int:
+            raise Hold("profile_unreadable")
+        for key in ("name", "description", "ui_locale", "stt_model_id",
+                    "llm_model_id", "tts_model_id", "voice_activation", "state"):
+            if key in data and not isinstance(data[key], str):
+                raise Hold("profile_unreadable")
+        if type(data.get("background_processing_enabled", False)) is not bool:
+            raise Hold("profile_unreadable")
+        for key in ("created_at", "updated_at"):
+            if not numeric(data.get(key, 0)):
+                raise Hold("profile_unreadable")
+        for key in ("allowed_providers", "credential_refs"):
+            values = data.get(key, [])
+            if not isinstance(values, list) or any(not isinstance(v, str) for v in values):
+                raise Hold("profile_unreadable")
+        if not isinstance(data.get("voice_by_language", {}), dict):
+            raise Hold("profile_unreadable")
+        if not isinstance(data.get("rules", []), list):
             raise Hold("profile_unreadable")
         by_kind = {"tool_rules": [], "network_rules": [], "filesystem_rules": [],
                    "shell_rules": [], "cloud_disclosure_rules": []}
         for item in data.get("rules", []):
+            if (not isinstance(item, dict)
+                    or any(not isinstance(item.get(k), str) for k in ("action", "decision"))
+                    or not isinstance(item.get("scope"), list)
+                    or any(not isinstance(v, str) for v in item["scope"])
+                    or not isinstance(item.get("approval", ""), str)
+                    or not numeric(item.get("expires_at", 0))):
+                raise Hold("profile_unreadable")
             rule = Rule(item["action"], tuple(item["scope"]), item["decision"],
                         item.get("approval", ""), item.get("expires_at", 0.0))
             if rule.action in GLOBAL_DENIES:
@@ -788,7 +832,7 @@ class Store:
             else:
                 kind = "tool_rules"
             by_kind[kind].append(rule)
-        return Profile(data["id"], int(data["version"]), data.get("name", ""),
+        return Profile(data["id"], data["version"], data.get("name", ""),
                        data.get("description", ""), data["based_on_mode"], data.get("ui_locale", "tr"),
                        data.get("stt_model_id", ""), data.get("llm_model_id", ""),
                        data.get("tts_model_id", ""), data.get("voice_by_language", {}),
@@ -796,7 +840,7 @@ class Store:
                        tuple(by_kind["tool_rules"]), tuple(by_kind["network_rules"]),
                        tuple(by_kind["filesystem_rules"]), tuple(by_kind["shell_rules"]),
                        tuple(by_kind["cloud_disclosure_rules"]), data.get("voice_activation", "off"),
-                       bool(data.get("background_processing_enabled", False)),
+                       data.get("background_processing_enabled", False),
                        data.get("state", "active"), float(data.get("created_at", 0.0)),
                        float(data.get("updated_at", 0.0))).checked()
 
@@ -883,6 +927,8 @@ class Store:
         text = self._dump(profile)
         if len(text) > self.LIMIT:
             raise Hold("profile_too_large")
+        # Never emit a generation the strict storage decoder would refuse.
+        self._parse(text)
         try:
             current = self._read_profile(target)
         except FileNotFoundError:
