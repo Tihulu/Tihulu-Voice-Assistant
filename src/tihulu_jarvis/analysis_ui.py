@@ -271,7 +271,10 @@ class AnalysisView:
         try:
             async with self.ui.leases.hold("audio_playback", "analysis-%d" % epoch):
                 self.ui.note_leases()
-                self.ui.spoken_line(speech, epoch)
+                if self.ui.cfg.get("show_spoken_text") and self.rows:
+                    label = self.Gtk.Label(label=self.tr("Spoken: ", "Okunan: ", "Gesprochen: ") + speech.text,
+                                           xalign=0, selectable=True, wrap=True)
+                    self.rows[-1].append(label)
                 def progress(stage):
                     if epoch == self.ui.session.epoch and not self.ui.playback_stopping:
                         self.ui.set_state(stage)
