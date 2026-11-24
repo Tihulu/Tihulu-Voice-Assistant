@@ -1,131 +1,45 @@
-# Tihulu Voice Assistant — Recovery Roadmap
+# Jarvis — Recovery and Product Delivery Roadmap
 
-> **Status:** Planning branch — no product code altered  
-> **Base commit:** `20f1349` (origin/main)
+Status: owner-approved product direction; implementation and release gates remain open. Tracking: #79. Planning PR: #78. This document governs delivery order and the latest architectural decisions. Retain existing product requirements and traceability; do not interpret deferred features as removed.
 
----
+## Evidence checkpoint
+Main verified at 20f1349871ad2a6a132975c914f71f8b16b38166 (PR #77). Run 45290156016: Python 3.10, 3.12, GTK and package passed; triggers failed because feat/merge-log-4 was missing from the branch list. Earlier record-card baseline reports 356 core and 602 native GTK tests. These are synthetic tests, not live voice or owner acceptance. GTK picker-associated segfault root cause UNKNOWN. Real Jan, microphone, Whisper, Piper, COSMIC/Wayland and clean-install acceptance remain HOLD until tested. Existing desktop, voice, policy, attachment, task-board and market code are reuse candidates. Do not claim tool execution, provider login or OpenCode integration based on disabled controls. Recheck current refs and exact-head CI before coding.
 
-## Current state (evidenced)
+## Product and architecture
+Local-first, multilingual desktop assistant: voice/text -> task orchestration -> authorized real computation/actions -> verified charts, tables, files, citations, text and concise spoken summary -> contextual follow-up/cancel. English code/docs/issues/commits/default UI; TR/EN/DE UI and independent automatic conversation-language detection, override, code switching and STT/LLM/TTS selection. Keep existing Python/GTK and legacy installation initially. Refactor incrementally behind typed interfaces; evaluate Open WebUI/Tauri only against measured rendering, privacy, cancellation, accessibility and Wayland needs. No mandatory Jan, OpenCode, Boru Yolu or Tihulu-Auto dependency.
 
-| Area | Evidenced status | Notes |
-|------|-----------------|-------|
-| Repo structure | `main` at `20f1349` with 80+ feat branches | Extensive incremental feature history |
-| CI | `test`, `gtk`, `triggers`, `package` jobs on PR to `main` | Tests run on `python -m unittest discover`; GTK tests require Xvfb |
-| GTK crash | **UNKNOWN root cause** | GTK picker-associated crash reported by user; not proven |
-| M1 code | Reported 21 M1 + 8 contracts tests passing | Only isolated unit tests; no live Jan/voice/GUI wiring |
-| Jan server | Previously responded; model IDs `Qwen3_6-35B-A3B-UD-IQ4_XS` | Availability not guaranteed |
-| STT/TTS | Hex/Whisper Large V3 Turbo preferred; Piper TR/EN/DE voices reported | Must re-verify |
-| Open WebUI | Installed; integration not verified | Requires audit |
-| OpenCode Tihulu-Auto | Exists in related efforts | Must audit compatibility, not assume |
-| README | Vague — "Jarvis like linux desktop assistant" | Needs clear product statement |
-| Documentation | `docs/` has STATE.md, STACK.md, DEVELOPMENT.md, RELEASE.md, TRACEABILITY.md, TEST_EVIDENCE.md, NATIVE_ACCEPTANCE.md, CATALOG_SOURCES.md | No PRODUCT_SCOPE, RECOVERY_ROADMAP, or CHATGPT_HANDOFF |
-| PR #77 | Historical | Triggers failure contradicts all-green claim; requires audit |
-| PR #72, #71, #70 | Most recent merged | Provenance increment, preflight/GPU check, CI trigger automation |
+Separate TaskOrchestrator, PolicyGateway, InferenceBackend, AgentConnector, EngineAdapter, ArtifactStore and credential broker. Use task/session/profile IDs, live revocation checks, typed bounded tool arguments, owned cancellable worker processes, filesystem/egress isolation and structured results with input digest, units, tool version, parent artifact IDs and warnings. UI updates only on GTK main thread. Model output and external documents are untrusted data, never grants. Never render arbitrary model HTML/JS or execute unvalidated scripts. Computation results must come from tools, not model guesses. Publish only validated non-stale artifacts. Local retention configurable; no raw speech storage by default.
 
----
+## Operating modes and profiles
+Three UI categories (Local, Cloud, Hybrid), four effective presets:
+- LOCAL_ONLY: local inference and authorized local host tools; optional explicitly requested public research; Strict Offline blocks all external egress for owned workers. No cloud fallback.
+- CLOUD_CHAT (Cloud Only): cloud reasoning and explicitly submitted chat content; no host tools, local file discovery, shell, desktop or sudo; optional cloud-safe research. Independent consented STT/TTS.
+- STANDARD_HYBRID: authorized cloud/local coordination. Cloud can propose host actions but only a verified local executor can execute them through policy. Approved scoped data may be shared with named providers; no automatic broad/raw disclosure.
+- SECURE_HYBRID (Tihulu-Auto): cloud advice/reasoning only. Authorized local planner (initially Jan/Qwen, later verified native substitute) independently plans and executes all host actions; cloud cannot directly invoke host tools or submit executable commands. Separate local and cloud contexts. Mandatory local minimum-necessary disclosure filtering, destination and scope checks; no raw files, paths, terminal output, screenshots or secrets by default. If local model/filter fails, HOLD; no silent downgrade. Any exceptional broader disclosure requires explicit separate review and a deliberate policy change, not session auto-approval.
 
-## Recovery strategy: sequential milestones with gates
+CUSTOM remains unlimited saved profile configuration, not an unrestricted fifth preset: clones an effective preset, can tighten scope and choose authorized model/tool/egress settings; cannot weaken global boundaries. Migrate legacy CUSTOM profiles without expanding privileges; unknown mappings disabled pending review. Import/export strips credentials, grants, private paths; rollback never resurrects expired permissions. Default LOCAL_ONLY. Independent AUTO, ECONOMY, BALANCED, PERFORMANCE, MANUAL routing strategy; user-configurable bounded concurrency (up to six if selected and resources permit). Limits/fallback cannot override privacy or billing consent. Mode switches invalidate transient grants and recheck/cancel incompatible tasks; never automatically transfer local history to cloud.
 
-### Phase P0 — Audit, naming, and crash diagnosis
+## Session-scoped authorization
+Chat header switch: Session Auto-Approve, OFF by default and on new sessions. User chooses explicitly scoped capability/target categories; allow once, task, session, scoped persistent, deny. Read, write, shell, apps, desktop, browser, OpenCode and network are separate. Scope to selected files/folders/operation classes; never wildcard all host actions. Live authorization checked at invocation and output publication; deny wins ties. Turning switch off revokes automatic grants, mode change/new session resets, hard stop cancels owned jobs and revokes temporary grants. No bypass of cloud disclosure review, destructive actions or privilege elevation. Show active grants and revoke controls; no persistence/export of session grants. Test expiry, revocation during work, escalation, connector bypass and stale events.
 
-**Objective:** Establish truthful baseline and safe checkpoint before any feature work.
+## Privileged Execution Gateway
+Never expose a password to any model, local or cloud, or to Jarvis chat, logs, argv, stdin relay, environment, clipboard, artifacts, recording or history. Prefer OS-controlled Polkit/PAM authentication for a narrowly scoped operation; alternatively an independent user-controlled terminal with direct sudo TTY authentication, no agent access to that terminal's input. Display exact proposed privileged action/scope and obtain explicit confirmation, independent of session auto-approve. Local model may request an authentication UI but cannot receive or type the password. Suspend desktop capture/automation around authentication; credential UI inaccessible to agents. Use narrowly scoped helpers, no persistent root daemon, no sudoers/NOPASSWD modifications, no shell interpolation or generic privileged command endpoint. Respect existing OS-managed authentication without storing/replaying credentials; if safe UI unavailable or denied, HOLD. CLOUD_CHAT cannot invoke host elevation. Standard Hybrid may propose; Secure Hybrid local planner authorizes request; output disclosure still follows mode policy. Synthetic tests use fake secret canaries and mock broker; owner acceptance uses a harmless scoped privileged operation, never actual password in evidence.
 
-| Task | Expected output | Gate |
-|------|----------------|------|
-| A.1 Full model/tool inventory detection | Sanitized metadata of active models, available tools | Checklist completed |
-| A.2 GTK crash investigation (if feasible) | Reproduce or confirm cause; if not reproducible, document UNKNOWN | Report filed |
-| A.3 Rename package to `tihulu_jarvis` consistently | Readable, non-generic naming in all imports/docs | `compileall` passes |
-| A.4 README rewrite | Clear product name, codename, status, feature overview, links | Reviewed |
-| A.5 Safe worktree checkpoint | Branch `plan/recovery-roadmap` with only docs | Push non-force |
+## Native models, connectors and accounts
+Use optional Jarvis-managed llama.cpp/GGUF worker with CPU/GPU selection, streaming, cancellation and resource leases; later compatible backends (Ollama, MLX, vLLM, approved custom endpoints). Reuse installed compatible weights by reference by default; explicit optional download/duplicate copy, no automatic installation/load/download/deletion. Jan first-class documented local API connector; discover actual models/readiness and distinguish remote inference. OpenCode first-class AgentConnector: actual project/session IDs, task dispatch/continue, events, progress and cancel only owned job; no scraping credentials, no automatic configuration changes. Connectors cannot bypass mode/scope/egress; restrict or HOLD if isolation cannot be enforced. Keep coordinator/local planner/executor/coding/reviewer/STT/TTS independent. Avoid duplicate GPU loads; measured resource management, no claim of shared VRAM merely from shared weights.
 
-### Phase P1 — First vertical slice: real voice → compute → chart → speech
+Cloud provider registry: OpenAI, Anthropic Claude, Google Gemini, DeepSeek, NVIDIA, OpenRouter and compatible custom endpoints. Support API keys and official OAuth/account sign-in where provider explicitly authorizes third-party use; verify current official documentation, eligibility, scopes, billing and subscription terms per adapter. No claim all subscriptions are reusable. OpenAI official supported account flow where eligible; Anthropic and Google official flows where eligible; DeepSeek API key until official OAuth verified. OAuth via system browser, PKCE/state and approved redirect, minimal scopes, secure refresh/revoke, no token scraping or impersonation. Credentials in OS secret store or explicit session-only entry if unavailable; never model context/export/repo/logs. Rate limits/credit exhaustion may trigger only preauthorized fallback, no silent cloud escalation or duplicate billable/side-effecting retry.
 
-**Objective:** End-to-end evidence that the core task loop works.
+## Application Engines
+Discover installed engines on demand, read-only; distinguish detected, compatible, authorized, tested and available. Typed adapters with capability/version/health, input/output artifacts, job events and cancel. Prefer documented API/CLI/headless/IPC/D-Bus/portal; user-enabled supported UI automation last. Do not bypass Wayland or personal browser profile. Examples: Python/Jupyter, R/Octave, Matplotlib/Gnuplot, LibreOffice, FFmpeg, ImageMagick, Blender, GIMP/Inkscape, Firefox, OpenCode, Git, TIHULU apps. Never claim generic control; no auto-install/update. All engines use same gateway, scoped filesystem/network, verified artifacts; no arbitrary paths/commands or shell escape. Prefer existing engines with built-in deterministic fallback when authorized. Engine registry separate from AI Market; task chaining and manual/automatic selection.
 
-| Task | Expected output | Gate |
-|------|----------------|------|
-| B.1 Jan adapter (text-level) | `naber nasilsin` → TR reply via real Jan endpoint | Unit test + real Jan test |
-| B.2 Synthetic CSV pipeline | Generate CSV → compute → matplotlib chart → save PNG | File exists, chart renders |
-| B.3 Chart displayed in chat | Chart appears as attachment in rich chat | Visual verification |
-| B.4 Spoken summary | Piper speaks chart summary | Audio verification |
-| B.5 Follow-up retains context | 4+ turns with chart reference | Session history check |
-| B.6 Cancel / Hard Stop | Stop speaking; task stops without affecting shared services | Negative test |
+## Ordered milestones (no calendar promises)
+R0 (legacy P0): freeze verified baseline and preserve installed version; reconcile planning refs and CI. Repair brittle trigger enumeration using reviewable event policy if possible, retain read-only workflow and required check names; verify fork safety and existing script/tests. Audit installed models and tools without publishing private inventory. Reproduce GTK startup/settings/file picker open/select/cancel/reopen, close during dialog, zero/large files with disposable profile, sanitized faulthandler/backtrace and version evidence. Root cause stays UNKNOWN until proven. Check real Jan text and TR/EN/DE mic/Whisper/Piper separately. No model downloads. Do not blindly rewrite UI.
+R1 (legacy P1): first useful LOCAL_ONLY task. Minimal EngineAdapter, typed analyze_csv/plot_series, task/permission/artifact contracts and deterministic worker. Synthetic CSV time_s,temperature_c: (0,20),(10,22),(20,24),(30,26),(40,28). Expected count 5, mean 24, min 20, max 28, delta 8, duration 40. Validate bounded selected-file access, no path escape, malformed/nonfinite/missing values, source immutability; approved local plotting dependency, no runtime install. Real chart/table in GTK chat, export, result-based spoken summary. Voice and text share same path; Jan structured action validated, opaque artifact ID instead of raw data by default. Four or more turns including recolor/reanalysis with provenance. Stop speaking vs cancel task vs hard stop; no stale publication/unrelated process termination. Test exact results, permission denial, offline network, cancel, follow-up and real owner voice in all three languages. Native inference and market expansion do not block R1.
+R2 (legacy P2): dedicated approved Firefox/public research adapter, isolated browser profile, domain navigation/read vs submit/download grants, citations with URL/title/retrieval time, injection defenses, rich artifacts/report export and keyboard accessibility. No access to personal cookies by default.
+R3: native inference/provider/account adapters, both hybrid branches, verified local shell bridge, runtime isolation/egress, session grants and privileged broker. Start policy contracts earlier in R1; real integration here. Negative tests with captured outbound bytes and fake secrets, actual worker identity, cloud host-action denial, filter failure, connector bypass, mode changes, quota, credential revocation, auth UI isolation. No claims of security until tested.
+R4 (legacy P3): OpenCode actual session integration, application engines, desktop portal/IPC, Git, workflow chaining, resource scheduling and optional Tihulu integrations. Verify actual versions, progress/cancellation and unrelated process preservation. No automatic push or destructive changes.
+R5 (legacy O): AI Market enhancements, approved source discovery, download/resume/checksum/license/compatibility/import, optional duplicate downloads, no shared-weight deletion; optional hands-free/VAD/wake word OFF by default; reusable workflows, local knowledge/RAG, conversation branching, recovery/resume and quick assistant. Clean-machine deb install/uninstall/rollback, icons, settings migration and release checks. Ubuntu/Pop!_OS first, portability later. Preserve original requirements.
 
-**Milestone gate:** Code exists on branch; unit tests run; owner verifies audio + UI.
-
-### Phase P2 — Firefox / background research with citations
-
-| Task | Expected output | Gate |
-|------|----------------|------|
-| C.1 Browser adapter | Playwright extension or similar with domain scope | Permission matrix enforced |
-| C.2 Research workflow | Navigate → read → extract citations → return | Citation format verified |
-| C.3 Private tab isolation | No cookie/session leakage | Negative test |
-| C.4 Prompt injection defense | Browser content cannot change tool policy | Negative test |
-
-### Phase P3 — Desktop and OpenCode connectors
-
-| Task | Expected output | Gate |
-|------|----------------|------|
-| D.1 Desktop app control | COSMIC portal / D-Bus app launch | Authorized only |
-| D.2 OpenCode session integration | Start/continue/stop real session with progress | Evidence-based status |
-
-### Phase O — Packaging, release, QA
-
-| Task | Expected output | Gate |
-|------|----------------|------|
-| E.1 CI green on all branches | `test` + `gtk` + `triggers` pass | All green |
-| E.2 .deb package | `dpkg -i` installs, icon in launcher | Pop!_OS verification |
-| E.3 Recovery tests | Crash during recording, model failure, partial download | No data loss |
-| E.4 Owner sign-off | Real mic/audio/UI + native packaging | Documented approval |
-
----
-
-## Acceptance criteria per milestone
-
-Each milestone follows the five-state tracking system:
-
-| State | Meaning |
-|-------|---------|
-| PLANNED | No verified artifact |
-| DRAFT | Source proposal exists |
-| IMPLEMENTED | Files exist |
-| UNIT_PASS | Isolated tests ran |
-| INTEGRATED_PASS | Actual service/interface tested |
-| OWNER_VERIFIED | Physical UI/audio/product test passed |
-| RELEASE_READY | All gates pass; owner signed off |
-| BLOCKED | External hard gate |
-
-> **No milestone is DONE** until: code exists on intended branch, non-destructive tests ran, negative tests passed where security-relevant, owner behavior verified when necessary, and rollback path tested.
-
----
-
-## Blockers and risks
-
-| Blocker | Impact | Mitigation |
-|---------|--------|------------|
-| GTK crash root cause UNKNOWN | Blocks P0 stability | Document, attempt reproduction; if unreproducible, defer with tracking issue |
-| Open WebUI compatibility unverified | Blocks M2 UI architecture choice | Run short spike; document ADR |
-| Real Jan endpoint availability uncertain | Blocks M1/M2 P1 vertical slice | Check before starting; if unavailable, mock with bounded timeout test |
-| PR #77 historical failure | Contradicts "all green" claims | Audit CI logs before asserting status |
-| No automerge policy | Slower iteration | Manual merge after green CI + review |
-
----
-
-## Timeline (estimate)
-
-| Phase | Effort | Dependencies |
-|-------|--------|-------------|
-| P0 Audit & naming | 1–2 days | None |
-| P1 Vertical slice | 3–5 days | P0 baseline, Jan available |
-| P2 Research | 3–5 days | P1, browser adapter |
-| P3 Desktop/OpenCode | 3–5 days | P1, policy engine |
-| O Packaging & QA | 2–3 days | All phases |
-
----
-
-## References
-
-- `docs/PRODUCT_SCOPE.md` — full product scope and requirements matrix
-- `docs/CHATGPT_HANDOFF.md` — handoff prompt for ChatGPT
-- `/home/horseman/tihulu_jarvis/TIHULU_JARVIS_OPENCode_PACKAGE/11_ROADMAP_AND_TASK_GRAPH.md` — original task graph
-- `/home/horseman/tihulu_jarvis/TIHULU_JARVIS_OPENCode_PACKAGE/12_TEST_AND_ACCEPTANCE.md` — acceptance test matrix
+## Evidence and release
+Per capability: PLANNED, DRAFT, IMPLEMENTED, UNIT_PASS, INTEGRATED_PASS, OWNER_VERIFIED, RELEASE_READY or HOLD with reason. No percentages inferred from test counts. Exact commit/run, commands, expected/actual, negative tests, rollback and owner evidence. No private files, host paths, credentials, raw speech or lab data in public repo. No force push to main, no auto merge; manual review and green exact-head CI required. Use small reviewable draft PRs; one coordination issue (#79). No market expansion before R1. Next action: R0 baseline CI and crash/real-device acceptance; R1 deterministic synthetic computation can be prototyped independently without enabling host shell or claiming product acceptance.
