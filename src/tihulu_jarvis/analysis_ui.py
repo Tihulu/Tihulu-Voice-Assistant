@@ -10,6 +10,7 @@ from threading import Lock
 from uuid import uuid4
 
 from . import analysis_controller as ac, analysis_export, analysis_intent, profiles
+from .selected_csv import selection_identity
 from .voice import audio
 from .voice.m1 import Hold, SpeechRequest, speech_text
 
@@ -20,6 +21,7 @@ class AnalysisView:
         self.tr = tr
         self.language = language if language in ac.LANGUAGES else "en"
         self.context = None
+        self.live_policy = None
         self.dialog = None
         self.handler = None
         self.grants = set()
@@ -64,10 +66,19 @@ class AnalysisView:
             "Lokale Analyse · time_s,temperature_c · kein Modell erforderlich"))
         self.refresh()
 
+    @staticmethod
+    def _read_allowed(live):
+        if live is None:
+            return False
+        decision, reason = live.evaluate("filesystem_read", ("csv_analysis",))
+        return decision == profiles.ALLOW or reason == "no_rule_matches"
+
     def authorized(self, context, action, target):
-        # Called on a worker: do not access GTK or the profile store here.
+        # Worker-safe: immutable policy plus bounded metadata and clock check.
+        # No GTK, mutable UI state or model callback on a worker.
         with self.lock:
-            return context == self.context and (action, target) in self.grants
+            return (context == self.context and (action, target) in self.grants
+                    and self._read_allowed(self.live_policy))
 
     def _profile(self):
         profile = self.ui.active_profile()
@@ -75,29 +86,37 @@ class AnalysisView:
             raise Hold("analysis_mode_denied")
         decision, reason = profiles.effective(profile).evaluate(
             "filesystem_read", ("csv_analysis",), time.time())
-        # An absent rule needs an explicit picker grant; explicit deny/ask
-        # must not be overridden by this UI. No general file authorization.
         if decision != profiles.ALLOW and reason != "no_rule_matches":
             raise Hold("analysis_not_authorized")
         return profile
 
     def _matches(self, context):
         profile = self._profile()
-        if (context is None or context != self.context
-                or profile.id != context.profile_id
-                or profile.version != context.profile_version):
-            raise Hold("analysis_context_changed")
+        with self.lock:
+            if (context is None or context != self.context
+                    or profile.id != context.profile_id
+                    or profile.version != context.profile_version
+                    or not self._read_allowed(self.live_policy)):
+                raise Hold("analysis_context_changed")
 
     def _activate(self):
         profile = self._profile()
         if self.context is not None:
             self._matches(self.context)
             return self.context
+        live = self.ui.store.bind_live(profile.id)
+        if (live.policy != profiles.effective(profile) or not self._read_allowed(live)):
+            raise Hold("analysis_context_changed")
         context = ac.Context(uuid4().hex, profile.id, profile.version, "LOCAL_ONLY")
         self.controller.activate(context)
         with self.lock:
             self.context = context
+            self.live_policy = live
         return context
+
+    def _selection_allowed(self, context):
+        self._matches(context)
+        return True
 
     def refresh(self):
         policy = getattr(self.ui, "policy", None)
@@ -132,6 +151,7 @@ class AnalysisView:
         self._drop_dialog()
         with self.lock:
             self.context = None
+            self.live_policy = None
             self.grants.clear()
         self.controller.hard_stop()
         self.last = None
@@ -167,6 +187,7 @@ class AnalysisView:
             if d is not self.dialog:
                 return
             path = None
+            identity = None
             try:
                 if result == Gtk.ResponseType.ACCEPT:
                     self._matches(context)
@@ -174,6 +195,7 @@ class AnalysisView:
                     path = file.get_path() if file is not None else None
                     if not path:
                         raise Hold("csv_invalid_selection")
+                    identity = selection_identity(path, authorized=lambda: self._selection_allowed(context))
             except Hold as exc:
                 self.ui.set_state("ready", str(exc))
             except Exception:
@@ -181,15 +203,15 @@ class AnalysisView:
             finally:
                 self._drop_dialog()
                 self.ui.refresh()
-            if path is not None:
-                self.start_selected(path, language=language, speak=speak)
+            if identity is not None:
+                self.start_selected(path, language=language, speak=speak, identity=identity)
 
         self.handler = dialog.connect("response", response)
         dialog.show()
         self.refresh()
         self.ui.refresh()
 
-    def start_selected(self, path, *, language=None, speak=False):
+    def start_selected(self, path, *, language=None, speak=False, identity=None):
         """Trusted picker accept path only; not a generic chat command."""
         if self.ui.busy or self.controller.busy or self.dialog is not None:
             return
@@ -197,9 +219,12 @@ class AnalysisView:
             context = self._activate()
             if not isinstance(path, str) or not path:
                 raise Hold("csv_invalid_selection")
+            if identity is None:
+                identity = selection_identity(path, authorized=lambda: self._selection_allowed(context))
             self._start(context, "selected_csv_analysis", path,
                         lambda color: self.controller.analyze_selected(
-                            path, color=color, language=language or self.language),
+                            path, color=color, language=language or self.language,
+                            expected_identity=identity),
                         speak=speak)
         except Hold as exc:
             self.ui.set_state("ready", str(exc))
