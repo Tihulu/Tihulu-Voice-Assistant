@@ -1792,6 +1792,11 @@ class CatalogFetchUITests(MarketFixture):
     def allow(self, *hosts):
         self.ui.catalog_hosts.set_text(" ".join(hosts))
         self.ui.remember_hosts()
+        profile = Profile(id="catalog-test", name="Synthetic catalog consent",
+            based_on_mode="SECURE_HYBRID",
+            network_rules=(Rule("external_network", ("catalog",), "allow"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
 
     def test_an_allowed_host_is_fetched_and_must_verify(self):
         opener, calls = self.opener()
@@ -3852,6 +3857,13 @@ class ApprovedSourcesTests(DesktopTests):
         self.click(self.ui.source_register)
         self.until(lambda: len(self.rows()) == 1)
 
+    def authorize_listing(self):
+        profile = Profile(id="source-test", name="Synthetic source consent",
+            based_on_mode="SECURE_HYBRID",
+            network_rules=(Rule("external_network", ("catalog",), "allow"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+
     def opener(self, payload):
         async def runtime(url, timeout):
             self.fetched.append((url, timeout))
@@ -3885,6 +3897,7 @@ class ApprovedSourcesTests(DesktopTests):
 
     def test_searching_a_source_shows_cards_and_says_nothing_is_installed(self):
         self.register()
+        self.authorize_listing()
         payload = json.dumps(self.listing())
         opener = self.opener(payload)
         self.ui.source_opener = lambda: opener
@@ -3964,6 +3977,7 @@ class RecordCardTests(ApprovedSourcesTests):
 
     def search(self):
         self.register()
+        self.authorize_listing()
         payload = json.dumps(self.listing())
         self.ui.source_opener = lambda: self.opener(payload)
         self.ui.source_list.select_row(self.rows()[0])
@@ -4462,3 +4476,169 @@ class AttachmentTurnBoundaryTests(DesktopFixture):
         self.assertEqual(self.ui.entry.get_text(), text)
         self.assertIs(self.ui.attachment, item)
         self.assertFalse(self.backend.requests)
+
+
+class ReviewSecurityTests(DesktopFixture):
+    """Exercise real GTK dispatch with synthetic files, clocks and backends."""
+
+    def fixture(self):
+        path = Path(self.profile_home).resolve() / "review.csv"
+        path.write_bytes(b"time_s,temperature_c\n0,20\n10,22\n")
+        return path
+
+    def activate_read(self, deadline):
+        profile = Profile(id="review-read", name="Review read",
+                          filesystem_rules=(Rule("filesystem_read", ("csv_analysis",),
+                                                 "allow", "fixture", deadline),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        return profile
+
+    def assert_refused(self, reason):
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), reason)
+        self.assertFalse(self.ui.analysis.rows)
+        self.assertIsNone(self.ui.analysis.last)
+        self.assertFalse(self.ui.analysis.controller._artifacts)
+
+    def test_selected_csv_replacement_after_acceptance_refused(self):
+        from threading import Event
+        from tihulu_jarvis import analysis_controller as ac
+        entered, release = Event(), Event()
+        path = self.fixture()
+        reader = ac.read_selected_csv
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("worker test timeout")
+            return reader(*args, **kwargs)
+        with patch.object(ac, "read_selected_csv", side_effect=delayed):
+            self.ui.analysis.start_selected(str(path))
+            try:
+                self.until(entered.is_set)
+                path.rename(path.with_suffix(".old"))
+                path.write_bytes(b"time_s,temperature_c\n0,99\n")
+            finally:
+                release.set()
+            self.assert_refused("csv_selection_changed")
+
+    def test_worker_expiry_before_data_open_refuses_io_and_publication(self):
+        from threading import Event
+        from tihulu_jarvis import analysis_controller as ac, selected_csv
+        entered, release = Event(), Event()
+        clock = [time.time()]
+        self.activate_read(clock[0] + 60)
+        path = self.fixture()
+        reader = ac.read_selected_csv
+        calls = []
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("worker test timeout")
+            # The worker is now expired, before the actual content reader.
+            with patch.object(selected_csv.os, "open", side_effect=AssertionError("expired open")) as op:
+                try:
+                    return reader(*args, **kwargs)
+                finally:
+                    calls.extend(op.call_args_list)
+        with patch.object(profiles.time, "time", side_effect=lambda: clock[0]), \
+             patch.object(ac, "read_selected_csv", side_effect=delayed):
+            self.ui.analysis.start_selected(str(path))
+            try:
+                self.until(entered.is_set)
+                clock[0] += 120
+            finally:
+                release.set()
+            self.assert_refused("analysis_not_authorized")
+        self.assertEqual(calls, [])
+
+    def test_worker_external_policy_change_before_data_open(self):
+        from threading import Event
+        from tihulu_jarvis import analysis_controller as ac, selected_csv
+        entered, release = Event(), Event()
+        profile = self.activate_read(time.time() + 3600)
+        path = self.fixture()
+        reader = ac.read_selected_csv
+        calls = []
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("worker test timeout")
+            with patch.object(selected_csv.os, "open", side_effect=AssertionError("revoked open")) as op:
+                try:
+                    return reader(*args, **kwargs)
+                finally:
+                    calls.extend(op.call_args_list)
+        with patch.object(ac, "read_selected_csv", side_effect=delayed):
+            self.ui.analysis.start_selected(str(path))
+            try:
+                self.until(entered.is_set)
+                self.ui.store.save(Profile(id=profile.id, version=2, name=profile.name,
+                    filesystem_rules=(Rule("filesystem_read", ("csv_analysis",), "deny"),)))
+            finally:
+                release.set()
+            self.assert_refused("analysis_not_authorized")
+        self.assertEqual(calls, [])
+
+    def test_worker_expiry_before_artifact_publication(self):
+        from threading import Event
+        from tihulu_jarvis import analysis_controller as ac
+        entered, release = Event(), Event()
+        clock = [time.time()]
+        self.activate_read(clock[0] + 60)
+        render = ac.render_svg
+        def delayed(*args, **kwargs):
+            result = render(*args, **kwargs)
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("worker test timeout")
+            return result
+        with patch.object(profiles.time, "time", side_effect=lambda: clock[0]), \
+             patch.object(ac, "render_svg", side_effect=delayed):
+            self.ui.analysis.start_selected(str(self.fixture()))
+            try:
+                self.until(entered.is_set)
+                clock[0] += 120
+            finally:
+                release.set()
+            self.assert_refused("analysis_not_authorized")
+
+    def test_expired_and_ask_voice_never_capture_or_record_allow(self):
+        self.connect_model()
+        for decision, deadline, reason in (("allow", time.time() - 1, "approval_expired"),
+                                           ("ask", 0.0, "approval_required")):
+            with self.subTest(decision=decision):
+                profile = Profile(id="review-" + decision, name="Review voice",
+                    tool_rules=(Rule("local_audio_device", ("push_to_talk",),
+                                     decision, "fixture" if decision == "allow" else "",
+                                     deadline),))
+                self.ui.store.save(profile)
+                self.ui.activate_profile(profile.id)
+                self.assertFalse(self.ui.talk.get_sensitive())
+                with patch.object(desktop.audio, "listen",
+                                  side_effect=AssertionError("unauthorized capture")) as capture:
+                    self.ui.voice()  # Bypass sensitivity to test actual runtime gate.
+                    self.until(lambda: not self.ui.busy)
+                    capture.assert_not_called()
+                self.assertEqual(str(self.ui.session.active.exception()), reason)
+                rows = [row for row in profiles.read_audit(self.ui.store.root)
+                        if row["profile"] == profile.id and row["action"] == "local_audio_device"]
+                self.assertTrue(rows)
+                self.assertTrue(all(row["decision"] == "deny" for row in rows))
+
+    def test_voice_expiry_between_submission_and_capture(self):
+        self.connect_model()
+        clock = [time.time()]
+        profile = Profile(id="review-expiring-voice", name="Review voice",
+            tool_rules=(Rule("local_audio_device", ("push_to_talk",), "allow",
+                             "fixture", clock[0] + 60),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch.object(profiles.time, "time", side_effect=lambda: clock[0]), \
+             patch.object(desktop.audio, "listen",
+                          side_effect=AssertionError("expired capture")) as capture:
+            self.click(self.ui.talk)
+            clock[0] += 120
+            self.until(lambda: not self.ui.busy)
+            capture.assert_not_called()
+        self.assertEqual(str(self.ui.session.active.exception()), "approval_expired")
