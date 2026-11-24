@@ -93,3 +93,18 @@ class IgnoreTests(unittest.TestCase):
                 ignored, _ = ci_triggers.check(path, ignore=("feat/this-pr",))
         self.assertEqual(plain, ("feat/this-pr",))
         self.assertEqual(ignored, ())
+
+
+class AllBranchesTests(unittest.TestCase):
+    def test_all_branch_glob_needs_no_remote_inventory(self):
+        import tempfile
+        from pathlib import Path
+        from tools import ci_triggers
+        text = "name: CI\non:\n  pull_request:\n    branches: ['**']\n"
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ci.yml"
+            path.write_text(text, encoding="utf-8")
+            with patch.object(ci_triggers, "remote_branches",
+                              side_effect=AssertionError("unexpected network")):
+                self.assertEqual(ci_triggers.check(path), ((), ()))
+        self.assertEqual(rewrite(text, ["feat/new"]), text)

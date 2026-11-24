@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Distributed without warranty; see LICENSE for the full terms.
 """Attachment tests: only temporary files in a private directory are read."""
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from tihulu_jarvis.attachments import (MAX_BYTES, MAX_CHARS, describe, load,
                                        prompt_block)
@@ -81,3 +83,74 @@ class DescribeTests(unittest.TestCase):
         self.assertTrue(block.endswith("[end of attached file]"))
         self.assertIn("mavi", block)
         self.assertNotIn(str(self.tmp), block)
+
+
+@unittest.skipUnless(hasattr(os, "O_PATH"), "Linux descriptor reader")
+class BoundedAttachmentTests(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name).resolve()
+        self.path = self.root / "notes.txt"
+        self.path.write_bytes(b"synthetic note")
+
+    def test_empty_file_keeps_legacy_reason(self):
+        self.path.write_bytes(b"")
+        with self.assertRaisesRegex(Hold, "^attachment_empty$"):
+            load(str(self.path))
+
+    def test_symlink_file_directory_and_fifo_are_refused(self):
+        link = self.root / "link.txt"
+        link.symlink_to(self.path)
+        real = self.root / "real"
+        real.mkdir()
+        (real / "notes.txt").write_bytes(b"synthetic note")
+        alias = self.root / "alias"
+        alias.symlink_to(real, target_is_directory=True)
+        fifo = self.root / "pipe.txt"
+        os.mkfifo(fifo)
+        for path in (link, alias / "notes.txt", fifo):
+            with self.subTest(path=path):
+                with patch("os.read", side_effect=AssertionError("unexpected data read")):
+                    with self.assertRaises(Hold):
+                        load(str(path))
+
+    def test_no_io_if_unauthorized(self):
+        with patch("os.open", side_effect=AssertionError("unexpected open")):
+            with self.assertRaisesRegex(Hold, "^attachment_not_authorized$"):
+                load(str(self.path), authorized=lambda: False)
+
+    def test_revocation_during_read(self):
+        allowed = True
+        original = os.read
+        def revoke(fd, n):
+            nonlocal allowed
+            data = original(fd, n)
+            allowed = False
+            return data
+        with patch("os.read", side_effect=revoke):
+            with self.assertRaisesRegex(Hold, "^attachment_not_authorized$"):
+                load(str(self.path), authorized=lambda: allowed)
+
+    def test_detectable_mutation_never_publishes_snapshot(self):
+        original = os.read
+        def mutate(fd, n):
+            data = original(fd, n)
+            if data:
+                self.path.write_bytes(b"changed")
+            return data
+        with patch("os.read", side_effect=mutate):
+            with self.assertRaisesRegex(Hold, "^attachment_changed_during_read$"):
+                load(str(self.path))
+
+    def test_oversized_growth_during_read_is_bounded(self):
+        original = os.read
+        def grow(fd, n):
+            data = original(fd, n)
+            if data and self.path.stat().st_size < MAX_BYTES:
+                with self.path.open("ab") as stream:
+                    stream.write(b"x" * MAX_BYTES)
+            return data
+        with patch("os.read", side_effect=grow):
+            with self.assertRaisesRegex(Hold, "^attachment_too_large$"):
+                load(str(self.path))

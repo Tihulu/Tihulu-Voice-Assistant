@@ -3995,3 +3995,381 @@ class RecordCardTests(ApprovedSourcesTests):
             out.append(item)
             item = item.get_next_sibling()
         return out
+
+
+class LocalAnalysisTests(DesktopFixture):
+    """Real GTK artifact view and real synthetic-file computation."""
+
+    def fixture(self):
+        folder = Path(self.profile_home).resolve()
+        path = folder / "temperature.csv"
+        path.write_bytes(b"time_s,temperature_c\n0,20\n10,22\n20,24\n30,26\n40,28\n")
+        return path
+
+    def analyze(self, path=None):
+        self.ui.analysis.start_selected(str(path or self.fixture()))
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertIsNotNone(self.ui.analysis.last)
+        return self.ui.analysis.controller.get(self.ui.analysis.last)
+
+    def test_real_chart_without_jan(self):
+        self.assertTrue(self.ui.analysis.choose_button.get_sensitive())
+        self.assertFalse(self.ui.send.get_sensitive())
+        artifact = self.analyze()
+        self.assertEqual(artifact.series.mean_c, 24)
+        row = self.ui.analysis.rows[-1]
+        self.assertIs(row.get_parent(), self.ui.log)
+        picture = row.get_first_child().get_next_sibling()
+        self.assertIsInstance(picture, Gtk.Picture)
+        self.assertIsNotNone(picture.get_paintable())
+        self.assertEqual(self.ui.board.rows[-1].state, "done")
+        self.assertFalse(self.ui.session.history)
+        self.jan.assert_not_called()
+
+    def test_followup_recolors_same_series_after_source_removed(self):
+        path = self.fixture()
+        first = self.analyze(path)
+        path.unlink()
+        previous = first
+        for color in ("green", "orange", "blue"):
+            self.ui.analysis.color.set_active_id(color)
+            self.click(self.ui.analysis.recolor_button)
+            self.until(lambda: not self.ui.busy)
+            self.assert_no_failed_turn()
+            result = self.ui.analysis.controller.get(self.ui.analysis.last)
+            self.assertEqual(result.parent_id, previous.id)
+            self.assertEqual(result.series, first.series)
+            self.assertEqual(result.color, color)
+            previous = result
+        self.assertEqual(len(self.ui.analysis.rows), 4)
+        self.assertFalse(self.ui.session.history)
+
+    def test_hard_stop_removes_local_results(self):
+        result = self.analyze()
+        self.click(self.ui.quick_stop)
+        self.assertFalse(self.ui.analysis.rows)
+        self.assertIsNone(self.ui.analysis.last)
+        self.assertFalse(self.ui.analysis.recolor_button.get_sensitive())
+        with self.assertRaisesRegex(Hold, "analysis_mode_denied"):
+            self.ui.analysis.controller.get(result.id)
+
+    def test_mode_change_clears_artifacts_and_blocks_new_selection(self):
+        self.analyze()
+        profile = profiles.template("research-assistant")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.assertFalse(self.ui.analysis.rows)
+        self.assertFalse(self.ui.analysis.choose_button.get_sensitive())
+        self.ui.analysis.start_selected(str(self.fixture()))
+        self.assertFalse(self.ui.busy)
+        self.assertIsNone(self.ui.analysis.last)
+
+    def test_explicit_file_deny_blocks_selection(self):
+        profile = Profile(id="no-csv", name="No CSV",
+                          filesystem_rules=(Rule("filesystem_read", (), "deny"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.ui.analysis.choose()
+        self.assertIsNone(self.ui.analysis.dialog)
+        self.ui.analysis.start_selected(str(self.fixture()))
+        self.assertFalse(self.ui.busy)
+        self.assertFalse(self.ui.analysis.rows)
+
+    def test_picker_cancel_and_reopen(self):
+        view = self.ui.analysis
+        for _ in range(2):
+            self.click(view.choose_button)
+            self.assertIsNotNone(view.dialog)
+            self.assertFalse(view.choose_button.get_sensitive())
+            view.cancel()
+            self.ui.refresh()
+            self.assertIsNone(view.dialog)
+            self.assertTrue(view.choose_button.get_sensitive())
+        self.assertFalse(self.ui.busy)
+        self.assertFalse(view.rows)
+
+    def test_cancel_during_worker_does_not_display_late_artifact(self):
+        from threading import Event
+        from tihulu_jarvis import analysis_controller
+        entered, release = Event(), Event()
+        render = analysis_controller.render_svg
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("worker test timeout")
+            return render(*args, **kwargs)
+        with patch.object(analysis_controller, "render_svg", side_effect=delayed):
+            self.ui.analysis.start_selected(str(self.fixture()))
+            try:
+                self.until(entered.is_set)
+                self.ui.interrupt(False)
+                self.assertTrue(self.ui.busy)
+            finally:
+                release.set()
+            self.until(lambda: not self.ui.busy)
+        self.assertFalse(self.ui.analysis.rows)
+        self.assertIsNone(self.ui.analysis.last)
+        self.assertEqual(self.ui.board.rows[-1].state, "cancelled")
+
+
+    def test_typed_analysis_opens_picker_without_model(self):
+        self.ui.entry.set_text("Bu dosyayı analiz et")
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.click(self.ui.send)
+        self.until(lambda: not self.ui.busy and self.ui.analysis.dialog is not None)
+        self.assert_no_failed_turn()
+        self.assertFalse(self.ui.analysis.rows)
+        self.jan.assert_not_called()
+        self.ui.analysis.cancel()
+        self.ui.refresh()
+
+    def test_typed_recolor_speaks_real_result_without_jan(self):
+        first = self.analyze()
+        self.ui.entry.set_text("Grafiği yeşil yap")
+        self.click(self.ui.send)
+        self.until(lambda: self.ui.stage == "speaking")
+        result = self.ui.analysis.controller.get(self.ui.analysis.last)
+        self.assertEqual(result.parent_id, first.id)
+        self.assertEqual(result.color, "green")
+        self.assertEqual(result.series.mean_c, 24)
+        self.assertEqual(self.backend.speeches[-1].language, "tr")
+        self.assertIn("Ortalama 24", self.backend.speeches[-1].text)
+        self.backend.playback_release.set()
+        self.click(self.ui.stop)
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertEqual(len(self.ui.analysis.rows), 2)
+        self.jan.assert_not_called()
+
+    def test_voice_recolor_uses_same_artifact_and_speech_path(self):
+        first = self.analyze()
+        self.connect_model()
+        self.backend.transcript = "Färbe das Diagramm orange"
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: self.ui.stage == "speaking")
+        result = self.ui.analysis.controller.get(self.ui.analysis.last)
+        self.assertEqual(result.parent_id, first.id)
+        self.assertEqual(result.color, "orange")
+        self.assertEqual(self.backend.speeches[-1].language, "de")
+        self.assertIn("Mittelwert 24", self.backend.speeches[-1].text)
+        self.assertFalse(self.backend.requests)
+        self.backend.playback_release.set()
+        self.click(self.ui.stop)
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+
+    def test_explicit_jan_proposal_only_receives_request(self):
+        first = self.analyze()
+        self.connect_model()
+        self.ui.mute.set_active(True)
+        self.backend.answers.append('{"action":"recolor","color":"green"}')
+        self.text("Task: please make the plot green")
+        self.assert_no_failed_turn()
+        result = self.ui.analysis.controller.get(self.ui.analysis.last)
+        self.assertEqual(result.parent_id, first.id)
+        self.assertEqual(result.color, "green")
+        self.assertEqual(len(self.backend.requests), 1)
+        request = self.backend.requests[0]
+        self.assertEqual(len(request), 2)
+        self.assertEqual(request[1].content, "please make the plot green")
+        self.assertFalse(self.backend.speeches)
+        self.assertFalse(self.ui.session.history)
+
+    def test_invalid_jan_proposal_does_not_open_picker(self):
+        self.connect_model()
+        self.backend.answers.append('{"action":"analyze","path":"/not-authorized"}')
+        self.text("Task: inspect the temperature data")
+        self.assertIsNone(self.ui.analysis.dialog)
+        self.assertFalse(self.ui.analysis.rows)
+        self.assertEqual(self.ui.board.rows[-1].state, "failed")
+        self.assertIn("analysis_invalid_proposal", self.ui.board.rows[-1].reason)
+
+    def test_selected_file_spoken_summary_can_be_stopped(self):
+        self.ui.analysis.start_selected(str(self.fixture()), language="en", speak=True)
+        self.until(lambda: self.ui.stage == "speaking")
+        self.assertIn("Mean 24", self.backend.speeches[-1].text)
+        self.backend.playback_release.set()
+        self.click(self.ui.stop)
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertEqual(len(self.ui.analysis.rows), 1)
+        self.assertFalse(self.backend.requests)
+
+
+    def test_export_all_formats_from_verified_artifact(self):
+        import csv
+        import struct
+        artifact = self.analyze()
+        view = self.ui.analysis
+        folder = Path(self.profile_home).resolve()
+        for kind, extension in (("svg", "svg"), ("png", "png"),
+                                ("data", "csv"), ("summary", "csv")):
+            path = folder / (kind + "." + extension)
+            self.assertTrue(view.save_selected(str(path), kind, view.context, artifact.id))
+            raw = path.read_bytes()
+            if kind == "svg":
+                self.assertEqual(raw, artifact.svg)
+            elif kind == "png":
+                self.assertEqual(raw[:8], b"\x89PNG\r\n\x1a\n")
+                self.assertEqual(struct.unpack(">II", raw[16:24]), (640, 320))
+            elif kind == "data":
+                self.assertEqual(len(raw.decode().splitlines()), 6)
+            else:
+                rows = list(csv.reader(raw.decode().splitlines()))
+                self.assertIn(["mean", "24.0", "degC"], rows)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(self.backend.requests)
+        self.assertFalse(self.ui.session.history)
+
+    def test_statistics_table_has_real_values(self):
+        self.analyze()
+        row = self.ui.analysis.rows[-1]
+        table = row.get_last_child()
+        self.assertIsInstance(table, Gtk.Grid)
+        self.assertEqual(table.get_child_at(1, 0).get_text(), "5")
+        self.assertEqual(table.get_child_at(1, 1).get_text(), "24 °C")
+        self.assertEqual(table.get_child_at(1, 5).get_text(), "40 s")
+
+    def test_export_denied_after_hard_stop(self):
+        artifact = self.analyze()
+        view = self.ui.analysis
+        context = view.context
+        path = Path(self.profile_home).resolve() / "stale.svg"
+        self.click(self.ui.quick_stop)
+        self.assertFalse(view.export_button.get_sensitive())
+        self.assertFalse(view.save_selected(str(path), "svg", context, artifact.id))
+        self.assertFalse(path.exists())
+
+    def test_explicit_write_deny_blocks_save_dialog_and_file(self):
+        profile = Profile(id="no-export", name="No export",
+                          filesystem_rules=(Rule("filesystem_write", (), "deny"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        artifact = self.analyze()
+        view = self.ui.analysis
+        view.choose_export()
+        self.assertIsNone(view.dialog)
+        path = Path(self.profile_home).resolve() / "denied.svg"
+        self.assertFalse(view.save_selected(str(path), "svg", view.context, artifact.id))
+        self.assertFalse(path.exists())
+
+    def test_export_picker_cancel_and_reopen(self):
+        self.analyze()
+        view = self.ui.analysis
+        for _ in range(2):
+            self.click(view.export_button)
+            self.assertIsNotNone(view.dialog)
+            self.assertFalse(view.export_button.get_sensitive())
+            view.cancel()
+            self.ui.refresh()
+            self.assertIsNone(view.dialog)
+            self.assertTrue(view.export_button.get_sensitive())
+
+
+class PickerLifecycleTests(DesktopFixture):
+    def test_model_picker_is_retained_and_cancelled(self):
+        self.ui.choose("stt")
+        dialog = self.ui.owned_picker
+        self.assertIsNotNone(dialog)
+        self.assertFalse(self.ui.analysis.choose_button.get_sensitive())
+        self.ui.choose("stt")
+        self.assertIs(self.ui.owned_picker, dialog)
+        self.ui.run_cancel_turn()
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertTrue(self.ui.analysis.choose_button.get_sensitive())
+        self.ui.choose("stt")
+        self.assertIsNotNone(self.ui.owned_picker)
+        self.ui.hard_stop()
+        self.assertIsNone(self.ui.owned_picker)
+
+    def test_model_picker_response_cancel_releases_owner(self):
+        self.ui.choose("stt")
+        self.ui.owned_picker.emit("response", Gtk.ResponseType.CANCEL)
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertIsNone(self.ui.owned_picker_handler)
+
+    def test_profile_switch_dismisses_pending_picker(self):
+        self.ui.choose("stt")
+        self.assertIsNotNone(self.ui.owned_picker)
+        profile = Profile(id="another-local", name="Another local")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.assertIsNone(self.ui.owned_picker)
+
+    def test_stale_profile_version_rejects_picker_acceptance(self):
+        from dataclasses import replace
+        self.ui.choose("stt")
+        old = self.ui.active_profile()
+        self.ui.store.save(replace(old, version=old.version + 1))
+        with patch.object(self.ui, "register_choice") as register:
+            self.ui.owned_picker.emit("response", Gtk.ResponseType.ACCEPT)
+            register.assert_not_called()
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertEqual(self.ui.status.get_text(), "picker_context_changed")
+
+    def test_cloud_mode_denies_legacy_attachment_read(self):
+        self.connect_model()
+        profile = Profile(id="cloud-file-test", name="Cloud", based_on_mode="CLOUD_CHAT")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch("tihulu_jarvis.attachments.load") as read:
+            self.ui.attach_file()
+            self.assertIsNone(self.ui.owned_picker)
+            self.assertIsNone(self.ui.read_attachment("/synthetic.txt"))
+            read.assert_not_called()
+
+    def test_unsent_attachment_revoked_at_profile_version_change(self):
+        from dataclasses import replace
+        self.connect_model()
+        path = Path(self.profile_home).resolve() / "fixture.txt"
+        path.write_text("synthetic-private-canary", encoding="utf-8")
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+        old = self.ui.active_profile()
+        self.ui.store.save(replace(old, version=old.version + 1))
+        self.ui.entry.set_text("Summarize the file")
+        self.click(self.ui.send)
+        self.assertFalse(self.ui.busy)
+        self.assertIsNone(self.ui.attachment)
+        self.assertFalse(self.backend.requests)
+        self.assertEqual(self.ui.status.get_text(), "attachment_context_changed")
+
+    def test_unsent_attachment_cleared_on_switch_and_hard_stop(self):
+        self.connect_model()
+        path = Path(self.profile_home).resolve() / "fixture.txt"
+        path.write_text("synthetic-private-canary", encoding="utf-8")
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+        self.ui.hard_stop()
+        self.assertIsNone(self.ui.attachment)
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+        profile = Profile(id="another-local", name="Another local")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.assertIsNone(self.ui.attachment)
+        self.assertEqual(self.ui.attachment_note.get_text(), "")
+
+
+    def test_hybrid_attachment_held_until_verified_route_exists(self):
+        self.connect_model()
+        profile = Profile(id="hybrid-file-test", name="Hybrid", based_on_mode="SECURE_HYBRID",
+                          filesystem_rules=(Rule("filesystem_read", ("attachment",), "allow"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch("tihulu_jarvis.attachments.load") as read:
+            self.assertIsNone(self.ui.read_attachment("/synthetic.txt"))
+            read.assert_not_called()
+        self.assertEqual(self.ui.status.get_text(), "attachment_mode_denied")
+
+    def test_explicit_ask_cannot_be_overridden_by_picker(self):
+        self.connect_model()
+        profile = Profile(id="ask-file-test", name="Ask",
+                          filesystem_rules=(Rule("filesystem_read", ("attachment",), "ask"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch("tihulu_jarvis.attachments.load") as read:
+            self.ui.attach_file()
+            self.assertIsNone(self.ui.owned_picker)
+            self.assertIsNone(self.ui.read_attachment("/synthetic.txt"))
+            read.assert_not_called()
+        self.assertEqual(self.ui.status.get_text(), "attachment_approval_required")
