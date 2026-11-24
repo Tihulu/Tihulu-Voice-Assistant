@@ -4642,3 +4642,56 @@ class ReviewSecurityTests(DesktopFixture):
             self.until(lambda: not self.ui.busy)
             capture.assert_not_called()
         self.assertEqual(str(self.ui.session.active.exception()), "approval_expired")
+
+
+    def test_attachment_expiry_between_submission_and_backend(self):
+        self.connect_model()
+        clock = [time.time()]
+        profile = Profile(id="review-attachment", name="Review attachment",
+            filesystem_rules=(Rule("filesystem_read", ("attachment",), "allow",
+                                   "fixture", clock[0] + 60),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        path = Path(self.profile_home).resolve() / "private-fixture.txt"
+        path.write_text("SYNTHETIC-ATTACHMENT-CANARY", encoding="utf-8")
+        with patch.object(profiles.time, "time", side_effect=lambda: clock[0]):
+            item = self.ui.read_attachment(str(path))
+            self.assertIsNotNone(item)
+            self.ui.entry.set_text("Merhaba!")
+            self.click(self.ui.send)
+            clock[0] += 120
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "attachment_context_changed")
+        self.assertFalse(self.backend.requests)
+        self.assertEqual(self.ui.entry.get_text(), "Merhaba!")
+        self.assertIs(self.ui.attachment, item)
+        self.assertNotIn("private-fixture", self.ui.board.rows[-1].label)
+
+    def test_expired_attachment_history_blocks_same_route_until_explicit_end(self):
+        self.connect_model()
+        clock = [time.time()]
+        profile = Profile(id="review-history-expiry", name="Review history",
+            filesystem_rules=(Rule("filesystem_read", ("attachment",), "allow",
+                                   "fixture", clock[0] + 60),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        path = Path(self.profile_home).resolve() / "private-fixture.txt"
+        path.write_text("SYNTHETIC-ATTACHMENT-CANARY", encoding="utf-8")
+        with patch.object(profiles.time, "time", side_effect=lambda: clock[0]):
+            self.assertIsNotNone(self.ui.read_attachment(str(path)))
+            self.text("Merhaba!")
+            self.assert_no_failed_turn()
+            self.assertTrue(self.ui.session.has_attachment_history)
+            self.assertTrue(any("SYNTHETIC-ATTACHMENT-CANARY" in m.content
+                                for m in self.backend.requests[-1]))
+            count = len(self.backend.requests)
+            clock[0] += 120
+            self.text("Naber nasılsın?")
+            self.assertEqual(str(self.ui.session.active.exception()), "attachment_context_changed")
+            self.assertEqual(len(self.backend.requests), count)
+            self.ui.interrupt(True)
+            self.assertFalse(self.ui.session.has_attachment_history)
+            self.text("Naber nasılsın?")
+            self.assert_no_failed_turn()
+            self.assertFalse(any("SYNTHETIC-ATTACHMENT-CANARY" in m.content
+                                 for m in self.backend.requests[-1]))
