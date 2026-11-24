@@ -3,7 +3,7 @@ Version: 0.1.0
 Architecture: all
 Maintainer: TIHULU JARVIS maintainers <maintainers@tihulu.invalid>
 Installed-Size: 2048
-Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-4.0, gir1.2-pango-1.0, libcairo2
+Depends: python3 (>= 3.10), python3-gi, gir1.2-gtk-4.0, gir1.2-pango-1.0, gir1.2-gdkpixbuf-2.0, librsvg2-common, libcairo2
 Section: utils
 Priority: optional
 Homepage: https://github.com/Tihulu/Tihulu-Voice-Assistant
