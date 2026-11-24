@@ -47,14 +47,14 @@ jobs:
               git('branch', name, sha)
               assert git('rev-parse', 'refs/heads/' + name) == sha
               print('Verified', name, sha, flush=True)
-          failed = False
-          for pattern in ('test_conflict_check.py', 'test_rehearsal_gate.py'):
-              suite = unittest.TestLoader().discover('tests', pattern=pattern)
-              expected = 11 if pattern == 'test_conflict_check.py' else 9
-              assert suite.countTestCases() == expected
-              result = unittest.TextTestRunner(verbosity=2).run(suite)
-              print(pattern, 'ran', result.testsRun, 'skips', len(result.skipped), flush=True)
-              failed |= not result.wasSuccessful() or bool(result.skipped)
+          import sys
+          import yaml
+          print('Python', sys.version.split()[0], 'PyYAML', yaml.__version__, flush=True)
+          suite = unittest.TestLoader().discover('tests')
+          assert suite.countTestCases() == 540, suite.countTestCases()
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          print('Full core ran', result.testsRun, 'skips', len(result.skipped), flush=True)
+          failed = not result.wasSuccessful() or bool(result.skipped) or result.testsRun != 540
           assert git('rev-parse', 'HEAD') == head
           assert not git('status', '--porcelain')
           raise SystemExit(int(failed))
