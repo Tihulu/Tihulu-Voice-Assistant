@@ -58,30 +58,43 @@ operator-chosen models.
 
 ## Debian package
 
-The portable wheel alone is not an end-user install. A Debian package is
-assembled from the built wheel with `packaging/deb/build.sh`, which needs no
-network: it stages the wheel into `/usr/share/tihulu-jarvis/venv` with `pip
---no-index --find-links`, adds a wrapper at `/usr/bin/tihulu-jarvis`, installs
-the desktop entry and icon into `/usr/share`, and records the runtime
-dependencies (python3, PyGObject, GTK 4, Pango, cairo) in `control`. No
-service, no root-owned data and no autostart entry are added.
+The portable wheel alone is not an end-user install. The Debian package
+stages only its pure Python modules and license metadata in
+`/usr/share/tihulu-jarvis/python`. The native wrapper invokes
+`/usr/bin/python3 -I -B` with the packaged launch module, so the target's
+distribution PyGObject/GTK libraries are visible without bundling an
+interpreter or relocating a build-machine virtual environment. No user
+Python path or user-site packages are required. The build environment
+must have pip and a prebuilt wheel. Runtime dependencies include GTK 4,
+PyGObject, GdkPixbuf and the SVG loader.
 
 ```sh
-sh packaging/deb/build.sh          # produces .release-work/tihulu-jarvis.deb
+PATH="$PWD/.buildvenv/bin:$PATH" sh packaging/deb/build.sh .release-work/deb dist
+# Non-installing runtime rehearsal from the extracted package:
+dpkg-deb -x .release-work/tihulu-jarvis.deb .release-work/preview-root
+.release-work/preview-root/usr/bin/tihulu-jarvis --check-runtime
+```
+
+The check requires a real display (Xvfb in CI is sufficient). It calls the
+actual wrapper, imports the packaged runtime and initializes GTK, then
+decodes a real synthetic SVG into a native texture. CI also runs the
+deterministic suite from the installed wheel and extracted Debian modules;
+any failed suite must fail the job.
+
+Only after the owner approves installation:
+
+```sh
 sudo dpkg -i .release-work/tihulu-jarvis.deb
 sudo dpkg -r tihulu-jarvis
 ```
 
-CI builds this package and verifies its contents: every shipped module and
-metadata file is present, the file list carries no workstation path, credential
-material or tests, and the package is extracted into an isolated root where the
-package imports and the entry module load. Removal deletes only what the
-package owns; the user's XDG configuration, profiles, market registry and
-every shared model remain.
-
-What a green package job does not prove: installation on a real desktop,
-launch under COSMIC, physical audio, or clean-machine installation on a
-different machine. Those remain separate gates and require a target system.
+The package has no service, no root-owned user data and no autostart entry.
+Existing XDG configuration, profiles, market registry and shared models
+are not removed by package removal. Do not install over a working version
+without a separately verified rollback package and owner approval.
+An extracted-root check is not a clean-machine install, COSMIC/Wayland
+acceptance or physical audio test. See R1_ARTIFACT_EXPORT.md for the
+remaining owner checks.
 
 ## The gates before a release, in order
 
@@ -95,9 +108,9 @@ them in this order, and stop at the first red one.
 2. **Every increment is verified.** The CI matrix runs the deterministic suite
    on 3.10 and 3.12, the GTK suite, and the package job. A merge step never
    leaves the stack on a red branch.
-3. **A clean-machine install works.** `tools/smoke.py` runs from outside the
-   source tree against the installed wheel and against the Debian root, so the
-   artefact is exercised rather than only imported.
+3. **The extracted package works.** Run the actual Debian launcher with
+   `--check-runtime` and `tools/smoke.py` outside the source tree. A true
+   clean-machine install and rollback are separate owner gates.
 4. **The requirements map is true.** `python3 tools/trace_check.py` — 38 rows
    pointing at code and test classes that all exist. A dangling reference fails
    the release.
