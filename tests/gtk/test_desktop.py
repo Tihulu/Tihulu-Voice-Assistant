@@ -4573,11 +4573,14 @@ class ReviewSecurityTests(DesktopFixture):
             if not release.wait(10):
                 raise AssertionError("worker test timeout")
             # The worker is now expired, before the actual content reader.
-            with patch.object(selected_csv.os, "open", side_effect=AssertionError("expired open")) as op:
+            # Observe only the selected-data reader's opens, not policy-clock
+            # checkpoint I/O in the shared os module.
+            with patch.object(selected_csv, "os", wraps=selected_csv.os) as file_os:
+                file_os.open.side_effect = AssertionError("expired open")
                 try:
                     return reader(*args, **kwargs)
                 finally:
-                    calls.extend(op.call_args_list)
+                    calls.extend(file_os.open.call_args_list)
         with patch.object(profiles.time, "time", side_effect=lambda: clock[0]), \
              patch.object(ac, "read_selected_csv", side_effect=delayed):
             self.ui.analysis.start_selected(str(path))
@@ -4601,11 +4604,14 @@ class ReviewSecurityTests(DesktopFixture):
             entered.set()
             if not release.wait(10):
                 raise AssertionError("worker test timeout")
-            with patch.object(selected_csv.os, "open", side_effect=AssertionError("revoked open")) as op:
+            # Observe only the selected-data reader's opens, not policy-clock
+            # checkpoint I/O in the shared os module.
+            with patch.object(selected_csv, "os", wraps=selected_csv.os) as file_os:
+                file_os.open.side_effect = AssertionError("revoked open")
                 try:
                     return reader(*args, **kwargs)
                 finally:
-                    calls.extend(op.call_args_list)
+                    calls.extend(file_os.open.call_args_list)
         with patch.object(ac, "read_selected_csv", side_effect=delayed):
             self.ui.analysis.start_selected(str(path))
             try:

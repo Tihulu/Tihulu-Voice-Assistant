@@ -644,3 +644,60 @@ class BoundedProfileReadTests(unittest.TestCase):
                 self.path.write_bytes(raw)
                 with self.assertRaisesRegex(Hold, "profile_unreadable"):
                     self.store.load("local-only")
+
+
+class RestartPolicyClockTests(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.root = Path(root.name)
+        self.store = Store(self.root)
+        self.profile = base(tool_rules=(Rule("local_audio_device", ("push_to_talk",),
+                            ALLOW, approval="fixture", expires_at=110),))
+        self.store.save(self.profile)
+        self.scope = ("push_to_talk",)
+
+    def test_observed_expiry_survives_reopen_with_earlier_wall_clock(self):
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=50)):
+            live = self.store.bind_live(self.profile.id)
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ALLOW)
+        with (patch.object(profiles.time, "time", return_value=120),
+              patch.object(profiles.time, "monotonic", return_value=51)):
+            self.assertEqual(live.evaluate("local_audio_device", self.scope),
+                             (ASK, "approval_expired"))
+        with (patch.object(profiles.time, "time", return_value=101),
+              patch.object(profiles.time, "monotonic", return_value=1)):
+            reopened = Store(self.root)
+            self.assertGreaterEqual(reopened.policy_now(), 120)
+            self.assertEqual(reopened.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope), (ASK, "approval_expired"))
+            with self.assertRaisesRegex(Hold, "approval_expired"):
+                profiles.require_tool(reopened.load(self.profile.id), "local_audio_device",
+                                      self.scope, reopened.policy_now())
+        self.assertNotIn(".policy-clock", self.store.ids())
+        self.assertEqual((self.root / ".policy-clock").stat().st_mode & 0o077, 0)
+
+    def test_invalid_checkpoint_denies_timed_allow(self):
+        path = self.root / ".policy-clock"
+        path.write_bytes(b"not a clock")
+        self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+            "local_audio_device", self.scope), (ASK, "approval_expired"))
+
+    def test_failed_checkpoint_write_latches_timed_denial(self):
+        from unittest.mock import patch
+        with patch.object(self.store._clock, "_persist", side_effect=OSError("fixture")):
+            self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope), (ASK, "approval_expired"))
+        self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+            "local_audio_device", self.scope), (ASK, "approval_expired"))
+
+    def test_checkpoint_reserves_ceiling_without_writing_each_check(self):
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=100.1),
+              patch.object(profiles.time, "monotonic", side_effect=[10.0, 10.1, 10.2]),
+              patch.object(self.store._clock, "_persist", wraps=self.store._clock._persist) as persist):
+            for _ in range(3):
+                self.assertLess(self.store.policy_now(), 101)
+            persist.assert_called_once_with(101)

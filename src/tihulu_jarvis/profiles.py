@@ -14,6 +14,7 @@ Decision order (fail closed):
   4. an approval that has expired degrades to ASK, never to silent ALLOW.
 """
 import json
+import math
 import os
 import re
 import tempfile
@@ -223,26 +224,89 @@ def _policy_stamp(path):
 
 
 class PolicyClock:
-    """Nondecreasing policy time for one running Store and its live bindings.
+    """Nondecreasing policy time, with a restart floor for one Store writer.
 
-    An observed forward jump is retained and advances with monotonic time.
-    This is not a durable clock across application restarts.
+    Persist a rounded-up one-second ceiling before returning an observed time.
+    A later Store opening the same intact directory starts at that floor.
+    No trusted elapsed time across shutdown, anti-tamper or concurrent-writer
+    guarantee. An unavailable checkpoint fails closed for timed permissions.
     """
-    def __init__(self, wall=None, monotonic=None):
+    def __init__(self, wall=None, monotonic=None, *, checkpoint=None):
         self._lock = Lock()
         self._observed = wall
         self._monotonic = monotonic
+        self._checkpoint = checkpoint
+        self._reserved = None
+        self._failed = False
+
+    def _restore(self):
+        if self._checkpoint is None:
+            return 0
+        try:
+            before = _policy_stamp(self._checkpoint)
+        except FileNotFoundError:
+            return 0  # First use; not proof that an older store had no clock.
+        if before[2] > 32:
+            raise Hold("policy_clock_unreadable")
+        raw = read_selected_bytes(str(self._checkpoint.absolute()),
+                                  authorized=lambda: True, expected_identity=before)
+        if not re.fullmatch(rb"[0-9]{1,13}\n", raw):
+            raise Hold("policy_clock_unreadable")
+        value = int(raw)
+        if value > 10**12 or _policy_stamp(self._checkpoint) != before:
+            raise Hold("policy_clock_unreadable")
+        return value
+
+    def _persist(self, value):
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="ascii",
+                    dir=str(self._checkpoint.parent), prefix=".policy-clock-",
+                    delete=False) as f:
+                tmp = f.name
+                f.write(str(value) + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, self._checkpoint)
+            tmp = None
+            fd = os.open(self._checkpoint.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        finally:
+            if tmp is not None:
+                Path(tmp).unlink(missing_ok=True)
 
     def now(self):
         with self._lock:
-            wall, mono = time.time(), time.monotonic()
-            if self._observed is None:
-                self._observed = wall
-            else:
-                self._observed = max(wall, self._observed +
-                                     max(0, mono - self._monotonic))
-            self._monotonic = mono if self._monotonic is None else max(mono, self._monotonic)
-            return self._observed
+            if self._failed:
+                return float("inf")
+            try:
+                wall, mono = time.time(), time.monotonic()
+                if not math.isfinite(wall) or not math.isfinite(mono):
+                    raise Hold("policy_clock_unreadable")
+                if self._reserved is None:
+                    self._reserved = self._restore()
+                    self._observed = max(self._reserved, self._observed or 0)
+                if self._monotonic is None:
+                    self._observed = max(wall, self._observed)
+                else:
+                    self._observed = max(wall, self._observed +
+                                         max(0, mono - self._monotonic))
+                self._monotonic = mono if self._monotonic is None else max(mono, self._monotonic)
+                if not 0 <= self._observed <= 10**12:
+                    raise Hold("policy_clock_unreadable")
+                if self._checkpoint is not None and self._observed > self._reserved:
+                    ceiling = math.ceil(self._observed)
+                    self._persist(ceiling)
+                    self._reserved = ceiling
+                return self._observed
+            except (OSError, Hold, ValueError, OverflowError):
+                # Do not revive a timed ALLOW after a failed clock check.
+                # Untimed permissions retain their ordinary policy semantics.
+                self._failed = True
+                return float("inf")
 
 
 @dataclass(frozen=True)
@@ -605,9 +669,9 @@ class Store:
     LIMIT = 32768
 
     def __init__(self, root):
-        self._clock = PolicyClock()
         self.root = Path(root)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._clock = PolicyClock(checkpoint=self.root / ".policy-clock")
         self.history = self.root / "history"
         self.history.mkdir(mode=0o700, exist_ok=True)
 
