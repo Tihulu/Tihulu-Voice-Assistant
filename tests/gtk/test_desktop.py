@@ -317,6 +317,83 @@ class FreshStartTests(DesktopFixture):
         self.jan.assert_not_called()
 
 
+class FirstRunTransportTests(DesktopFixture):
+    """Actual GTK, Jan HTTP client and loopback TCP; deterministic replies only."""
+    fresh_settings = True
+
+    def test_first_run_discovery_failure_retry_and_streaming_chat(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from threading import Thread
+        from tihulu_jarvis.voice.jan import Jan
+
+        traffic = []
+        available = [False]
+        class Service(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def answer(self, status, body, media):
+                self.send_response(status)
+                self.send_header("Content-Type", media)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                traffic.append(("GET", self.path))
+                if self.path != "/v1/models" or not available[0]:
+                    self.answer(503, b"{}", "application/json")
+                    return
+                self.answer(200, b'{"data":[{"id":"fixture-chat"}]}', "application/json")
+
+            def do_POST(self):
+                data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                traffic.append(("POST", self.path, data))
+                payload = b"".join(
+                    b"data: " + json.dumps({"choices": [{"delta": {"content": part}}]}).encode()
+                    + b"\r\n\r\n" for part in ("Merhaba! ", "Size yardımcı olabilirim."))
+                self.answer(200, payload + b"data: [DONE]\r\n\r\n", "text/event-stream")
+
+        server = HTTPServer(("127.0.0.1", 0), Service)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        def stop():
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+        self.addCleanup(stop)
+        self.stack.enter_context(patch.object(desktop, "Jan", Jan))
+        self.assertFalse(traffic)
+        self.click(self.ui.setup_connect)
+        self.ui.url.set_text("http://127.0.0.1:%d" % server.server_port)
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertIn("jan_http_503", self.ui.status.get_text())
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.assertEqual(self.ui.inventory, ())
+        available[0] = True
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.inventory, ("fixture-chat",))
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.ui.models.set_active(0)
+        self.click(self.ui.return_to_chat)
+        self.text("Merhaba! Bana yardımcı olur musun?")
+        self.assert_no_failed_turn()
+        self.assertEqual(len(self.ui.session.history), 2)
+        self.assertEqual(self.ui.session.history[-1].content, "Merhaba! Size yardımcı olabilirim.")
+        self.assertEqual([x[:2] for x in traffic],
+                         [("GET", "/v1/models"), ("GET", "/v1/models"),
+                          ("POST", "/v1/chat/completions")])
+        self.assertTrue(traffic[-1][2]["stream"])
+        self.assertEqual(traffic[-1][2]["model"], "fixture-chat")
+        self.assertEqual(traffic[-1][2]["messages"][-1]["content"],
+                         "Merhaba! Bana yardımcı olur musun?")
+        self.assertFalse(self.backend.speeches)
+
+
 class DesktopTests(DesktopFixture):
     """Voice, cancellation and mode-independent desktop controls."""
 
