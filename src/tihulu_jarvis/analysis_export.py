@@ -4,6 +4,7 @@ import csv
 import hashlib
 import io
 import os
+import stat
 from uuid import uuid4
 
 from .analysis_controller import Artifact
@@ -40,6 +41,8 @@ def encode(artifact, kind, *, png=None):
         raise Hold("export_invalid_artifact")
     if hashlib.sha256(artifact.svg).hexdigest() != artifact.svg_sha256:
         raise Hold("export_digest_mismatch")
+    if not isinstance(kind, str) or kind not in FORMATS:
+        raise Hold("export_invalid_format")
     if kind == "svg":
         data = artifact.svg
     elif kind == "data":
@@ -99,10 +102,14 @@ def write_new(path, kind, data, *, authorized):
             directory = child
         if authorized() is not True:
             raise Hold("export_not_authorized")
+        info = os.fstat(directory)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o022:
+            raise Hold("export_destination_not_private")
         name = ".jarvis-" + uuid4().hex + ".tmp"
         fd = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW |
                      os.O_CLOEXEC, 0o600, dir_fd=directory)
         temp = name
+        os.fchmod(fd, 0o600)
         offset = 0
         while offset < len(data):
             if authorized() is not True:
@@ -124,7 +131,11 @@ def write_new(path, kind, data, *, authorized):
     finally:
         if fd is not None:
             os.close(fd)
-        if temp is not None:
-            os.unlink(temp, dir_fd=directory)
-        if directory is not None:
-            os.close(directory)
+        try:
+            if temp is not None:
+                os.unlink(temp, dir_fd=directory)
+        except OSError:
+            raise Hold("export_cleanup_failed_check_destination") from None
+        finally:
+            if directory is not None:
+                os.close(directory)
