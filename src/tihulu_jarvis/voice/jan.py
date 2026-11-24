@@ -10,12 +10,14 @@ import socket
 from urllib.parse import urlsplit
 
 from .m1 import Hold
+from ..owned_wait import await_authorized
 
 LIMIT = 524288
 # A stream is bounded by events and characters, so a runaway server cannot
 # hold a turn open or grow a reply without end.
 MAX_EVENTS = 4096
 MAX_TEXT = 32000
+AUTH_POLL = .25
 
 
 def endpoint(raw):
@@ -132,6 +134,17 @@ async def body(r):
     return b"".join([part async for part in body_parts(r, length, chunked)])
 
 
+def safe_text(value):
+    # UTF-8/GTK cannot represent lone surrogates or embedded NUL as text.
+    if not isinstance(value, str) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        return False
+    return True
+
+
 def model_id(v):
     return isinstance(v, str) and 0 < len(v) <= 256 and v.isprintable()
 
@@ -185,7 +198,7 @@ async def _events(lines, on_delta, *, framed=False):
             if not isinstance(delta, dict):
                 raise TypeError
             piece = delta.get("content")
-            if piece is not None and not isinstance(piece, str):
+            if piece is not None and not safe_text(piece):
                 raise TypeError
         except (ValueError, KeyError, IndexError, TypeError, UnicodeError, RecursionError):
             raise Hold("jan_invalid_response") from None
@@ -248,7 +261,8 @@ class Jan:
         if payload is not None and len(payload) > LIMIT:
             raise Hold("jan_request_too_large")
         try:
-            return await asyncio.wait_for(self._exchange(op, payload), self.timeout)
+            return await await_authorized(lambda: self._exchange(op, payload),
+                                          self.timeout, self._checkpoint, interval=AUTH_POLL)
         except asyncio.TimeoutError:
             raise Hold("jan_timeout") from None
         except OSError:
@@ -275,7 +289,7 @@ class Jan:
             try:
                 msg = obj["choices"][0]["message"]
                 text = msg["content"]
-                if msg.get("role") != "assistant" or not isinstance(text, str) or not text.strip() or len(text) > MAX_TEXT:
+                if msg.get("role") != "assistant" or not safe_text(text) or not text.strip() or len(text) > MAX_TEXT:
                     raise ValueError
                 return text
             except (KeyError, IndexError, TypeError, ValueError):
@@ -284,7 +298,8 @@ class Jan:
         if len(payload) > LIMIT:
             raise Hold("jan_request_too_large")
         try:
-            return await asyncio.wait_for(self._stream(payload, on_delta), self.timeout)
+            return await await_authorized(lambda: self._stream(payload, on_delta),
+                                          self.timeout, self._checkpoint, interval=AUTH_POLL)
         except asyncio.TimeoutError:
             raise Hold("jan_timeout") from None
         except OSError:

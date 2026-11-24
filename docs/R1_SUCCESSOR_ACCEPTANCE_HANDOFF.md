@@ -102,3 +102,9 @@ types, and accepts LF or CRLF event lines. An explicit DONE marker is required;
 known-length/chunked frames are validated through their end. This is the
 supported single-JSON-data-line SSE subset, not a general-purpose HTTP client.
 CI and independent evidence remain separate.
+
+The shared owned-wait helper now also checks active Jan requests while awaiting
+slots/connect/response at the nominal 250 ms interval, cancelling and draining
+the owned task on denial. Already queued bytes cannot be recalled; writer close
+is not a remote server cancellation guarantee. Reject lone UTF-16 surrogates
+and NUL before native text publication in both response modes. No idle polling.
