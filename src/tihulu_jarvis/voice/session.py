@@ -16,6 +16,7 @@ class Session:
         self.epoch, self.history, self.context = 0, (), LanguageContext()
         self.active = None
         self._history_route = None
+        self.has_attachment_history = False
         self._invalidated = False
 
     def invalidate(self, clear=False):
@@ -27,6 +28,7 @@ class Session:
         if clear:
             self.history, self.context = (), LanguageContext()
             self._history_route = None
+            self.has_attachment_history = False
 
     def own(self, run, *, loop=None):
         if self.active is not None and not self.active.done():
@@ -95,7 +97,12 @@ class Session:
         if voices is not None:
             if attachment is not None:
                 raise Hold("attachment_voice_unsupported")
-            done = await complete_turn(user,self.context,history,jan,voices,cancelled=lambda: epoch!=self.epoch)
+            async def guarded_chat(messages):
+                self.check(epoch)
+                if authorize() is not True:
+                    raise Hold("attachment_context_changed")
+                return await jan(messages)
+            done = await complete_turn(user,self.context,history,guarded_chat,voices,cancelled=lambda: epoch!=self.epoch)
             self.check(epoch)
             self.history, self.context = done.history, done.context
             self._history_route = route
@@ -117,5 +124,6 @@ class Session:
                     and valid_response(result,decision.response_language,lexical_identifier)):
                 self.history, self.context = (*history,message,Message("assistant",result)),decision.next_context
                 self._history_route = route
+                self.has_attachment_history = self.has_attachment_history or attachment is not None
                 return result, None
         raise Hold("response_rejected_after_one_retry")
