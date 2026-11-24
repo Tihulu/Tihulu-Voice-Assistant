@@ -377,6 +377,14 @@ class EscalationTests(unittest.TestCase):
         self.assertEqual(sorted(lines), ["Cloud reasoning", "Sending content to a provider"])
         self.assertEqual(profiles.escalation(chat, local), frozenset())
 
+    def test_expired_grant_cannot_hide_new_escalation(self):
+        expired = self.profile(based_on_mode="SECURE_HYBRID",
+            shell_rules=(Rule("host_shell", ("jan-qwen",), ALLOW, "old", 1.0),))
+        fresh = self.profile(based_on_mode="SECURE_HYBRID",
+            shell_rules=(Rule("host_shell", ("jan-qwen",), ALLOW, "new", 1e12),))
+        self.assertNotIn("host_shell", profiles.granted(expired))
+        self.assertIn("host_shell", profiles.escalation(expired, fresh))
+
     def test_a_denial_never_counts_as_an_escalation(self):
         local = self.profile()
         denied = self.profile(tool_rules=(Rule("host_shell", ("bridge",), "deny"),))
