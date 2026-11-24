@@ -140,11 +140,14 @@ async def _events(r, on_delta):
 
 
 class Jan:
-    def __init__(self, url, model="", timeout=60.0):
+    def __init__(self, url, model="", timeout=60.0, *, checkpoint=lambda: None):
         self.ip, self.port = endpoint(url)
         if not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or not 0 < timeout <= 300:
             raise Hold("invalid_timeout")
         self.model, self.timeout = model, timeout
+        if not callable(checkpoint):
+            raise Hold("invalid_authorization_checkpoint")
+        self._checkpoint = checkpoint
         self._slots = asyncio.Semaphore(2)
 
     async def _connect(self):
@@ -154,22 +157,30 @@ class Jan:
                                              limit=16384)
 
     async def _exchange(self, operation, data):
+        self._checkpoint()
         async with self._slots:
+            self._checkpoint()
             r, w = await self._connect()
             try:
+                self._checkpoint()
                 host = str(self.ip) if self.ip.version == 4 else "[" + str(self.ip) + "]"
                 method = "GET" if data is None else "POST"
                 payload = data or b""
                 hdr = (f"{method} /v1/{operation} HTTP/1.1\r\nHost: {host}:{self.port}\r\n"
                        "Connection: close\r\nAccept: application/json\r\nContent-Type: application/json\r\n"
                        f"Content-Length: {len(payload)}\r\n\r\n")
+                self._checkpoint()
                 w.write(hdr.encode("ascii") + payload)
                 await w.drain()
-                return json.loads((await body(r)).decode("utf-8"))
+                self._checkpoint()
+                raw = await body(r)
+                self._checkpoint()
+                return json.loads(raw.decode("utf-8"))
             finally:
                 w.close()
 
     async def _request(self, op, data=None):
+        self._checkpoint()
         payload = None if data is None else json.dumps(data, ensure_ascii=False).encode("utf-8")
         if payload is not None and len(payload) > LIMIT:
             raise Hold("jan_request_too_large")
@@ -189,6 +200,7 @@ class Jan:
         The pieces are also returned joined, so a caller that wants the whole
         answer still gets one validated string.
         """
+        self._checkpoint()
         if not model_id(self.model):
             raise Hold("select_installed_model")
         if not messages or any(m.role not in ("system", "assistant", "user") or not isinstance(m.content, str) for m in messages):
@@ -216,17 +228,26 @@ class Jan:
             raise Hold("jan_unavailable") from None
 
     async def _stream(self, payload, on_delta):
+        self._checkpoint()
         async with self._slots:
+            self._checkpoint()
             r, w = await self._connect()
             try:
+                self._checkpoint()
                 host = str(self.ip) if self.ip.version == 4 else "[" + str(self.ip) + "]"
                 hdr = (f"POST /v1/chat/completions HTTP/1.1\r\nHost: {host}:{self.port}\r\n"
                        "Connection: close\r\nAccept: text/event-stream\r\n"
                        "Content-Type: application/json\r\n"
                        f"Content-Length: {len(payload)}\r\n\r\n")
+                self._checkpoint()
                 w.write(hdr.encode("ascii") + payload)
                 await w.drain()
-                text = await self._stream_body(r, on_delta)
+                self._checkpoint()
+                def guarded_delta(piece):
+                    self._checkpoint()
+                    on_delta(piece)
+                text = await self._stream_body(r, guarded_delta)
+                self._checkpoint()
                 # The joined text is validated exactly like a whole answer.
                 if not text.strip() or len(text) > MAX_TEXT:
                     raise Hold("jan_invalid_response")

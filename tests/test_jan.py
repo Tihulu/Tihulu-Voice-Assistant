@@ -173,3 +173,56 @@ class JanStreamTests(unittest.IsolatedAsyncioTestCase):
         async with server:
             with self.assertRaisesRegex(Hold, "jan_invalid_response"):
                 await self.client(server).chat((Message("user", "hi"),), on_delta=lambda p: None)
+
+
+class JanAuthorizationTests(unittest.IsolatedAsyncioTestCase):
+    async def exercise(self, operation):
+        from types import SimpleNamespace
+        allowed = True
+        entered, release = asyncio.Event(), asyncio.Event()
+        writes, closed = [], []
+        def checkpoint():
+            if not allowed:
+                raise Hold("fixture_revoked")
+        jan = Jan("http://127.0.0.1:9876", "fixture", checkpoint=checkpoint)
+        class Writer:
+            def write(self, data):
+                writes.append(data)
+            async def drain(self):
+                pass
+            def close(self):
+                closed.append(True)
+        async def connect():
+            entered.set()
+            await release.wait()
+            return asyncio.StreamReader(), Writer()
+        with patch.object(jan, "_connect", side_effect=connect):
+            task = asyncio.create_task(operation(jan))
+            try:
+                await asyncio.wait_for(entered.wait(), 1)
+                allowed = False
+            finally:
+                release.set()
+            with self.assertRaisesRegex(Hold, "fixture_revoked"):
+                await asyncio.wait_for(task, 1)
+        self.assertEqual(writes, [])
+        self.assertEqual(closed, [True])
+
+    async def test_revoke_while_connecting_full_chat_has_no_write(self):
+        await self.exercise(lambda jan: jan((Message("user", "SYNTHETIC-CANARY"),)))
+
+    async def test_revoke_while_connecting_stream_has_no_write(self):
+        await self.exercise(lambda jan: jan.chat((Message("user", "SYNTHETIC-CANARY"),),
+                                                on_delta=lambda _: None))
+
+    async def test_revoke_while_connecting_discovery_has_no_write(self):
+        await self.exercise(lambda jan: jan.models())
+
+    async def test_denial_before_connect_has_no_connection(self):
+        def deny():
+            raise Hold("fixture_revoked")
+        jan = Jan("http://127.0.0.1:9876", "fixture", checkpoint=deny)
+        with patch.object(jan, "_connect") as connect:
+            with self.assertRaisesRegex(Hold, "fixture_revoked"):
+                await jan.models()
+            connect.assert_not_called()

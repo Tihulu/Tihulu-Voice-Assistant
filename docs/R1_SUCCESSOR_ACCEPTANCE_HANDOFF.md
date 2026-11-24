@@ -83,3 +83,16 @@ snapshot privacy/cleanup, and cancellation while transcription is paused.
 The private copy is removed on ordinary completion or cancellation; hard
 process/host crash cleanup and filesystem blocking latency are not certified.
 No physical timing or full independent test reproduction claim.
+
+## ADJ-05 transport successor
+
+A paused-connect synthetic reproduction against frozen #101 showed a new
+request write after simulated revocation (both ordinary and streaming paths).
+The separate successor binds Jan to a trusted desktop route/epoch/operation
+checkpoint and rechecks after semaphore acquisition and connect, before write,
+after drain/response and before stream publication. Discovery, probe, analysis
+classifier and conversation use the same seam; selected attachment and voice
+operations add their existing live checks. No guarantee of recalling queued
+bytes, OS-level atomicity or upstream isolation. Standalone transport fixtures
+retain an explicit trusted default; production desktop constructors bind it.
+SSE framing and malformed response handling are separately tracked until tested.

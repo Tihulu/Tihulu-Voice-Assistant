@@ -350,18 +350,25 @@ class AnalysisView:
         finally:
             self.ui.note_leases()
 
-    async def command(self, text, epoch):
+    async def command(self, text, epoch, *, extra=lambda: None):
         """Only explicit recognized user commands, never ordinary chat replies."""
+        extra()
         context = self._activate()
         self.ui.session.check(epoch)
+        def authorized():
+            extra()
+            self._matches(context)
+            return True
         intent = analysis_intent.direct(text)
         if intent is None:
             if self.ui.cfg["llm"] not in self.ui.inventory:
                 raise Hold("select_installed_model")
             self.ui.set_state("thinking")
-            intent = await analysis_intent.propose(text, self.ui.backend_for_test())
-            self.ui.session.check(epoch)
-            self._matches(context)
+            backend, checkpoint, _ = self.ui.bound_jan(epoch, extra=authorized)
+            intent = await analysis_intent.propose(text, backend)
+            checkpoint()
+        self.ui.session.check(epoch)
+        authorized()
         if intent.action == "analyze":
             # Open the picker only after the existing turn is drained.
             self.pending = (epoch, context, intent.language)
