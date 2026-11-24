@@ -11,7 +11,7 @@ fi
 # Never delete or reuse a caller-supplied staging directory.
 # mkdir (without -p for the leaf) also refuses an existing symlink.
 mkdir -p -- "$(dirname -- "$work")"
-if ! mkdir -m 0700 -- "$work"; then
+if ! mkdir -m 0755 -- "$work"; then
     echo "staging directory must not exist; choose a fresh path" >&2
     exit 2
 fi
