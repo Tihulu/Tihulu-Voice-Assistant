@@ -36,7 +36,7 @@ A **local-first, multimodal task assistant** that:
 
 ## Authoritative specifications
 
-Full spec suite: `/home/horseman/tihulu_jarvis/TIHULU_JARVIS_OPENCode_PACKAGE/`
+Full spec suite: `TIHULU_JARVIS_OPENCode_PACKAGE/`
 
 | File | Content |
 |------|---------|
@@ -55,21 +55,18 @@ Full spec suite: `/home/horseman/tihulu_jarvis/TIHULU_JARVIS_OPENCode_PACKAGE/`
 
 ## Priorities
 
-| Priority | Goal |
-|----------|------|
-| **P0** | Evidence audit, crash diagnosis (GTK root cause UNKNOWN), readable naming, setup docs |
-| **P1** | First real vertical slice: voice → synthetic CSV → local computation → chart in chat → spoken summary → follow-up → cancel |
-| **P2** | Firefox / background research with citations; AI Market |
-| **P3** | Desktop connector; OpenCode session delegation |
+R0 baseline recovery → R1 real local task → R2 research and rich chat → R3 inference/providers and secure modes → R4 application engines and OpenCode → R5 release and remaining scope. See the [roadmap](docs/RECOVERY_ROADMAP.md) for acceptance gates.
 
 ## Operating modes
 
-| Mode | Shell access | Network |
-|------|-------------|---------|
-| `LOCAL_ONLY` | Approved local bridge only | Optional public web; strict-offline denies |
-| `CLOUD_CHAT` | **None** | Provider + approved cloud-safe research |
-| `SECURE_HYBRID` | Jan/Qwen local shell only | Scoped; locally minimized |
-| `CUSTOM` | Per-profile scoped | Per-profile |
+| Mode | Reasoning | Host tools | Disclosure |
+|---|---|---|---|
+| LOCAL_ONLY | Local | Scoped local | No cloud inference; optional web / strict offline |
+| CLOUD_CHAT (Cloud Only) | Cloud | None | Explicit chat content only |
+| STANDARD_HYBRID | Local + cloud coordination | Local executor; cloud proposals allowed subject to policy | Explicit scoped approval |
+| SECURE_HYBRID (Tihulu-Auto) | Local planner + cloud advice | Local planner and executor only | Mandatory minimum-necessary local filtering |
+
+CUSTOM is an unlimited saved profile facility, not a bypass or fifth effective preset. Session Auto-Approve is OFF by default, scope-limited, revocable and reset on session/mode changes. Sudo uses OS authentication only; no model receives or types credentials. Native inference, Jan and OpenCode connectors, optional installed Application Engines, and official provider OAuth/API key flows are required, subject to verified compatibility and authorization. See the [authoritative recovery roadmap](docs/RECOVERY_ROADMAP.md) for full contracts and gates.
 
 ## Getting started
 
@@ -80,9 +77,9 @@ See [Development Guide](docs/DEVELOPMENT.md) for setup instructions.
 | Item | State |
 |------|-------|
 | Main branch | `20f1349` — stack landing recorded |
-| CI | `test`, `gtk`, `triggers`, `package` on PR |
+| CI | PR #77: test, GTK and package passed; triggers failed (missing branch) |
 | GTK crash | UNKNOWN root cause (reported, not proven) |
-| M1 tests | Reported 29/29 isolated (no live Jan/voice) |
+| M1 tests | 356 core / 602 GTK reported for record-card baseline; owner acceptance HOLD |
 | This branch | `plan/recovery-roadmap` — docs only, no product code |
 
 ## License
