@@ -69,8 +69,8 @@ def verify_body(text):
 async def fetch(raw, allowlist, opener, timeout=TIMEOUT):
     """Fetch an allowed catalog. ``opener(url, timeout)`` returns response text.
 
-    The stock opener verifies TLS against the system trust store. A caller
-    may inject one for tests; a production caller must not disable it.
+    The production opener currently refuses before network access. A trusted
+    synthetic caller may inject an opener for fixture tests.
     """
     host = allowed(raw, allowlist)
     if not callable(opener):
@@ -85,7 +85,7 @@ async def fetch(raw, allowlist, opener, timeout=TIMEOUT):
 
 
 def default_opener():
-    """Return an opener that verifies certificates against the system store."""
+    """Explicitly unavailable fallback transport."""
     def open_url(url, timeout=TIMEOUT):
         raise Hold("transport_not_available")
     return open_url
