@@ -559,7 +559,9 @@ class ProfileUITests(DesktopFixture):
     def test_profile_switch_keeps_conversation_but_freezes_capability(self):
         self.connect_model()
         self.text("Merhaba!")
+        self.assert_no_failed_turn()
         history = self.ui.session.history
+        count = len(self.backend.requests)
         self.save_profile(Profile(id="strict", name="Strict", based_on_mode="LOCAL_ONLY"))
         self.pick("strict")
         self.click(self.ui.profile_activate)
@@ -568,6 +570,14 @@ class ProfileUITests(DesktopFixture):
         self.assertEqual(self.ui.session.history, history)
         self.assertTrue(self.ui.send.get_sensitive())
         self.text("naber nasilsin")
+        # History stays visible, but must not cross a new profile route.
+        self.assertEqual(self.ui.session.history, history)
+        self.assertEqual(len(self.backend.requests), count)
+        self.assertEqual(str(self.ui.session.active.exception()),
+                         "conversation_route_changed_end_conversation")
+        self.ui.activate_profile("private-assistant")
+        self.text("naber nasilsin")
+        self.assert_no_failed_turn()
         self.assertEqual(len(self.ui.session.history), len(history) + 2)
 
 
@@ -4381,7 +4391,7 @@ class HistoryRouteTests(DesktopFixture):
         path = Path(self.profile_home).resolve() / "fixture.txt"
         path.write_text("SYNTHETIC-PRIVATE-CASE-9E37", encoding="utf-8")
         self.assertIsNotNone(self.ui.read_attachment(str(path)))
-        self.text("Bu notu özetler misin?")
+        self.text("Merhaba! Türkçe cevap ver. Bu notu özetler misin?")
         self.assert_no_failed_turn()
         self.assertTrue(any("SYNTHETIC-PRIVATE-CASE-9E37" in m.content
                             for m in self.backend.requests[-1]))
@@ -4394,7 +4404,7 @@ class HistoryRouteTests(DesktopFixture):
         self.ui.activate_profile(profile.id)
         self.text("Naber nasılsın?")
         self.assertEqual(len(self.backend.requests), count)
-        self.assertEqual(self.ui.status.get_text(),
+        self.assertEqual(str(self.ui.session.active.exception()),
                          "conversation_route_changed_end_conversation")
         self.ui.interrupt(True)
         self.text("Naber nasılsın?")
@@ -4414,5 +4424,5 @@ class HistoryRouteTests(DesktopFixture):
         self.until(lambda: not self.ui.busy)
         self.assertEqual(len(self.backend.requests), count)
         self.assertFalse(self.backend.speeches)
-        self.assertEqual(self.ui.status.get_text(),
+        self.assertEqual(str(self.ui.session.active.exception()),
                          "conversation_route_changed_end_conversation")
