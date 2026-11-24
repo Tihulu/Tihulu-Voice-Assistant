@@ -4266,3 +4266,85 @@ class LocalAnalysisTests(DesktopFixture):
             self.ui.refresh()
             self.assertIsNone(view.dialog)
             self.assertTrue(view.export_button.get_sensitive())
+
+
+class PickerLifecycleTests(DesktopFixture):
+    def test_model_picker_is_retained_and_cancelled(self):
+        self.ui.choose("stt")
+        dialog = self.ui.owned_picker
+        self.assertIsNotNone(dialog)
+        self.assertFalse(self.ui.analysis.choose_button.get_sensitive())
+        self.ui.choose("stt")
+        self.assertIs(self.ui.owned_picker, dialog)
+        self.ui.run_cancel_turn()
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertTrue(self.ui.analysis.choose_button.get_sensitive())
+        self.ui.choose("stt")
+        self.assertIsNotNone(self.ui.owned_picker)
+        self.ui.hard_stop()
+        self.assertIsNone(self.ui.owned_picker)
+
+    def test_model_picker_response_cancel_releases_owner(self):
+        self.ui.choose("stt")
+        self.ui.owned_picker.emit("response", Gtk.ResponseType.CANCEL)
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertIsNone(self.ui.owned_picker_handler)
+
+    def test_profile_switch_dismisses_pending_picker(self):
+        self.ui.choose("stt")
+        self.assertIsNotNone(self.ui.owned_picker)
+        profile = Profile(id="another-local", name="Another local")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.assertIsNone(self.ui.owned_picker)
+
+    def test_stale_profile_version_rejects_picker_acceptance(self):
+        from dataclasses import replace
+        self.ui.choose("stt")
+        old = self.ui.active_profile()
+        self.ui.store.save(replace(old, version=old.version + 1))
+        with patch.object(self.ui, "register_choice") as register:
+            self.ui.owned_picker.emit("response", Gtk.ResponseType.ACCEPT)
+            register.assert_not_called()
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertEqual(self.ui.status.get_text(), "picker_context_changed")
+
+    def test_cloud_mode_denies_legacy_attachment_read(self):
+        self.connect_model()
+        profile = Profile(id="cloud-file-test", name="Cloud", based_on_mode="CLOUD_CHAT")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch("tihulu_jarvis.attachments.load") as read:
+            self.ui.attach_file()
+            self.assertIsNone(self.ui.owned_picker)
+            self.assertIsNone(self.ui.read_attachment("/synthetic.txt"))
+            read.assert_not_called()
+
+    def test_unsent_attachment_revoked_at_profile_version_change(self):
+        from dataclasses import replace
+        self.connect_model()
+        path = Path(self.profile_home).resolve() / "fixture.txt"
+        path.write_text("synthetic-private-canary", encoding="utf-8")
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+        old = self.ui.active_profile()
+        self.ui.store.save(replace(old, version=old.version + 1))
+        self.ui.entry.set_text("Summarize the file")
+        self.click(self.ui.send)
+        self.assertFalse(self.ui.busy)
+        self.assertIsNone(self.ui.attachment)
+        self.assertFalse(self.backend.requests)
+        self.assertEqual(self.ui.status.get_text(), "attachment_context_changed")
+
+    def test_unsent_attachment_cleared_on_switch_and_hard_stop(self):
+        self.connect_model()
+        path = Path(self.profile_home).resolve() / "fixture.txt"
+        path.write_text("synthetic-private-canary", encoding="utf-8")
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+        self.ui.hard_stop()
+        self.assertIsNone(self.ui.attachment)
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+        profile = Profile(id="another-local", name="Another local")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.assertIsNone(self.ui.attachment)
+        self.assertEqual(self.ui.attachment_note.get_text(), "")
