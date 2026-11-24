@@ -19,6 +19,7 @@ import re
 import tempfile
 import stat
 import time
+from threading import Lock
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -225,13 +226,16 @@ class LivePolicy:
     """Bounded policy snapshot checked without GTK or model access.
 
     External edits/replacements are detected at each checkpoint. A monotonic
-    floor prevents a backward wall-clock adjustment extending a grant.
+    floor and synchronized high-water mark prevent an observed expiry
+    from being reversed by a wall-clock correction within this binding.
     """
     policy: EffectivePolicy
     path: Path
     stamp: tuple
     wall: float
     monotonic: float
+    _clock_lock: object = field(default_factory=Lock, init=False, repr=False, compare=False)
+    _observed: float = field(default=0.0, init=False, repr=False, compare=False)
 
     def unchanged(self):
         try:
@@ -242,8 +246,17 @@ class LivePolicy:
     def evaluate(self, action, scope=()):
         if not self.unchanged():
             return DENY, "policy_changed"
-        now = max(time.time(), self.wall + max(0, time.monotonic() - self.monotonic))
-        return self.policy.evaluate(action, scope, now)
+        with self._clock_lock:
+            now = max(self._observed, time.time(),
+                      self.wall + max(0, time.monotonic() - self.monotonic))
+            object.__setattr__(self, "_observed", now)
+            return self.policy.evaluate(action, scope, now)
+
+
+def _without_grant(rule):
+    """A copied rule is a scope template, never a live authorization."""
+    return replace(rule, decision=ASK if rule.decision == ALLOW else rule.decision,
+                   approval="", expires_at=0.0)
 
 
 def clone_to_custom(profile, name):
@@ -254,7 +267,7 @@ def clone_to_custom(profile, name):
     carried = tuple(r for r in profile.rules()
                     if r.action in ("filesystem_read", "filesystem_write", "browser_navigate"))
     # An owner's approval is a grant, not an inherited token: the clone re-asks.
-    carried = tuple(replace(r, approval="", expires_at=0.0) for r in carried)
+    carried = tuple(_without_grant(r) for r in carried)
     filesystem = tuple(r for r in carried if r.action.startswith("filesystem_"))
     network = tuple(r for r in carried if r.action == "browser_navigate")
     out = replace(profile, id=profile.id + "-custom", name=name, based_on_mode="CUSTOM",
@@ -275,7 +288,7 @@ def sanitized(profile):
             if any(part.lower() in PRIVATE or part.startswith("/") or part.startswith("~")
                    for part in rule.scope):
                 continue  # workstation-specific scope never travels
-            out.append(replace(rule, approval="", expires_at=0.0))
+            out.append(_without_grant(rule))
         return tuple(out)
 
     out = replace(profile, state="pending_review", credential_refs=(), allowed_providers=(),
@@ -696,5 +709,12 @@ class Store:
                 if candidate.version == version:
                     target = candidate
         if latest and "target" in locals():
-            return self.save(replace(target, version=latest + 1))
+            # Restoring descriptive policy must not resurrect revoked/expired
+            # grants, or re-enable previously authorized background capture.
+            rules = {kind: tuple(_without_grant(r) for r in getattr(target, kind))
+                     for kind in RULE_KINDS}
+            return self.save(replace(target, version=latest + 1,
+                                     credential_refs=(), allowed_providers=(),
+                                     voice_activation="off",
+                                     background_processing_enabled=False, **rules))
         raise Hold("profile_version_not_found")

@@ -490,3 +490,74 @@ class LivePolicyTests(unittest.TestCase):
         self.assertFalse(live.unchanged())
         self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
                          (DENY, "policy_changed"))
+
+
+class GrantInheritanceTests(unittest.TestCase):
+    def source(self):
+        return base(id="private", filesystem_rules=(
+            Rule("filesystem_read", ("file",), ALLOW, "expired", 99),
+            Rule("filesystem_read", ("live",), ALLOW, "current", 1e12),
+            Rule("filesystem_read", ("timed",), ALLOW, expires_at=99),
+            Rule("filesystem_read", ("plain",), ALLOW),
+            Rule("filesystem_write", ("project",), DENY),
+            Rule("filesystem_write", ("notes",), ASK),
+        ), network_rules=(Rule("browser_navigate", ("public",), ALLOW),))
+
+    def assert_no_copied_grants(self, profile):
+        for rule in profile.rules():
+            self.assertNotEqual(rule.decision, ALLOW)
+            self.assertEqual((rule.approval, rule.expires_at), ("", 0))
+        self.assertEqual(effective(profile).evaluate("filesystem_write", ("project",))[0], DENY)
+        self.assertEqual(effective(profile).evaluate("filesystem_write", ("notes",))[0], ASK)
+
+    def test_clone_requires_new_authorization_even_for_plain_or_live_allow(self):
+        source = self.source()
+        clone = clone_to_custom(source, "Clone")
+        self.assert_no_copied_grants(clone)
+        for scope in ("file", "live", "timed", "plain"):
+            with self.subTest(scope=scope), self.assertRaisesRegex(Hold, "approval_required"):
+                profiles.require_tool(clone, "filesystem_read", (scope,), now=100, selected=True)
+        self.assertEqual(effective(clone).evaluate("browser_navigate", ("public",))[0], ASK)
+        self.assertEqual(effective(source).evaluate("filesystem_read", ("live",), now=100)[0], ALLOW)
+
+    def test_sanitization_never_launders_an_allow(self):
+        clean = sanitized(self.source())
+        self.assertEqual(clean.state, "pending_review")
+        self.assert_no_copied_grants(clean)
+
+    def test_rollback_requires_reauthorization_even_for_historical_allow(self):
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root))
+            source = replace(self.source(), voice_activation="wake_word",
+                             background_processing_enabled=True)
+            store.save(source)
+            store.save(replace(source, version=2, filesystem_rules=(), network_rules=()))
+            rolled = store.rollback(source.id, 1)
+            self.assertEqual(rolled.version, 3)
+            self.assert_no_copied_grants(rolled)
+            self.assertEqual(rolled.voice_activation, "off")
+            self.assertFalse(rolled.background_processing_enabled)
+            with self.assertRaisesRegex(Hold, "approval_required"):
+                profiles.require_tool(store.load(source.id), "filesystem_read", ("file",), now=100)
+
+
+class LiveExpiryHighWaterTests(unittest.TestCase):
+    def test_observed_forward_expiry_cannot_revive_after_clock_correction(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root))
+            profile = base(filesystem_rules=(Rule("filesystem_read", ("csv_analysis",),
+                           ALLOW, approval="fixture", expires_at=100),))
+            store.save(profile)
+            with (patch.object(profiles.time, "time", return_value=90),
+                  patch.object(profiles.time, "monotonic", return_value=10)):
+                live = store.bind_live(profile.id)
+            with (patch.object(profiles.time, "time", return_value=120),
+                  patch.object(profiles.time, "monotonic", return_value=11)):
+                self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
+                                 (ASK, "approval_expired"))
+            with (patch.object(profiles.time, "time", return_value=91),
+                  patch.object(profiles.time, "monotonic", return_value=12)):
+                self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
+                                 (ASK, "approval_expired"))
