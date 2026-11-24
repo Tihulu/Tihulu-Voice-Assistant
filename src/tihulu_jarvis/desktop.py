@@ -232,34 +232,56 @@ def create_window(app, loop, bridge=None):
             self.state_row = Gtk.Label(xalign=0, wrap=True)
             root.append(self.state_row)
             self.stack = Gtk.Stack(vexpand=True)
-            tabs = Gtk.StackSwitcher(stack=self.stack)
-            root.append(tabs)
-            root.append(self.stack)
+            workspace = Gtk.Box(spacing=12, vexpand=True)
+            root.append(workspace)
+            self.navigation = Gtk.StackSidebar(stack=self.stack)
+            nav_scroll = Gtk.ScrolledWindow(vexpand=True)
+            nav_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            nav_scroll.set_child(self.navigation)
+            workspace.append(nav_scroll)
+            self.stack.set_hexpand(True)
+            workspace.append(self.stack)
             chat = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=10)
             self.stack.add_titled(chat,"conversation",tr("Chat & Voice","Sohbet ve ses","Chat & Sprache"))
+            self.setup = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            chat.append(self.setup)
+            self.setup_note = Gtk.Label(xalign=0, wrap=True)
+            self.setup.append(self.setup_note)
+            self.setup_connect = self.button(self.setup, tr(
+                "Connect local model", "Yerel model bağla", "Lokales Modell verbinden"),
+                lambda: self.stack.set_visible_child_name("models"))
+            self.setup_connect.set_halign(Gtk.Align.START)
             self.log = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
             self.scroll = Gtk.ScrolledWindow(vexpand=True)
             self.scroll.set_child(self.log)
             chat.append(self.scroll)
+            self.search_panel = Gtk.Expander(label=tr(
+                "Find in conversation", "Sohbette bul", "Im Gespräch suchen"))
+            searchbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            self.search_panel.set_child(searchbox)
+            chat.append(self.search_panel)
             searchrow = Gtk.Box(spacing=8)
             self.search_entry = Gtk.Entry(hexpand=True,placeholder_text=tr("Search this conversation…","Bu sohbette ara…","In diesem Gespräch suchen…"))
             searchrow.append(self.search_entry)
+            self.search_submit = self.button(searchrow, tr("Search", "Ara", "Suchen"),
+                                             lambda: self.run_search(remember=True))
             self.search_clear = self.button(searchrow,tr("Clear","Temizle","Leeren"),self.clear_search)
             self.export_chat = self.button(searchrow, tr("Export conversation",
                                                          "Sohbeti dışa aktar",
                                                          "Gespräch exportieren"),
                                            self.export_conversation)
-            chat.append(searchrow)
+            searchbox.append(searchrow)
             self.search_results = Gtk.ListBox()
-            chat.append(self.search_results)
+            searchbox.append(self.search_results)
             self.search_note = Gtk.Label(xalign=0, wrap=True)
-            chat.append(self.search_note)
+            searchbox.append(self.search_note)
             self.search_entry.connect("changed", lambda *_: self.run_search())
+            self.search_entry.connect("activate", lambda *_: self.run_search(remember=True))
             self.search_results.connect("row-selected", lambda *_: self.show_match())
             self.search_history = Gtk.ListBox()
-            chat.append(self.search_history)
+            searchbox.append(self.search_history)
             historyrow = Gtk.Box(spacing=8)
-            chat.append(historyrow)
+            searchbox.append(historyrow)
             self.search_history_label = Gtk.Label(xalign=0, wrap=True)
             historyrow.append(self.search_history_label)
             self.search_history_label.set_text(tr("Recent searches",
@@ -453,6 +475,7 @@ def create_window(app, loop, bridge=None):
             return True
 
         def run_focus_search(self, *_):
+            self.search_panel.set_expanded(True)
             self.search_entry.grab_focus()
             return True
 
@@ -996,7 +1019,7 @@ def create_window(app, loop, bridge=None):
                             "%s bu bilgisayarda" % row.route.model_id,
                             "%s auf diesem Computer" % row.route.model_id))
 
-        def run_search(self):
+        def run_search(self, *, remember=False):
             """Search the local conversation; results are snippets, bounded.
 
             Nothing leaves this machine, and the field is disabled while a turn
@@ -1017,8 +1040,9 @@ def create_window(app, loop, bridge=None):
                 self.search_matches = ()
                 self.search_note.set_text(str(exc))
                 return
-            # Only a query that ran is remembered, and only once it ran.
-            self.remember_search(query)
+            # Live results are transient. Only explicit submission saves a query.
+            if remember and not self.busy:
+                self.remember_search(query)
             for index, role, text in self.search_matches:
                 row = Gtk.ListBoxRow()
                 label = Gtk.Label(label="%s · %s" % (role, text), xalign=0, wrap=True)
@@ -1058,10 +1082,15 @@ def create_window(app, loop, bridge=None):
                 row.query = query
                 row.set_child(Gtk.Label(label=query, xalign=0, wrap=True))
                 row.set_activatable(True)
-                row.connect("activate", lambda *_: self.search_entry.set_text(row.query))
+                row.connect("activate", lambda item: self.recall_search(item.query))
                 self.search_history.append(row)
             self.search_history_label.set_visible(bool(self.cfg.get("search_history")))
             self.search_forget.set_sensitive(bool(self.cfg.get("search_history")))
+
+        def recall_search(self, query):
+            if not self.busy:
+                self.search_entry.set_text(query)
+                self.run_search(remember=True)
 
         def remember_search(self, query):
             """Remember a query that was actually searched for."""
@@ -1154,7 +1183,10 @@ def create_window(app, loop, bridge=None):
                                   "yalnızca geri döngü; üst servis doğrulanmadı",
                                   "Nur Loopback; Upstream nicht verifiziert")
             parts = [mode or tr("no mode", "mod yok", "kein Modus"), name, model, boundary]
-            if data is not None and data["endpoint"] != "loopback":
+            if not self.url.get_text().strip():
+                parts.append(tr("connection not configured", "bağlantı yapılandırılmadı",
+                                "Verbindung nicht eingerichtet"))
+            elif data is not None and data["endpoint"] != "loopback":
                 # The boundary is about the profile; the endpoint is its own
                 # fact, and a build that cannot use it says so rather than
                 # leaving a reader to assume it will work.
@@ -1213,7 +1245,11 @@ def create_window(app, loop, bridge=None):
                 self.disclosure_note.set_text("")
                 return
             data = disclosure.facts(profile, endpoint, self.store.policy_now())
-            if data["endpoint"] != "loopback":
+            if not endpoint:
+                body = tr("No connection configured. Choose a local Jan endpoint to chat.",
+                          "Bağlantı yapılandırılmadı. Sohbet için yerel Jan bağlantısını seç.",
+                          "Keine Verbindung eingerichtet. Lokalen Jan-Zugang zum Chatten wählen.")
+            elif data["endpoint"] != "loopback":
                 body = tr("The configured endpoint is not a loopback address; this build refuses it.",
                           "Yapılandırılan uç nokta geri döngü adresi değil; bu sürüm onu reddeder.",
                           "Der konfigurierte Endpunkt ist keine Loopback-Adresse; dieser Build lehnt ihn ab.")
@@ -1240,6 +1276,18 @@ def create_window(app, loop, bridge=None):
 
         def refresh(self):
             connected = self.cfg["llm"] in self.inventory
+            self.setup.set_visible(not connected)
+            self.setup_connect.set_sensitive(not self.busy)
+            if not self.url.get_text().strip():
+                self.setup_note.set_text(tr(
+                    "Start with your local model. Open Jan, enter its local API URL, discover models and choose one. No download is needed.",
+                    "Yerel modelinle başla. Jan'ı aç, yerel API adresini gir, modelleri bul ve birini seç. İndirme gerekmez.",
+                    "Mit dem lokalen Modell starten. Jan öffnen, lokale API-Adresse eingeben, Modelle suchen und eines wählen. Kein Download nötig."))
+            else:
+                self.setup_note.set_text(tr(
+                    "Discover and select a model to start chatting. Voice setup is optional for text chat.",
+                    "Sohbet için model bul ve seç. Yazılı sohbet için ses ayarları isteğe bağlıdır.",
+                    "Zum Chatten ein Modell suchen und auswählen. Spracheinrichtung ist für Textchat optional."))
             # Whether the audio tools exist is asked once per refresh, and the
             # answer is what the readiness row states.
             self.tools_available = audio.tools_ready("arecord", "whisper-cli",
@@ -1257,6 +1305,8 @@ def create_window(app, loop, bridge=None):
             self.refresh_state_row()
             self.search_entry.set_sensitive(not self.busy)
             self.search_clear.set_sensitive(not self.busy)
+            self.search_submit.set_sensitive(not self.busy)
+            self.search_history.set_sensitive(not self.busy)
             # An export needs something to export; an empty log offers nothing.
             self.export_chat.set_sensitive(not self.busy and bool(self.session.history))
             self.attach.set_sensitive(not self.busy and self.cfg["llm"] in self.inventory)
@@ -3270,6 +3320,12 @@ def create_window(app, loop, bridge=None):
             task.add_done_callback(finished)
 
         def discover(self):
+            if not self.url.get_text().strip():
+                self.set_state("ready", tr(
+                    "Enter the local Jan API URL first.",
+                    "Önce yerel Jan API adresini gir.",
+                    "Zuerst lokale Jan-API-Adresse eingeben."))
+                return
             async def run(epoch):
                 client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 models=await client.models()

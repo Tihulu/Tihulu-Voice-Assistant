@@ -133,7 +133,8 @@ class DesktopFixture(unittest.TestCase):
             model.with_name(model.name + ".json").write_text(
                 json.dumps({"language": {"code": lang}}), encoding="utf-8")
             cfg["voices"][lang] = str(model)
-        settings.save(cfg, tmp / "models.json")
+        settings.save(settings.empty() if getattr(self, "fresh_settings", False) else cfg,
+                      tmp / "models.json")
         self.stack.enter_context(patch.object(settings, "config_path", return_value=tmp / "models.json"))
         # Profiles and market state live in a private directory per test:
         # a fixture must never write to the owner's real store, and a saved
@@ -273,6 +274,32 @@ class DesktopFixture(unittest.TestCase):
             rows.append(item.get_text())
             item = item.get_next_sibling()
         return rows
+class FreshStartTests(DesktopFixture):
+    """Real GTK construction with blank model configuration, fixture transport."""
+    fresh_settings = True
+
+    def test_blank_start_guides_setup_without_inference_or_capture(self):
+        self.assertEqual(self.ui.stack.get_visible_child_name(), "conversation")
+        self.assertTrue(self.ui.setup.get_visible())
+        self.assertFalse(self.ui.search_panel.get_expanded())
+        self.assertIn("connection not configured", self.ui.topbar_note.get_text())
+        self.assertNotIn("not a loopback address", self.ui.disclosure_note.get_text())
+        self.assertFalse(self.ui.send.get_sensitive())
+        self.assertFalse(self.ui.talk.get_sensitive())
+        self.jan.assert_not_called()
+        self.ui.setup_connect.emit("clicked")
+        self.assertEqual(self.ui.stack.get_visible_child_name(), "models")
+        self.ui.reload.emit("clicked")
+        self.assertIn("Enter the local Jan API URL", self.ui.status.get_text())
+        self.jan.assert_not_called()
+
+    def test_blank_start_keeps_local_analysis_available(self):
+        self.assertTrue(self.ui.analysis.choose_button.get_sensitive())
+        self.ui.entry.set_text("Bu dosyayı analiz et")
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.jan.assert_not_called()
+
+
 class DesktopTests(DesktopFixture):
     """Voice, cancellation and mode-independent desktop controls."""
 
@@ -3452,9 +3479,21 @@ class SearchHistoryTests(ConversationSearchTests):
     def queries(self):
         return [row.query for row in self.history_rows()]
 
+    def test_live_prefixes_are_not_persisted_until_submission(self):
+        self.turn()
+        for query in ("n", "na", "nab", "naber"):
+            self.ui.search_entry.set_text(query)
+            self.assertEqual(self.ui.cfg.get("search_history"), [])
+            self.assertEqual(settings.load()["search_history"], [])
+        self.ui.search_entry.emit("activate")
+        self.assertEqual(settings.load()["search_history"], ["naber"])
+        self.ui.refresh()
+        self.assertEqual(settings.load()["search_history"], ["naber"])
+
     def test_a_query_that_ran_is_remembered(self):
         self.turn()
         self.ui.search_entry.set_text("kelimem")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         self.assertEqual(self.ui.cfg.get("search_history"), ["kelimem"])
         self.assertEqual(self.queries(), ["kelimem"])
@@ -3463,27 +3502,33 @@ class SearchHistoryTests(ConversationSearchTests):
     def test_a_refused_query_is_not_remembered(self):
         self.turn()
         self.ui.search_entry.set_text("absent-word")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"absent-word"' in self.ui.search_note.get_text())
         # A query that ran but matched nothing was still searched for.
         self.assertEqual(self.ui.cfg.get("search_history"), ["absent-word"])
         # A query the client refuses to run leaves no memory behind.
         self.ui.search_entry.set_text("x" * 200)
+        self.ui.search_entry.emit("activate")
         self.until(lambda: self.ui.search_note.get_text() == "invalid_search_query")
         self.assertEqual(self.ui.cfg.get("search_history"), ["absent-word"])
 
     def test_re_asking_moves_a_query_to_the_front(self):
         self.turn()
         self.ui.search_entry.set_text("kelimem")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         self.ui.search_entry.set_text("mavi")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"mavi"' in self.ui.search_note.get_text())
         self.ui.search_entry.set_text("kelimem")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         self.assertEqual(self.queries(), ["kelimem", "mavi"])
 
     def test_a_remembered_query_re_runs_the_search(self):
         self.turn()
         self.ui.search_entry.set_text("kelimem")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         self.ui.search_entry.set_text("")
         self.assertEqual(self.rows(), [])
@@ -3494,6 +3539,7 @@ class SearchHistoryTests(ConversationSearchTests):
     def test_forgetting_clears_the_store_not_just_the_row(self):
         self.turn()
         self.ui.search_entry.set_text("kelimem")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         self.click(self.ui.search_forget)
         self.until(lambda: not self.history_rows())
