@@ -179,7 +179,7 @@ class AnalysisController:
             self._artifacts[result.id] = result
             return result.id
 
-    def analyze_selected(self, path, *, color="blue", language="en"):
+    def analyze_selected(self, path, *, color="blue", language="en", expected_identity=None):
         """Only the trusted picker supplies path. Return an opaque artifact ID."""
         if not isinstance(path, str):
             raise Hold("csv_invalid_selection")
@@ -191,7 +191,7 @@ class AnalysisController:
                 check()
                 return True
             data = read_selected_csv(path, authorized=authorized,
-                                     cancelled=check).data
+                                     cancelled=check, expected_identity=expected_identity).data
             series = analyze_temperature(data, cancelled=check)
             return self._publish(job, action, path, series, color, language, None)
         finally:
