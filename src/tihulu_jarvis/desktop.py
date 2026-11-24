@@ -3074,14 +3074,15 @@ def create_window(app, loop, bridge=None):
             """Bind a trusted operation to its exact generation and selection."""
             active = self.cfg.get("profile")
             profile, stamp = self.store.snapshot(active)
-            def check():
+            def identity():
                 self.session.check(epoch)
                 if (self.closing or self.cfg.get("profile") != active
                         or selection() != expected or not self.store.is_current(active, stamp)):
                     raise Hold("profile_changed")
+            def check():
+                identity()
                 profiles.require_tool(profile, action, scope, self.store.policy_now(), selected=selected)
-                if not self.store.is_current(active, stamp):
-                    raise Hold("profile_changed")
+                identity()
             check()
             return check
 

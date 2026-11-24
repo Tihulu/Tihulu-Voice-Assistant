@@ -132,6 +132,39 @@ class AudioGrantTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(drained.is_set())
         self.assertEqual(self.calls, ["arecord"])
 
+    async def test_playback_revocation_drains_owned_child(self):
+        owner = self
+        entered, drained = asyncio.Event(), asyncio.Event()
+        @asynccontextmanager
+        async def child(name, *args, **kw):
+            owner.calls.append(name)
+            if name == "piper":
+                owner.wav(args[-1])
+                class Synth:
+                    returncode = 0
+                    async def communicate(self, data):
+                        return b"", b""
+                yield Synth()
+            else:
+                class Playback:
+                    async def wait(self):
+                        entered.set()
+                        await asyncio.Future()
+                try:
+                    yield Playback()
+                finally:
+                    drained.set()
+        with patch.object(audio, "child", child), patch.object(audio, "tools_ready", return_value=True), \
+             patch.object(audio, "AUTH_POLL", .01):
+            task = asyncio.create_task(audio.speak(
+                SpeechRequest("Hello", "en", str(self.voice)), lambda _: None, checkpoint=self.check))
+            await asyncio.wait_for(entered.wait(), 1)
+            self.allowed = False
+            with self.assertRaisesRegex(Hold, "approval_expired"):
+                await asyncio.wait_for(task, 1)
+        self.assertTrue(drained.is_set())
+        self.assertEqual(self.calls, ["piper", "aplay"])
+
     async def test_successful_wait_and_cancellation(self):
         async def done():
             return 7

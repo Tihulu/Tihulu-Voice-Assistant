@@ -56,3 +56,17 @@ paused capture and paused backend cases separately. A reply committed while
 still authorized is not retroactively erased by later expiry. The disclosure
 UI reports only the direct loopback transport and explicitly unknown upstream
 processing. Physical verification of the service and isolation remain HOLD.
+
+## ADJ-04 successor (PR #101)
+
+The frozen #100 remains unchanged. The successor requires an explicit trusted
+checkpoint for every listen, speak and transcribe call; ordinary voice, preview,
+selected recording and analysis speech supply existing profile-generation and
+epoch checks. Active subprocess waits poll at a nominal 250 ms and each stage
+checks before spawn, inside the scheduled spawn task, after spawn and before
+publication. Test both transitions, active capture/playback drain, refused
+spawn, timeout/cancellation, and all four native call sites. This is a nominal
+polling interval, not a measured device cutoff deadline. OS spawn and cleanup
+latency, hostile same-UID processes, existing captured/played data and real
+hardware remain outside this guarantee. Low-level standalone child tests retain
+their trusted default callback; production audio entrypoints have no default.
