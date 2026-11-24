@@ -65,7 +65,10 @@ stages only its pure Python modules and license metadata in
 distribution PyGObject/GTK libraries are visible without bundling an
 interpreter or relocating a build-machine virtual environment. No user
 Python path or user-site packages are required. The build environment
-must have pip and a prebuilt wheel. Runtime dependencies include GTK 4,
+must have pip and a prebuilt wheel. The staging path must not exist: the
+builder refuses existing directories and symlinks rather than deleting them.
+For another build, use a new staging path in the disposable build workspace.
+Do not use a personal directory as staging. Runtime dependencies include GTK 4,
 PyGObject, GdkPixbuf and the SVG loader.
 
 ```sh
