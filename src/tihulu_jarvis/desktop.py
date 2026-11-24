@@ -744,9 +744,9 @@ def create_window(app, loop, bridge=None):
             except (Hold, KeyError):
                 current = None
             if current is None:
-                extra = profiles.granted(target)
+                extra = profiles.granted(target, self.store.policy_now())
             else:
-                extra = profiles.escalation(current, target)
+                extra = profiles.escalation(current, target, self.store.policy_now())
             if not extra:
                 self.activate_profile(profile_id)
                 return None
@@ -1231,7 +1231,7 @@ def create_window(app, loop, bridge=None):
             self.entry.set_sensitive(not self.busy)
             self.refresh_send()
             allowed = getattr(self, "policy", None) is not None and \
-                self.policy.evaluate("local_audio_device", ("push_to_talk",), time.time())[0] == profiles.ALLOW
+                self.policy.evaluate("local_audio_device", ("push_to_talk",), self.store.policy_now())[0] == profiles.ALLOW
             self.talk.set_sensitive(not self.busy and connected and allowed \
                 and bool(self.cfg["stt"]) and bool(self.cfg["voices"]) \
                 and audio.tools_ready("arecord","whisper-cli","piper","aplay"))
@@ -3028,7 +3028,7 @@ def create_window(app, loop, bridge=None):
             profile = self.active_profile()
             for action, scope in requests:
                 try:
-                    decision, reason = profiles.require_tool(profile, action, scope, time.time(), selected=selected)
+                    decision, reason = profiles.require_tool(profile, action, scope, self.store.policy_now(), selected=selected)
                 except Hold as exc:
                     self.record_policy(action, scope, "deny", str(exc))
                     raise
@@ -3291,7 +3291,7 @@ def create_window(app, loop, bridge=None):
             if profile.state != "active" or profile.based_on_mode != "LOCAL_ONLY":
                 raise Hold("attachment_mode_denied")
             decision, reason = profiles.effective(profile).evaluate(
-                attachments.ACTION, attachments.SCOPE, time.time())
+                attachments.ACTION, attachments.SCOPE, self.store.policy_now())
             if decision == profiles.ALLOW or reason == "no_rule_matches":
                 return
             if decision == profiles.ASK:

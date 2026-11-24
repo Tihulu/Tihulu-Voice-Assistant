@@ -221,21 +221,47 @@ def _policy_stamp(path):
             info.st_ctime_ns, info.st_mode)
 
 
+class PolicyClock:
+    """Nondecreasing policy time for one running Store and its live bindings.
+
+    An observed forward jump is retained and advances with monotonic time.
+    This is not a durable clock across application restarts.
+    """
+    def __init__(self, wall=None, monotonic=None):
+        self._lock = Lock()
+        self._observed = wall
+        self._monotonic = monotonic
+
+    def now(self):
+        with self._lock:
+            wall, mono = time.time(), time.monotonic()
+            if self._observed is None:
+                self._observed = wall
+            else:
+                self._observed = max(wall, self._observed +
+                                     max(0, mono - self._monotonic))
+            self._monotonic = mono if self._monotonic is None else max(mono, self._monotonic)
+            return self._observed
+
+
 @dataclass(frozen=True)
 class LivePolicy:
     """Bounded policy snapshot checked without GTK or model access.
 
     External edits/replacements are detected at each checkpoint. A monotonic
-    floor and synchronized high-water mark prevent an observed expiry
-    from being reversed by a wall-clock correction within this binding.
+    floor and shared nondecreasing clock prevent an observed expiry from
+    being reversed by a wall-clock correction or a new binding in one Store.
     """
     policy: EffectivePolicy
     path: Path
     stamp: tuple
     wall: float
     monotonic: float
-    _clock_lock: object = field(default_factory=Lock, init=False, repr=False, compare=False)
-    _observed: float = field(default=0.0, init=False, repr=False, compare=False)
+    clock: PolicyClock = field(default=None, repr=False, compare=False)
+
+    def __post_init__(self):
+        if self.clock is None:
+            object.__setattr__(self, "clock", PolicyClock(self.wall, self.monotonic))
 
     def unchanged(self):
         try:
@@ -246,11 +272,7 @@ class LivePolicy:
     def evaluate(self, action, scope=()):
         if not self.unchanged():
             return DENY, "policy_changed"
-        with self._clock_lock:
-            now = max(self._observed, time.time(),
-                      self.wall + max(0, time.monotonic() - self.monotonic))
-            object.__setattr__(self, "_observed", now)
-            return self.policy.evaluate(action, scope, now)
+        return self.policy.evaluate(action, scope, self.clock.now())
 
 
 def _without_grant(rule):
@@ -273,7 +295,8 @@ def clone_to_custom(profile, name):
     out = replace(profile, id=profile.id + "-custom", name=name, based_on_mode="CUSTOM",
                   version=1, state="active", credential_refs=(), allowed_providers=(),
                   tool_rules=(), network_rules=network, filesystem_rules=filesystem,
-                  shell_rules=(), cloud_disclosure_rules=())
+                  shell_rules=(), cloud_disclosure_rules=(), voice_activation="off",
+                  background_processing_enabled=False)
     return out.checked()
 
 
@@ -294,7 +317,8 @@ def sanitized(profile):
     out = replace(profile, state="pending_review", credential_refs=(), allowed_providers=(),
                   tool_rules=clean(profile.tool_rules), network_rules=clean(profile.network_rules),
                   filesystem_rules=clean(profile.filesystem_rules), shell_rules=(),
-                  cloud_disclosure_rules=clean(profile.cloud_disclosure_rules))
+                  cloud_disclosure_rules=clean(profile.cloud_disclosure_rules),
+                  voice_activation="off", background_processing_enabled=False)
     # Privileged rules arrive denied until the owner re-authorizes them.
     return replace(out, shell_rules=(Rule("host_shell", (), DENY),)).checked()
 
@@ -461,6 +485,8 @@ def require_tool(profile, action, scope=(), now=None, *, selected=False):
     """
     if profile.state != "active":
         raise Hold("profile_not_active")
+    if now is None:
+        now = time.time()
     # Preserve a specific explicit refusal reason even when the mode also
     # forbids that action. Never treat a mode denial as an approval.
     decision, reason = decide(profile.rules(), action, scope, now)
@@ -518,13 +544,15 @@ def granted(profile, now=None):
     return frozenset(out)
 
 
-def escalation(current, target):
+def escalation(current, target, now=None):
     """Privileges the target would add. An empty result needs no confirmation.
 
     Privileges are compared by granted token, never by name, so renaming a
     profile cannot hide an escalation.
     """
-    return frozenset(granted(target) - granted(current))
+    if now is None:
+        now = time.time()
+    return frozenset(granted(target, now) - granted(current, now))
 
 
 def describe(escalation_set):
@@ -576,6 +604,7 @@ class Store:
     LIMIT = 32768
 
     def __init__(self, root):
+        self._clock = PolicyClock()
         self.root = Path(root)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.history = self.root / "history"
@@ -674,6 +703,9 @@ class Store:
         except (ValueError, OSError):
             raise Hold("profile_unreadable") from None
 
+    def policy_now(self):
+        return self._clock.now()
+
     def bind_live(self, profile_id):
         """Bind a checked active policy to the exact stored file generation."""
         path = self._path(profile_id)
@@ -682,7 +714,8 @@ class Store:
             profile = self.load(profile_id)
             if profile.id != profile_id or profile.state != "active" or _policy_stamp(path) != before:
                 raise Hold("profile_changed")
-            return LivePolicy(effective(profile), path, before, time.time(), time.monotonic())
+            return LivePolicy(effective(profile), path, before, self.policy_now(),
+                              time.monotonic(), self._clock)
         except OSError:
             raise Hold("profile_unreadable") from None
 

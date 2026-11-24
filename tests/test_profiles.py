@@ -561,3 +561,36 @@ class LiveExpiryHighWaterTests(unittest.TestCase):
                   patch.object(profiles.time, "monotonic", return_value=12)):
                 self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
                                  (ASK, "approval_expired"))
+
+
+class SharedPolicyClockTests(unittest.TestCase):
+    def test_new_binding_and_direct_gate_share_irreversible_expiry(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root))
+            profile = base(tool_rules=(Rule("local_audio_device", ("push_to_talk",),
+                           ALLOW, approval="fixture", expires_at=110),))
+            store.save(profile)
+            wall, mono = [100], [50]
+            with (patch.object(profiles.time, "time", side_effect=lambda: wall[0]),
+                  patch.object(profiles.time, "monotonic", side_effect=lambda: mono[0])):
+                live = store.bind_live(profile.id)
+                self.assertEqual(live.evaluate("local_audio_device", ("push_to_talk",))[0], ALLOW)
+                wall[0], mono[0] = 120, 51
+                self.assertEqual(live.evaluate("local_audio_device", ("push_to_talk",)),
+                                 (ASK, "approval_expired"))
+                wall[0], mono[0] = 101, 52
+                rebound = store.bind_live(profile.id)
+                self.assertGreaterEqual(store.policy_now(), 121)
+                self.assertEqual(rebound.evaluate("local_audio_device", ("push_to_talk",)),
+                                 (ASK, "approval_expired"))
+                with self.assertRaisesRegex(Hold, "approval_expired"):
+                    profiles.require_tool(store.load(profile.id), "local_audio_device",
+                                          ("push_to_talk",), store.policy_now())
+
+    def test_clone_and_import_do_not_copy_automatic_activation(self):
+        source = base(id="private", voice_activation="wake_word",
+                      background_processing_enabled=True)
+        for copied in (clone_to_custom(source, "Clone"), sanitized(source)):
+            self.assertEqual(copied.voice_activation, "off")
+            self.assertFalse(copied.background_processing_enabled)
