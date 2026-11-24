@@ -217,6 +217,60 @@ class StoreTests(unittest.TestCase):
             Store._parse(text)
 
 
+class StoreMutationTests(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.store = Store(root.name)
+        self.other = Store(root.name)
+        self.store.save(base())
+
+    def test_conflicting_writer_and_rollback_cannot_pass_version_check(self):
+        with self.store._mutation_lock():
+            with self.assertRaisesRegex(Hold, "profile_store_busy_or_unavailable"):
+                self.other.save(base(version=2, name="stale"))
+            with self.assertRaisesRegex(Hold, "profile_store_busy_or_unavailable"):
+                self.other.rollback("local-only", 1)
+            self.store._save_locked(base(version=2, name="winner"))
+        with self.assertRaisesRegex(Hold, "version_must_increase"):
+            self.other.save(base(version=2, name="stale"))
+        self.assertEqual(self.other.load("local-only").name, "winner")
+        self.assertEqual([p.version for p in self.other.versions("local-only")], [1, 2])
+
+    def test_existing_history_generation_cannot_be_replaced(self):
+        path = self.store.history / "local-only-v2.json"
+        original = Store._dump(base(version=2, name="archived"))
+        path.write_text(original)
+        with self.assertRaisesRegex(Hold, "version_must_increase"):
+            self.store.save(base(version=2, name="replacement"))
+        self.assertEqual(path.read_text(), original)
+        self.assertEqual(self.store.load("local-only").version, 1)
+
+    def test_profile_identity_and_history_prefix_are_isolated(self):
+        self.store.save(base(id="local-only-v2", name="other profile"))
+        self.assertEqual([p.id for p in self.store.versions("local-only")], ["local-only"])
+        rolled = self.store.rollback("local-only", 1)
+        self.assertEqual((rolled.id, rolled.version), ("local-only", 2))
+        self.store._path("local-only").write_text(Store._dump(base(id="wrong")))
+        with self.assertRaisesRegex(Hold, "profile_changed"):
+            self.store.load("local-only")
+        with self.assertRaisesRegex(Hold, "profile_changed"):
+            self.store.save(base(version=3))
+
+    def test_rollback_after_failed_history_write_uses_active_version(self):
+        from unittest.mock import patch
+        original = self.store._write
+        def write(path, text):
+            if path.parent == self.store.history:
+                raise OSError("fixture")
+            original(path, text)
+        with patch.object(self.store, "_write", side_effect=write):
+            with self.assertRaisesRegex(Hold, "profile_history_write_failed"):
+                self.store.save(base(version=2, name="active without archive"))
+        self.assertEqual(self.store.load("local-only").version, 2)
+        self.assertEqual(self.store.rollback("local-only", 1).version, 3)
+
+
 class EndpointEnforcementTests(unittest.TestCase):
     def profile(self, **kw):
         values = {"id": "local-only", "name": "Assistant", "based_on_mode": "LOCAL_ONLY", "version": 1}

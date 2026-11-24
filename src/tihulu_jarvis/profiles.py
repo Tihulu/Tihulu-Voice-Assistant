@@ -796,24 +796,72 @@ class Store:
             raise Hold("profile_unreadable") from None
         return self._parse(raw.decode("utf-8"))
 
+    @contextmanager
+    def _mutation_lock(self):
+        """Serialize cooperating profile writers separately from policy time."""
+        fd = None
+        try:
+            fd = os.open(self.history, os.O_RDONLY | os.O_DIRECTORY |
+                         os.O_CLOEXEC | os.O_NOFOLLOW)
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            if fd is not None:
+                os.close(fd)
+            raise Hold("profile_store_busy_or_unavailable") from None
+        try:
+            yield
+        finally:
+            os.close(fd)
+
     def save(self, profile):
+        with self._mutation_lock():
+            return self._save_locked(profile)
+
+    def _save_locked(self, profile):
         profile = profile.checked()
         target = self._path(profile.id)
-        if target.is_file():
-            try:
-                if self._read_profile(target).version >= profile.version:
-                    raise Hold("version_must_increase")
-            except FileNotFoundError:
-                pass
-            except (ValueError, OSError):
-                raise Hold("profile_unreadable") from None
-        self._write(target, self._dump(profile))
-        self._write(self.history / (profile.id + "-v%d.json" % profile.version), self._dump(profile))
+        text = self._dump(profile)
+        if len(text) > self.LIMIT:
+            raise Hold("profile_too_large")
+        try:
+            current = self._read_profile(target)
+        except FileNotFoundError:
+            current = None
+        except (ValueError, OSError, KeyError, TypeError, RecursionError):
+            raise Hold("profile_unreadable") from None
+        if current is not None:
+            if current.id != profile.id:
+                raise Hold("profile_changed")
+            if current.version >= profile.version:
+                raise Hold("version_must_increase")
+        archived = self.history / (profile.id + "-v%d.json" % profile.version)
+        try:
+            # Do not replace an existing historical generation, including a
+            # dangling symlink. The active file and history are not a single
+            # crash-atomic transaction.
+            archived.lstat()
+        except FileNotFoundError:
+            pass
+        except OSError:
+            raise Hold("profile_unreadable") from None
+        else:
+            raise Hold("version_must_increase")
+        try:
+            self._write(target, text)
+        except OSError:
+            raise Hold("profile_write_failed") from None
+        try:
+            self._write(archived, text)
+        except OSError:
+            raise Hold("profile_history_write_failed") from None
         return profile
 
     def load(self, profile_id):
         try:
-            return self._read_profile(self._path(profile_id))
+            profile = self._read_profile(self._path(profile_id))
+            if profile.id != profile_id:
+                raise Hold("profile_changed")
+            return profile
         except FileNotFoundError:
             raise Hold("profile_not_found") from None
         except (ValueError, OSError, KeyError, TypeError, RecursionError):
@@ -844,14 +892,25 @@ class Store:
         out = []
         for path in sorted(self.history.glob(stem + "-v*.json")):
             try:
-                out.append(self._read_profile(path))
+                # A different profile ID can share the glob prefix. Only
+                # accept a canonical filename for this exact generation.
+                candidate = self._read_profile(path)
+                if candidate.id != profile_id or path.name != (
+                        stem + "-v%d.json" % candidate.version):
+                    continue
+                out.append(candidate)
             except (Hold, ValueError, OSError, KeyError, TypeError, RecursionError):
                 out.append(path.name)
         return tuple(out)
 
     def rollback(self, profile_id, version):
         """Restore an earlier policy as a new version, never re-granting later ones."""
-        latest = 0
+        with self._mutation_lock():
+            return self._rollback_locked(profile_id, version)
+
+    def _rollback_locked(self, profile_id, version):
+        # Include the active version even if its history write failed.
+        latest = self.load(profile_id).version
         for candidate in self.versions(profile_id):
             if isinstance(candidate, Profile):
                 latest = max(latest, candidate.version)
@@ -862,7 +921,7 @@ class Store:
             # grants, or re-enable previously authorized background capture.
             rules = {kind: tuple(_without_grant(r) for r in getattr(target, kind))
                      for kind in RULE_KINDS}
-            return self.save(replace(target, version=latest + 1,
+            return self._save_locked(replace(target, version=latest + 1,
                                      credential_refs=(), allowed_providers=(),
                                      voice_activation="off",
                                      background_processing_enabled=False, **rules))
