@@ -3439,11 +3439,19 @@ def create_window(app, loop, bridge=None):
                 def grow(piece):
                     if epoch == self.session.epoch:
                         self.extend(answer,"JARVIS",piece)
-                result,_=await self.session.reply(text,backend,
-                                                  epoch,on_delta=grow,route=route,
-                                                  attachment=item,model=self.cfg["llm"],
-                                                  authorize=permitted)
-                self.session.check(epoch)
+                try:
+                    result,_=await self.session.reply(text,backend,
+                                                      epoch,on_delta=grow,route=route,
+                                                      attachment=item,model=self.cfg["llm"],
+                                                      authorize=permitted)
+                    self.session.check(epoch)
+                except (Hold, asyncio.CancelledError):
+                    # Earlier authorized deltas cannot be unseen, but a
+                    # rejected turn must not retain a partial assistant reply.
+                    self.growing.pop(answer, None)
+                    if answer.get_parent() == self.log:
+                        self.log.remove(answer)
+                    raise
                 if item is not None and self.history_attachment_live is None:
                     self.history_attachment_live = selected_live
                 self.extend(answer,"JARVIS",result,replace=True)
@@ -3479,6 +3487,8 @@ def create_window(app, loop, bridge=None):
                 result,speech=await self.session.reply(text,backend,epoch,voices,route=route,
                     authorize=lambda: self.conversation_authorized(route))
                 self.session.check(epoch)
+                if not self.conversation_authorized(route):
+                    raise Hold("attachment_context_changed")
                 self.bubble("JARVIS",result)
                 self.spoken_line(speech, epoch)
                 if self.mute.get_active():
@@ -3492,6 +3502,9 @@ def create_window(app, loop, bridge=None):
                                                "Antwort stumm; als Text angezeigt."))
                     return
                 async with self.leases.hold("audio_playback", "voice-turn-%d" % epoch):
+                    self.session.check(epoch)
+                    if not self.conversation_authorized(route):
+                        raise Hold("attachment_context_changed")
                     self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
                     playback = loop.create_task(audio.speak(speech, progress))

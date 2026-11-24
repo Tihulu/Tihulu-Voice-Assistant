@@ -100,3 +100,54 @@ class AttachmentTurnTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.requests), count)
         self.session.invalidate(clear=True)
         self.assertFalse(self.session.has_attachment_history)
+
+
+    async def test_revocation_during_valid_reply_discards_new_history(self):
+        allowed = True
+        async def backend(messages):
+            nonlocal allowed
+            allowed = False
+            return "Hello, the note is ready."
+        with self.assertRaisesRegex(Hold, "^attachment_context_changed$"):
+            await self.session.own(lambda epoch: self.session.reply(
+                "Hello!", backend, epoch, attachment=item("synthetic fixture"),
+                authorize=lambda: allowed))
+        self.assertEqual(self.session.history, ())
+        self.assertFalse(self.session.has_attachment_history)
+
+    async def test_stream_revocation_latches_even_if_backend_catches_hold(self):
+        allowed = True
+        seen = []
+        class Backend:
+            async def chat(inner, messages, on_delta):
+                nonlocal allowed
+                on_delta("Hello")
+                allowed = False
+                try:
+                    on_delta("forbidden fixture")
+                except Hold:
+                    allowed = True
+                return "Hello, the note is ready."
+        with self.assertRaisesRegex(Hold, "^attachment_context_changed$"):
+            await self.session.own(lambda epoch: self.session.reply(
+                "Hello!", Backend(), epoch, on_delta=seen.append,
+                attachment=item("synthetic fixture"), authorize=lambda: allowed))
+        self.assertEqual(seen, ["Hello"])
+        self.assertEqual(self.session.history, ())
+        self.assertFalse(self.session.has_attachment_history)
+
+    async def test_voice_revocation_during_reply_preserves_only_prior_history(self):
+        from tihulu_jarvis.voice.m1 import Voice
+        await self.send("Hello!", item("synthetic fixture"))
+        previous = self.session.history
+        allowed = True
+        async def backend(messages):
+            nonlocal allowed
+            allowed = False
+            return "Hello, the note is ready."
+        with self.assertRaisesRegex(Hold, "^attachment_context_changed$"):
+            await self.session.own(lambda epoch: self.session.reply(
+                "Hello!", backend, epoch, {"en": Voice("fixture", "en")},
+                authorize=lambda: allowed))
+        self.assertEqual(self.session.history, previous)
+        self.assertTrue(self.session.has_attachment_history)

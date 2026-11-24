@@ -94,16 +94,31 @@ class Session:
         self.check(epoch)
         self.require_route(route)
         history = self.history
+        refused = False
+
+        def checkpoint():
+            nonlocal refused
+            self.check(epoch)
+            # A denial observed during this turn is terminal, even if a
+            # backend catches the callback exception or permission changes.
+            if refused or authorize() is not True:
+                refused = True
+                raise Hold("attachment_context_changed")
+
+        def guarded_delta(piece):
+            checkpoint()
+            on_delta(piece)
+
         if voices is not None:
             if attachment is not None:
                 raise Hold("attachment_voice_unsupported")
             async def guarded_chat(messages):
-                self.check(epoch)
-                if authorize() is not True:
-                    raise Hold("attachment_context_changed")
-                return await jan(messages)
+                checkpoint()
+                result = await jan(messages)
+                checkpoint()
+                return result
             done = await complete_turn(user,self.context,history,guarded_chat,voices,cancelled=lambda: epoch!=self.epoch)
-            self.check(epoch)
+            checkpoint()
             self.history, self.context = done.history, done.context
             self._history_route = route
             return done.display_text, done.speech
@@ -112,13 +127,11 @@ class Session:
         # the server sends it. A client without that capability still answers.
         streaming = on_delta is not None and callable(getattr(jan, "chat", None))
         for attempt in range(2):
-            self.check(epoch)
-            if authorize() is not True:
-                raise Hold("attachment_context_changed")
+            checkpoint()
             system = self._text_instruction(decision, attempt)
-            result = await (jan.chat((Message("system",system),*history,message), on_delta=on_delta)
+            result = await (jan.chat((Message("system",system),*history,message), on_delta=guarded_delta)
                             if streaming else jan((Message("system",system),*history,message)))
-            self.check(epoch)
+            checkpoint()
             if (isinstance(result,str) and result.strip() and len(result)<=32000
                     and not re.search(r"</?(?:think|analysis)\b",result,re.I)
                     and valid_response(result,decision.response_language,lexical_identifier)):
