@@ -3244,25 +3244,31 @@ def create_window(app, loop, bridge=None):
                     child=nxt
             self.set_state("stopping" if self.busy else "ready")
 
-        def require_attachment(self):
-            """The policy gate for an attachment, decided before any dialog.
+        def attachment_policy(self):
+            """Only the verified local route is available in this preview."""
+            profile = self.active_profile()
+            if profile.state != "active" or profile.based_on_mode != "LOCAL_ONLY":
+                raise Hold("attachment_mode_denied")
+            decision, reason = profiles.effective(profile).evaluate(
+                attachments.ACTION, attachments.SCOPE, time.time())
+            if decision == profiles.ALLOW or reason == "no_rule_matches":
+                return
+            if decision == profiles.ASK:
+                raise Hold("attachment_approval_required")
+            raise Hold("profile_forbids_filesystem_read")
 
-            Returning None means the active profile denies the read, and the
-            audit trail already carries the decision. A caller must not open a
-            chooser in that case: a denied read never reaches a file picker.
-            """
+        def require_attachment(self):
+            """Gate the picker and every actual read/send; absence needs a picker."""
             if self.busy or self.cfg["llm"] not in self.inventory:
                 return None
             try:
-                profile = self.active_profile()
-                if profile.state != "active" or profile.based_on_mode == "CLOUD_CHAT":
-                    raise Hold("attachment_mode_denied")
-                self.require_tools((attachments.ACTION, attachments.SCOPE))
+                self.attachment_policy()
             except Hold as exc:
-                # A refused read is a receipt, not a silent menu item.
+                self.record_policy(attachments.ACTION, attachments.SCOPE, "deny", str(exc))
                 self.receipt("refused", "read a file (filesystem_read)")
                 self.set_state("ready", str(exc))
                 return None
+            self.record_policy(attachments.ACTION, attachments.SCOPE, "allow", "rule_or_absent")
             return True
 
         def attach_file(self):
@@ -3287,7 +3293,14 @@ def create_window(app, loop, bridge=None):
                 return None
             try:
                 route = self.attachment_route()
-                item = attachments.load(path)
+                def authorized():
+                    try:
+                        self.attachment_policy()
+                        return (not self.busy and not self.closing
+                                and self.attachment_route() == route)
+                    except Hold:
+                        return False
+                item = attachments.load(path, authorized=authorized)
             except Hold as exc:
                 self.clear_attachment()
                 self.set_state("ready", str(exc))
