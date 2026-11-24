@@ -476,23 +476,32 @@ PRIVILEGES = {
 }
 
 
-def granted(profile):
-    """Privileges the profile's policy actually grants, as stable tokens."""
+def granted(profile, now=None):
+    """Conservative capability summary for escalation/UI, not an I/O grant."""
+    if profile.state != "active":
+        return frozenset()
+    if now is None:
+        now = time.time()
+    policy = effective(profile)
     rules = profile.rules()
     out = set()
-    # A mode grants a capability; a rule can still deny it.
+    # A mode may advertise a future cloud capability; runtime remains gated.
     if profile.based_on_mode in ("CLOUD_CHAT", "SECURE_HYBRID", "CUSTOM"):
         out |= {"cloud_inference", "cloud_disclosure"}
-    for action in PRIVILEGES:
-        # A scoped allow still grants the capability; a deny removes it.
-        if any(rule.action == action and rule.decision == "allow" for rule in rules):
-            out.add(action)
-        elif any(rule.action == action and rule.decision == "deny" for rule in rules):
-            out.discard(action)
     if profile.voice_activation == "wake_word":
         out.add("wake_word")
     if profile.background_processing_enabled:
         out.add("background_processing")
+    for action in PRIVILEGES:
+        scoped = tuple(rule for rule in rules if rule.action == action)
+        if not policy.supports(action):
+            out.discard(action)
+        elif scoped:
+            # Expired and ASK rules cannot suppress a subsequent escalation.
+            if any(policy.evaluate(action, rule.scope, now)[0] == ALLOW for rule in scoped):
+                out.add(action)
+            else:
+                out.discard(action)
     return frozenset(out)
 
 
