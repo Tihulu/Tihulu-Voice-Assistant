@@ -4839,6 +4839,29 @@ class ReviewSecurityTests(DesktopFixture):
         self.assertFalse(self.ui.session.history)
         self.assertFalse(self.bubbles())
 
+    def test_voice_expiry_during_backend_discards_reply_and_speech(self):
+        self.connect_model()
+        clock = [time.time()]
+        profile = Profile(id="review-expiring-voice", name="Review voice",
+            tool_rules=(Rule("local_audio_device", ("push_to_talk",), "allow",
+                             "fixture", clock[0] + 60),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.backend.hold_chat = True
+        with patch.object(profiles.time, "time", side_effect=lambda: clock[0]):
+            self.begin_voice()
+            self.click(self.ui.finish_btn)
+            self.until(lambda: self.backend.chat_entered)
+            self.assertEqual(len(self.backend.requests), 1)
+            clock[0] += 120
+            self.backend.chat_release.set()
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(self.backend.requests), 1)
+        self.assertFalse(self.backend.speeches)
+        self.assertFalse(self.ui.session.history)
+        self.assertEqual(str(self.ui.session.active.exception()), "attachment_context_changed")
+        self.assertFalse(any(bubble.startswith("JARVIS") for bubble in self.bubbles()))
+
     def test_voice_policy_replacement_during_capture_blocks_transcription(self):
         self.connect_model()
         self.begin_voice()

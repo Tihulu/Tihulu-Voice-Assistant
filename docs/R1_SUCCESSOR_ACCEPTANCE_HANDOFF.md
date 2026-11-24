@@ -19,6 +19,8 @@ frozen #94 FAIL verdict, stable installation, or main. No R2–R5 runtime enable
 | UX-01 | bad clock, missing/invalid profile at startup, bad secondary profile | no arbitrary profile fallback; bounded diagnostic; timed controls disabled |
 | PERF-01 | local profile checks, long streaming turn, large bounded audit, repeated clock checks | measure actual UI latency and I/O; no unbounded read; ordinary stream identity check does not parse JSON |
 | PKG-01 | exact wheel and Debian extract, staging sentinel, smoke, trigger checks | required CI and independent execution separately recorded |
+| VOICE-01 | expire or replace profile during capture or while model reply is pending | refuse new transcript dispatch, reply history/publication and new speech; existing captured samples and in-flight request bytes cannot be recalled |
+| DISC-01 | loopback service with unknown upstream, non-loopback refused, observed grant expiry | direct transport distinct from unknown upstream locality; no absolute privacy assertion; same nondecreasing clock for UI summary |
 | OWNER-01 | actual supported OS, local Jan, microphone/speaker, cancellation, permissions, install/remove/rollback | owner evidence on real environment, not synthetic CI |
 
 ## Evidence and limits
@@ -42,3 +44,15 @@ independent access-control grant. UI consent is still action-level, not the
 full R3 scoped grant broker. Numeric loopback transport is not proof that a
 third-party local service performs inference entirely locally. Do not claim
 physical, upstream, process isolation, or release acceptance from these tests.
+
+## Voice and disclosure boundary clarification
+
+Voice capture uses the exact active profile generation and current clock, with
+rechecks before capture, after returned transcription, at inference checkpoints,
+and before new playback. This is not a periodic microphone watchdog: a capture
+or playback already running can continue until its ordinary completion or owned
+cancel/stop. A completed result is refused if its grant has changed. Test the
+paused capture and paused backend cases separately. A reply committed while
+still authorized is not retroactively erased by later expiry. The disclosure
+UI reports only the direct loopback transport and explicitly unknown upstream
+processing. Physical verification of the service and isolation remain HOLD.
