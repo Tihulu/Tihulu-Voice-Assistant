@@ -65,7 +65,7 @@ class Backend:
                 await self.chat_release.wait()
         return self.answers.popleft() if self.answers else "Merhaba!"
 
-    async def listen(self, model, finish, publish):
+    async def listen(self, model, finish, publish, *, checkpoint):
         if self.capture_error:
             raise Hold("capture_fixture_failure")
         try:
@@ -82,7 +82,7 @@ class Backend:
             self.capture_cleaned = True
             raise
 
-    async def speak(self, speech, publish):
+    async def speak(self, speech, publish, *, checkpoint):
         self.speeches.append(speech)
         publish(self.playback_stage)
         try:
