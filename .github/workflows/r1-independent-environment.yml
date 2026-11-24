@@ -1,0 +1,204 @@
+name: Independent R1 exact environment review
+on:
+  pull_request:
+    branches: [fix/r1-profile-native-text]
+    paths: [.github/workflows/r1-independent-environment.yml]
+permissions:
+  contents: read
+jobs:
+  independent:
+    if: github.head_ref == 'qa/independent-r1-environment' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      CANDIDATE: 16b341b57fe7ef1a33d76434efce0c8b301b1273
+      TREE: 9f285ff53b360b20999a5879fff800d4c40ad103
+      PYTHONDONTWRITEBYTECODE: '1'
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_NO_INPUT: '1'
+    steps:
+      - name: Check out only the frozen candidate
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 16b341b57fe7ef1a33d76434efce0c8b301b1273
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify identity and historical objects
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(id -u)" != 0
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          test "$(git rev-parse --is-shallow-repository)" = false
+          test -z "$(git status --porcelain)"
+          test "$(git hash-object src/tihulu_jarvis/profiles.py)" = a1a0e68a1f65ad42376a5b9bc80599966f76fe40
+          test "$(git hash-object tests/test_profile_native_text.py)" = d878267d492ede20afb5fcaaa02e5f3cb1c4fe9f
+          test "$(git hash-object tests/test_conflict_check.py)" = b09752f2a25e5380e20ff220cd98edaa54493200
+          while read -r name sha; do
+            test "$(git rev-parse "refs/remotes/origin/$name")" = "$sha"
+            git cat-file -e "$sha^{commit}"
+            git branch "$name" "$sha"
+            test "$(git rev-parse "refs/heads/$name")" = "$sha"
+            printf 'REVIEW PIN %s %s\n' "$name" "$sha"
+          done <<'PINS'
+          feat/usage-report 60f237df43631a1c4ec3619ac3e6f409935a251a
+          feat/approved-sources 36cc9fdf9d0103cb6a6101d3a37cdb7d6456d3a2
+          feat/profile-ui 627309491c568cef3d799fcbd1853ebc8c106f96
+          feat/modes-and-profiles 6a21bf7003039d8d63684c9e5572859ad22ec5a2
+          feat/market-ui c9e8c87bb52505f21532f94025307962feaeb220
+          feat/market-consolidated 29cc369acd052efb526d9c3c51320a9323f5a0bb
+          PINS
+          printf 'REVIEW SOURCE %s %s\n' "$CANDIDATE" "$TREE"
+          git --version
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        id: py310
+        with:
+          python-version: '3.10'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        id: py312
+        with:
+          python-version: '3.12'
+      - name: Provision disposable runner dependencies only
+        shell: bash
+        env:
+          PY310: ${{ steps.py310.outputs.python-path }}
+          PY312: ${{ steps.py312.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi python3-yaml gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+          base="$RUNNER_TEMP/jarvis-independent"
+          mkdir -m 700 "$base"
+          "$PY310" -m venv "$base/py310"
+          "$PY312" -m venv "$base/py312"
+          "$PY312" -m venv "$base/wheel"
+          "$base/py310/bin/python" -m pip install PyYAML
+          "$base/py312/bin/python" -m pip install PyYAML build 'setuptools>=77' wheel
+          "$base/wheel/bin/python" -m pip install PyYAML
+          "$base/py310/bin/python" -c 'import sys,yaml; assert sys.version_info[:2]==(3,10); print(sys.version, yaml.__version__)'
+          "$base/py312/bin/python" -c 'import sys,yaml,build; assert sys.version_info[:2]==(3,12); print(sys.version, yaml.__version__, build.__version__)'
+          /usr/bin/python3 -c 'import sys,gi,yaml; gi.require_version("Gtk","4.0"); from gi.repository import Gtk; print(sys.version, yaml.__version__, Gtk.get_major_version(), Gtk.get_minor_version())'
+          dpkg-query -W python3-gi python3-yaml gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb
+          "$base/py312/bin/python" -m pip freeze
+          "$base/wheel/bin/python" -m pip freeze
+      - name: Reviewer-authored test driver and full core matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          base="$RUNNER_TEMP/jarvis-independent"
+          cat > "$base/verify.py" <<'PY'
+          import pathlib, sys, unittest, json
+          from hashlib import sha256
+          start, expected, package, label = sys.argv[1:]
+          start, package = pathlib.Path(start).resolve(), pathlib.Path(package).resolve()
+          import tihulu_jarvis
+          def provenance():
+              actual = pathlib.Path(tihulu_jarvis.__file__).resolve().parent
+              assert actual == package, (label, actual, package)
+              for name, module in tuple(sys.modules.items()):
+                  if name == "tihulu_jarvis" or name.startswith("tihulu_jarvis."):
+                      file = getattr(module, "__file__", None)
+                      if file:
+                          assert pathlib.Path(file).resolve().is_relative_to(package), (name, file)
+          provenance()
+          suite = unittest.defaultTestLoader.discover(str(start), top_level_dir=str(start))
+          assert suite.countTestCases() == int(expected), (label, suite.countTestCases())
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          provenance()
+          summary = dict(layer=label, python=sys.version.split()[0], tests=result.testsRun,
+                         skips=[(t.id(), reason) for t,reason in result.skipped],
+                         failures=len(result.failures), errors=len(result.errors),
+                         package_init_sha256=sha256(pathlib.Path(tihulu_jarvis.__file__).read_bytes()).hexdigest())
+          print("REVIEW RESULT", json.dumps(summary, sort_keys=True), flush=True)
+          assert result.testsRun == int(expected) and result.wasSuccessful() and not result.skipped, summary
+          PY
+          for v in py310 py312; do
+            PYTHONPATH="$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE" "$base/$v/bin/python" -B "$base/verify.py" "$GITHUB_WORKSPACE/tests" 587 "$GITHUB_WORKSPACE/src/tihulu_jarvis" "$v-core" 2>&1 | tee "$base/$v.log"
+          done
+          /usr/bin/python3 tools/trace_check.py | tee "$base/trace.log"
+          grep -Fx 'trace check: 38 rows, 0 problems' "$base/trace.log"
+          test -z "$(git status --porcelain)"
+      - name: Independent real GTK widget suite
+        shell: bash
+        env:
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          GTK_A11Y: none
+          G_DEBUG: fatal-criticals
+        run: |
+          set -euo pipefail
+          base="$RUNNER_TEMP/jarvis-independent"
+          PYTHONPATH="$GITHUB_WORKSPACE/src:$GITHUB_WORKSPACE" dbus-run-session -- xvfb-run -a /usr/bin/python3 -B "$base/verify.py" "$GITHUB_WORKSPACE/tests/gtk" 697 "$GITHUB_WORKSPACE/src/tihulu_jarvis" gtk 2>&1 | tee "$base/gtk.log"
+          test -z "$(git status --porcelain)"
+      - name: Offline build, disposable wheel and extracted Debian
+        shell: bash
+        env:
+          PIP_NO_INDEX: '1'
+          PIP_NO_BUILD_ISOLATION: '1'
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          GTK_A11Y: none
+          G_DEBUG: fatal-criticals
+        run: |
+          set -euo pipefail
+          base="$RUNNER_TEMP/jarvis-independent"
+          root="$GITHUB_WORKSPACE"
+          mkdir "$base/dist"
+          "$base/py312/bin/python" -m build --no-isolation --sdist --wheel --outdir "$base/dist"
+          shopt -s nullglob
+          wheels=("$base"/dist/*.whl)
+          sdists=("$base"/dist/*.tar.gz)
+          test "${#wheels[@]}" = 1
+          test "${#sdists[@]}" = 1
+          "$base/wheel/bin/python" -m pip install --no-index --no-deps "${wheels[0]}"
+          mkdir -p "$root/.release-work"
+          PATH="$base/py312/bin:$PATH" sh packaging/deb/build.sh "$base/deb-stage" "$base/dist"
+          deb="$root/.release-work/tihulu-jarvis.deb"
+          test -f "$deb"
+          dpkg-deb --info "$deb"
+          dpkg-deb -x "$deb" "$base/extracted"
+          runtime="$base/extracted/usr/share/tihulu-jarvis/python"
+          wheelpkg=$("$base/wheel/bin/python" -I -c 'import tihulu_jarvis,pathlib; print(pathlib.Path(tihulu_jarvis.__file__).resolve().parent)')
+          case "$wheelpkg" in "$base/wheel/"*) ;; *) exit 1 ;; esac
+          "$base/py312/bin/python" - "$root" "${wheels[0]}" "$wheelpkg" "$runtime/tihulu_jarvis" <<'PY'
+          import pathlib, sys, zipfile, hashlib, subprocess
+          root, wheel, installed, deb = map(pathlib.Path, sys.argv[1:])
+          source = root / "src/tihulu_jarvis"
+          def modules(folder):
+              return {str(p.relative_to(folder)):p.read_bytes() for p in folder.rglob("*.py")}
+          expected = modules(source)
+          assert expected
+          for name, data in expected.items():
+              assert subprocess.check_output(["git","show","HEAD:src/tihulu_jarvis/"+name], cwd=root) == data, name
+          with zipfile.ZipFile(wheel) as z:
+              names = z.namelist()
+              assert len(names) == len(set(names))
+              actual = {n.removeprefix("tihulu_jarvis/"):z.read(n) for n in names if n.startswith("tihulu_jarvis/") and n.endswith(".py")}
+              assert actual == expected, "wheel module manifest or bytes differ"
+              assert any(n.endswith(".dist-info/licenses/LICENSE") for n in names)
+              assert any(n.endswith(".dist-info/entry_points.txt") for n in names)
+              assert not any(n.startswith(("tests/","docs/","data/")) for n in names)
+          assert modules(installed) == expected, "installed wheel module bytes differ"
+          assert modules(deb) == expected, "Debian module bytes differ"
+          launcher = deb.parent.parent / "launch.py"
+          assert launcher.read_bytes() == (root/"packaging/deb/launch.py").read_bytes()
+          print("REVIEW PROVENANCE", len(expected), "Python modules identical to pinned source in wheel, installed wheel and extracted Debian")
+          for name, data in sorted(expected.items()):
+              print("REVIEW MODULE", hashlib.sha256(data).hexdigest(), name)
+          PY
+          sha256sum "${wheels[0]}" "${sdists[0]}" "$deb" | tee "$base/package-sha256.txt"
+          cd "$base"
+          PYTHONPATH="$root" "$base/wheel/bin/python" -B "$base/verify.py" "$root/tests" 587 "$wheelpkg" wheel 2>&1 | tee "$base/wheel.log"
+          "$base/wheel/bin/python" -B "$root/tools/smoke.py" | tee "$base/wheel-smoke.log"
+          grep -Fx 'smoke: 42 checks, 42 passed, 0 failed' "$base/wheel-smoke.log"
+          dbus-run-session -- xvfb-run -a "$base/extracted/usr/bin/tihulu-jarvis" --check-runtime | tee "$base/launcher.log"
+          grep -Fx 'Jarvis installed runtime: GTK display and SVG texture OK' "$base/launcher.log"
+          PYTHONPATH="$runtime:$root" /usr/bin/python3 -B "$base/verify.py" "$root/tests" 587 "$runtime/tihulu_jarvis" deb 2>&1 | tee "$base/deb.log"
+          PYTHONPATH="$runtime" /usr/bin/python3 -B "$root/tools/smoke.py" | tee "$base/deb-smoke.log"
+          grep -Fx 'smoke: 42 checks, 42 passed, 0 failed' "$base/deb-smoke.log"
+          cd "$root"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          test "$(git rev-parse HEAD^{tree})" = "$TREE"
+          git diff --exit-code HEAD -- src tests packaging
+          printf 'REVIEW ALL REQUIRED LAYERS PASS\n'
