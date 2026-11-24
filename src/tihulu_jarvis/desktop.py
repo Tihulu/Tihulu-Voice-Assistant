@@ -494,6 +494,11 @@ def create_window(app, loop, bridge=None):
 
         def set_state(self, state, detail=""):
             self.stage = state
+            if detail == "conversation_route_changed_end_conversation":
+                detail = tr(
+                    "Connection or profile changed. End the conversation or restore the previous connection before continuing.",
+                    "Bağlantı veya profil değişti. Devam etmek için sohbeti sonlandırın veya önceki bağlantıya dönün.",
+                    "Verbindung oder Profil geändert. Beenden Sie das Gespräch oder stellen Sie die vorherige Verbindung wieder her.")
             self.status.set_text(detail or state.replace("_"," ").capitalize())
             self.refresh()
 
