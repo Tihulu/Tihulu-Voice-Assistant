@@ -3995,3 +3995,119 @@ class RecordCardTests(ApprovedSourcesTests):
             out.append(item)
             item = item.get_next_sibling()
         return out
+
+
+class LocalAnalysisTests(DesktopFixture):
+    """Real GTK artifact view and real synthetic-file computation."""
+
+    def fixture(self):
+        folder = Path(self.profile_home).resolve()
+        path = folder / "temperature.csv"
+        path.write_bytes(b"time_s,temperature_c\n0,20\n10,22\n20,24\n30,26\n40,28\n")
+        return path
+
+    def analyze(self, path=None):
+        self.ui.analysis.start_selected(str(path or self.fixture()))
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertIsNotNone(self.ui.analysis.last)
+        return self.ui.analysis.controller.get(self.ui.analysis.last)
+
+    def test_real_chart_without_jan(self):
+        self.assertTrue(self.ui.analysis.choose_button.get_sensitive())
+        self.assertFalse(self.ui.send.get_sensitive())
+        artifact = self.analyze()
+        self.assertEqual(artifact.series.mean_c, 24)
+        row = self.ui.analysis.rows[-1]
+        self.assertIs(row.get_parent(), self.ui.log)
+        picture = row.get_first_child().get_next_sibling()
+        self.assertIsInstance(picture, Gtk.Picture)
+        self.assertIsNotNone(picture.get_paintable())
+        self.assertEqual(self.ui.board.rows[-1].state, "done")
+        self.assertFalse(self.ui.session.history)
+        self.jan.assert_not_called()
+
+    def test_followup_recolors_same_series_after_source_removed(self):
+        path = self.fixture()
+        first = self.analyze(path)
+        path.unlink()
+        previous = first
+        for color in ("green", "orange", "blue"):
+            self.ui.analysis.color.set_active_id(color)
+            self.click(self.ui.analysis.recolor_button)
+            self.until(lambda: not self.ui.busy)
+            self.assert_no_failed_turn()
+            result = self.ui.analysis.controller.get(self.ui.analysis.last)
+            self.assertEqual(result.parent_id, previous.id)
+            self.assertEqual(result.series, first.series)
+            self.assertEqual(result.color, color)
+            previous = result
+        self.assertEqual(len(self.ui.analysis.rows), 4)
+        self.assertFalse(self.ui.session.history)
+
+    def test_hard_stop_removes_local_results(self):
+        result = self.analyze()
+        self.click(self.ui.quick_stop)
+        self.assertFalse(self.ui.analysis.rows)
+        self.assertIsNone(self.ui.analysis.last)
+        self.assertFalse(self.ui.analysis.recolor_button.get_sensitive())
+        with self.assertRaisesRegex(Hold, "analysis_mode_denied"):
+            self.ui.analysis.controller.get(result.id)
+
+    def test_mode_change_clears_artifacts_and_blocks_new_selection(self):
+        self.analyze()
+        profile = profiles.template("research-assistant")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.assertFalse(self.ui.analysis.rows)
+        self.assertFalse(self.ui.analysis.choose_button.get_sensitive())
+        self.ui.analysis.start_selected(str(self.fixture()))
+        self.assertFalse(self.ui.busy)
+        self.assertIsNone(self.ui.analysis.last)
+
+    def test_explicit_file_deny_blocks_selection(self):
+        profile = Profile(id="no-csv", name="No CSV",
+                          filesystem_rules=(Rule("filesystem_read", (), "deny"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.ui.analysis.choose()
+        self.assertIsNone(self.ui.analysis.dialog)
+        self.ui.analysis.start_selected(str(self.fixture()))
+        self.assertFalse(self.ui.busy)
+        self.assertFalse(self.ui.analysis.rows)
+
+    def test_picker_cancel_and_reopen(self):
+        view = self.ui.analysis
+        for _ in range(2):
+            self.click(view.choose_button)
+            self.assertIsNotNone(view.dialog)
+            self.assertFalse(view.choose_button.get_sensitive())
+            view.cancel()
+            self.ui.refresh()
+            self.assertIsNone(view.dialog)
+            self.assertTrue(view.choose_button.get_sensitive())
+        self.assertFalse(self.ui.busy)
+        self.assertFalse(view.rows)
+
+    def test_cancel_during_worker_does_not_display_late_artifact(self):
+        from threading import Event
+        from tihulu_jarvis import analysis_controller
+        entered, release = Event(), Event()
+        render = analysis_controller.render_svg
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("worker test timeout")
+            return render(*args, **kwargs)
+        with patch.object(analysis_controller, "render_svg", side_effect=delayed):
+            self.ui.analysis.start_selected(str(self.fixture()))
+            try:
+                self.until(entered.is_set)
+                self.ui.interrupt(False)
+                self.assertTrue(self.ui.busy)
+            finally:
+                release.set()
+            self.until(lambda: not self.ui.busy)
+        self.assertFalse(self.ui.analysis.rows)
+        self.assertIsNone(self.ui.analysis.last)
+        self.assertEqual(self.ui.board.rows[-1].state, "cancelled")
