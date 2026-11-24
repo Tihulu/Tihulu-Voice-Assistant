@@ -70,3 +70,16 @@ polling interval, not a measured device cutoff deadline. OS spawn and cleanup
 latency, hostile same-UID processes, existing captured/played data and real
 hardware remain outside this guarantee. Low-level standalone child tests retain
 their trusted default callback; production audio entrypoints have no default.
+
+## Selected recording cancellation and identity
+
+Selected recording now uses the same owned task/epoch and Hard Stop lifecycle.
+A regular WAV is identified at selection, bound to the exact policy generation
+through task binding, copied using descriptor-relative traversal to a private
+mode-0600 snapshot, and checked again before invoking Whisper. Maximum source
+size 256 MiB; copy chunks 256 KiB with cooperative yields. Test selection-to-task
+replacement, same-version profile replacement during binding, FIFO rejection,
+snapshot privacy/cleanup, and cancellation while transcription is paused.
+The private copy is removed on ordinary completion or cancellation; hard
+process/host crash cleanup and filesystem blocking latency are not certified.
+No physical timing or full independent test reproduction claim.

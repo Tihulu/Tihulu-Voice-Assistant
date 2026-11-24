@@ -3058,7 +3058,8 @@ def create_window(app, loop, bridge=None):
                 context = self.picker_context()
                 selection = self.tool_checkpoint("filesystem_read", ("recording",),
                                                  self.session.epoch, selected=True,
-                                                 selection=lambda: self.cfg["stt"], expected=model)
+                                                 selection=lambda: self.cfg["stt"], expected=model,
+                                                 expected_generation=(context[0], context[4]))
                 identity = audio.recording_identity(path, checkpoint=selection)
             except Hold as exc:
                 self.set_state("ready", str(exc))
@@ -3070,7 +3071,8 @@ def create_window(app, loop, bridge=None):
                     raise Hold("profile_changed")
                 checkpoint = self.tool_checkpoint("filesystem_read", ("recording",),
                                                  epoch, selected=True,
-                                                 selection=lambda: self.cfg["stt"], expected=model)
+                                                 selection=lambda: self.cfg["stt"], expected=model,
+                                                 expected_generation=(context[0], context[4]))
                 checkpoint()
                 self.set_state("transcribing")
                 raw = await audio.transcribe(model, path, runner=self.transcribe_runner,
@@ -3084,10 +3086,12 @@ def create_window(app, loop, bridge=None):
             self.submit(run)
 
         def tool_checkpoint(self, action, scope, epoch, *, selected=False,
-                            selection=lambda: None, expected=None):
+                            selection=lambda: None, expected=None, expected_generation=None):
             """Bind a trusted operation to its exact generation and selection."""
             active = self.cfg.get("profile")
             profile, stamp = self.store.snapshot(active)
+            if expected_generation is not None and (active, stamp) != expected_generation:
+                raise Hold("profile_changed")
             def identity():
                 self.session.check(epoch)
                 if (self.closing or self.cfg.get("profile") != active

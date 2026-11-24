@@ -2155,6 +2155,24 @@ class TranscribeFileUITests(DownloadFixture):
         self.assertFalse(Path(reached[0]).exists())
         self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
 
+    def test_recording_generation_change_during_task_binding_refused(self):
+        clip = self.clip()
+        runner, calls = self.runner()
+        self.ui.transcribe_runner = runner
+        bind = self.ui.tool_checkpoint
+        selection_epoch = self.ui.session.epoch
+        def replace_on_bind(action, scope, epoch, **kwargs):
+            if epoch != selection_epoch:
+                old = self.ui.active_profile()
+                self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+            return bind(action, scope, epoch, **kwargs)
+        with patch.object(self.ui, "tool_checkpoint", side_effect=replace_on_bind):
+            self.ui.run_transcribe(str(clip))
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "profile_changed")
+        self.assertFalse(calls)
+        self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
+
     def test_recording_replacement_after_submission_refused(self):
         clip = self.clip()
         runner, calls = self.runner()
