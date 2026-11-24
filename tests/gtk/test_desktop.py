@@ -4416,9 +4416,12 @@ class HistoryRouteTests(DesktopFixture):
     def test_voice_turn_does_not_replay_after_profile_switch(self):
         self.seed_history()
         count = len(self.backend.requests)
-        profile = Profile(id="other-voice-profile", name="Other local")
+        # Exercise the history guard, not the microphone permission guard.
+        # This separate fixture profile already has explicit synthetic PTT consent.
+        profile = profiles.template("daily-assistant")
         self.ui.store.save(profile)
         self.ui.activate_profile(profile.id)
+        self.assertTrue(self.ui.talk.get_sensitive())
         self.begin_voice()
         self.click(self.ui.finish_btn)
         self.until(lambda: not self.ui.busy)
