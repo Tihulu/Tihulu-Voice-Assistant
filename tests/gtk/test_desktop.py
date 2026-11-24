@@ -4196,3 +4196,73 @@ class LocalAnalysisTests(DesktopFixture):
         self.assert_no_failed_turn()
         self.assertEqual(len(self.ui.analysis.rows), 1)
         self.assertFalse(self.backend.requests)
+
+
+    def test_export_all_formats_from_verified_artifact(self):
+        import csv
+        import struct
+        artifact = self.analyze()
+        view = self.ui.analysis
+        folder = Path(self.profile_home).resolve()
+        for kind, extension in (("svg", "svg"), ("png", "png"),
+                                ("data", "csv"), ("summary", "csv")):
+            path = folder / (kind + "." + extension)
+            self.assertTrue(view.save_selected(str(path), kind, view.context, artifact.id))
+            raw = path.read_bytes()
+            if kind == "svg":
+                self.assertEqual(raw, artifact.svg)
+            elif kind == "png":
+                self.assertEqual(raw[:8], b"\x89PNG\r\n\x1a\n")
+                self.assertEqual(struct.unpack(">II", raw[16:24]), (640, 320))
+            elif kind == "data":
+                self.assertEqual(len(raw.decode().splitlines()), 6)
+            else:
+                rows = list(csv.reader(raw.decode().splitlines()))
+                self.assertIn(["mean", "24.0", "degC"], rows)
+            self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        self.assertFalse(self.backend.requests)
+        self.assertFalse(self.ui.session.history)
+
+    def test_statistics_table_has_real_values(self):
+        self.analyze()
+        row = self.ui.analysis.rows[-1]
+        table = row.get_last_child()
+        self.assertIsInstance(table, Gtk.Grid)
+        self.assertEqual(table.get_child_at(1, 0).get_text(), "5")
+        self.assertEqual(table.get_child_at(1, 1).get_text(), "24 °C")
+        self.assertEqual(table.get_child_at(1, 5).get_text(), "40 s")
+
+    def test_export_denied_after_hard_stop(self):
+        artifact = self.analyze()
+        view = self.ui.analysis
+        context = view.context
+        path = Path(self.profile_home).resolve() / "stale.svg"
+        self.click(self.ui.quick_stop)
+        self.assertFalse(view.export_button.get_sensitive())
+        self.assertFalse(view.save_selected(str(path), "svg", context, artifact.id))
+        self.assertFalse(path.exists())
+
+    def test_explicit_write_deny_blocks_save_dialog_and_file(self):
+        profile = Profile(id="no-export", name="No export",
+                          filesystem_rules=(Rule("filesystem_write", (), "deny"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        artifact = self.analyze()
+        view = self.ui.analysis
+        view.choose_export()
+        self.assertIsNone(view.dialog)
+        path = Path(self.profile_home).resolve() / "denied.svg"
+        self.assertFalse(view.save_selected(str(path), "svg", view.context, artifact.id))
+        self.assertFalse(path.exists())
+
+    def test_export_picker_cancel_and_reopen(self):
+        self.analyze()
+        view = self.ui.analysis
+        for _ in range(2):
+            self.click(view.export_button)
+            self.assertIsNotNone(view.dialog)
+            self.assertFalse(view.export_button.get_sensitive())
+            view.cancel()
+            self.ui.refresh()
+            self.assertIsNone(view.dialog)
+            self.assertTrue(view.export_button.get_sensitive())

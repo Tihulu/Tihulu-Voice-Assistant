@@ -9,7 +9,7 @@ import time
 from threading import Lock
 from uuid import uuid4
 
-from . import analysis_controller as ac, analysis_intent, profiles
+from . import analysis_controller as ac, analysis_export, analysis_intent, profiles
 from .voice import audio
 from .voice.m1 import Hold, SpeechRequest, speech_text
 
@@ -41,6 +41,21 @@ class AnalysisView:
         row.append(self.color)
         self.recolor_button = desktop.button(row, tr("Recolor last chart",
             "Son grafiği renklendir", "Letztes Diagramm umfärben"), self.recolor)
+        export_row = Gtk.Box(spacing=6)
+        parent.append(export_row)
+        self.export_format = Gtk.ComboBoxText()
+        for token, caption in (
+            ("svg", tr("Chart (SVG)", "Grafik (SVG)", "Diagramm (SVG)")),
+            ("png", tr("Chart (PNG)", "Grafik (PNG)", "Diagramm (PNG)")),
+            ("data", tr("Data (CSV)", "Veri (CSV)", "Daten (CSV)")),
+            ("summary", tr("Statistics (CSV)", "İstatistik (CSV)", "Statistik (CSV)")),
+        ):
+            self.export_format.append(token, caption)
+        self.export_format.set_active_id("svg")
+        export_row.append(self.export_format)
+        self.export_button = desktop.button(export_row, tr(
+            "Export last result", "Son sonucu dışa aktar", "Letztes Ergebnis exportieren"),
+            self.choose_export)
         self.note = Gtk.Label(xalign=0, wrap=True)
         parent.append(self.note)
         self.note.set_text(tr(
@@ -92,6 +107,8 @@ class AnalysisView:
         self.choose_button.set_sensitive(enabled)
         self.color.set_sensitive(enabled)
         self.recolor_button.set_sensitive(enabled and self.last is not None)
+        self.export_button.set_sensitive(enabled and self.last is not None)
+        self.export_format.set_sensitive(enabled and self.last is not None)
 
     def _drop_dialog(self):
         dialog = self.dialog
@@ -336,20 +353,107 @@ class AnalysisView:
         except Hold as exc:
             self.ui.set_state("ready", str(exc))
 
-    def display(self, artifact):
-        """Main-thread only; decode the trusted engine's static SVG."""
-        from gi.repository import Gdk, GdkPixbuf
+    def _export_policy(self, context, ident):
+        self._matches(context)
+        profile = self._profile()
+        decision, reason = profiles.effective(profile).evaluate(
+            "filesystem_write", ("csv_analysis_export",), time.time())
+        if decision != profiles.ALLOW and reason != "no_rule_matches":
+            raise Hold("export_not_authorized")
+        return self.controller.get(ident)
+
+    def choose_export(self):
+        """A local save dialog grants one destination, never an overwrite."""
+        if self.ui.busy or self.dialog is not None or self.last is None:
+            return
+        context, ident = self.context, self.last
+        kind = self.export_format.get_active_id()
+        try:
+            self._export_policy(context, ident)
+            if kind not in analysis_export.FORMATS:
+                raise Hold("export_invalid_format")
+        except Hold as exc:
+            self.ui.set_state("ready", str(exc))
+            return
         Gtk = self.Gtk
+        dialog = Gtk.FileChooserNative.new(
+            self.tr("Save a new local result file", "Yeni yerel sonuç dosyası kaydet",
+                    "Neue lokale Ergebnisdatei speichern"), self.ui.win,
+            Gtk.FileChooserAction.SAVE, self.tr("Save", "Kaydet", "Speichern"),
+            self.tr("Cancel", "İptal", "Abbrechen"))
+        dialog.set_modal(True)
+        dialog.set_current_name("jarvis-" + kind + analysis_export.FORMATS[kind])
+        self.dialog = dialog
+
+        def response(d, result):
+            if d is not self.dialog:
+                return
+            path = None
+            try:
+                if result == Gtk.ResponseType.ACCEPT:
+                    file = d.get_file()
+                    path = file.get_path() if file is not None else None
+                    if not path:
+                        raise Hold("export_invalid_destination")
+            except Hold as exc:
+                self.ui.set_state("ready", str(exc))
+            except Exception:
+                self.ui.set_state("ready", "export_invalid_destination")
+            finally:
+                self._drop_dialog()
+                self.ui.refresh()
+            if path is not None:
+                self.save_selected(path, kind, context, ident)
+
+        self.handler = dialog.connect("response", response)
+        dialog.show()
+        self.ui.refresh()
+
+    def save_selected(self, path, kind, context, ident):
+        """Trusted save acceptance only. No agent or prompt may supply a path."""
+        if self.ui.busy or self.dialog is not None or self.ui.closing:
+            return False
+        try:
+            artifact = self._export_policy(context, ident)
+            def png(svg):
+                return bytes(self._texture(svg).save_to_png_bytes().get_data())
+            data = analysis_export.encode(artifact, kind, png=png)
+            # Keep this bounded commit on the GTK thread so UI revocation,
+            # mode changes and close cannot interleave with final publication.
+            # No model or arbitrary executable runs during this operation.
+            def authorized():
+                self._export_policy(context, ident)
+                return not self.ui.busy and not self.ui.closing
+            analysis_export.write_new(path, kind, data, authorized=authorized)
+        except Hold as exc:
+            self.ui.set_state("ready", str(exc))
+            return False
+        except Exception:
+            self.ui.set_state("ready", "export_write_failed")
+            return False
+        self.ui.set_state("ready", self.tr(
+            "New local result file saved.", "Yeni yerel sonuç dosyası kaydedildi.",
+            "Neue lokale Ergebnisdatei gespeichert."))
+        return True
+
+    @staticmethod
+    def _texture(svg):
+        from gi.repository import Gdk, GdkPixbuf
         try:
             loader = GdkPixbuf.PixbufLoader.new_with_type("svg")
-            loader.write(artifact.svg)
+            loader.write(svg)
             loader.close()
             pixbuf = loader.get_pixbuf()
             if pixbuf is None:
                 raise Hold("chart_render_failed")
-            texture = Gdk.Texture.new_for_pixbuf(pixbuf)
+            return Gdk.Texture.new_for_pixbuf(pixbuf)
         except Exception:
             raise Hold("chart_render_failed") from None
+
+    def display(self, artifact):
+        """Main-thread only; decode the trusted engine's static SVG."""
+        Gtk = self.Gtk
+        texture = self._texture(artifact.svg)
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         box.add_css_class("message")
         box.add_css_class("assistant")
@@ -370,6 +474,23 @@ class AnalysisView:
                          "Messwerte: %d · Dauer: %.6g s · Änderung: %.6g °C")
         box.append(Gtk.Label(label=detail % (series.count, series.duration_s,
                              series.delta_c), xalign=0, selectable=True, wrap=True))
+        table = Gtk.Grid(column_spacing=18, row_spacing=3)
+        table.set_halign(Gtk.Align.START)
+        captions = {
+            "count": self.tr("Samples", "Ölçümler", "Messwerte"),
+            "mean": self.tr("Mean", "Ortalama", "Mittelwert"),
+            "minimum": self.tr("Minimum", "En düşük", "Minimum"),
+            "maximum": self.tr("Maximum", "En yüksek", "Maximum"),
+            "change": self.tr("Change", "Değişim", "Änderung"),
+            "duration": self.tr("Duration", "Süre", "Dauer"),
+        }
+        for index, (metric, value, unit) in enumerate(analysis_export.summary_rows(series)):
+            table.attach(Gtk.Label(label=captions[metric], xalign=0), 0, index, 1, 1)
+            label = Gtk.Label(label=format(value, ".12g") + (
+                " °C" if unit == "degC" else " s" if unit == "s" else ""),
+                xalign=1, selectable=True)
+            table.attach(label, 1, index, 1, 1)
+        box.append(table)
         # Deliberately separate from Session.history, which may be sent to a
         # model on a later text turn. No implicit disclosure or export.
         self.ui.log.append(box)
