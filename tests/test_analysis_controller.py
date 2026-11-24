@@ -153,6 +153,19 @@ class AnalysisControllerTests(unittest.TestCase):
         self.assertEqual(errors, ["analysis_cancelled"])
         self.assertFalse(self.controller.busy)
 
+    def test_parent_read_revoked_before_recolor_publication(self):
+        ident = self.analyze()
+        self.grants.add(("artifact_recolor", ident))
+        real_render = ac.render_svg
+        def revoke_parent(*args, **kwargs):
+            result = real_render(*args, **kwargs)
+            self.grants.remove(("artifact_read", ident))
+            return result
+        with patch.object(ac, "render_svg", side_effect=revoke_parent):
+            with self.assertRaisesRegex(Hold, "analysis_not_authorized"):
+                self.controller.recolor(ident, color="green")
+        self.assertFalse(self.controller.busy)
+
     def test_bounded_artifacts(self):
         with patch.object(ac, "MAX_ARTIFACTS", 1):
             self.analyze()
