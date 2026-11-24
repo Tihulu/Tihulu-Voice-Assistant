@@ -3352,33 +3352,47 @@ def create_window(app, loop, bridge=None):
             if self.cfg["llm"] not in self.inventory:
                 return
             self.record_disclosure()
-            # The attachment is a bounded block in the same message, and it is
-            # cleared afterwards so it can never be sent twice.
             item = self.attachment
-            if item is not None:
+            selected_route = self.attachment_context
+            def allowed():
+                if item is None:
+                    return True
                 try:
-                    if (self.attachment_context != self.attachment_route()
-                            or self.require_attachment() is None):
-                        raise Hold("attachment_context_changed")
-                except Hold as exc:
-                    self.clear_attachment()
-                    self.set_state("ready", str(exc))
-                    return
-                text = text + "\n\n" + attachments.prompt_block(item)
+                    self.attachment_policy()
+                    return not self.closing and self.attachment_route() == selected_route
+                except Hold:
+                    return False
+            if item is not None and (not allowed() or self.require_attachment() is None):
                 self.clear_attachment()
-            self.entry.set_text("")
+                self.set_state("ready", "attachment_context_changed")
+                return
+            # Validate language and total wire size before consuming the draft.
+            # The file is data, never a source of host language instructions.
+            try:
+                _, message = self.session.prepare_text(text, attachment=item, model=self.cfg["llm"])
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
             self.turn_note = text[:80]
             async def run(epoch):
-                self.bubble("You",text)
+                self.session.check(epoch)
+                backend, route = self.conversation_backend()
+                if not allowed():
+                    raise Hold("attachment_context_changed")
+                self.session.prepare_text(text, attachment=item, model=self.cfg["llm"])
+                self.entry.set_text("")
+                if item is not None:
+                    self.clear_attachment()
+                self.bubble("You",message.content)
                 self.set_state("thinking")
                 answer=self.bubble("JARVIS","")
                 def grow(piece):
-                    # Only what the server actually sent is shown, in order.
                     if epoch == self.session.epoch:
                         self.extend(answer,"JARVIS",piece)
-                backend, route = self.conversation_backend()
                 result,_=await self.session.reply(text,backend,
-                                                  epoch,on_delta=grow,route=route)
+                                                  epoch,on_delta=grow,route=route,
+                                                  attachment=item,model=self.cfg["llm"],
+                                                  authorize=allowed)
                 self.session.check(epoch)
                 self.extend(answer,"JARVIS",result,replace=True)
             self.submit(run)
