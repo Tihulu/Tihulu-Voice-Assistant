@@ -10,7 +10,7 @@ import socket
 from urllib.parse import urlsplit
 
 from .m1 import Hold
-from ..owned_wait import await_authorized
+from ..owned_wait import OperationDeadline, await_with_deadline
 
 LIMIT = 524288
 # A stream is bounded by events and characters, so a runaway server cannot
@@ -232,25 +232,26 @@ class Jan:
                                              family=socket.AF_INET if ip.version == 4 else socket.AF_INET6,
                                              limit=16384)
 
-    async def _exchange(self, operation, data):
-        self._checkpoint()
+    async def _exchange(self, operation, data, deadline):
+        deadline.check()
         async with self._slots:
-            self._checkpoint()
+            deadline.check()
             r, w = await self._connect()
             try:
-                self._checkpoint()
+                deadline.check()
                 host = str(self.ip) if self.ip.version == 4 else "[" + str(self.ip) + "]"
                 method = "GET" if data is None else "POST"
                 payload = data or b""
                 hdr = (f"{method} /v1/{operation} HTTP/1.1\r\nHost: {host}:{self.port}\r\n"
                        "Connection: close\r\nAccept: application/json\r\nContent-Type: application/json\r\n"
                        f"Content-Length: {len(payload)}\r\n\r\n")
-                self._checkpoint()
-                w.write(hdr.encode("ascii") + payload)
+                wire = hdr.encode("ascii") + payload
+                deadline.check()
+                w.write(wire)
                 await w.drain()
-                self._checkpoint()
+                deadline.check()
                 raw = await body(r)
-                self._checkpoint()
+                deadline.check()
                 return json.loads(raw.decode("utf-8"))
             finally:
                 w.close()
@@ -261,8 +262,9 @@ class Jan:
         if payload is not None and len(payload) > LIMIT:
             raise Hold("jan_request_too_large")
         try:
-            return await await_authorized(lambda: self._exchange(op, payload),
-                                          self.timeout, self._checkpoint, interval=AUTH_POLL)
+            deadline = OperationDeadline(self.timeout, self._checkpoint)
+            return await await_with_deadline(lambda: self._exchange(op, payload, deadline),
+                                             deadline, interval=AUTH_POLL)
         except asyncio.TimeoutError:
             raise Hold("jan_timeout") from None
         except OSError:
@@ -298,8 +300,9 @@ class Jan:
         if len(payload) > LIMIT:
             raise Hold("jan_request_too_large")
         try:
-            return await await_authorized(lambda: self._stream(payload, on_delta),
-                                          self.timeout, self._checkpoint, interval=AUTH_POLL)
+            deadline = OperationDeadline(self.timeout, self._checkpoint)
+            return await await_with_deadline(lambda: self._stream(payload, on_delta, deadline),
+                                             deadline, interval=AUTH_POLL)
         except asyncio.TimeoutError:
             raise Hold("jan_timeout") from None
         except OSError:
@@ -307,27 +310,28 @@ class Jan:
         except (ValueError, EOFError, UnicodeError, RecursionError):
             raise Hold("jan_invalid_response") from None
 
-    async def _stream(self, payload, on_delta):
-        self._checkpoint()
+    async def _stream(self, payload, on_delta, deadline):
+        deadline.check()
         async with self._slots:
-            self._checkpoint()
+            deadline.check()
             r, w = await self._connect()
             try:
-                self._checkpoint()
+                deadline.check()
                 host = str(self.ip) if self.ip.version == 4 else "[" + str(self.ip) + "]"
                 hdr = (f"POST /v1/chat/completions HTTP/1.1\r\nHost: {host}:{self.port}\r\n"
                        "Connection: close\r\nAccept: text/event-stream\r\n"
                        "Content-Type: application/json\r\n"
                        f"Content-Length: {len(payload)}\r\n\r\n")
-                self._checkpoint()
-                w.write(hdr.encode("ascii") + payload)
+                wire = hdr.encode("ascii") + payload
+                deadline.check()
+                w.write(wire)
                 await w.drain()
-                self._checkpoint()
+                deadline.check()
                 def guarded_delta(piece):
-                    self._checkpoint()
+                    deadline.check()
                     on_delta(piece)
                 text = await self._stream_body(r, guarded_delta)
-                self._checkpoint()
+                deadline.check()
                 # The joined text is validated exactly like a whole answer.
                 if not text.strip() or len(text) > MAX_TEXT:
                     raise Hold("jan_invalid_response")
