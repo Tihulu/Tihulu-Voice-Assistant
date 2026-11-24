@@ -3450,7 +3450,8 @@ def create_window(app, loop, bridge=None):
                     # rejected turn must not retain a partial assistant reply.
                     self.growing.pop(answer, None)
                     if answer.get_parent() == self.log:
-                        self.log.remove(answer)
+                        # Preserve the existing empty cancelled-turn label.
+                        answer.set_text("JARVIS\n")
                     raise
                 if item is not None and self.history_attachment_live is None:
                     self.history_attachment_live = selected_live

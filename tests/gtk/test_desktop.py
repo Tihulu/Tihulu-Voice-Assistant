@@ -2631,6 +2631,43 @@ class StreamingReplyTests(DesktopTests):
         self.assertEqual(self.bubbles()[-1], "JARVIS\n")
         self.assertEqual(self.ui.session.history, ())
 
+    def test_attachment_revocation_during_stream_clears_partial_reply(self):
+        self.connect_model()
+        profile = Profile(id="stream-revocation", name="Stream revocation",
+            filesystem_rules=(Rule("filesystem_read", ("attachment",), "allow",
+                                   "fixture", time.time() + 3600),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        path = Path(self.profile_home).resolve() / "stream-fixture.txt"
+        path.write_text("SYNTHETIC-INPUT", encoding="utf-8")
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+
+        async def chat(messages, on_delta=None):
+            self.backend.requests.append(messages)
+            on_delta("Merhaba")
+            self.backend.chat_entered = True
+            await self.backend.chat_release.wait()
+            on_delta("FORBIDDEN-LATE-DELTA")
+            return "Merhaba!"
+
+        self.backend.chat = chat
+        self.ui.entry.set_text("Merhaba!")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.chat_entered)
+        self.assertIn("JARVIS\nMerhaba", self.bubbles())
+        try:
+            self.ui.store.save(Profile(id=profile.id, version=2, name=profile.name,
+                filesystem_rules=(Rule("filesystem_read", ("attachment",), "deny"),)))
+        finally:
+            self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "attachment_context_changed")
+        self.assertEqual(self.bubbles()[-1], "JARVIS\n")
+        self.assertFalse(any("FORBIDDEN-LATE-DELTA" in x for x in self.bubbles()))
+        self.assertEqual(self.ui.session.history, ())
+        self.assertFalse(self.ui.session.has_attachment_history)
+        self.assertIsNone(self.ui.history_attachment_live)
+
     def test_a_whole_reply_without_streaming_is_unchanged(self):
         self.connect_model()
         self.backend.answers.append("naber nasilsin")
