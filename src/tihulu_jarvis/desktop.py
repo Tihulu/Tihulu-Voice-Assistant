@@ -3069,7 +3069,7 @@ def create_window(app, loop, bridge=None):
             profile, stamp = self.store.snapshot(active)
             def unchanged():
                 return (self.cfg.get("profile") == active
-                        and self.store.snapshot(active) == (profile, stamp))
+                        and self.store.is_current(active, stamp))
             for action, scope in requests:
                 try:
                     now = self.store.policy_now()
@@ -3084,6 +3084,10 @@ def create_window(app, loop, bridge=None):
                 self.record_policy(action, scope, decision, reason)
                 # Audit I/O may take time; do not allow a stale generation
                 # to leave this synchronous authorization boundary.
+                if not unchanged():
+                    raise Hold("profile_changed")
+                # Time may have advanced during the audit write.
+                profiles.require_tool(profile, action, scope, self.store.policy_now(), selected=selected)
                 if not unchanged():
                     raise Hold("profile_changed")
 
@@ -3126,7 +3130,7 @@ def create_window(app, loop, bridge=None):
             route = self.attachment_route()
             endpoint = self.require_endpoint(route[3])
             model = route[4]
-            if endpoint != route[3] or self.attachment_route() != route:
+            if endpoint != route[3] or not self.route_current(route):
                 raise Hold("profile_changed")
             self.session.require_route(route)
             if not self.conversation_authorized(route):
@@ -3140,16 +3144,23 @@ def create_window(app, loop, bridge=None):
             decision, reason = live.evaluate(attachments.ACTION, attachments.SCOPE)
             return decision == profiles.ALLOW or reason == "no_rule_matches"
 
+        def route_current(self, route):
+            # Trusted immutable route created from a validated active profile.
+            # Compare current UI selection and exact inode metadata instead
+            # of parsing the JSON repeatedly for every streamed text delta.
+            return (not self.closing and self.cfg.get("profile") == route[0]
+                    and self.url.get_text().strip() == route[3]
+                    and self.cfg["llm"] == route[4]
+                    and self.store.is_current(route[0], route[5]))
+
         def conversation_authorized(self, route):
             try:
-                if self.closing or self.attachment_route() != route:
-                    return False
-                profiles.enforce_endpoint(self.active_profile(), route[3])
-                if self.attachment_route() != route:
+                if not self.route_current(route):
                     return False
                 if self.session.has_attachment_history:
                     self.attachment_policy()
-                    return self.attachment_live_allowed(self.history_attachment_live)
+                    return (self.attachment_live_allowed(self.history_attachment_live)
+                            and self.route_current(route))
                 return True
             except Hold:
                 return False

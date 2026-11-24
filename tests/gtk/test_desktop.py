@@ -4574,6 +4574,15 @@ class HistoryRouteTests(DesktopFixture):
         self.assertFalse(any("SYNTHETIC-PRIVATE-CASE-9E37" in m.content
                              for m in self.backend.requests[-1]))
 
+    def test_ordinary_route_checkpoint_uses_identity_without_json_reparse(self):
+        self.connect_model()
+        _, route = self.ui.conversation_backend()
+        with patch.object(self.ui.store, "load") as read:
+            self.assertTrue(self.ui.conversation_authorized(route))
+            read.assert_not_called()
+        self.ui.url.set_text("http://127.0.0.1:9877")
+        self.assertFalse(self.ui.conversation_authorized(route))
+
     def test_same_version_file_replacement_blocks_text_history(self):
         self.seed_history()
         count = len(self.backend.requests)

@@ -649,6 +649,15 @@ class LivePolicyTests(unittest.TestCase):
             self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
                              (DENY, "policy_changed"))
 
+    def test_snapshot_identity_checkpoint_does_not_read_profile_contents(self):
+        from unittest.mock import patch
+        _, stamp = self.store.snapshot(self.profile.id)
+        with patch.object(self.store, "_read_profile") as read:
+            self.assertTrue(self.store.is_current(self.profile.id, stamp))
+            read.assert_not_called()
+        self.store._write(self.store._path(self.profile.id), Store._dump(self.profile))
+        self.assertFalse(self.store.is_current(self.profile.id, stamp))
+
     def test_removed_policy_fails_closed(self):
         live = self.store.bind_live(self.profile.id)
         self.store._path(self.profile.id).unlink()

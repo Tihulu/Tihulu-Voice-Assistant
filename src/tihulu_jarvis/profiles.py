@@ -1106,6 +1106,13 @@ class Store:
         except OSError:
             raise Hold("profile_unreadable") from None
 
+    def is_current(self, profile_id, stamp):
+        """Fast identity checkpoint for an already validated snapshot."""
+        try:
+            return _policy_stamp(self._path(profile_id)) == stamp
+        except (Hold, OSError):
+            return False
+
     def bind_live(self, profile_id):
         """Bind a checked active policy to the exact stored file generation."""
         profile, stamp = self.snapshot(profile_id)
