@@ -704,8 +704,10 @@ def create_window(app, loop, bridge=None):
             return (profile.id, profile.version, profile.based_on_mode,
                     self.url.get_text().strip(), self.cfg["llm"])
 
-        def activate_profile(self, profile_id, quiet=False):
-            entry = self.store.load(profile_id).checked()
+        def activate_profile(self, profile_id, quiet=False, expected=None):
+            entry, stamp = self.store.snapshot(profile_id)
+            if expected is not None and (entry, stamp) != expected:
+                raise Hold("profile_changed")
             if entry.state != "active":
                 raise Hold("profile_not_active")
             self.dismiss_picker()
@@ -737,22 +739,33 @@ def create_window(app, loop, bridge=None):
             except Hold as exc:
                 self.set_state("ready", str(exc))
 
-        def switch_profile(self, profile_id):
-            target = self.store.load(profile_id).checked()
+        def switch_context(self):
+            active = self.cfg.get("profile")
             try:
-                current = self.store.load(self.cfg["profile"]).checked()
+                current = self.store.snapshot(active)
             except (Hold, KeyError):
                 current = None
-            if current is None:
-                extra = profiles.granted(target, self.store.policy_now())
-            else:
-                extra = profiles.escalation(current, target, self.store.policy_now())
-            if not extra:
-                self.activate_profile(profile_id)
-                return None
-            return self.confirm_escalation(target, extra)
+            return active, current
 
-        def confirm_escalation(self, target, extra):
+        def switch_profile(self, profile_id):
+            if self.busy or self.closing:
+                raise Hold("profile_switch_busy")
+            target, stamp = self.store.snapshot(profile_id)
+            if target.state != "active":
+                raise Hold("profile_not_active")
+            context = self.switch_context()
+            current = context[1]
+            now = self.store.policy_now()
+            extra = (profiles.granted(target, now) if current is None
+                     else profiles.escalation(current[0], target, now))
+            if not extra:
+                if self.switch_context() != context:
+                    raise Hold("profile_changed")
+                self.activate_profile(profile_id, expected=(target, stamp))
+                return None
+            return self.confirm_escalation(target, extra, stamp, context)
+
+        def confirm_escalation(self, target, extra, stamp, context):
             """Show exactly which privileges the switch would add."""
             lines = profiles.describe(extra)
             dialog = Gtk.Window(title=tr("Confirm added privileges",
@@ -775,7 +788,7 @@ def create_window(app, loop, bridge=None):
             self.button(row, tr("Cancel", "Vazgeç", "Abbrechen"),
                         lambda: self.cancel_escalation(target, dialog))
             self.button(row, tr("Confirm switch", "Geçişi onayla", "Wechsel bestätigen"),
-                        lambda: self.apply_escalation(target, dialog, lines))
+                        lambda: self.apply_escalation(target, dialog, lines, extra, stamp, context))
             dialog.connect("close-request", lambda *_: self.forget_confirmation(dialog) or False)
             self.confirmations.append(dialog)
             self.refresh_state_row()
@@ -788,10 +801,22 @@ def create_window(app, loop, bridge=None):
             self.refresh_state_row()
             return False
 
-        def apply_escalation(self, target, dialog, lines):
+        def apply_escalation(self, target, dialog, lines, extra, stamp, context):
+            if dialog not in self.confirmations:
+                return
+            self.forget_confirmation(dialog)
             dialog.close()
             try:
-                self.activate_profile(target.id)
+                if (self.busy or self.closing or self.switch_context() != context
+                        or self.store.snapshot(target.id) != (target, stamp)):
+                    raise Hold("profile_changed")
+                now = self.store.policy_now()
+                current = context[1]
+                remaining = (profiles.granted(target, now) if current is None
+                             else profiles.escalation(current[0], target, now))
+                if not remaining <= extra or self.switch_context() != context:
+                    raise Hold("profile_changed")
+                self.activate_profile(target.id, expected=(target, stamp))
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return
@@ -811,13 +836,8 @@ def create_window(app, loop, bridge=None):
                                        "Wechsel abgebrochen."))
 
         def activate_selected(self):
-            chosen = self.selected_profile()
-            if chosen is None or self.busy:
-                return
-            try:
-                self.activate_profile(chosen.id)
-            except Hold as exc:
-                self.set_state("ready", str(exc))
+            # Both visible entry points must use the same consent boundary.
+            self.switch_selected()
 
         def clone_selected(self):
             chosen = self.selected_profile()
@@ -849,7 +869,8 @@ def create_window(app, loop, bridge=None):
                 if (self.store.root / (entry.id + ".json")).is_file():
                     raise Hold("profile_already_exists")
                 self.store.save(entry)
-                self.activate_profile(entry.id)
+                self.refresh_profiles()
+                self.switch_profile(entry.id)
             except Hold as exc:
                 self.set_state("ready", str(exc))
 

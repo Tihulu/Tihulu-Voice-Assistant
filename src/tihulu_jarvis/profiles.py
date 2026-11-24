@@ -404,7 +404,10 @@ class LivePolicy:
     def evaluate(self, action, scope=()):
         if not self.unchanged():
             return DENY, "policy_changed"
-        return self.policy.evaluate(action, scope, self.clock.now())
+        now = self.clock.now()
+        if not self.unchanged():
+            return DENY, "policy_changed"
+        return self.policy.evaluate(action, scope, now)
 
 
 def _without_grant(rule):
@@ -978,18 +981,27 @@ class Store:
     def policy_now(self):
         return self._clock.now()
 
-    def bind_live(self, profile_id):
-        """Bind a checked active policy to the exact stored file generation."""
+    def snapshot(self, profile_id):
+        """Return a checked profile and the identity of its exact generation."""
         path = self._path(profile_id)
         try:
             before = _policy_stamp(path)
             profile = self.load(profile_id)
-            if profile.id != profile_id or profile.state != "active" or _policy_stamp(path) != before:
+            if _policy_stamp(path) != before:
                 raise Hold("profile_changed")
-            return LivePolicy(effective(profile), path, before, self.policy_now(),
-                              time.monotonic(), self._clock)
+            return profile, before
+        except FileNotFoundError:
+            raise Hold("profile_not_found") from None
         except OSError:
             raise Hold("profile_unreadable") from None
+
+    def bind_live(self, profile_id):
+        """Bind a checked active policy to the exact stored file generation."""
+        profile, stamp = self.snapshot(profile_id)
+        if profile.state != "active":
+            raise Hold("profile_changed")
+        return LivePolicy(effective(profile), self._path(profile_id), stamp,
+                          self.policy_now(), time.monotonic(), self._clock)
 
     def ids(self):
         # A fixed-width slice would corrupt any name containing a dot.

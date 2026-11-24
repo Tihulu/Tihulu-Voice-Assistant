@@ -1956,6 +1956,45 @@ class EscalationConsentTests(ProfileUITests):
         self.assertEqual(self.ui.cfg["profile"], "private-assistant")
         self.assertEqual(self.ui.store.load(self.ui.cfg["profile"]).based_on_mode, "LOCAL_ONLY")
 
+    def test_activate_button_cannot_bypass_escalation_confirmation(self):
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                         based_on_mode="CLOUD_CHAT"))
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_activate)
+        self.until(lambda: self.dialog() is not None)
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+
+    def test_confirmation_rejects_target_replacement_even_same_version(self):
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                         based_on_mode="CLOUD_CHAT"))
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.dialog() is not None)
+        path = self.ui.store._path("cloud-chat")
+        self.ui.store._write(path, profiles.Store._dump(profiles.Profile(
+            id="cloud-chat", name="Changed", based_on_mode="SECURE_HYBRID")))
+        for button in self.buttons_of(self.dialog()):
+            if button.get_label() and button.get_label().startswith("Confirm"):
+                button.emit("clicked")
+        self.until(lambda: self.dialog() is None)
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+        self.assertEqual(self.ui.status.get_text(), "profile_changed")
+
+    def test_confirmation_rejects_changed_source_generation(self):
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                         based_on_mode="CLOUD_CHAT"))
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.dialog() is not None)
+        self.ui.store.save(profiles.Profile(id="private-assistant", version=2,
+                                           name="Changed"))
+        for button in self.buttons_of(self.dialog()):
+            if button.get_label() and button.get_label().startswith("Confirm"):
+                button.emit("clicked")
+        self.until(lambda: self.dialog() is None)
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+        self.assertEqual(self.ui.status.get_text(), "profile_changed")
+
     def test_an_escalation_can_be_confirmed_and_is_recorded(self):
         chat = self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
                                                  based_on_mode="CLOUD_CHAT").checked())
