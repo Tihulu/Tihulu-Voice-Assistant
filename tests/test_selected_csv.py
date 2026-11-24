@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from tihulu_jarvis.selected_csv import read_selected_csv
+from tihulu_jarvis.selected_csv import read_selected_csv, selection_identity
 from tihulu_jarvis.temperature_engine import MAX_BYTES, analyze_temperature
 from tihulu_jarvis.voice.m1 import Hold
 
@@ -33,6 +33,28 @@ class SelectedCSVTests(unittest.TestCase):
         self.path.write_bytes(b"replacement")
         self.assertEqual(analyze_temperature(snapshot.data).mean_c, 21)
         self.assertEqual(snapshot.data, DATA)
+
+    def test_replacement_after_selection_is_refused_before_data_read(self):
+        identity = selection_identity(str(self.path), authorized=lambda: True)
+        self.path.rename(self.root / "old.csv")
+        self.path.write_bytes(b"time_s,temperature_c\n0,99\n")
+        with patch("os.read", side_effect=AssertionError("replacement read")):
+            with self.assertRaisesRegex(Hold, "^csv_selection_changed$"):
+                self.read(expected_identity=identity)
+
+    def test_mutation_after_selection_is_refused(self):
+        identity = selection_identity(str(self.path), authorized=lambda: True)
+        self.path.write_bytes(DATA.replace(b"20", b"29"))
+        with patch("os.read", side_effect=AssertionError("changed file read")):
+            with self.assertRaisesRegex(Hold, "^csv_selection_changed$"):
+                self.read(expected_identity=identity)
+
+    def test_unchanged_selection_is_read_and_denied_selection_never_opens(self):
+        identity = selection_identity(str(self.path), authorized=lambda: True)
+        self.assertEqual(self.read(expected_identity=identity).data, DATA)
+        with patch("os.open", side_effect=AssertionError("unexpected open")):
+            with self.assertRaisesRegex(Hold, "^csv_selection_not_authorized$"):
+                selection_identity(str(self.path), authorized=lambda: False)
 
     def test_denied_before_open(self):
         with patch("os.open", side_effect=AssertionError("unexpected open")):
