@@ -4373,3 +4373,46 @@ class PickerLifecycleTests(DesktopFixture):
             self.assertIsNone(self.ui.read_attachment("/synthetic.txt"))
             read.assert_not_called()
         self.assertEqual(self.ui.status.get_text(), "attachment_approval_required")
+
+
+class HistoryRouteTests(DesktopFixture):
+    def seed_history(self):
+        self.connect_model()
+        path = Path(self.profile_home).resolve() / "fixture.txt"
+        path.write_text("SYNTHETIC-PRIVATE-CASE-9E37", encoding="utf-8")
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+        self.text("Bu notu özetler misin?")
+        self.assert_no_failed_turn()
+        self.assertTrue(any("SYNTHETIC-PRIVATE-CASE-9E37" in m.content
+                            for m in self.backend.requests[-1]))
+
+    def test_profile_switch_blocks_text_replay_until_end_conversation(self):
+        self.seed_history()
+        count = len(self.backend.requests)
+        profile = Profile(id="other-history-profile", name="Other local")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.text("Naber nasılsın?")
+        self.assertEqual(len(self.backend.requests), count)
+        self.assertEqual(self.ui.status.get_text(),
+                         "conversation_route_changed_end_conversation")
+        self.ui.interrupt(True)
+        self.text("Naber nasılsın?")
+        self.assert_no_failed_turn()
+        self.assertGreater(len(self.backend.requests), count)
+        self.assertFalse(any("SYNTHETIC-PRIVATE-CASE-9E37" in m.content
+                             for m in self.backend.requests[-1]))
+
+    def test_voice_turn_does_not_replay_after_profile_switch(self):
+        self.seed_history()
+        count = len(self.backend.requests)
+        profile = Profile(id="other-voice-profile", name="Other local")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(self.backend.requests), count)
+        self.assertFalse(self.backend.speeches)
+        self.assertEqual(self.ui.status.get_text(),
+                         "conversation_route_changed_end_conversation")
