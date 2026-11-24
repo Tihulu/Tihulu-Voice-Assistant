@@ -20,12 +20,14 @@ def main():
         from tihulu_jarvis.desktop import _gtk
         from tihulu_jarvis.analysis_ui import AnalysisView
         from tihulu_jarvis.temperature_engine import analyze_temperature, render_svg
-        _gtk()
+        _, _, Gtk = _gtk()
+        if not Gtk.init_check():
+            raise SystemExit("Jarvis native display unavailable")
         svg = render_svg(analyze_temperature(b"time_s,temperature_c\n0,20\n1,22\n"))
         texture = AnalysisView._texture(svg)
         if (texture.get_width(), texture.get_height()) != (640, 320):
             raise SystemExit("Jarvis native chart runtime mismatch")
-        print("Jarvis installed runtime: GTK and SVG texture OK")
+        print("Jarvis installed runtime: GTK display and SVG texture OK")
         return 0
     return desktop_main()
 
