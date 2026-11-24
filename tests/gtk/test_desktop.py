@@ -559,7 +559,9 @@ class ProfileUITests(DesktopFixture):
     def test_profile_switch_keeps_conversation_but_freezes_capability(self):
         self.connect_model()
         self.text("Merhaba!")
+        self.assert_no_failed_turn()
         history = self.ui.session.history
+        count = len(self.backend.requests)
         self.save_profile(Profile(id="strict", name="Strict", based_on_mode="LOCAL_ONLY"))
         self.pick("strict")
         self.click(self.ui.profile_activate)
@@ -568,6 +570,14 @@ class ProfileUITests(DesktopFixture):
         self.assertEqual(self.ui.session.history, history)
         self.assertTrue(self.ui.send.get_sensitive())
         self.text("naber nasilsin")
+        # History stays visible, but must not cross a new profile route.
+        self.assertEqual(self.ui.session.history, history)
+        self.assertEqual(len(self.backend.requests), count)
+        self.assertEqual(str(self.ui.session.active.exception()),
+                         "conversation_route_changed_end_conversation")
+        self.ui.activate_profile("private-assistant")
+        self.text("naber nasilsin")
+        self.assert_no_failed_turn()
         self.assertEqual(len(self.ui.session.history), len(history) + 2)
 
 
@@ -4373,3 +4383,49 @@ class PickerLifecycleTests(DesktopFixture):
             self.assertIsNone(self.ui.read_attachment("/synthetic.txt"))
             read.assert_not_called()
         self.assertEqual(self.ui.status.get_text(), "attachment_approval_required")
+
+
+class HistoryRouteTests(DesktopFixture):
+    def seed_history(self):
+        self.connect_model()
+        path = Path(self.profile_home).resolve() / "fixture.txt"
+        path.write_text("SYNTHETIC-PRIVATE-CASE-9E37", encoding="utf-8")
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+        self.text("Merhaba! Türkçe cevap ver. Bu notu özetler misin?")
+        self.assert_no_failed_turn()
+        self.assertTrue(any("SYNTHETIC-PRIVATE-CASE-9E37" in m.content
+                            for m in self.backend.requests[-1]))
+
+    def test_profile_switch_blocks_text_replay_until_end_conversation(self):
+        self.seed_history()
+        count = len(self.backend.requests)
+        profile = Profile(id="other-history-profile", name="Other local")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.text("Naber nasılsın?")
+        self.assertEqual(len(self.backend.requests), count)
+        self.assertEqual(str(self.ui.session.active.exception()),
+                         "conversation_route_changed_end_conversation")
+        self.ui.interrupt(True)
+        self.text("Naber nasılsın?")
+        self.assert_no_failed_turn()
+        self.assertGreater(len(self.backend.requests), count)
+        self.assertFalse(any("SYNTHETIC-PRIVATE-CASE-9E37" in m.content
+                             for m in self.backend.requests[-1]))
+
+    def test_voice_turn_does_not_replay_after_profile_switch(self):
+        self.seed_history()
+        count = len(self.backend.requests)
+        # Exercise the history guard, not the microphone permission guard.
+        # This separate fixture profile already has explicit synthetic PTT consent.
+        profile = profiles.template("daily-assistant")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.assertTrue(self.ui.talk.get_sensitive())
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(self.backend.requests), count)
+        self.assertFalse(self.backend.speeches)
+        self.assertEqual(str(self.ui.session.active.exception()),
+                         "conversation_route_changed_end_conversation")

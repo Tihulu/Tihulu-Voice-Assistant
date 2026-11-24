@@ -494,6 +494,11 @@ def create_window(app, loop, bridge=None):
 
         def set_state(self, state, detail=""):
             self.stage = state
+            if detail == "conversation_route_changed_end_conversation":
+                detail = tr(
+                    "Connection or profile changed. End the conversation or restore the previous connection before continuing.",
+                    "Bağlantı veya profil değişti. Devam etmek için sohbeti sonlandırın veya önceki bağlantıya dönün.",
+                    "Verbindung oder Profil geändert. Beenden Sie das Gespräch oder stellen Sie die vorherige Verbindung wieder her.")
             self.status.set_text(detail or state.replace("_"," ").capitalize())
             self.refresh()
 
@@ -3057,6 +3062,15 @@ def create_window(app, loop, bridge=None):
         def backend_for_test(self):
             return Jan(self.require_endpoint(), self.cfg["llm"])
 
+        def conversation_backend(self):
+            """Bind prior messages to current profile version and endpoint/model."""
+            endpoint = self.require_endpoint()
+            profile = self.active_profile()
+            model = self.cfg["llm"]
+            route = (profile.id, profile.version, profile.based_on_mode, endpoint, model)
+            self.session.require_route(route)
+            return Jan(endpoint, model), route
+
         def submit(self, work):
             if self.busy:
                 return
@@ -3362,8 +3376,9 @@ def create_window(app, loop, bridge=None):
                     # Only what the server actually sent is shown, in order.
                     if epoch == self.session.epoch:
                         self.extend(answer,"JARVIS",piece)
-                result,_=await self.session.reply(text,Jan(self.require_endpoint(), self.cfg["llm"]),
-                                                  epoch,on_delta=grow)
+                backend, route = self.conversation_backend()
+                result,_=await self.session.reply(text,backend,
+                                                  epoch,on_delta=grow,route=route)
                 self.session.check(epoch)
                 self.extend(answer,"JARVIS",result,replace=True)
             self.submit(run)
@@ -3393,7 +3408,8 @@ def create_window(app, loop, bridge=None):
                     await self.analysis.command(text, epoch)
                     return
                 self.set_state("thinking")
-                result,speech=await self.session.reply(text,Jan(self.require_endpoint(),self.cfg["llm"]),epoch,voices)
+                backend, route = self.conversation_backend()
+                result,speech=await self.session.reply(text,backend,epoch,voices,route=route)
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
                 self.spoken_line(speech, epoch)

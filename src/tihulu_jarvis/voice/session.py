@@ -11,6 +11,7 @@ class Session:
     def __init__(self):
         self.epoch, self.history, self.context = 0, (), LanguageContext()
         self.active = None
+        self._history_route = None
         self._invalidated = False
 
     def invalidate(self, clear=False):
@@ -21,6 +22,7 @@ class Session:
                 self.active.cancel()
         if clear:
             self.history, self.context = (), LanguageContext()
+            self._history_route = None
 
     def own(self, run, *, loop=None):
         if self.active is not None and not self.active.done():
@@ -34,13 +36,25 @@ class Session:
         if epoch != self.epoch:
             raise Hold("turn_cancelled")
 
-    async def reply(self, user, jan, epoch, voices=None, on_delta=None):
+    def require_route(self, route):
+        """A prior conversation may not silently cross a changed trust route.
+
+        The trusted caller supplies an immutable route identity; it is not
+        taken from model output. Unbound standalone sessions retain their
+        existing contract. Desktop turns must supply a route on every reply.
+        """
+        if self.history and route != self._history_route:
+            raise Hold("conversation_route_changed_end_conversation")
+
+    async def reply(self, user, jan, epoch, voices=None, on_delta=None, *, route=None):
         self.check(epoch)
+        self.require_route(route)
         history = self.history
         if voices is not None:
             done = await complete_turn(user,self.context,history,jan,voices,cancelled=lambda: epoch!=self.epoch)
             self.check(epoch)
             self.history, self.context = done.history, done.context
+            self._history_route = route
             return done.display_text, done.speech
         decision = route_language(user,self.context)
         message = Message("user", user)
@@ -59,5 +73,6 @@ class Session:
                     and not re.search(r"</?(?:think|analysis)\b",result,re.I)
                     and valid_response(result,decision.response_language,lexical_identifier)):
                 self.history, self.context = (*history,message,Message("assistant",result)),decision.next_context
+                self._history_route = route
                 return result, None
         raise Hold("response_rejected_after_one_retry")
