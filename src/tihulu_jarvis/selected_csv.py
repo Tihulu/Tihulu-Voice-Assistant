@@ -8,6 +8,7 @@ must be owned by the controller, not the model. No permission is granted here.
 import os
 import stat
 from dataclasses import dataclass
+from contextlib import contextmanager
 
 from .temperature_engine import MAX_BYTES
 from .voice.m1 import Hold
@@ -32,16 +33,9 @@ def _identity(info):
             info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
 
 
-def read_selected_bytes(path, *, authorized, cancelled=lambda: False, allow_empty=False):
-    """Return a bounded immutable snapshot; never send a path to the model.
-
-    Shared internal reader for CSV and selected text. Legacy CSV reason codes
-    are preserved at the boundary. All path components are opened without following symlinks. The selected
-    pathname is resolved at open time; once open, all reads and checks concern
-    the same descriptor. Reject detectable mutation, short reads and oversize
-    files. This does not prove the inode was unchanged BEFORE the open; a
-    stronger picker may supply an already-open descriptor in a future adapter.
-    """
+@contextmanager
+def _pin(path, *, authorized, cancelled, allow_empty):
+    """Open only metadata, never the file contents or a special device."""
     _check(authorized, cancelled)
     if not isinstance(path, str) or not path.startswith("/") or "\x00" in path:
         raise Hold("csv_invalid_selection")
@@ -54,7 +48,6 @@ def read_selected_bytes(path, *, authorized, cancelled=lambda: False, allow_empt
     if os.open not in os.supports_dir_fd:
         raise Hold("csv_secure_reader_unavailable")
     directory = None
-    fd = None
     pinned = None
     try:
         base_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
@@ -74,12 +67,48 @@ def read_selected_bytes(path, *, authorized, cancelled=lambda: False, allow_empt
         if (before.st_size == 0 and not allow_empty) or before.st_size > MAX_BYTES:
             raise Hold("csv_invalid_size")
         _check(authorized, cancelled)
-        # Linux procfs resolves this process's held descriptor, not the path
-        # supplied by the picker. Fail closed if procfs is unavailable.
-        fd = os.open("/proc/self/fd/%d" % pinned,
-                     os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
-        if _identity(os.fstat(fd)) != _identity(before):
-            raise Hold("csv_changed_during_read")
+        yield pinned, before
+    except OSError:
+        raise Hold("csv_selection_unreadable") from None
+    finally:
+        if pinned is not None:
+            os.close(pinned)
+        if directory is not None:
+            os.close(directory)
+
+
+def selection_identity(path, *, authorized, cancelled=lambda: False, allow_empty=False):
+    """Capture regular-file identity at trusted picker acceptance, without data I/O.
+
+    GTK returns a pathname, not a descriptor. This records identity at the
+    acceptance callback, not at an earlier highlight in a native dialog.
+    """
+    with _pin(path, authorized=authorized, cancelled=cancelled,
+              allow_empty=allow_empty) as (_, before):
+        _check(authorized, cancelled)
+        return _identity(before)
+
+
+def read_selected_bytes(path, *, authorized, cancelled=lambda: False,
+                        allow_empty=False, expected_identity=None):
+    """Reopen a selected inode safely; refuse replacement before reading data.
+
+    The trusted picker supplies expected_identity. Standalone synchronous
+    callers may omit it when the actual open is their selection boundary.
+    This is a metadata identity contract, not mount or same-UID isolation.
+    """
+    fd = None
+    try:
+        with _pin(path, authorized=authorized, cancelled=cancelled,
+                  allow_empty=allow_empty) as (pinned, before):
+            if expected_identity is not None and _identity(before) != expected_identity:
+                raise Hold("csv_selection_changed")
+            _check(authorized, cancelled)
+            # Reopen the pinned inode, not the selected pathname.
+            fd = os.open("/proc/self/fd/%d" % pinned,
+                         os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            if _identity(os.fstat(fd)) != _identity(before):
+                raise Hold("csv_changed_during_read")
         data = bytearray()
         while True:
             _check(authorized, cancelled)
@@ -100,13 +129,9 @@ def read_selected_bytes(path, *, authorized, cancelled=lambda: False, allow_empt
     finally:
         if fd is not None:
             os.close(fd)
-        if pinned is not None:
-            os.close(pinned)
-        if directory is not None:
-            os.close(directory)
 
 
-def read_selected_csv(path, *, authorized, cancelled=lambda: False):
-    """Preserve the strict nonempty CSV snapshot contract."""
+def read_selected_csv(path, *, authorized, cancelled=lambda: False, expected_identity=None):
+    """Preserve strict nonempty CSV contract and optional picker identity."""
     return SelectedCSV(read_selected_bytes(path, authorized=authorized,
-                                          cancelled=cancelled))
+                                          cancelled=cancelled, expected_identity=expected_identity))
