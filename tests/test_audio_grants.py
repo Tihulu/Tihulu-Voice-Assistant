@@ -165,6 +165,39 @@ class AudioGrantTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(drained.is_set())
         self.assertEqual(self.calls, ["piper", "aplay"])
 
+    async def test_selected_recording_snapshot_is_private_and_removed(self):
+        recording = self.root / "fixture.wav"
+        self.wav(recording)
+        original = recording.read_bytes()
+        seen = []
+        async def runner(model, wav, stem):
+            seen.append(wav)
+            self.assertNotEqual(wav, recording)
+            self.assertEqual(wav.read_bytes(), original)
+            self.assertEqual(wav.stat().st_mode & 0o777, 0o600)
+            recording.write_bytes(b"changed after snapshot")
+            stem.with_suffix(".txt").write_text("fixture transcript")
+        result = await audio.transcribe(str(self.model), str(recording), runner, checkpoint=self.check)
+        self.assertEqual(result, "fixture transcript")
+        self.assertFalse(seen[0].exists())
+
+    async def test_selected_recording_replacement_and_special_file_refused(self):
+        import os
+        recording = self.root / "fixture.wav"
+        self.wav(recording)
+        identity = audio.recording_identity(str(recording), checkpoint=self.check)
+        recording.unlink()
+        self.wav(recording)
+        async def runner(*args):
+            self.fail("unexpected runner")
+        with self.assertRaisesRegex(Hold, "recording_changed"):
+            await audio.transcribe(str(self.model), str(recording), runner,
+                                   checkpoint=self.check, expected_identity=identity)
+        recording.unlink()
+        os.mkfifo(recording)
+        with self.assertRaisesRegex(Hold, "unsupported_recording"):
+            await audio.transcribe(str(self.model), str(recording), runner, checkpoint=self.check)
+
     async def test_successful_wait_and_cancellation(self):
         async def done():
             return 7

@@ -15,6 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .. import resources
+from ..selected_csv import selection_identity, copy_selected_to
 from .m1 import Hold, Voice
 
 
@@ -246,32 +247,60 @@ async def listen(model, finish, publish, *, checkpoint):
 MAX_TRANSCRIPT = 64000
 
 
-async def transcribe(model, recording, runner=None, publish=None, *, checkpoint):
-    """Transcribe an owner-supplied recording without touching the microphone.
+MAX_RECORDING = 256 * 1024 * 1024
 
-    ``runner(model, wav, stem)`` is the speech engine; the default uses
-    whisper-cli, and tests inject a fixture. Nothing is recorded here.
-    """
+
+def recording_identity(recording, *, checkpoint):
+    checkpoint()
+    if not isinstance(recording, str) or not Path(recording).is_absolute():
+        raise Hold("recording_not_found")
+    if Path(recording).suffix.lower() != ".wav":
+        raise Hold("unsupported_recording")
+    def authorized():
+        checkpoint()
+        return True
+    try:
+        return selection_identity(recording, authorized=authorized, max_bytes=MAX_RECORDING)
+    except Hold as exc:
+        if str(exc) == "csv_selection_unreadable":
+            raise Hold("recording_not_found") from None
+        if str(exc) in ("csv_invalid_size", "csv_not_regular_file", "csv_invalid_selection"):
+            raise Hold("unsupported_recording") from None
+        raise
+
+
+async def transcribe(model, recording, runner=None, publish=None, *, checkpoint,
+                     expected_identity=None):
+    """Transcribe a bounded private copy of an explicitly selected recording."""
     checkpoint()
     model = selected_file(model, ".bin")
-    recording = Path(recording)
-    if not recording.is_absolute() or not recording.is_file():
-        raise Hold("recording_not_found")
-    if recording.suffix.lower() != ".wav" or recording.stat().st_size > 256 * 1024 * 1024:
-        raise Hold("unsupported_recording")
-    if not await asyncio.to_thread(has_signal, recording):
-        raise Hold("no_speech_signal")
-    checkpoint()
-    if publish:
-        publish("transcribing")
+    identity = recording_identity(recording, checkpoint=checkpoint)
+    if expected_identity is not None and identity != expected_identity:
+        raise Hold("recording_changed")
+    def authorized():
+        checkpoint()
+        return True
     with tempfile.TemporaryDirectory(prefix="tihulu-transcribe-") as tmp:
         stem = Path(tmp) / "transcript"
+        snapshot = Path(tmp) / "selected.wav"
+        try:
+            await copy_selected_to(recording, snapshot, authorized=authorized,
+                                   expected_identity=identity, max_bytes=MAX_RECORDING)
+        except Hold as exc:
+            if str(exc) in ("csv_selection_changed", "csv_changed_during_read"):
+                raise Hold("recording_changed") from None
+            raise
+        checkpoint()
+        if not await asyncio.to_thread(has_signal, snapshot):
+            raise Hold("no_speech_signal")
+        checkpoint()
+        if publish:
+            publish("transcribing")
         checkpoint()
         if runner is None:
-            await _whisper(model, recording, stem, checkpoint=checkpoint)
+            await _whisper(model, snapshot, stem, checkpoint=checkpoint)
         else:
-            # Injectable trusted fixture runner, never chosen by a model.
-            await await_authorized(lambda: runner(model, recording, stem), 120, checkpoint)
+            await await_authorized(lambda: runner(model, snapshot, stem), 120, checkpoint)
         checkpoint()
         output = stem.with_suffix(".txt")
         if not output.is_file() or output.stat().st_size > MAX_TRANSCRIPT:

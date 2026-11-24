@@ -2114,7 +2114,8 @@ class TranscribeFileUITests(DownloadFixture):
             self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
             stem.with_suffix(".txt").write_text("SYNTHETIC-CANARY")
         self.ui.transcribe_runner = engine
-        self.assertIsNone(self.ui.run_transcribe(str(clip)))
+        self.ui.run_transcribe(str(clip))
+        self.until(lambda: not self.ui.busy)
         self.assertEqual(reached, ["transcription"])
         self.assertEqual(self.ui.status.get_text(), "profile_changed")
         self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
@@ -2124,11 +2125,47 @@ class TranscribeFileUITests(DownloadFixture):
         clip = self.clip()
         self.ui.transcribe_runner = runner
         # The file chooser is native; the action it triggers runs here.
-        result = self.ui.run_transcribe(str(clip))
-        self.assertEqual(result, "Merhaba!", self.ui.status.get_text())
+        self.ui.run_transcribe(str(clip))
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.session.active.result(), "Merhaba!", self.ui.status.get_text())
         self.until(lambda: any(b.startswith("Recording") for b in self.bubbles()))
-        self.assertEqual(calls, [(self.ui.cfg["stt"], str(clip))])
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][0], self.ui.cfg["stt"])
+        self.assertNotEqual(calls[0][1], str(clip))
+        self.assertFalse(Path(calls[0][1]).exists())
         self.assertIn("Merhaba!", self.bubbles()[-1])
+
+    def test_hard_stop_cancels_recording_transcription_and_drains(self):
+        clip = self.clip()
+        reached = []
+        async def engine(model, wav, stem):
+            reached.append(str(wav))
+            try:
+                await asyncio.Future()
+            finally:
+                reached.append("drained")
+        self.ui.transcribe_runner = engine
+        self.ui.run_transcribe(str(clip))
+        self.until(lambda: bool(reached))
+        self.assertTrue(self.ui.busy)
+        self.assertTrue(self.ui.hard.get_sensitive())
+        self.ui.hard_stop()
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(reached[-1], "drained")
+        self.assertFalse(Path(reached[0]).exists())
+        self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
+
+    def test_recording_replacement_after_submission_refused(self):
+        clip = self.clip()
+        runner, calls = self.runner()
+        self.ui.transcribe_runner = runner
+        self.ui.run_transcribe(str(clip))
+        clip.unlink()
+        self.clip()
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "recording_changed")
+        self.assertFalse(calls)
+        self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
 
     def test_a_rejected_recording_is_a_bounded_reason(self):
         runner, calls = self.runner()

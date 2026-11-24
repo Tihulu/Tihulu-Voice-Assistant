@@ -3049,25 +3049,39 @@ def create_window(app, loop, bridge=None):
             self.show_owned_picker(dialog, response)
 
         def run_transcribe(self, path):
-            """Transcribe an owner-supplied recording; nothing is captured here."""
+            """Own selected-recording transcription as an ordinary cancellable task."""
+            if self.busy or self.closing:
+                return
             try:
                 self.require_tools(("filesystem_read", ("recording",)), selected=True)
-                self.set_state("ready", "transcribing")
                 model = self.cfg["stt"]
-                checkpoint = self.tool_checkpoint("filesystem_read", ("recording",),
+                context = self.picker_context()
+                selection = self.tool_checkpoint("filesystem_read", ("recording",),
                                                  self.session.epoch, selected=True,
                                                  selection=lambda: self.cfg["stt"], expected=model)
-                raw = self.loop.run_until_complete(
-                    audio.transcribe(model, path, runner=self.transcribe_runner, checkpoint=checkpoint))
+                identity = audio.recording_identity(path, checkpoint=selection)
             except Hold as exc:
                 self.set_state("ready", str(exc))
-                return None
-            except Exception:
-                self.set_state("ready", "local_operation_failed")
-                return None
-            self.bubble("Recording", raw)
-            self.set_state("ready", "transcribed")
-            return raw
+                return
+            async def run(epoch):
+                # submit owns a new epoch; compare the other selection fields.
+                current = self.picker_context()
+                if current[:3] != context[:3] or current[4] != context[4]:
+                    raise Hold("profile_changed")
+                checkpoint = self.tool_checkpoint("filesystem_read", ("recording",),
+                                                 epoch, selected=True,
+                                                 selection=lambda: self.cfg["stt"], expected=model)
+                checkpoint()
+                self.set_state("transcribing")
+                raw = await audio.transcribe(model, path, runner=self.transcribe_runner,
+                                             checkpoint=checkpoint, expected_identity=identity)
+                checkpoint()
+                self.bubble("Recording", raw)
+                self.turn_outcome = "transcribed"
+                return raw
+            self.turn_note = tr("Transcribe selected recording", "Seçili kaydı yazıya çevir",
+                                "Ausgewählte Aufnahme transkribieren")
+            self.submit(run)
 
         def tool_checkpoint(self, action, scope, epoch, *, selected=False,
                             selection=lambda: None, expected=None):
