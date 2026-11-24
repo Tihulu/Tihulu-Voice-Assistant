@@ -2447,10 +2447,9 @@ def create_window(app, loop, bridge=None):
         def search_source(self):
             """List a registered source's public metadata, bounded and verified.
 
-            The same HTTPS policy as a catalog fetch applies: the host must be
-            allowed, TLS is verified against the system store, no redirect is
-            followed and no credential is sent. The opener is injectable so the
-            policy is tested without a socket.
+            The same scoped network policy as a catalog fetch applies. The
+            production opener is held before network I/O; trusted synthetic
+            fixtures may inject a transport.
             """
             if self.busy:
                 return None
@@ -2471,7 +2470,7 @@ def create_window(app, loop, bridge=None):
             return cards
 
         def source_opener(self):
-            """The listing opener; the default verifies TLS like a catalog."""
+            """The listing opener shares the catalog transport HOLD."""
             return catalog_fetch.urlopen_opener()
 
         def show_source_cards(self, cards, refused):
