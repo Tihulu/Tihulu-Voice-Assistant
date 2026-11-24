@@ -64,6 +64,10 @@ jobs:
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
         with:
           python-version: '3.12'
+      - name: Install target-system native runtime for Debian launch check
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
       - name: Build sdist and wheel, then verify the installed package
         env:
           PYTHONDONTWRITEBYTECODE: '1'
@@ -83,6 +87,9 @@ jobs:
               "tihulu_jarvis/__init__.py", "tihulu_jarvis/desktop.py", "tihulu_jarvis/settings.py",
               "tihulu_jarvis/profiles.py", "tihulu_jarvis/market.py", "tihulu_jarvis/contracts.py",
               "tihulu_jarvis/transfer_http.py",
+              "tihulu_jarvis/selected_csv.py", "tihulu_jarvis/temperature_engine.py",
+              "tihulu_jarvis/analysis_controller.py", "tihulu_jarvis/analysis_ui.py",
+              "tihulu_jarvis/analysis_intent.py", "tihulu_jarvis/analysis_export.py",
               "tihulu_jarvis/voice/__init__.py", "tihulu_jarvis/voice/m1.py",
               "tihulu_jarvis/voice/jan.py", "tihulu_jarvis/voice/audio.py",
               "tihulu_jarvis/voice/session.py",
@@ -102,7 +109,7 @@ jobs:
           CHECK
           python -m venv .runvenv
           .runvenv/bin/pip install -q dist/*.whl
-          (cd /tmp && "$GITHUB_WORKSPACE/.runvenv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests" 2>&1 | tail -n 5)
+          (cd /tmp && "$GITHUB_WORKSPACE/.runvenv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
           .runvenv/bin/python -c "import tihulu_jarvis; print('installed import ok')"
           .runvenv/bin/python -c "import tihulu_jarvis.market as m; print('installed market ok', m.CATEGORIES)"
           .runvenv/bin/python -c "import tihulu_jarvis.desktop as d; print('entry module ok', hasattr(d, 'main'))"
@@ -118,11 +125,13 @@ jobs:
           grep -qE "^/usr/bin/tihulu-jarvis$" .release-work/deb-files.txt
           grep -qE "^/usr/share/applications/io\\.github\\.Tihulu\\.Jarvis\\.desktop$" .release-work/deb-files.txt
           grep -qE "^/usr/share/icons/hicolor/scalable/apps/io\\.github\\.Tihulu\\.Jarvis\\.svg$" .release-work/deb-files.txt
-          grep -qE "^/usr/share/tihulu-jarvis/venv/bin/tihulu-jarvis$" .release-work/deb-files.txt
-          grep -qE "site-packages/tihulu_jarvis/desktop\\.py$" .release-work/deb-files.txt
-          grep -qE "site-packages/tihulu_jarvis/market\\.py$" .release-work/deb-files.txt
-          grep -qE "site-packages/tihulu_jarvis/profiles\\.py$" .release-work/deb-files.txt
-          grep -qE "site-packages/tihulu_jarvis/transfer_http\\.py$" .release-work/deb-files.txt
+          grep -qE "^/usr/share/tihulu-jarvis/launch\\.py$" .release-work/deb-files.txt
+          for module in desktop market profiles transfer_http selected_csv temperature_engine analysis_controller analysis_ui analysis_intent analysis_export; do
+            grep -qFx "/usr/share/tihulu-jarvis/python/tihulu_jarvis/$module.py" .release-work/deb-files.txt
+          done
+          if grep -qE '/venv/|/pyvenv.cfg$' .release-work/deb-files.txt; then
+            echo "package carries a build-machine virtual environment"; exit 1
+          fi
           grep -qE "licenses/LICENSE$" .release-work/deb-files.txt
           if grep -E "/home/|/Users/|/tmp/|nvapi-|gh[pousr]_[A-Za-z0-9]{12}|sk-[A-Za-z0-9]{20}" .release-work/deb-files.txt; then
             echo "package carries workstation or credential material"; exit 1
@@ -131,14 +140,13 @@ jobs:
             echo "package ships tests"; exit 1
           fi
           echo "package file list verified: $(wc -l < .release-work/deb-files.txt) entries"
-      - name: Install into an isolated root and run the suite from it
+      - name: Extract and exercise the actual Debian launcher
         run: |
           mkdir -p .release-work/root
           dpkg-deb -x .release-work/tihulu-jarvis.deb .release-work/root
-          test -x .release-work/root/usr/bin/tihulu-jarvis
-          grep -q "/usr/share/tihulu-jarvis/venv/bin/tihulu-jarvis" .release-work/root/usr/bin/tihulu-jarvis
-          .release-work/root/usr/share/tihulu-jarvis/venv/bin/python -c "import tihulu_jarvis; print('installed from deb root')"
-          .release-work/root/usr/share/tihulu-jarvis/venv/bin/python -c "import tihulu_jarvis.market as m; print('deb-root market ok', m.CATEGORIES)"
-          .release-work/root/usr/share/tihulu-jarvis/venv/bin/python -c "import tihulu_jarvis.desktop as d; print('deb-root entry ok', hasattr(d, 'main'))"
-          (cd /tmp && "$GITHUB_WORKSPACE/.release-work/root/usr/share/tihulu-jarvis/venv/bin/python" "$GITHUB_WORKSPACE/tools/smoke.py")
-          head -n 3 .release-work/root/usr/share/applications/io.github.Tihulu.Jarvis.desktop
+          launcher="$GITHUB_WORKSPACE/.release-work/root/usr/bin/tihulu-jarvis"
+          runtime="$GITHUB_WORKSPACE/.release-work/root/usr/share/tihulu-jarvis/python"
+          test -x "$launcher"
+          (cd /tmp && GDK_BACKEND=x11 GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a "$launcher" --check-runtime)
+          (cd /tmp && PYTHONPATH="$runtime" /usr/bin/python3 "$GITHUB_WORKSPACE/tools/smoke.py")
+          (cd /tmp && PYTHONPATH="$runtime" /usr/bin/python3 -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
