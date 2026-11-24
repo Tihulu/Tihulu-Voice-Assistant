@@ -237,6 +237,11 @@ class StoreMutationTests(unittest.TestCase):
         self.assertEqual(self.other.load("local-only").name, "winner")
         self.assertEqual([p.version for p in self.other.versions("local-only")], [1, 2])
 
+    def test_create_only_refuses_even_higher_version_of_existing_profile(self):
+        with self.assertRaisesRegex(Hold, "profile_already_exists"):
+            self.other.save(base(version=9, name="import"), create_only=True)
+        self.assertEqual(self.store.load("local-only").version, 1)
+
     def test_existing_history_generation_cannot_be_replaced(self):
         path = self.store.history / "local-only-v2.json"
         original = Store._dump(base(version=2, name="archived"))
@@ -561,6 +566,17 @@ class LivePolicyTests(unittest.TestCase):
         self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
                          (DENY, "policy_changed"))
 
+    def test_policy_replaced_during_clock_check_is_denied(self):
+        from unittest.mock import patch
+        live = self.store.bind_live(self.profile.id)
+        def replace_policy():
+            self.store.save(base(version=2, filesystem_rules=(
+                Rule("filesystem_read", ("csv_analysis",), DENY),)))
+            return 90.0
+        with patch.object(self.store._clock, "now", side_effect=replace_policy):
+            self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
+                             (DENY, "policy_changed"))
+
     def test_removed_policy_fails_closed(self):
         live = self.store.bind_live(self.profile.id)
         self.store._path(self.profile.id).unlink()
@@ -702,6 +718,30 @@ class BoundedProfileReadTests(unittest.TestCase):
                         reader.assert_not_called()
                 finally:
                     self.path.unlink()
+
+    def test_profile_import_rejects_special_and_oversize_files_before_read(self):
+        import os
+        from unittest.mock import patch
+        source = self.store.root / "import.json"
+        target = self.store.root / "fixture"
+        target.write_text(Store._dump(base()))
+        for kind in ("fifo", "symlink", "oversize"):
+            with self.subTest(kind=kind):
+                if kind == "fifo":
+                    os.mkfifo(source)
+                elif kind == "symlink":
+                    source.symlink_to(target)
+                else:
+                    source.write_bytes(b"x" * (Store.LIMIT * 4 + 1))
+                try:
+                    with patch.object(profiles, "read_selected_bytes") as reader:
+                        with self.assertRaisesRegex(Hold, "profile_import_rejected"):
+                            self.store.import_file(str(source))
+                        reader.assert_not_called()
+                finally:
+                    source.unlink()
+        source.write_text(Store._dump(base()))
+        self.assertEqual(self.store.import_file(str(source)).id, "local-only")
 
     def test_replacement_between_stamp_and_read_is_refused(self):
         from unittest.mock import patch

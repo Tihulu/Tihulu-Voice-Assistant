@@ -902,9 +902,18 @@ class Store:
         finally:
             os.close(fd)
 
-    def save(self, profile):
+    def save(self, profile, *, create_only=False):
         with self._mutation_lock():
-            return self._save_locked(profile)
+            return self._save_locked(profile, create_only=create_only)
+
+    def import_file(self, path):
+        """Read a trusted picker selection with the bounded regular-file reader."""
+        if not isinstance(path, str) or not os.path.isabs(path):
+            raise Hold("profile_import_rejected")
+        try:
+            return self._read_profile(Path(path))
+        except (Hold, ValueError, OSError, KeyError, TypeError, RecursionError):
+            raise Hold("profile_import_rejected") from None
 
     def _ensure_current_archive_locked(self, current):
         """Recover missing history from the authoritative active generation.
@@ -924,7 +933,7 @@ class Store:
         except OSError:
             raise Hold("profile_unreadable") from None
 
-    def _save_locked(self, profile):
+    def _save_locked(self, profile, *, create_only=False):
         profile = profile.checked()
         target = self._path(profile.id)
         text = self._dump(profile)
@@ -939,6 +948,8 @@ class Store:
         except (ValueError, OSError, KeyError, TypeError, RecursionError):
             raise Hold("profile_unreadable") from None
         if current is not None:
+            if create_only:
+                raise Hold("profile_already_exists")
             if current.id != profile.id:
                 raise Hold("profile_changed")
             if current.version >= profile.version:

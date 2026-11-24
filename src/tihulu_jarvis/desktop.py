@@ -845,7 +845,7 @@ def create_window(app, loop, bridge=None):
                 return
             try:
                 clone = profiles.clone_to_custom(chosen, chosen.name + " copy")
-                self.store.save(clone)
+                self.store.save(clone, create_only=True)
                 self.activate_profile(clone.id)
             except Hold as exc:
                 self.set_state("ready", str(exc))
@@ -868,7 +868,7 @@ def create_window(app, loop, bridge=None):
                 entry = profiles.template(key)
                 if (self.store.root / (entry.id + ".json")).is_file():
                     raise Hold("profile_already_exists")
-                self.store.save(entry)
+                self.store.save(entry, create_only=True)
                 self.refresh_profiles()
                 self.switch_profile(entry.id)
             except Hold as exc:
@@ -876,11 +876,11 @@ def create_window(app, loop, bridge=None):
 
         def import_profile_text(self, raw):
             """An imported copy arrives pending review, never activated."""
-            entry = profiles.Store._parse(raw)
+            return self.store_imported_profile(profiles.Store._parse(raw))
+
+        def store_imported_profile(self, entry):
             clean = profiles.sanitized(entry)
-            if (self.store.root / (clean.id + ".json")).is_file():
-                raise Hold("profile_already_exists")
-            self.store.save(clean)
+            self.store.save(clean, create_only=True)
             self.refresh_profiles()
             return clean
 
@@ -898,8 +898,7 @@ def create_window(app, loop, bridge=None):
                         return
                     file = d.get_file()
                     path = file.get_path() if file else None
-                    raw = Path(path).read_text(encoding="utf-8") if path else ""
-                    self.import_profile_text(raw)
+                    self.store_imported_profile(self.store.import_file(path))
                     self.set_state("ready", "profile_imported_pending_review")
                 except (Hold, OSError, ValueError):
                     self.set_state("ready", "profile_import_rejected")
