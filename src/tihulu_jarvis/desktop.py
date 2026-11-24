@@ -15,6 +15,7 @@ from . import (a11y, agents, attachments, catalog_sources, files, keys, queries,
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from .analysis_ui import AnalysisView
+from .selected_csv import selection_identity
 from . import analysis_intent
 from . import locks, search, states
 from . import market, profiles, settings
@@ -1228,7 +1229,7 @@ def create_window(app, loop, bridge=None):
             self.entry.set_sensitive(not self.busy)
             self.refresh_send()
             allowed = getattr(self, "policy", None) is not None and \
-                self.policy.evaluate("local_audio_device", ("push_to_talk",))[0] == profiles.ALLOW
+                self.policy.evaluate("local_audio_device", ("push_to_talk",), time.time())[0] == profiles.ALLOW
             self.talk.set_sensitive(not self.busy and connected and allowed \
                 and bool(self.cfg["stt"]) and bool(self.cfg["voices"]) \
                 and audio.tools_ready("arecord","whisper-cli","piper","aplay"))
@@ -1878,10 +1879,9 @@ def create_window(app, loop, bridge=None):
             except Hold as exc:
                 self.web_note.set_text(str(exc))
                 return
-            self.require_tools(("browser_navigate", ("approved_target",)))
-            self.web_note.set_text(tr("Reading %s (%s)…" % (url, method),
-                                      "%s okunuyor (%s)…" % (url, method),
-                                      "%s wird gelesen (%s)…" % (url, method)))
+            self.web_note.set_text(tr("Plan only: %s (%s); no network request." % (url, method),
+                                      "Yalnızca plan: %s (%s); ağ isteği yok." % (url, method),
+                                      "Nur Plan: %s (%s); keine Netzwerkanfrage." % (url, method)))
 
         def submit_target(self):
             target = self.selected_target()
@@ -1894,10 +1894,9 @@ def create_window(app, loop, bridge=None):
                 self.web_note.set_text(str(exc))
                 self.receipt("refused", "submitting to %s (submission_not_approved)" % target.url)
                 return
-            self.require_tools(("browser_navigate", ("submission",)))
-            self.web_note.set_text(tr("Submitting to %s (POST)…" % target.url,
-                                      "%s adresine gönderiliyor (POST)…" % target.url,
-                                      "Senden an %s (POST)…" % target.url))
+            self.web_note.set_text(tr("Plan only: %s (POST); no network request." % target.url,
+                                      "Yalnızca plan: %s (POST); ağ isteği yok." % target.url,
+                                      "Nur Plan: %s (POST); keine Netzwerkanfrage." % target.url))
 
         def build_activity_page(self):
             """The tasks this client runs, stated without a guessed percentage.
@@ -2096,7 +2095,7 @@ def create_window(app, loop, bridge=None):
                 return
             root = root or self.folder_root.get_text().strip()
             try:
-                self.require_tools(("filesystem_read", ("folder",)))
+                self.require_tools(("filesystem_read", ("folder",)), selected=True)
                 folder = files.list_dir(root)
             except Hold as exc:
                 # A refused or unreadable folder is a bounded reason.
@@ -2142,7 +2141,7 @@ def create_window(app, loop, bridge=None):
             if entry.directory:
                 return None
             try:
-                self.require_tools(("filesystem_read", ("file",)))
+                self.require_tools(("filesystem_read", ("file",)), selected=True)
                 text = files.preview(self.cfg.get("research_root", ""), entry.name)
             except Hold as exc:
                 if "profile_forbids" in str(exc):
@@ -2938,8 +2937,12 @@ def create_window(app, loop, bridge=None):
             sample = {"tr": "Bu bir ses önizlemesidir.",
                       "en": "This is a voice preview.",
                       "de": "Das ist eine Stimmprobe."}[lang]
-            self.require_tools(("local_audio_device", ("push_to_talk",)))
-            speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"][lang], lang).id)
+            try:
+                self.require_tools(("local_audio_device", ("push_to_talk",)))
+                speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"][lang], lang).id)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
             async def run(epoch):
                 def progress(stage):
                     if epoch == self.session.epoch:
@@ -2947,6 +2950,7 @@ def create_window(app, loop, bridge=None):
                 # A preview shares the playback lease with a turn, never the
                 # device: a refused lease is a bounded reason.
                 async with self.leases.hold("audio_playback", "preview"):
+                    self.require_tools(("local_audio_device", ("push_to_talk",)))
                     await audio.speak(speech, progress)
             self.submit(run)
 
@@ -3001,6 +3005,7 @@ def create_window(app, loop, bridge=None):
         def run_transcribe(self, path):
             """Transcribe an owner-supplied recording; nothing is captured here."""
             try:
+                self.require_tools(("filesystem_read", ("recording",)), selected=True)
                 self.set_state("ready", "transcribing")
                 raw = self.loop.run_until_complete(
                     audio.transcribe(self.cfg["stt"], path, runner=self.transcribe_runner))
@@ -3014,7 +3019,7 @@ def create_window(app, loop, bridge=None):
             self.set_state("ready", "transcribed")
             return raw
 
-        def require_tools(self, *requests):
+        def require_tools(self, *requests, selected=False):
             """Refuse an action the active profile denies, at the moment it runs.
 
             Every decision is appended to the local audit trail.
@@ -3022,11 +3027,11 @@ def create_window(app, loop, bridge=None):
             profile = self.active_profile()
             for action, scope in requests:
                 try:
-                    profiles.require_tool(profile, action, scope)
+                    decision, reason = profiles.require_tool(profile, action, scope, time.time(), selected=selected)
                 except Hold as exc:
                     self.record_policy(action, scope, "deny", str(exc))
                     raise
-                self.record_policy(action, scope, "allow", "rule_or_absent")
+                self.record_policy(action, scope, decision, reason)
 
         def record_disclosure(self):
             """Record that the boundary was stated before the message was sent."""
@@ -3314,7 +3319,20 @@ def create_window(app, loop, bridge=None):
                                 and self.attachment_route() == route)
                     except Hold:
                         return False
-                item = attachments.load(path, authorized=authorized)
+                # Capture identity at the trusted callback before opening data.
+                # The synchronous loader still rechecks the same identity.
+                try:
+                    identity = selection_identity(path, authorized=authorized, allow_empty=True)
+                except Hold as exc:
+                    raise Hold({
+                        "csv_invalid_selection": "attachment_not_found",
+                        "csv_not_regular_file": "attachment_not_found",
+                        "csv_selection_unreadable": "attachment_not_found",
+                        "csv_invalid_size": "attachment_too_large",
+                        "csv_selection_not_authorized": "attachment_not_authorized",
+                        "csv_secure_reader_unavailable": "attachment_secure_reader_unavailable",
+                    }.get(str(exc), "attachment_unreadable")) from None
+                item = attachments.load(path, authorized=authorized, expected_identity=identity)
             except Hold as exc:
                 self.clear_attachment()
                 self.set_state("ready", str(exc))
@@ -3410,6 +3428,7 @@ def create_window(app, loop, bridge=None):
                 # The microphone is exclusive: a turn that cannot get the lease
                 # is refused before capture starts, never after it fails.
                 async with self.leases.hold("microphone", "voice-turn-%d" % epoch):
+                    self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
                     text=await audio.listen(self.cfg["stt"],self.finish,progress)
                 # The microphone is free again the moment the capture ends.
@@ -3438,6 +3457,7 @@ def create_window(app, loop, bridge=None):
                                                "Antwort stumm; als Text angezeigt."))
                     return
                 async with self.leases.hold("audio_playback", "voice-turn-%d" % epoch):
+                    self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
                     playback = loop.create_task(audio.speak(speech, progress))
                     self.playback = playback
