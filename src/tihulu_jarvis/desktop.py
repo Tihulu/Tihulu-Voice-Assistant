@@ -14,6 +14,7 @@ from . import (a11y, agents, attachments, catalog_sources, files, keys, queries,
                  readiness, receipts, resources, tasks, transcript, usage, web)
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
+from .analysis_ui import AnalysisView
 from . import locks, search, states
 from . import market, profiles, settings
 from .voice import audio
@@ -207,7 +208,7 @@ def create_window(app, loop, bridge=None):
             # composer's, reachable without looking for it.
             self.quick_stop = Gtk.Button(label=tr("Hard stop","Tümünü durdur","Alles stoppen"))
             self.quick_stop.add_css_class("badge")
-            self.quick_stop.connect("clicked", lambda *_: self.interrupt(False))
+            self.quick_stop.connect("clicked", lambda *_: self.hard_stop())
             self.quick_stop.set_sensitive(False)
             accessible_name(self.quick_stop, tr("Stop everything now",
                                                  "Her şeyi şimdi durdur",
@@ -288,7 +289,7 @@ def create_window(app, loop, bridge=None):
                                           "Audioausgabe stummschalten"))
             self.cancel = self.button(controls,tr("Cancel turn","Turu iptal et","Antwort abbrechen"),lambda:self.interrupt(False))
             self.end = self.button(controls,tr("End conversation","Sohbeti bitir","Gespräch beenden"),lambda:self.interrupt(True))
-            self.hard = self.button(controls,tr("Hard stop","Tümünü durdur","Alles stoppen"),lambda:self.interrupt(False))
+            self.hard = self.button(controls,tr("Hard stop","Tümünü durdur","Alles stoppen"),self.hard_stop)
             for widget, caption in ((self.talk, tr("Start listening on the microphone",
                                                    "Mikrofonda dinlemeyi başlat",
                                                    "Zuhören mit dem Mikrofon starten")),
@@ -402,6 +403,8 @@ def create_window(app, loop, bridge=None):
             self.build_agents_page()
             self.turn_note = ""
             self.build_activity_page()
+            self.analysis = AnalysisView(self, chat, Gtk, GLib, tr, lang)
+            self.refresh()
             self.win.present()
 
         def apply_text_scale(self):
@@ -468,6 +471,8 @@ def create_window(app, loop, bridge=None):
         def run_hard_stop(self, *_):
             if self.busy:
                 self.interrupt(True)
+            elif hasattr(self, "analysis"):
+                self.hard_stop()
             return True
 
         def run_attach(self, *_):
@@ -625,6 +630,8 @@ def create_window(app, loop, bridge=None):
             entry = self.store.load(profile_id).checked()
             if entry.state != "active":
                 raise Hold("profile_not_active")
+            if hasattr(self, "analysis"):
+                self.analysis.reset()
             self.cfg["profile"] = entry.id
             self.policy = profiles.effective(entry)
             self.save()
@@ -1151,6 +1158,11 @@ def create_window(app, loop, bridge=None):
             self.hard.set_sensitive(self.busy)
             # The topbar stop is the composer stop, so its state matches.
             self.quick_stop.set_sensitive(self.busy)
+            if hasattr(self, "analysis"):
+                self.analysis.refresh()
+                analysis_live = bool(self.analysis.dialog is not None or self.analysis.last)
+                self.hard.set_sensitive(self.busy or analysis_live)
+                self.quick_stop.set_sensitive(self.busy or analysis_live)
             for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,
                       self.transcribe_button,*self.previews):
                 w.set_sensitive(not self.busy)
@@ -3132,7 +3144,17 @@ def create_window(app, loop, bridge=None):
             if self.stage != "stopping":
                 self.set_state("stopping_playback")
 
+        def hard_stop(self):
+            if hasattr(self, "analysis"):
+                self.analysis.reset()
+            self.interrupt(False)
+
         def interrupt(self, clear):
+            if hasattr(self, "analysis"):
+                if clear:
+                    self.analysis.reset()
+                else:
+                    self.analysis.cancel()
             self.session.invalidate(clear=clear)
             if clear:
                 child=self.log.get_first_child()
@@ -3288,6 +3310,8 @@ def create_window(app, loop, bridge=None):
             self.submit(run)
 
         def close(self,*_):
+            if hasattr(self, "analysis"):
+                self.analysis.reset()
             if not self.busy:
                 return False
             if not self.closing:
