@@ -34,7 +34,7 @@ class Attachment:
         return self
 
 
-def load(path, *, authorized=lambda: True):
+def load(path, *, authorized=lambda: True, expected_identity=None):
     """Read one bounded, pinned snapshot after trusted caller authorization.
 
     The default is retained for local standalone readers; it is not a model
@@ -44,7 +44,8 @@ def load(path, *, authorized=lambda: True):
         raise Hold("attachment_not_found")
     raw = Path(path)
     try:
-        data = read_selected_bytes(path, authorized=authorized, allow_empty=True)
+        data = read_selected_bytes(path, authorized=authorized, allow_empty=True,
+                                   expected_identity=expected_identity)
     except Hold as exc:
         reason = {
             "csv_invalid_selection": "attachment_not_found",
@@ -52,6 +53,7 @@ def load(path, *, authorized=lambda: True):
             "csv_selection_unreadable": "attachment_not_found",
             "csv_invalid_size": "attachment_too_large",
             "csv_changed_during_read": "attachment_changed_during_read",
+            "csv_selection_changed": "attachment_selection_changed",
             "csv_secure_reader_unavailable": "attachment_secure_reader_unavailable",
             "csv_selection_not_authorized": "attachment_not_authorized",
         }.get(str(exc), "attachment_unreadable")
