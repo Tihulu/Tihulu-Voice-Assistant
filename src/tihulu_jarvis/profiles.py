@@ -147,19 +147,21 @@ class Profile:
             raise Hold("invalid_locale_or_activation")
         if set(self.voice_by_language) - set(LANGUAGES):
             raise Hold("unsupported_voice_language")
-        if any(not isinstance(v, str) or not v for v in self.voice_by_language.values()):
+        if any(not _native_text(v) or not v for v in self.voice_by_language.values()):
             raise Hold("invalid_voice_reference")
+        if not _native_text(self.name) or not _native_text(self.description):
+            raise Hold("invalid_profile_text")
         if len(self.name) > 80 or len(self.description) > 400:
             raise Hold("profile_text_too_long")
         for key in ("stt_model_id", "llm_model_id", "tts_model_id"):
             value = getattr(self, key)
-            if not isinstance(value, str) or len(value) > 256:
+            if not _native_text(value) or len(value) > 256:
                 raise Hold("invalid_local_model_choice")
         for ref in self.credential_refs:
             if not isinstance(ref, str) or not REF.fullmatch(ref):
                 raise Hold("credential_material_in_profile_data")
         for provider in self.allowed_providers:
-            if not isinstance(provider, str) or len(provider) > 64 or "/" in provider:
+            if not _native_text(provider) or len(provider) > 64 or "/" in provider:
                 raise Hold("invalid_provider_reference")
         seen = set()
         for rule in self.rules():
@@ -170,9 +172,9 @@ class Profile:
                 raise Hold("global_deny_not_weakable")
             if rule.action not in RULE_ACTIONS or rule.decision not in DECISIONS:
                 raise Hold("invalid_rule")
-            if any(not isinstance(s, str) or len(s) > 96 or not s or "~" in s for s in rule.scope):
+            if any(not _native_text(s) or len(s) > 96 or not s or "~" in s for s in rule.scope):
                 raise Hold("invalid_rule_scope")
-            if rule.approval and not REF.fullmatch(rule.approval):
+            if not _native_text(rule.approval) or (rule.approval and not REF.fullmatch(rule.approval)):
                 raise Hold("invalid_approval_reference")
             if not 0 <= rule.expires_at <= 1e12:
                 raise Hold("invalid_approval_expiry")
@@ -546,6 +548,7 @@ AUDIT_BYTES = 262144
 
 
 def _native_text(value):
+    """Text accepted by strict UTF-8 storage and native string APIs."""
     if not isinstance(value, str) or "\x00" in value:
         return False
     try:
