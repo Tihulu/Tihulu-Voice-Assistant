@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 0749fc74d427b7893252ca25f625803471797e33
+          ref: af0bbaa9207b195ad736ff96b295150e9bd12b3f
           fetch-depth: 0
           persist-credentials: false
       - name: Verify pinned source and historical refs; run exact tests
@@ -25,9 +25,9 @@ jobs:
           import unittest
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
-          head = '0749fc74d427b7893252ca25f625803471797e33'
+          head = 'af0bbaa9207b195ad736ff96b295150e9bd12b3f'
           assert git('rev-parse', 'HEAD') == head
-          assert set(git('diff', '--name-only', '518043289df5f8539669531defc1b518f60997a9', head).splitlines()) == {'src/tihulu_jarvis/owned_wait.py', 'src/tihulu_jarvis/voice/jan.py', 'tests/test_jan_effect_deadline.py'}
+          assert set(git('diff', '--name-only', '0749fc74d427b7893252ca25f625803471797e33', head).splitlines()) == {'src/tihulu_jarvis/voice/audio.py', 'tests/test_audio_capture_deadline.py'}
           assert git('hash-object', 'tests/test_conflict_check.py') == 'b09752f2a25e5380e20ff220cd98edaa54493200'
           assert git('rev-parse', '--is-shallow-repository') == 'false'
           assert not git('status', '--porcelain')
@@ -51,38 +51,36 @@ jobs:
           import yaml
           print('Python', sys.version.split()[0], 'PyYAML', yaml.__version__, flush=True)
           suite = unittest.TestLoader().discover('tests')
-          assert suite.countTestCases() == 551, suite.countTestCases()
+          assert suite.countTestCases() == 557, suite.countTestCases()
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           print('Full core ran', result.testsRun, 'skips', len(result.skipped), flush=True)
-          failed = not result.wasSuccessful() or bool(result.skipped) or result.testsRun != 551
+          failed = not result.wasSuccessful() or bool(result.skipped) or result.testsRun != 557
           assert git('rev-parse', 'HEAD') == head
           assert not git('status', '--porcelain')
           raise SystemExit(int(failed))
           PY
-  deadline_comparison:
+  capture_comparison:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 518043289df5f8539669531defc1b518f60997a9
+          ref: 0749fc74d427b7893252ca25f625803471797e33
           path: original
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 0749fc74d427b7893252ca25f625803471797e33
+          ref: af0bbaa9207b195ad736ff96b295150e9bd12b3f
           path: fixed
           persist-credentials: false
-      - name: Confirm exact source and test identities
+      - name: Verify exact before and after sources
         run: |
-          test "$(git -C original rev-parse HEAD)" = "518043289df5f8539669531defc1b518f60997a9"
-          test "$(git -C fixed rev-parse HEAD)" = "0749fc74d427b7893252ca25f625803471797e33"
-          test "$(git -C original hash-object src/tihulu_jarvis/voice/jan.py)" = "c6a03374fdab94ee66f90be34c561ecc47680cef"
-          test "$(git -C original hash-object src/tihulu_jarvis/owned_wait.py)" = "7469dc4be8533a3f2486fa7421fcdb41cc966601"
-          test "$(git -C fixed hash-object src/tihulu_jarvis/voice/jan.py)" = "1bbc34043bfd1cb53b2c1ae4936f8ad35bb012ee"
-          test "$(git -C fixed hash-object src/tihulu_jarvis/owned_wait.py)" = "f53bb0e7c0530f4375cca2b33b6c2f6d8d45ffa0"
-          test "$(git -C fixed hash-object tests/test_jan_effect_deadline.py)" = "5b36d4d454aee942969b471cb760bb6aa4707210"
-      - name: Run identical fixtures on original and fixed production code
+          test "$(git -C original rev-parse HEAD)" = "0749fc74d427b7893252ca25f625803471797e33"
+          test "$(git -C fixed rev-parse HEAD)" = "af0bbaa9207b195ad736ff96b295150e9bd12b3f"
+          test "$(git -C original hash-object src/tihulu_jarvis/voice/audio.py)" = "a02bfdd2c48c35b2dac3f6e341c61fbe4af46462"
+          test "$(git -C fixed hash-object src/tihulu_jarvis/voice/audio.py)" = "51981e55542f8c4ebf633298f203b66c7a29c2fd"
+          test "$(git -C fixed hash-object tests/test_audio_capture_deadline.py)" = "0d3adabad16c20337a0e4b1fe7cbf51231aa2c2d"
+      - name: Compare same six tests on both implementations
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
@@ -91,26 +89,25 @@ jobs:
           import os
           import pathlib
           import unittest
-          from tihulu_jarvis.voice import jan
+          from tihulu_jarvis.voice import audio
           version = os.environ['VERSION']
           root = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
-          assert pathlib.Path(jan.__file__).resolve().is_relative_to(root / version / 'src')
+          assert pathlib.Path(audio.__file__).resolve().is_relative_to(root / version / 'src')
           suite = unittest.TestLoader().discover(str(root / 'fixed' / 'tests'),
-                                                pattern='test_jan_effect_deadline.py')
-          assert suite.countTestCases() == 11
+                                                pattern='test_audio_capture_deadline.py')
+          assert suite.countTestCases() == 6
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           names = {case._testMethodName for case, _ in result.failures}
           expected = {
-              'test_full_late_connect_no_write',
-              'test_stream_late_connect_no_write_or_delta',
-              'test_discovery_late_connect_no_write',
-              'test_stream_late_drain_no_delta',
-              'test_stream_late_read_no_delta',
-              'test_stream_callback_crosses_deadline_no_next_delta',
+              'test_late_spawn_refuses_capture',
+              'test_late_first_sample_refuses_publication',
+              'test_total_deadline_refuses_publication_and_signal',
+              'test_callback_crossing_deadline_refuses_signal',
+              'test_effect_check_after_environment_preparation',
           } if version == 'original' else set()
           print(version, 'ran', result.testsRun, 'failures', sorted(names),
                 'errors', len(result.errors), 'skips', len(result.skipped), flush=True)
-          assert result.testsRun == 11 and not result.errors and not result.skipped
+          assert result.testsRun == 6 and not result.errors and not result.skipped
           assert names == expected, (names, expected)
           PY
           done
