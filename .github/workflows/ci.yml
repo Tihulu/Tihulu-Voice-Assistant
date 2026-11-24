@@ -1,28 +1,7 @@
 name: Core and native GTK tests
 on:
   pull_request:
-    branches: [
-               'main', 'feat/m1-portable-core', 'feat/modes-and-profiles', 'feat/profile-ui',
-               'feat/market-ui', 'feat/mode-endpoint', 'feat/action-enforcement',
-               'feat/loopback-transport', 'feat/market-consolidated', 'feat/transfer-resume',
-               'feat/market-history', 'feat/update-flow', 'feat/queue-persistence',
-               'feat/catalog-trust', 'feat/deb-packaging', 'feat/remote-catalog',
-               'feat/audit-trail', 'feat/escalation-consent', 'feat/transcribe-file',
-               'feat/route-policy', 'feat/resource-locks', 'feat/privacy-disclosure',
-               'feat/state-labels', 'feat/chat-search', 'feat/attachments',
-               'feat/routing-table', 'feat/audit-filters', 'feat/streaming', 'feat/a11y-scale',
-               'feat/keyboard-nav', 'feat/receipts', 'feat/web-targets', 'feat/activity-board',
-               'feat/spoken-text', 'feat/files-research', 'feat/readiness',
-               'feat/search-history', 'feat/topbar', 'feat/quick-stop', 'feat/queue-summary',
-               'feat/settings-page', 'feat/transcript-export', 'feat/mute', 'feat/keys-help',
-               'feat/agents-gates', 'feat/clean-install', 'feat/stack-check', 'feat/preflight',
-               'feat/traceability', 'feat/repo-english', 'feat/voice-resources',
-               'feat/usage-report', 'feat/approved-sources', 'feat/conflict-rehearsal',
-               'feat/smoke-coverage', 'feat/state-refresh', 'docs/initial-public-scaffold',
-               'feat/ai-market', 'feat/download-queue', 'feat/market-catalog',
-               'feat/native-voice-controls', 'feat/release-packaging', 'feat/ci-triggers',
-               'feat/merge-log', 'feat/merge-log-2', 'feat/merge-log-3', 'feat/preflight-gpu',
-               'feat/record-card']
+    branches: ['**']
 permissions:
   contents: read
 jobs:
@@ -73,7 +52,7 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
         with:
           persist-credentials: false
-      - name: Check that every branch is in the CI trigger list
+      - name: Check that CI covers every PR base branch
         run: python3 tools/ci_triggers.py --check
   package:
     runs-on: ubuntu-24.04
