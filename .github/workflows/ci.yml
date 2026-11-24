@@ -1,28 +1,7 @@
 name: Core and native GTK tests
 on:
   pull_request:
-    branches: [
-               'main', 'feat/m1-portable-core', 'feat/modes-and-profiles', 'feat/profile-ui',
-               'feat/market-ui', 'feat/mode-endpoint', 'feat/action-enforcement',
-               'feat/loopback-transport', 'feat/market-consolidated', 'feat/transfer-resume',
-               'feat/market-history', 'feat/update-flow', 'feat/queue-persistence',
-               'feat/catalog-trust', 'feat/deb-packaging', 'feat/remote-catalog',
-               'feat/audit-trail', 'feat/escalation-consent', 'feat/transcribe-file',
-               'feat/route-policy', 'feat/resource-locks', 'feat/privacy-disclosure',
-               'feat/state-labels', 'feat/chat-search', 'feat/attachments',
-               'feat/routing-table', 'feat/audit-filters', 'feat/streaming', 'feat/a11y-scale',
-               'feat/keyboard-nav', 'feat/receipts', 'feat/web-targets', 'feat/activity-board',
-               'feat/spoken-text', 'feat/files-research', 'feat/readiness',
-               'feat/search-history', 'feat/topbar', 'feat/quick-stop', 'feat/queue-summary',
-               'feat/settings-page', 'feat/transcript-export', 'feat/mute', 'feat/keys-help',
-               'feat/agents-gates', 'feat/clean-install', 'feat/stack-check', 'feat/preflight',
-               'feat/traceability', 'feat/repo-english', 'feat/voice-resources',
-               'feat/usage-report', 'feat/approved-sources', 'feat/conflict-rehearsal',
-               'feat/smoke-coverage', 'feat/state-refresh', 'docs/initial-public-scaffold',
-               'feat/ai-market', 'feat/download-queue', 'feat/market-catalog',
-               'feat/native-voice-controls', 'feat/release-packaging', 'feat/ci-triggers',
-               'feat/merge-log', 'feat/merge-log-2', 'feat/merge-log-3', 'feat/preflight-gpu',
-               'feat/record-card', 'feat/merge-log-4', 'plan/recovery-roadmap']
+    branches: ['**']
 permissions:
   contents: read
 jobs:
@@ -123,7 +102,8 @@ jobs:
           CHECK
           python -m venv .runvenv
           .runvenv/bin/pip install -q dist/*.whl
-          (cd /tmp && "$GITHUB_WORKSPACE/.runvenv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests" 2>&1 | tail -n 5)
+          (cd /tmp && PYTHONPATH="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.runvenv/bin/python" -c 'import pathlib, sys, tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve())')
+          (cd /tmp && PYTHONPATH="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.runvenv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
           .runvenv/bin/python -c "import tihulu_jarvis; print('installed import ok')"
           .runvenv/bin/python -c "import tihulu_jarvis.market as m; print('installed market ok', m.CATEGORIES)"
           .runvenv/bin/python -c "import tihulu_jarvis.desktop as d; print('entry module ok', hasattr(d, 'main'))"

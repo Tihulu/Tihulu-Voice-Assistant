@@ -1,10 +1,21 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Distributed without warranty; see LICENSE for the full terms.
-"""Conflict-rehearsal tests: the local repository is the fixture."""
+"""Conflict-rehearsal tests: historical and disposable Git fixtures."""
+import os
+import subprocess
+import tempfile
 import unittest
 from io import StringIO
+from pathlib import Path
 
-from tools.conflict_check import local_branches, report
+from tools.conflict_check import local_branches, report, merge_tree
+
+
+def setUpModule():
+    # Historical checks require this checkout, not the caller's cwd. The
+    # installed-package suite deliberately starts outside the source tree.
+    unittest.addModuleCleanup(os.chdir, os.getcwd())
+    os.chdir(Path(__file__).resolve().parents[1])
 
 
 class ReportTests(unittest.TestCase):
@@ -118,3 +129,51 @@ class MergePRTests(unittest.TestCase):
                                    "base": "feat/usage-report"}])
         self.assertIn("applies cleanly", out)
         self.assertNotIn("merge it, do not rebase", out)
+
+
+class DisposableRehearsalTests(unittest.TestCase):
+    """Always exercise actual Git merge-tree, even in a shallow CI checkout."""
+
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        previous = os.getcwd()
+        os.chdir(self.root)
+        self.addCleanup(os.chdir, previous)
+        self.git("init", "-b", "main")
+        self.git("config", "user.name", "Synthetic reviewer")
+        self.git("config", "user.email", "fixture@example.invalid")
+        self.git("config", "commit.gpgsign", "false")
+        self.commit("shared.txt", "original\n", "base")
+
+    def git(self, *args):
+        return subprocess.run(["git", *args], cwd=self.root, check=True,
+                              capture_output=True, text=True).stdout.strip()
+
+    def commit(self, filename, data, message):
+        (self.root / filename).write_text(data, encoding="utf-8")
+        self.git("add", filename)
+        self.git("commit", "-m", message)
+
+    def test_clean_divergent_branches_without_checkout_or_merge(self):
+        self.git("switch", "-c", "feature")
+        self.commit("feature.txt", "feature\n", "feature")
+        self.git("switch", "main")
+        self.commit("main.txt", "main\n", "main")
+        before = self.git("rev-parse", "HEAD")
+        self.assertEqual(merge_tree("main", "feature"), (True, []))
+        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+        self.assertEqual(self.git("status", "--porcelain"), "")
+        self.assertFalse((self.root / "feature.txt").exists())
+
+    def test_conflict_reports_only_path_and_preserves_worktree(self):
+        self.git("switch", "-c", "feature")
+        self.commit("shared.txt", "feature\n", "feature")
+        self.git("switch", "main")
+        self.commit("shared.txt", "main\n", "main")
+        before = self.git("rev-parse", "HEAD")
+        self.assertEqual(merge_tree("main", "feature"), (False, ["shared.txt"]))
+        self.assertEqual(self.git("rev-parse", "HEAD"), before)
+        self.assertEqual((self.root / "shared.txt").read_text(), "main\n")
+        self.assertEqual(self.git("status", "--porcelain"), "")
