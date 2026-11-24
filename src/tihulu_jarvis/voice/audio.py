@@ -224,21 +224,8 @@ async def listen(model, finish, publish, *, checkpoint):
         checkpoint()
         if not await asyncio.to_thread(has_signal, wav):
             raise Hold("no_speech_signal")
-        checkpoint()
-        publish("transcribing")
-        checkpoint()
-        async with child("whisper-cli","-m",model,"-f",wav,"-l","auto","-otxt","-of",stem, checkpoint=checkpoint) as p:
-            if await await_authorized(p.wait, 120, checkpoint):
-                raise Hold("transcription_failed")
-        checkpoint()
-        output = stem.with_suffix(".txt")
-        if not output.is_file() or output.stat().st_size > 64000:
-            raise Hold("invalid_transcript")
-        text = output.read_text(encoding="utf-8").strip()
-        if not text or len(text)>16000 or not any(ch.isalnum() for ch in text):
-            raise Hold("empty_transcript")
-        checkpoint()
-        return text
+        return await _transcription_stage(model, wav, stem, None, publish,
+                                          checkpoint=checkpoint)
 
 
 MAX_TRANSCRIPT = 64000
@@ -290,23 +277,34 @@ async def transcribe(model, recording, runner=None, publish=None, *, checkpoint,
         checkpoint()
         if not await asyncio.to_thread(has_signal, snapshot):
             raise Hold("no_speech_signal")
-        checkpoint()
+        return await _transcription_stage(model, snapshot, stem, runner, publish,
+                                          checkpoint=checkpoint)
+
+
+async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint):
+    # Start the budget before status publication and queued process creation.
+    deadline = OperationDeadline(120, checkpoint)
+
+    async def run():
+        deadline.check()
         if publish:
             publish("transcribing")
-        checkpoint()
+        deadline.check()
         if runner is None:
-            await _whisper(model, snapshot, stem, checkpoint=checkpoint)
+            await _whisper(model, wav, stem, checkpoint=deadline.check)
         else:
-            await await_authorized(lambda: runner(model, snapshot, stem), 120, checkpoint)
-        checkpoint()
+            await runner(model, wav, stem)
+        deadline.check()
         output = stem.with_suffix(".txt")
         if not output.is_file() or output.stat().st_size > MAX_TRANSCRIPT:
             raise Hold("invalid_transcript")
         text = output.read_text(encoding="utf-8").strip()
         if not text or len(text) > 16000 or not any(ch.isalnum() for ch in text):
             raise Hold("empty_transcript")
-        checkpoint()
+        deadline.check()
         return text
+
+    return await await_with_deadline(run, deadline, interval=AUTH_POLL)
 
 
 async def _whisper(model, wav, stem, *, checkpoint):
@@ -315,8 +313,10 @@ async def _whisper(model, wav, stem, *, checkpoint):
         raise Hold("transcription_backend_missing")
     async with child("whisper-cli", "-m", model, "-f", wav, "-l", "auto",
                      "-otxt", "-of", stem, checkpoint=checkpoint) as p:
-        if await await_authorized(p.wait, 120, checkpoint):
+        checkpoint()
+        if await p.wait():
             raise Hold("transcription_failed")
+        checkpoint()
 
 
 async def speak(speech, publish, *, checkpoint):
@@ -326,16 +326,33 @@ async def speak(speech, publish, *, checkpoint):
         raise Hold("playback_backend_missing")
     with tempfile.TemporaryDirectory(prefix="tihulu-playback-") as tmp:
         wav = Path(tmp)/"reply.wav"
-        publish("synthesizing")
-        checkpoint()
-        async with child("piper","--model",model.id,"--output_file",wav, stdin=True, checkpoint=checkpoint) as p:
-            await await_authorized(lambda: p.communicate((speech.text+"\n").encode("utf-8")), 90, checkpoint)
-            if p.returncode or not wav.is_file() or wav.stat().st_size <= 44:
-                raise Hold("synthesis_failed")
-        checkpoint()
-        async with child("aplay","-q",wav, checkpoint=checkpoint) as p:
-            checkpoint()
-            publish("speaking")
-            if await await_authorized(p.wait, 180, checkpoint):
-                raise Hold("playback_failed")
+        synthesis = OperationDeadline(90, checkpoint)
+
+        async def synthesize():
+            synthesis.check()
+            publish("synthesizing")
+            synthesis.check()
+            async with child("piper", "--model", model.id, "--output_file", wav,
+                             stdin=True, checkpoint=synthesis.check) as p:
+                payload = (speech.text + "\n").encode("utf-8")
+                synthesis.check()
+                await p.communicate(payload)
+                synthesis.check()
+                if p.returncode or not wav.is_file() or wav.stat().st_size <= 44:
+                    raise Hold("synthesis_failed")
+                synthesis.check()
+
+        await await_with_deadline(synthesize, synthesis, interval=AUTH_POLL)
+        playback = OperationDeadline(180, checkpoint)
+
+        async def play():
+            async with child("aplay", "-q", wav, checkpoint=playback.check) as p:
+                playback.check()
+                publish("speaking")
+                playback.check()
+                if await p.wait():
+                    raise Hold("playback_failed")
+                playback.check()
+
+        await await_with_deadline(play, playback, interval=AUTH_POLL)
         checkpoint()
