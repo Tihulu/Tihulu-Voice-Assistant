@@ -1,0 +1,307 @@
+name: Exact R1 historical evidence
+on:
+  pull_request:
+    branches: ['review/r1-deadline-and-qa-consolidated']
+    paths: ['.github/workflows/r1-historical-evidence.yml']
+permissions:
+  contents: read
+jobs:
+  historical:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 16b341b57fe7ef1a33d76434efce0c8b301b1273
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify pinned source and historical refs; run exact tests
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          import unittest
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          head = '16b341b57fe7ef1a33d76434efce0c8b301b1273'
+          assert git('rev-parse', 'HEAD') == head
+          assert set(git('diff', '--name-only', '126987ccb34cf083aedea585b005e76367170f40', head).splitlines()) == {'src/tihulu_jarvis/profiles.py', 'tests/test_profile_native_text.py'}
+          assert git('hash-object', 'tests/test_conflict_check.py') == 'b09752f2a25e5380e20ff220cd98edaa54493200'
+          assert git('rev-parse', '--is-shallow-repository') == 'false'
+          assert not git('status', '--porcelain')
+          pins = {
+              'feat/usage-report': '60f237df43631a1c4ec3619ac3e6f409935a251a',
+              'feat/approved-sources': '36cc9fdf9d0103cb6a6101d3a37cdb7d6456d3a2',
+              'feat/profile-ui': '627309491c568cef3d799fcbd1853ebc8c106f96',
+              'feat/modes-and-profiles': '6a21bf7003039d8d63684c9e5572859ad22ec5a2',
+              'feat/market-ui': 'c9e8c87bb52505f21532f94025307962feaeb220',
+              'feat/market-consolidated': '29cc369acd052efb526d9c3c51320a9323f5a0bb',
+          }
+          for name, sha in pins.items():
+              actual = git('rev-parse', 'refs/remotes/origin/' + name)
+              if actual != sha:
+                  raise SystemExit('Historical ref changed: ' + name)
+              git('cat-file', '-e', sha + '^{commit}')
+              git('branch', name, sha)
+              assert git('rev-parse', 'refs/heads/' + name) == sha
+              print('Verified', name, sha, flush=True)
+          import sys
+          import yaml
+          print('Python', sys.version.split()[0], 'PyYAML', yaml.__version__, flush=True)
+          suite = unittest.TestLoader().discover('tests')
+          assert suite.countTestCases() == 587, suite.countTestCases()
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          print('Full core ran', result.testsRun, 'skips', len(result.skipped), flush=True)
+          failed = not result.wasSuccessful() or bool(result.skipped) or result.testsRun != 587
+          assert git('rev-parse', 'HEAD') == head
+          assert not git('status', '--porcelain')
+          raise SystemExit(int(failed))
+          PY
+      - name: Verify requirements traceability
+        run: python3 tools/trace_check.py
+  profile_text_comparison:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 126987ccb34cf083aedea585b005e76367170f40
+          path: original
+          persist-credentials: false
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 16b341b57fe7ef1a33d76434efce0c8b301b1273
+          path: fixed
+          persist-credentials: false
+      - name: Verify exact blobs
+        run: |
+          test "$(git -C original rev-parse HEAD)" = "126987ccb34cf083aedea585b005e76367170f40"
+          test "$(git -C fixed rev-parse HEAD)" = "16b341b57fe7ef1a33d76434efce0c8b301b1273"
+          test "$(git -C original hash-object src/tihulu_jarvis/profiles.py)" = "c50dc8069391fc42766e1ddb7c72a490651fb034"
+          test "$(git -C fixed hash-object src/tihulu_jarvis/profiles.py)" = "a1a0e68a1f65ad42376a5b9bc80599966f76fe40"
+          test "$(git -C fixed hash-object tests/test_profile_native_text.py)" = "d878267d492ede20afb5fcaaa02e5f3cb1c4fe9f"
+      - name: Compare identical profile fixtures
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          for version in original fixed; do
+            VERSION="$version" PYTHONPATH="$GITHUB_WORKSPACE/$version/src" python3 - <<'PY'
+          import os
+          import pathlib
+          import unittest
+          from tihulu_jarvis import profiles
+          root = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
+          version = os.environ['VERSION']
+          assert pathlib.Path(profiles.__file__).resolve().is_relative_to(root / version / 'src')
+          suite = unittest.TestLoader().discover(str(root / 'fixed' / 'tests'),
+                                                pattern='test_profile_native_text.py')
+          assert suite.countTestCases() == 6
+          result = unittest.TextTestRunner(verbosity=2).run(suite)
+          names = {getattr(case, 'test_case', case)._testMethodName
+                   for case, _ in result.failures + result.errors}
+          expected = {
+              'test_parser_rejects_native_unsafe_fields',
+              'test_direct_validation_refuses_nonstring_display_text',
+              'test_invalid_save_preserves_active_and_history',
+              'test_malformed_import_never_reaches_store',
+              'test_legacy_malformed_profile_is_not_activated',
+          } if version == 'original' else set()
+          print(version, 'ran', result.testsRun, 'failed methods', sorted(names),
+                'failures', len(result.failures), 'errors', len(result.errors),
+                'skips', len(result.skipped), flush=True)
+          assert result.testsRun == 6 and not result.skipped
+          assert names == expected, (names, expected)
+          PY
+          done
+  native_profile_text:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 16b341b57fe7ef1a33d76434efce0c8b301b1273
+          persist-credentials: false
+      - name: Verify exact source and fixture
+        run: |
+          test "$(git rev-parse HEAD)" = "16b341b57fe7ef1a33d76434efce0c8b301b1273"
+          test "$(git hash-object tests/gtk/test_desktop.py)" = "c9ead17d01caa3e8a14836d36454a1b672516892"
+      - name: Install existing native test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+      - name: Verify corrupt profile is skipped before GTK display
+        env:
+          PYTHONPATH: src:tests/gtk
+          PYTHONDONTWRITEBYTECODE: '1'
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          GTK_A11Y: none
+          G_DEBUG: fatal-criticals
+        run: |
+          dbus-run-session -- xvfb-run -a /usr/bin/python3 - <<'PY'
+          import json
+          import unittest
+          from test_desktop import DesktopFixture
+          from tihulu_jarvis import profiles
+          from tihulu_jarvis.voice.m1 import Hold
+
+          class NativeProfileText(DesktopFixture):
+              def test_unsafe_profile_refused_and_valid_profile_visible(self):
+                  source = profiles.Profile("fixture", name="Türkçe · Deutsch · 日本語")
+                  data = json.loads(profiles.Store._dump(source))
+                  path = self.ui.store._path(source.id)
+                  before = self.ui.cfg["profile"]
+                  for bad in ("\ud800", "x\x00y"):
+                      data["name"] = bad
+                      raw = json.dumps(data).encode()
+                      path.write_bytes(raw)
+                      self.ui.refresh_profiles()
+                      self.assertNotIn(source.id, [p.id for p in self.ui.policy_rows.values()])
+                      self.assertIn("1 unreadable profile", self.ui.profile_storage_note.get_text())
+                      self.assertEqual(path.read_bytes(), raw)
+                      with self.assertRaises(Hold):
+                          self.ui.import_profile_text(raw.decode())
+                      self.assertEqual(self.ui.cfg["profile"], before)
+                  path.unlink()
+                  self.ui.store.save(source)
+                  self.ui.refresh_profiles()
+                  labels = [row.get_child().get_text() for row in self.ui.policy_rows]
+                  self.assertTrue(any(source.name in label for label in labels))
+                  self.assertEqual(self.ui.profile_storage_note.get_text(), "")
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(
+              [NativeProfileText("test_unsafe_profile_refused_and_valid_profile_visible")]))
+          assert result.testsRun == 1 and result.wasSuccessful() and not result.skipped
+          PY
+
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 16b341b57fe7ef1a33d76434efce0c8b301b1273
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact cumulative target
+        run: |
+          test "$(git rev-parse HEAD)" = "16b341b57fe7ef1a33d76434efce0c8b301b1273"
+          test "$(git rev-parse HEAD^{tree})" = "9f285ff53b360b20999a5879fff800d4c40ad103"
+          test "$(git hash-object tests/test_conflict_check.py)" = "b09752f2a25e5380e20ff220cd98edaa54493200"
+          test -z "$(git status --porcelain)"
+      - name: Restore exact historical local branches
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          pins = {
+              'feat/usage-report': '60f237df43631a1c4ec3619ac3e6f409935a251a',
+              'feat/approved-sources': '36cc9fdf9d0103cb6a6101d3a37cdb7d6456d3a2',
+              'feat/profile-ui': '627309491c568cef3d799fcbd1853ebc8c106f96',
+              'feat/modes-and-profiles': '6a21bf7003039d8d63684c9e5572859ad22ec5a2',
+              'feat/market-ui': 'c9e8c87bb52505f21532f94025307962feaeb220',
+              'feat/market-consolidated': '29cc369acd052efb526d9c3c51320a9323f5a0bb',
+          }
+          for name, sha in pins.items():
+              actual = git('rev-parse', 'refs/remotes/origin/' + name)
+              if actual != sha:
+                  raise SystemExit('Historical ref changed: ' + name)
+              git('cat-file', '-e', sha + '^{commit}')
+              git('branch', name, sha)
+              assert git('rev-parse', 'refs/heads/' + name) == sha
+              print('Verified', name, sha, flush=True)
+          PY
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Install target-system native runtime for Debian launch check
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+      - name: Build sdist and wheel, then verify the installed package
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -m venv .buildvenv
+          .buildvenv/bin/pip install -q build
+          .buildvenv/bin/python -m build --sdist --wheel --outdir dist
+          ls -l dist
+          python - <<'CHECK'
+          import pathlib, zipfile
+          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
+          sdists = sorted(pathlib.Path("dist").glob("*.tar.gz"))
+          assert len(wheels) == 1 and len(sdists) == 1, (wheels, sdists)
+          names = set(zipfile.ZipFile(wheels[0]).namelist())
+          tag = "tihulu_jarvis-0.1.0.dev0"
+          required = {
+              "tihulu_jarvis/__init__.py", "tihulu_jarvis/desktop.py", "tihulu_jarvis/settings.py",
+              "tihulu_jarvis/profiles.py", "tihulu_jarvis/market.py", "tihulu_jarvis/contracts.py",
+              "tihulu_jarvis/transfer_http.py",
+              "tihulu_jarvis/selected_csv.py", "tihulu_jarvis/temperature_engine.py",
+              "tihulu_jarvis/analysis_controller.py", "tihulu_jarvis/analysis_ui.py",
+              "tihulu_jarvis/analysis_intent.py", "tihulu_jarvis/analysis_export.py",
+              "tihulu_jarvis/voice/__init__.py", "tihulu_jarvis/voice/m1.py",
+              "tihulu_jarvis/voice/jan.py", "tihulu_jarvis/voice/audio.py",
+              "tihulu_jarvis/voice/session.py",
+              tag + ".dist-info/licenses/LICENSE",
+              tag + ".dist-info/entry_points.txt",
+              tag + ".data/data/share/applications/io.github.Tihulu.Jarvis.desktop",
+              tag + ".data/data/share/icons/hicolor/scalable/apps/io.github.Tihulu.Jarvis.svg",
+          }
+          missing = required - names
+          assert not missing, missing
+          leaks = [n for n in names
+                   if n.startswith(("tests/", "docs/", "data/")) and "/share/" not in n]
+          assert not leaks, leaks
+          for banned in ("password", "nvapi-", "/home/", "jarvis.json"):
+              assert not any(banned in n for n in names), banned
+          print("wheel content verified:", len(names), "entries")
+          CHECK
+          python -m venv .runvenv
+          .runvenv/bin/pip install -q dist/*.whl
+          # Repository root exposes the test-only tools namespace, not src.
+          (cd /tmp && PYTHONPATH="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.runvenv/bin/python" -c 'import pathlib, sys, tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve())')
+          (cd /tmp && PYTHONPATH="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.runvenv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
+          .runvenv/bin/python -c "import tihulu_jarvis; print('installed import ok')"
+          .runvenv/bin/python -c "import tihulu_jarvis.market as m; print('installed market ok', m.CATEGORIES)"
+          .runvenv/bin/python -c "import tihulu_jarvis.desktop as d; print('entry module ok', hasattr(d, 'main'))"
+          test -x .runvenv/bin/tihulu-jarvis && echo "console script installed"
+          (cd /tmp && "$GITHUB_WORKSPACE/.runvenv/bin/python" "$GITHUB_WORKSPACE/tools/smoke.py")
+      - name: Assemble a Debian package and verify its contents
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          sh packaging/deb/build.sh .release-work/deb dist
+          dpkg-deb --info .release-work/tihulu-jarvis.deb | grep -E "Package:|Version:|Architecture:|Depends:"
+          dpkg-deb --contents .release-work/tihulu-jarvis.deb | awk '{print $6}' | sed 's|^\./|/|' > .release-work/deb-files.txt
+          grep -qE "^/usr/bin/tihulu-jarvis$" .release-work/deb-files.txt
+          grep -qE "^/usr/share/applications/io\\.github\\.Tihulu\\.Jarvis\\.desktop$" .release-work/deb-files.txt
+          grep -qE "^/usr/share/icons/hicolor/scalable/apps/io\\.github\\.Tihulu\\.Jarvis\\.svg$" .release-work/deb-files.txt
+          grep -qE "^/usr/share/tihulu-jarvis/launch\\.py$" .release-work/deb-files.txt
+          for module in desktop market profiles transfer_http selected_csv temperature_engine analysis_controller analysis_ui analysis_intent analysis_export; do
+            grep -qFx "/usr/share/tihulu-jarvis/python/tihulu_jarvis/$module.py" .release-work/deb-files.txt
+          done
+          if grep -qE '/venv/|/pyvenv.cfg$' .release-work/deb-files.txt; then
+            echo "package carries a build-machine virtual environment"; exit 1
+          fi
+          grep -qE "licenses/LICENSE$" .release-work/deb-files.txt
+          if grep -E "/home/|/Users/|/tmp/|nvapi-|gh[pousr]_[A-Za-z0-9]{12}|sk-[A-Za-z0-9]{20}" .release-work/deb-files.txt; then
+            echo "package carries workstation or credential material"; exit 1
+          fi
+          if grep -E " tests/" .release-work/deb-files.txt; then
+            echo "package ships tests"; exit 1
+          fi
+          echo "package file list verified: $(wc -l < .release-work/deb-files.txt) entries"
+      - name: Extract and exercise the actual Debian launcher
+        run: |
+          mkdir -p .release-work/root
+          dpkg-deb -x .release-work/tihulu-jarvis.deb .release-work/root
+          launcher="$GITHUB_WORKSPACE/.release-work/root/usr/bin/tihulu-jarvis"
+          runtime="$GITHUB_WORKSPACE/.release-work/root/usr/share/tihulu-jarvis/python"
+          test -x "$launcher"
+          (cd /tmp && GDK_BACKEND=x11 GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a "$launcher" --check-runtime)
+          (cd /tmp && PYTHONPATH="$runtime" /usr/bin/python3 "$GITHUB_WORKSPACE/tools/smoke.py")
+          (cd /tmp && PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -c 'import pathlib, os, tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).resolve().is_relative_to(pathlib.Path(os.environ["PYTHONPATH"].split(":")[0]).resolve())')
+          (cd /tmp && PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
