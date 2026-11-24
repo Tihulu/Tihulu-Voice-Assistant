@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from .. import resources
-from ..owned_wait import OperationDeadline, await_with_deadline
+from ..owned_wait import OperationDeadline, await_with_deadline, finish_owned
 from ..owned_wait import await_authorized as owned_wait
 from ..selected_csv import selection_identity, copy_selected_to
 from .m1 import Hold, Voice
@@ -129,17 +129,17 @@ async def child(name, *args, stdin=False, checkpoint=lambda: None):
     try:
         p = await asyncio.shield(spawn)
     except asyncio.CancelledError:
-        try:
+        async def reclaim_spawn():
             await terminate(await spawn)
-        finally:
-            raise
+        await finish_owned(reclaim_spawn())
+        raise
     except OSError:
         raise Hold("audio_start_failed") from None
     try:
         checkpoint()
         yield p
     finally:
-        await terminate(p)
+        await finish_owned(terminate(p))
 
 
 def has_signal(path):

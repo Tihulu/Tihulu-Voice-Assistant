@@ -22,6 +22,25 @@ class OperationDeadline:
             raise asyncio.TimeoutError
 
 
+async def finish_owned(awaitable):
+    """Drain an owned cleanup despite further cancellation of its caller.
+
+    The cleanup future is not independently cancellable by its caller.
+    Propagate cancellation only after it finishes; propagate cleanup errors.
+    """
+    task = asyncio.ensure_future(awaitable)
+    interrupted = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            interrupted = True
+    result = task.result()
+    if interrupted:
+        raise asyncio.CancelledError
+    return result
+
+
 async def await_with_deadline(factory, deadline, *, interval=.25):
     """Await and drain owned work; effect sites must also call deadline.check."""
     async def start():
@@ -42,7 +61,7 @@ async def await_with_deadline(factory, deadline, *, interval=.25):
         if not task.done():
             task.cancel()
         # Retrieve exceptions even when authorization failed simultaneously.
-        await asyncio.gather(task, return_exceptions=True)
+        await finish_owned(asyncio.gather(task, return_exceptions=True))
 
 
 async def await_authorized(factory, timeout, checkpoint, *, interval=.25):

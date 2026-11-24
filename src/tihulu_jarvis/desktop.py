@@ -3727,6 +3727,17 @@ def main():
         with gtk_asyncio(loop):
             return app.run(None)
     finally:
+        # Cancel the application owners first, not their subprocess cleanup
+        # tasks. A blanket cancel of all descendants can interrupt a reap.
+        owners = set()
+        for window in state:
+            active, playback = window.session.active, window.playback
+            window.session.invalidate()
+            window.stop_speaking()
+            owners.update(task for task in (active, playback)
+                          if task is not None and not task.done())
+        if owners:
+            loop.run_until_complete(asyncio.gather(*owners, return_exceptions=True))
         pending=asyncio.all_tasks(loop)
         for task in pending:
             task.cancel()
