@@ -2257,13 +2257,13 @@ class DisclosureUITests(EscalationConsentTests):
 
     def test_the_local_boundary_is_stated_before_a_message(self):
         self.connect_model()
-        self.assertIn("Content stays on this computer", self.ui.disclosure_note.get_text())
+        self.assertIn("Upstream processing is unverified", self.ui.disclosure_note.get_text())
         self.text("Merhaba!")
         rows = profiles.read_audit(self.ui.store.root)
         self.assertTrue(any(r["action"] == "disclosure" for r in rows))
         row = [r for r in rows if r["action"] == "disclosure"][-1]
         self.assertEqual(row["decision"], "shown")
-        self.assertEqual(row["reason"], "loopback_transport_only")
+        self.assertEqual(row["reason"], "loopback_upstream_unverified")
 
     def test_a_cloud_mode_states_the_permission_and_the_transport_limit(self):
         self.connect_model()
@@ -2273,7 +2273,7 @@ class DisclosureUITests(EscalationConsentTests):
         self.switch_to("cloud-chat")
         note = self.ui.disclosure_note.get_text()
         self.assertIn("fixture-provider", note)
-        self.assertIn("nothing leaves this computer", note)
+        self.assertIn("Upstream processing is unverified", note)
 
     def test_a_cloud_mode_without_providers_says_routes_are_refused(self):
         self.connect_model()
@@ -3437,7 +3437,7 @@ class TopbarTests(DesktopTests):
         self.assertIn("LOCAL_ONLY", text)
         self.assertIn("Private Assistant", text)
         self.assertIn("fixture-chat", text)
-        self.assertIn("content stays on this computer", text)
+        self.assertIn("loopback only; upstream unverified", text)
 
     def test_an_absent_model_is_said_to_be_absent(self):
         self.ui.cfg["llm"] = ""
@@ -3465,9 +3465,8 @@ class TopbarTests(DesktopTests):
         self.connect_model()
         self.ui.url.set_text("https://provider.example/v1")
         self.until(lambda: "endpoint not a loopback address" in self.ui.topbar_note.get_text())
-        # The microphone stays local either way: this build transports only to
-        # a numeric loopback endpoint, so nothing leaves the computer.
-        self.assertIn("content stays on this computer", self.ui.topbar_note.get_text())
+        # A refused endpoint does not prove the entire machine is private.
+        self.assertIn("privacy boundary unverified", self.ui.topbar_note.get_text())
 
     def widgets_of(self, widget):
         out, item = [], widget.get_first_child()

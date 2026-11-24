@@ -1137,17 +1137,22 @@ def create_window(app, loop, bridge=None):
                 mode, name = profile.based_on_mode, profile.name or profile.id
             model = self.cfg["llm"] or tr("no model selected", "model seçili değil",
                                           "kein Modell ausgewählt")
-            boundary = tr("content stays on this computer",
-                          "içerik bu bilgisayarda kalır",
-                          "Inhalt bleibt auf diesem Computer")
+            boundary = tr("privacy boundary unverified",
+                          "gizlilik sınırı doğrulanmadı",
+                          "Datenschutzgrenze nicht verifiziert")
             try:
-                data = disclosure.facts(profile, self.url.get_text().strip())
+                data = disclosure.facts(profile, self.url.get_text().strip(), self.store.policy_now())
             except (Hold, UnboundLocalError):
                 data = None
-            if data is not None and data["boundary"] != disclosure.STAYS_LOCAL:
-                boundary = tr("cloud reasoning permitted",
-                              "bulut çıkarımına izinli",
-                              "Cloud-Schlussfolgerung erlaubt")
+            if data is not None:
+                if data["boundary"] != disclosure.STAYS_LOCAL:
+                    boundary = tr("cloud reasoning permitted; upstream unverified",
+                                  "bulut çıkarımına izinli; üst servis doğrulanmadı",
+                                  "Cloud-Schlussfolgerung erlaubt; Upstream nicht verifiziert")
+                elif data["endpoint"] == "loopback":
+                    boundary = tr("loopback only; upstream unverified",
+                                  "yalnızca geri döngü; üst servis doğrulanmadı",
+                                  "Nur Loopback; Upstream nicht verifiziert")
             parts = [mode or tr("no mode", "mod yok", "kein Modus"), name, model, boundary]
             if data is not None and data["endpoint"] != "loopback":
                 # The boundary is about the profile; the endpoint is its own
@@ -1163,8 +1168,8 @@ def create_window(app, loop, bridge=None):
             privileged tools, a pending approval, connection and idle state."""
             try:
                 profile = self.active_profile()
-                data = disclosure.facts(profile, self.url.get_text().strip())
-                grants = profiles.granted(profile)
+                data = disclosure.facts(profile, self.url.get_text().strip(), self.store.policy_now())
+                grants = data["grants"]
             except Hold:
                 self.state_row.set_text("")
                 self.topbar_note.set_text(self.topbar_text())
@@ -1207,26 +1212,23 @@ def create_window(app, loop, bridge=None):
             except Hold:
                 self.disclosure_note.set_text("")
                 return
-            data = disclosure.facts(profile, endpoint)
-            if data["boundary"] == disclosure.CLOUD_WITH_APPROVAL:
-                body = tr("Content you write may go to: %s." % ", ".join(data["providers"]),
-                          "Yazdığın içerik şuraya gidebilir: %s." % ", ".join(data["providers"]),
-                          "Inhalt, den du schreibst, kann an %s gehen." % ", ".join(data["providers"]))
-                body += " " + tr("This build only transports to a loopback endpoint, so nothing leaves this computer yet.",
-                                 "Bu sürüm yalnızca geri döngü uç noktasına taşır, bu yüzden şimdilik hiçbir şey bilgisayardan çıkmaz.",
-                                 "Dieser Build transportiert nur zu einem Loopback-Endpunkt, deshalb verlässt nichts diesen Computer.")
-            elif data["boundary"] == disclosure.CLOUD_WITHOUT_APPROVAL:
-                body = tr("This mode permits cloud reasoning but no provider is approved, so cloud routes are refused.",
-                          "Bu mod bulut çıkarımına izin verir ama onaylı sağlayıcı yok, bulut rotaları reddedilir.",
-                          "Dieser Modus erlaubt Cloud-Schlussfolgerung, aber kein Anbieter ist genehmigt, daher werden Cloud-Routen abgelehnt.")
-            elif data["endpoint"] != "loopback":
+            data = disclosure.facts(profile, endpoint, self.store.policy_now())
+            if data["endpoint"] != "loopback":
                 body = tr("The configured endpoint is not a loopback address; this build refuses it.",
                           "Yapılandırılan uç nokta geri döngü adresi değil; bu sürüm onu reddeder.",
                           "Der konfigurierte Endpunkt ist keine Loopback-Adresse; dieser Build lehnt ihn ab.")
             else:
-                body = tr("Content stays on this computer.",
-                          "İçerik bu bilgisayarda kalır.",
-                          "Inhalt bleibt auf diesem Computer.")
+                body = tr("Loopback transport only. Upstream processing is unverified.",
+                          "Yalnızca geri döngü bağlantısı. Üst servisin veri işlemesi doğrulanmadı.",
+                          "Nur Loopback-Transport. Upstream-Verarbeitung nicht verifiziert.")
+                if data["boundary"] == disclosure.CLOUD_WITH_APPROVAL:
+                    body += " " + tr("Approved providers: %s. Direct cloud transport is unavailable." % ", ".join(data["providers"]),
+                                     "Onaylı sağlayıcılar: %s. Doğrudan bulut bağlantısı kullanılamıyor." % ", ".join(data["providers"]),
+                                     "Genehmigte Anbieter: %s. Direkter Cloud-Transport nicht verfügbar." % ", ".join(data["providers"]))
+                elif data["boundary"] == disclosure.CLOUD_WITHOUT_APPROVAL:
+                    body += " " + tr("No provider is approved; direct cloud routes are refused.",
+                                     "Onaylı sağlayıcı yok; doğrudan bulut rotaları reddedilir.",
+                                     "Kein Anbieter genehmigt; direkte Cloud-Routen werden abgelehnt.")
             self.disclosure_note.set_text(tr("Privacy: ", "Gizlilik: ", "Privatsphäre: ") + body)
 
         def refresh_send(self):
@@ -3094,7 +3096,7 @@ def create_window(app, loop, bridge=None):
         def record_disclosure(self):
             """Record that the boundary was stated before the message was sent."""
             try:
-                data = disclosure.facts(self.active_profile(), self.url.get_text().strip())
+                data = disclosure.facts(self.active_profile(), self.url.get_text().strip(), self.store.policy_now())
             except Hold:
                 return
             self.record_policy("disclosure", (data["boundary"], data["endpoint"]),
