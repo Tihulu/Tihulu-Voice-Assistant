@@ -67,15 +67,19 @@ def report(plan, out=None, err=None):
     """One line per branch in the merge order, and a verdict."""
     out, err = out or sys.stdout, err or sys.stderr
     problems, checked = [], 0
+    if not plan:
+        problems.append("no branches to rehearse")
     for entry in plan:
         number, head, base = entry.get("number"), entry.get("head"), entry.get("base")
         if not head or not base:
             problems.append("#%s has no head or base to rehearse" % number)
             continue
         if base not in local_branches():
+            problems.append("#%s: base missing locally (%s)" % (number, base))
             print("  #%s %-32s base missing locally (%s)" % (number, head, base), file=out)
             continue
         if head not in local_branches():
+            problems.append("#%s: head missing locally (%s)" % (number, head))
             print("  #%s %-32s head missing locally (%s)" % (number, head, head), file=out)
             continue
         already = contained(base, head)
@@ -84,19 +88,19 @@ def report(plan, out=None, err=None):
             problems.append("#%s: commits cannot be compared" % number)
             print("  #%s %-32s could not be rehearsed" % (number, head), file=out)
             continue
-        if already:
-            # A merge PR carries a whole line: rebasing it replays what the base
-            # already has, so the answer is to merge it, not to rebase it.
-            print("  #%s %-32s merge it, do not rebase (%d commits already in base)"
-                  % (number, head, already), file=out)
-            continue
         clean, files = merge_tree(base, head)
         if clean is None:
             problems.append("#%s: %s" % (number, files[0] if files else "unknown"))
             print("  #%s %-32s could not be rehearsed" % (number, head), file=out)
             continue
         if clean:
-            print("  #%s %-32s applies cleanly" % (number, head), file=out)
+            if already:
+                # Equivalent patches advise against rebasing but never bypass
+                # an actual merge-tree rehearsal.
+                print("  #%s %-32s merge it, do not rebase (%d commits already in base)"
+                      % (number, head, already), file=out)
+            else:
+                print("  #%s %-32s applies cleanly" % (number, head), file=out)
             continue
         problems.append("#%s (%s) conflicts in %s" % (number, head, ", ".join(files)))
         print("  #%s %-32s CONFLICT in %s" % (number, head, ", ".join(files)), file=err)

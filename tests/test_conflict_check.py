@@ -36,7 +36,8 @@ class ReportTests(unittest.TestCase):
         out, err = self.entries()
         code = report([{"number": 2, "head": "feat/approved-sources",
                         "base": "no-such-base"}], out=out, err=err)
-        self.assertIn("0 problems", out.getvalue())
+        self.assertEqual(code, 1)
+        self.assertIn("1 problems", out.getvalue())
         self.assertIn("base missing locally", out.getvalue())
 
     def test_an_entry_without_a_head_or_base_is_a_problem(self):
@@ -99,7 +100,7 @@ class RehearsalTests(unittest.TestCase):
         self.need("feat/usage-report")
         code, out, _ = self.report_for([{"number": 7, "head": "no-such-head",
                                          "base": "feat/usage-report"}])
-        self.assertEqual(code, 0)
+        self.assertEqual(code, 1)
         self.assertIn("head missing locally", out)
 
 
