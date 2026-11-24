@@ -91,7 +91,7 @@ class AnalysisController:
         self._artifacts = {}
 
     def activate(self, context):
-        """Trusted UI only. Always invalidate prior jobs/results/grants."""
+        """Trusted UI only. Invalidate prior jobs/results. The UI owns grant revocation."""
         if not isinstance(context, Context):
             raise Hold("invalid_analysis_context")
         context.checked()
@@ -158,6 +158,8 @@ class AnalysisController:
                     or self._context != job.context):
                 raise Hold("analysis_cancelled")
             self._allow(action, target)
+            if action == "artifact_recolor":
+                self._allow("artifact_read", target)
         return False
 
     def _finish(self, job):
