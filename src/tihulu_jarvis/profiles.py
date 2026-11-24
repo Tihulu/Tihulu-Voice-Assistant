@@ -230,9 +230,10 @@ class PolicyClock:
 
     Persist a rounded-up one-second ceiling before returning an observed time.
     Cooperating Stores serialize checkpoint reads and updates using a local
-    directory advisory lock. No trusted elapsed time across shutdown or
-    anti-tamper guarantee. An unavailable checkpoint or contended lock fails
-    closed for timed permissions in that Store.
+    directory advisory lock. A durable initialization marker distinguishes
+    a missing checkpoint from first use when the marker survives. No trusted
+    elapsed time across shutdown or anti-tamper guarantee. An unavailable
+    checkpoint or contended lock fails closed for timed permissions in that Store.
     """
     def __init__(self, wall=None, monotonic=None, *, checkpoint=None):
         self._lock = Lock()
@@ -242,13 +243,45 @@ class PolicyClock:
         self._reserved = None
         self._failed = False
 
+    def _marker(self):
+        return self._checkpoint.with_name(self._checkpoint.name + "-initialized")
+
+    def _marker_exists(self):
+        try:
+            info = self._marker().lstat()
+        except FileNotFoundError:
+            return False
+        if not stat.S_ISREG(info.st_mode) or info.st_size != 0:
+            raise Hold("policy_clock_unreadable")
+        return True
+
+    def _ensure_marker(self):
+        # Called under the checkpoint lock. Persist the marker first: an
+        # interrupted first write must not be interpreted as a fresh store.
+        if self._marker_exists():
+            return
+        fd = os.open(self._marker(), os.O_WRONLY | os.O_CREAT | os.O_EXCL |
+                     os.O_CLOEXEC | os.O_NOFOLLOW, 0o600)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        fd = os.open(self._checkpoint.parent, os.O_RDONLY | os.O_DIRECTORY |
+                     os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+
     def _restore(self):
         if self._checkpoint is None:
             return 0
         try:
             before = _policy_stamp(self._checkpoint)
         except FileNotFoundError:
-            return 0  # First use; not proof that an older store had no clock.
+            if self._marker_exists():
+                raise Hold("policy_clock_unreadable")
+            return 0  # Legacy/first use; not proof that no floor ever existed.
         if before[2] > 32:
             raise Hold("policy_clock_unreadable")
         raw = read_selected_bytes(str(self._checkpoint.absolute()),
@@ -258,6 +291,7 @@ class PolicyClock:
         value = int(raw)
         if value > 10**12 or _policy_stamp(self._checkpoint) != before:
             raise Hold("policy_clock_unreadable")
+        self._ensure_marker()  # Also migrate an intact legacy checkpoint.
         return value
 
     def _persist(self, value):
@@ -331,6 +365,7 @@ class PolicyClock:
                         raise Hold("policy_clock_unreadable")
                     if self._checkpoint is not None and self._observed > self._reserved:
                         ceiling = math.ceil(self._observed)
+                        self._ensure_marker()
                         self._persist(ceiling)
                         self._reserved = ceiling
                     return self._observed
@@ -775,6 +810,13 @@ class Store:
                 os.fsync(f.fileno())
             os.replace(tmp, path)
             tmp = None
+            # Persist the directory entry as well as the file contents.
+            fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY |
+                         os.O_CLOEXEC | os.O_NOFOLLOW)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
         finally:
             if tmp:
                 Path(tmp).unlink(missing_ok=True)
@@ -817,6 +859,24 @@ class Store:
         with self._mutation_lock():
             return self._save_locked(profile)
 
+    def _ensure_current_archive_locked(self, current):
+        """Recover missing history from the authoritative active generation.
+
+        Never restore active permissions from history or overwrite an
+        existing archive. A missing archive can be repaired on a subsequent
+        explicit mutation, before replacing the active generation.
+        """
+        archived = self.history / (current.id + "-v%d.json" % current.version)
+        try:
+            archived.lstat()
+        except FileNotFoundError:
+            try:
+                self._write(archived, self._dump(current))
+            except OSError:
+                raise Hold("profile_history_write_failed") from None
+        except OSError:
+            raise Hold("profile_unreadable") from None
+
     def _save_locked(self, profile):
         profile = profile.checked()
         target = self._path(profile.id)
@@ -846,6 +906,8 @@ class Store:
             raise Hold("profile_unreadable") from None
         else:
             raise Hold("version_must_increase")
+        if current is not None:
+            self._ensure_current_archive_locked(current)
         try:
             self._write(target, text)
         except OSError:
@@ -891,6 +953,8 @@ class Store:
         stem = self._path(profile_id).stem
         out = []
         for path in sorted(self.history.glob(stem + "-v*.json")):
+            if not re.fullmatch(re.escape(stem) + r"-v[1-9][0-9]*\.json", path.name):
+                continue
             try:
                 # A different profile ID can share the glob prefix. Only
                 # accept a canonical filename for this exact generation.

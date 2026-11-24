@@ -269,6 +269,29 @@ class StoreMutationTests(unittest.TestCase):
                 self.store.save(base(version=2, name="active without archive"))
         self.assertEqual(self.store.load("local-only").version, 2)
         self.assertEqual(self.store.rollback("local-only", 1).version, 3)
+        self.assertEqual([p.version for p in self.store.versions("local-only")], [1, 2, 3])
+        self.assertEqual(self.store.versions("local-only")[1].name, "active without archive")
+
+    def test_failed_recovery_preserves_active_generation(self):
+        from unittest.mock import patch
+        self.store.save(base(version=2, name="active"))
+        (self.store.history / "local-only-v2.json").unlink()
+        with patch.object(self.other, "_write", side_effect=OSError("fixture")):
+            with self.assertRaisesRegex(Hold, "profile_history_write_failed"):
+                self.other.save(base(version=3, name="new"))
+        self.assertEqual(self.store.load("local-only").name, "active")
+        self.assertFalse((self.store.history / "local-only-v3.json").exists())
+
+    def test_recovery_never_replays_historical_grants(self):
+        granted = base(version=2, tool_rules=(Rule("local_audio_device", (), ALLOW),))
+        self.store.save(granted)
+        revoked = base(version=3, tool_rules=(Rule("local_audio_device", (), DENY),))
+        self.store.save(revoked)
+        (self.store.history / "local-only-v3.json").unlink()
+        reopened = Store(self.store.root)
+        self.assertEqual(effective(reopened.load("local-only")).evaluate("local_audio_device")[0], DENY)
+        reopened.save(base(version=4, name="updated", tool_rules=revoked.tool_rules))
+        self.assertEqual(effective(reopened.versions("local-only")[2]).evaluate("local_audio_device")[0], DENY)
 
 
 class EndpointEnforcementTests(unittest.TestCase):
@@ -791,6 +814,44 @@ class RestartPolicyClockTests(unittest.TestCase):
             self.assertEqual(second.evaluate("local_audio_device", self.scope)[0], ALLOW)
             path.write_text("99\n")
             self.assertEqual(second.evaluate("local_audio_device", self.scope)[0], ASK)
+
+    def test_missing_initialized_checkpoint_refused_after_reopen(self):
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=120),
+              patch.object(profiles.time, "monotonic", return_value=10)):
+            self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+        marker = self.root / ".policy-clock-initialized"
+        self.assertTrue(marker.is_file())
+        self.assertEqual(marker.stat().st_mode & 0o077, 0)
+        (self.root / ".policy-clock").unlink()
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=1)):
+            reopened = Store(self.root)
+            self.assertEqual(reopened.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+            self.assertFalse((self.root / ".policy-clock").exists())
+
+    def test_first_checkpoint_failure_is_not_fresh_store_on_restart(self):
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=10),
+              patch.object(self.store._clock, "_persist", side_effect=OSError("fixture"))):
+            self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+            self.assertEqual(Store(self.root).bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+
+    def test_intact_legacy_checkpoint_is_migrated_without_reset(self):
+        from unittest.mock import patch
+        (self.root / ".policy-clock").write_text("120\n")
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=10)):
+            self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+        self.assertTrue((self.root / ".policy-clock-initialized").is_file())
+        self.assertEqual((self.root / ".policy-clock").read_text(), "120\n")
+
 
     def test_contended_checkpoint_lock_fails_closed_without_waiting(self):
         import fcntl
