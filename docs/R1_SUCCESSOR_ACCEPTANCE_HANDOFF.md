@@ -95,4 +95,10 @@ classifier and conversation use the same seam; selected attachment and voice
 operations add their existing live checks. No guarantee of recalling queued
 bytes, OS-level atomicity or upstream isolation. Standalone transport fixtures
 retain an explicit trusted default; production desktop constructors bind it.
-SSE framing and malformed response handling are separately tracked until tested.
+The successor also shares the bounded HTTP header/framing parser across JSON
+and SSE, decodes chunked/content-length/close-delimited bodies, bounds total
+body and header bytes/count, rejects conflicting framing and invalid delta
+types, and accepts LF or CRLF event lines. An explicit DONE marker is required;
+known-length/chunked frames are validated through their end. This is the
+supported single-JSON-data-line SSE subset, not a general-purpose HTTP client.
+CI and independent evidence remain separate.
