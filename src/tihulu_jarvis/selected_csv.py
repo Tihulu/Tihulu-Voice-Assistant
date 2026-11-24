@@ -48,12 +48,13 @@ def read_selected_csv(path, *, authorized, cancelled=lambda: False):
     if not parts or any(part in ("", ".", "..") for part in parts):
         raise Hold("csv_invalid_selection")
     if not all(hasattr(os, flag) for flag in
-               ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK", "O_CLOEXEC")):
+               ("O_NOFOLLOW", "O_DIRECTORY", "O_NONBLOCK", "O_CLOEXEC", "O_PATH")):
         raise Hold("csv_secure_reader_unavailable")
     if os.open not in os.supports_dir_fd:
         raise Hold("csv_secure_reader_unavailable")
     directory = None
     fd = None
+    pinned = None
     try:
         base_flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC
         directory = os.open("/", base_flags | os.O_DIRECTORY)
@@ -63,13 +64,21 @@ def read_selected_csv(path, *, authorized, cancelled=lambda: False):
             os.close(directory)
             directory = child
         _check(authorized, cancelled)
-        # NONBLOCK prevents a malicious FIFO from waiting for a writer.
-        fd = os.open(parts[-1], base_flags | os.O_NONBLOCK, dir_fd=directory)
-        before = os.fstat(fd)
+        # O_PATH pins the inode without opening a device or blocking on a FIFO.
+        pinned = os.open(parts[-1], os.O_PATH | os.O_NOFOLLOW | os.O_CLOEXEC,
+                         dir_fd=directory)
+        before = os.fstat(pinned)
         if not stat.S_ISREG(before.st_mode):
             raise Hold("csv_not_regular_file")
         if before.st_size <= 0 or before.st_size > MAX_BYTES:
             raise Hold("csv_invalid_size")
+        _check(authorized, cancelled)
+        # Linux procfs resolves this process's held descriptor, not the path
+        # supplied by the picker. Fail closed if procfs is unavailable.
+        fd = os.open("/proc/self/fd/%d" % pinned,
+                     os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        if _identity(os.fstat(fd)) != _identity(before):
+            raise Hold("csv_changed_during_read")
         data = bytearray()
         while True:
             _check(authorized, cancelled)
@@ -90,5 +99,7 @@ def read_selected_csv(path, *, authorized, cancelled=lambda: False):
     finally:
         if fd is not None:
             os.close(fd)
+        if pinned is not None:
+            os.close(pinned)
         if directory is not None:
             os.close(directory)
