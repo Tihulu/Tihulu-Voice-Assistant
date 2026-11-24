@@ -83,11 +83,14 @@ def decide(profile_rules, action, scope=(), now=None):
     for rule in profile_rules:
         if not rule.matches(action, scope):
             continue
-        if len(rule.scope) > best_len or (len(rule.scope) == best_len and rule.decision == DENY):
+        rank = {ALLOW: 0, ASK: 1, DENY: 2}
+        if len(rule.scope) > best_len or (len(rule.scope) == best_len and
+                rank[rule.decision] > rank[best.decision]):
             best, best_len = rule, len(rule.scope)
     if best is None:
         return DENY, "no_rule_matches"
-    if best.decision == ALLOW and best.approval and best.expires_at <= now:
+    if (best.decision == ALLOW and (best.approval or best.expires_at > 0)
+            and best.expires_at <= now):
         return ASK, "approval_expired"
     return best.decision, "rule"
 
@@ -445,13 +448,19 @@ def require_tool(profile, action, scope=(), now=None, *, selected=False):
     """
     if profile.state != "active":
         raise Hold("profile_not_active")
+    # Preserve a specific explicit refusal reason even when the mode also
+    # forbids that action. Never treat a mode denial as an approval.
+    decision, reason = decide(profile.rules(), action, scope, now)
+    if decision == DENY and reason == "rule":
+        raise Hold("profile_forbids_" + action)
     decision, reason = effective(profile).evaluate(action, scope, now)
     if decision == ASK:
         raise Hold("approval_expired" if reason == "approval_expired"
                    else "approval_required")
     if decision == ALLOW:
         return decision, reason
-    if reason == "no_rule_matches" and selected is True:
+    if (reason == "no_rule_matches" and selected is True and action == "filesystem_read"
+            and scope in (("folder",), ("file",), ("recording",))):
         return ALLOW, "explicit_selection"
     raise Hold("profile_forbids_" + action if reason == "rule" else
                "approval_required" if reason == "no_rule_matches" else reason)
@@ -508,6 +517,8 @@ def enforce_endpoint(profile, endpoint):
     modes make that explicit instead of promising capabilities that do not
     exist here.
     """
+    if profile.state != "active":
+        raise Hold("profile_not_active")
     if not isinstance(endpoint, str) or len(endpoint) > ENDPOINT_LIMIT or not endpoint.strip():
         raise Hold("invalid_local_settings")
     raw = endpoint.strip()
