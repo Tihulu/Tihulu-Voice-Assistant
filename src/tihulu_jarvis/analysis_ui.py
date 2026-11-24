@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Native GTK adapter for the explicitly selected, local-only R1 task.
 
-No model receives paths, artifacts, or computed private summaries. The UI owns
+No model receives Jarvis-discovered paths, artifacts, or computed private summaries. The UI owns
 all grants; a model cannot call these entry points.
 """
 import asyncio
@@ -9,8 +9,9 @@ import time
 from threading import Lock
 from uuid import uuid4
 
-from . import analysis_controller as ac, profiles
-from .voice.m1 import Hold
+from . import analysis_controller as ac, analysis_intent, profiles
+from .voice import audio
+from .voice.m1 import Hold, SpeechRequest, speech_text
 
 
 class AnalysisView:
@@ -25,6 +26,7 @@ class AnalysisView:
         self.lock = Lock()
         self.controller = ac.AnalysisController(self.authorized)
         self.last = None
+        self.pending = None
         self.rows = []
         row = Gtk.Box(spacing=6)
         parent.append(row)
@@ -101,6 +103,7 @@ class AnalysisView:
             dialog.destroy()
 
     def cancel(self):
+        self.pending = None
         self._drop_dialog()
         with self.lock:
             self.grants = {g for g in self.grants if g[0] == "artifact_read"}
@@ -108,6 +111,7 @@ class AnalysisView:
         self.refresh()
 
     def reset(self):
+        self.pending = None
         self._drop_dialog()
         with self.lock:
             self.context = None
@@ -120,7 +124,7 @@ class AnalysisView:
         self.rows.clear()
         self.refresh()
 
-    def choose(self):
+    def choose(self, *, language=None, speak=False):
         if self.ui.busy or self.dialog is not None or self.controller.busy:
             return
         try:
@@ -159,16 +163,16 @@ class AnalysisView:
                 self.ui.set_state("ready", "csv_selection_unreadable")
             finally:
                 self._drop_dialog()
-                self.refresh()
+                self.ui.refresh()
             if path is not None:
-                self.start_selected(path)
+                self.start_selected(path, language=language, speak=speak)
 
         self.handler = dialog.connect("response", response)
         dialog.show()
         self.refresh()
         self.ui.refresh()
 
-    def start_selected(self, path):
+    def start_selected(self, path, *, language=None, speak=False):
         """Trusted picker accept path only; not a generic chat command."""
         if self.ui.busy or self.controller.busy or self.dialog is not None:
             return
@@ -178,12 +182,13 @@ class AnalysisView:
                 raise Hold("csv_invalid_selection")
             self._start(context, "selected_csv_analysis", path,
                         lambda color: self.controller.analyze_selected(
-                            path, color=color, language=self.language))
+                            path, color=color, language=language or self.language),
+                        speak=speak)
         except Hold as exc:
             self.ui.set_state("ready", str(exc))
 
     def recolor(self):
-        if self.ui.busy or self.controller.busy or self.last is None:
+        if self.ui.busy or self.controller.busy or self.dialog is not None or self.last is None:
             return
         try:
             context = self._activate()
@@ -194,54 +199,142 @@ class AnalysisView:
         except Hold as exc:
             self.ui.set_state("ready", str(exc))
 
-    def _start(self, context, action, target, work):
+    def _start(self, context, action, target, work, *, speak=False):
         color = self.color.get_active_id()
         if color not in ac.COLORS:
             raise Hold("chart_invalid_color")
-        grant = (action, target)
-        with self.lock:
-            self.grants.add(grant)
 
         async def run(epoch):
-            worker = None
-            try:
-                self.ui.session.check(epoch)
-                self._matches(context)
-                self.ui.set_state("thinking")
-                worker = asyncio.create_task(asyncio.to_thread(work, color))
-                try:
-                    ident = await asyncio.shield(worker)
-                except asyncio.CancelledError:
-                    self.cancel()
-                    try:
-                        await worker
-                    except Exception:
-                        pass
-                    raise
-                self.ui.session.check(epoch)
-                self._matches(context)
-                with self.lock:
-                    self.grants.add(("artifact_read", ident))
-                try:
-                    artifact = self.controller.get(ident)
-                    self.display(artifact)
-                except Exception:
-                    with self.lock:
-                        self.grants.discard(("artifact_read", ident))
-                    raise
-                self.last = ident
-            finally:
-                with self.lock:
-                    self.grants.discard(grant)
+            await self._execute(epoch, context, action, target, work, color, speak)
 
         self.ui.turn_note = self.tr("Local CSV analysis", "Yerel CSV analizi",
                                     "Lokale CSV-Analyse")
+        self.ui.submit(run)
+
+    async def _execute(self, epoch, context, action, target, work, color, speak):
+        grant = (action, target)
+        self.ui.session.check(epoch)
+        self._matches(context)
+        with self.lock:
+            self.grants.add(grant)
         try:
-            self.ui.submit(run)
-        except Exception:
+            self.ui.set_state("thinking")
+            worker = asyncio.create_task(asyncio.to_thread(work, color))
+            try:
+                ident = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                self.cancel()
+                try:
+                    await worker
+                except Exception:
+                    pass
+                raise
+            self.ui.session.check(epoch)
+            self._matches(context)
+            with self.lock:
+                self.grants.add(("artifact_read", ident))
+            try:
+                artifact = self.controller.get(ident)
+                self.display(artifact)
+            except Exception:
+                with self.lock:
+                    self.grants.discard(("artifact_read", ident))
+                raise
+            self.last = ident
+        finally:
             with self.lock:
                 self.grants.discard(grant)
-            raise
+        if speak:
+            await self.speak(artifact, epoch, context)
+
+    async def speak(self, artifact, epoch, context):
+        self.ui.session.check(epoch)
+        self._matches(context)
+        if self.ui.mute.get_active():
+            self.ui.turn_outcome = self.tr("Result muted; shown in chat.",
+                "Sonuç sessiz; sohbette gösterildi.", "Ergebnis stumm; im Chat angezeigt.")
+            return
+        try:
+            profile = self._profile()
+            if profiles.effective(profile).evaluate(
+                    "local_audio_device", ("push_to_talk",), time.time())[0] != profiles.ALLOW:
+                raise Hold("analysis_audio_denied")
+            voice = audio.SelectedVoices(self.ui.cfg["voices"])[artifact.language]
+            if not audio.tools_ready("piper", "aplay"):
+                raise Hold("analysis_audio_unavailable")
+            speech = SpeechRequest(speech_text(artifact.summary), artifact.language, voice.id)
+        except (Hold, KeyError):
+            self.ui.turn_outcome = self.tr("Result shown; local speech unavailable or denied.",
+                "Sonuç gösterildi; yerel ses kullanılamıyor veya izin yok.",
+                "Ergebnis angezeigt; lokale Sprachausgabe fehlt oder ist nicht erlaubt.")
+            return
+        try:
+            async with self.ui.leases.hold("audio_playback", "analysis-%d" % epoch):
+                self.ui.note_leases()
+                if self.ui.cfg.get("show_spoken_text") and self.rows:
+                    label = self.Gtk.Label(label=self.tr("Spoken: ", "Okunan: ", "Gesprochen: ") + speech.text,
+                                           xalign=0, selectable=True, wrap=True)
+                    self.rows[-1].append(label)
+                def progress(stage):
+                    if epoch == self.ui.session.epoch and not self.ui.playback_stopping:
+                        self.ui.set_state(stage)
+                playback = asyncio.create_task(audio.speak(speech, progress))
+                self.ui.playback = playback
+                try:
+                    await asyncio.shield(playback)
+                except asyncio.CancelledError:
+                    self.ui.stop_speaking()
+                    try:
+                        await playback
+                    except asyncio.CancelledError:
+                        pass
+                    self.ui.session.check(epoch)
+                finally:
+                    self.ui.playback = None
+                    self.ui.playback_stopping = False
+        except Hold:
+            self.ui.session.check(epoch)
+            self.ui.turn_outcome = "analysis_speech_failed"
+        finally:
+            self.ui.note_leases()
+
+    async def command(self, text, epoch):
+        """Only explicit recognized user commands, never ordinary chat replies."""
+        context = self._activate()
+        self.ui.session.check(epoch)
+        intent = analysis_intent.direct(text)
+        if intent is None:
+            if self.ui.cfg["llm"] not in self.ui.inventory:
+                raise Hold("select_installed_model")
+            self.ui.set_state("thinking")
+            intent = await analysis_intent.propose(text, self.ui.backend_for_test())
+            self.ui.session.check(epoch)
+            self._matches(context)
+        if intent.action == "analyze":
+            # Open the picker only after the existing turn is drained.
+            self.pending = (epoch, context, intent.language)
+            self.ui.turn_outcome = self.tr("Select a CSV file to analyze.",
+                "Analiz etmek için bir CSV dosyası seç.", "CSV-Datei zur Analyse auswählen.")
+            return
+        if intent.action != "recolor" or self.last is None:
+            raise Hold("analysis_artifact_not_found")
+        parent = self.last
+        self.color.set_active_id(intent.color)
+        await self._execute(epoch, context, "artifact_recolor", parent,
+            lambda color: self.controller.recolor(
+                parent, color=color, language=intent.language), intent.color, True)
+
+    def open_pending(self, epoch):
+        pending, self.pending = self.pending, None
+        if pending is None or pending[0] != epoch or epoch != self.ui.session.epoch:
+            return
+        if self.ui.closing or self.ui.busy:
+            return
+        try:
+            self._matches(pending[1])
+            self.choose(language=pending[2], speak=True)
+        except Hold as exc:
+            self.ui.set_state("ready", str(exc))
 
     def display(self, artifact):
         """Main-thread only; decode the trusted engine's static SVG."""

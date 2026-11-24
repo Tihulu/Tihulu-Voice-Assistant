@@ -15,6 +15,7 @@ from . import (a11y, agents, attachments, catalog_sources, files, keys, queries,
 from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing
 from .analysis_ui import AnalysisView
+from . import analysis_intent
 from . import locks, search, states
 from . import market, profiles, settings
 from .voice import audio
@@ -271,6 +272,7 @@ def create_window(app, loop, bridge=None):
             self.send = self.button(entryrow,tr("Send","Gönder","Senden"),self.send_text)
             self.attach = self.button(entryrow,tr("Attach a file","Dosya ekle","Datei anhängen"),self.attach_file)
             self.entry.connect("activate",lambda *_:self.send_text())
+            self.entry.connect("changed", lambda *_: self.refresh_send())
             self.attachment_note = Gtk.Label(xalign=0, wrap=True)
             chat.append(entryrow)
             chat.append(self.attachment_note)
@@ -1121,6 +1123,13 @@ def create_window(app, loop, bridge=None):
                           "Inhalt bleibt auf diesem Computer.")
             self.disclosure_note.set_text(tr("Privacy: ", "Gizlilik: ", "Privatsphäre: ") + body)
 
+        def refresh_send(self):
+            text = self.entry.get_text()
+            connected = self.cfg["llm"] in self.inventory
+            direct = analysis_intent.direct(text) is not None
+            local = getattr(self, "policy", None) is not None and self.policy.mode == "LOCAL_ONLY"
+            self.send.set_sensitive(not self.busy and (connected or (local and direct)))
+
         def refresh(self):
             connected = self.cfg["llm"] in self.inventory
             # Whether the audio tools exist is asked once per refresh, and the
@@ -1144,7 +1153,7 @@ def create_window(app, loop, bridge=None):
             self.export_chat.set_sensitive(not self.busy and bool(self.session.history))
             self.attach.set_sensitive(not self.busy and self.cfg["llm"] in self.inventory)
             self.entry.set_sensitive(not self.busy)
-            self.send.set_sensitive(not self.busy and connected)
+            self.refresh_send()
             allowed = getattr(self, "policy", None) is not None and \
                 self.policy.evaluate("local_audio_device", ("push_to_talk",))[0] == profiles.ALLOW
             self.talk.set_sensitive(not self.busy and connected and allowed \
@@ -3026,6 +3035,8 @@ def create_window(app, loop, bridge=None):
                     self.set_state("ready",message)
                 else:
                     self.set_state("ready","Stopped")
+                if hasattr(self, "analysis"):
+                    self.analysis.open_pending(epoch)
             task.add_done_callback(finished)
 
         def discover(self):
@@ -3228,7 +3239,24 @@ def create_window(app, loop, bridge=None):
 
         def send_text(self):
             text=self.entry.get_text().strip()
-            if self.busy or not text or self.cfg["llm"] not in self.inventory:
+            if self.busy or not text:
+                return
+            if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
+                if self.attachment is not None:
+                    self.set_state("ready", tr("Local CSV analysis uses its own picker, not text attachments.",
+                        "Yerel CSV analizi kendi dosya seçicisini kullanır.",
+                        "Lokale CSV-Analyse verwendet einen eigenen Dateidialog."))
+                    return
+                if self.analysis.dialog is not None:
+                    return
+                self.entry.set_text("")
+                self.turn_note = tr("Local analysis request", "Yerel analiz isteği", "Lokale Analyseanfrage")
+                async def task_run(epoch):
+                    self.bubble("You", text)
+                    await self.analysis.command(text, epoch)
+                self.submit(task_run)
+                return
+            if self.cfg["llm"] not in self.inventory:
                 return
             self.record_disclosure()
             # The attachment is a bounded block in the same message, and it is
@@ -3273,6 +3301,11 @@ def create_window(app, loop, bridge=None):
                 self.note_leases()
                 self.session.check(epoch)
                 self.bubble("You",text)
+                if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
+                    if self.analysis.dialog is not None:
+                        raise Hold("analysis_picker_busy")
+                    await self.analysis.command(text, epoch)
+                    return
                 self.set_state("thinking")
                 result,speech=await self.session.reply(text,Jan(self.require_endpoint(),self.cfg["llm"]),epoch,voices)
                 self.session.check(epoch)
