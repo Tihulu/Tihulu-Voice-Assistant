@@ -14,6 +14,8 @@ async def await_authorized(factory, timeout, checkpoint, *, interval=.25):
     deadline = loop.time() + timeout
     async def start():
         checkpoint()
+        if loop.time() >= deadline:
+            raise asyncio.TimeoutError
         return await factory()
     task = asyncio.create_task(start())
     try:
@@ -24,6 +26,8 @@ async def await_authorized(factory, timeout, checkpoint, *, interval=.25):
                 raise asyncio.TimeoutError
             done, _ = await asyncio.wait((task,), timeout=min(interval, remaining))
             checkpoint()
+            if loop.time() >= deadline:
+                raise asyncio.TimeoutError
             if done:
                 return task.result()
     finally:
