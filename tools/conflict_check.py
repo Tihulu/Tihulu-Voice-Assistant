@@ -67,15 +67,19 @@ def report(plan, out=None, err=None):
     """One line per branch in the merge order, and a verdict."""
     out, err = out or sys.stdout, err or sys.stderr
     problems, checked = [], 0
+    if not plan:
+        problems.append("no branches to rehearse")
     for entry in plan:
         number, head, base = entry.get("number"), entry.get("head"), entry.get("base")
         if not head or not base:
             problems.append("#%s has no head or base to rehearse" % number)
             continue
         if base not in local_branches():
+            problems.append("#%s: base missing locally (%s)" % (number, base))
             print("  #%s %-32s base missing locally (%s)" % (number, head, base), file=out)
             continue
         if head not in local_branches():
+            problems.append("#%s: head missing locally (%s)" % (number, head))
             print("  #%s %-32s head missing locally (%s)" % (number, head, head), file=out)
             continue
         already = contained(base, head)
