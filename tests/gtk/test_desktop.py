@@ -471,6 +471,29 @@ class ProfileUITests(DesktopFixture):
     def pick(self, profile_id):
         self.ui.profile_list.select_row(self.row_for(profile_id))
 
+    def test_invalid_profile_does_not_break_other_profile_controls(self):
+        self.ui.store._path("broken").write_text("{broken", encoding="utf-8")
+        self.ui.refresh_profiles()
+        self.assertEqual(self.rows(), ["private-assistant"])
+        self.assertIn("1 unreadable profile", self.ui.profile_storage_note.get_text())
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+
+    def test_clock_failure_is_visible_and_timed_audio_disabled(self):
+        self.connect_model()
+        self.assertTrue(self.ui.talk.get_sensitive())
+        with patch.object(self.ui.store._clock, "now", return_value=float("inf")):
+            self.ui.refresh()
+            self.assertIn("Timed permissions are blocked", self.ui.policy_clock_note.get_text())
+            self.assertFalse(self.ui.talk.get_sensitive())
+
+    def test_stale_delete_selection_preserves_newer_profile(self):
+        self.save_profile(Profile(id="extra", name="Old"))
+        self.pick("extra")
+        self.ui.store.save(Profile(id="extra", version=2, name="New"))
+        self.click(self.ui.profile_delete)
+        self.assertEqual(self.ui.store.load("extra").name, "New")
+        self.assertEqual(self.ui.status.get_text(), "profile_changed")
+
     def test_default_profile_is_permission_light_and_grants_push_to_talk(self):
         self.assertEqual(self.rows(), ["private-assistant"])
         self.assertEqual(self.ui.cfg["profile"], "private-assistant")
@@ -512,7 +535,23 @@ class ProfileUITests(DesktopFixture):
         clone = self.ui.store.load("private-assistant-custom")
         self.assertEqual(clone.based_on_mode, "CUSTOM")
         self.assertFalse([r for r in clone.rules() if r.approval])
-        self.assertEqual(self.ui.cfg["profile"], "private-assistant-custom")
+        # A CUSTOM mode advertises capabilities even though the runtime gates
+        # are closed; cloning does not silently confirm that mode switch.
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+        self.until(lambda: bool(self.ui.confirmations))
+        dialog = self.ui.confirmations[-1]
+        box = dialog.get_child()
+        child = box.get_first_child()
+        while child is not None:
+            if isinstance(child, Gtk.Box):
+                button = child.get_first_child()
+                while button is not None:
+                    if isinstance(button, Gtk.Button) and (button.get_label() or "").startswith("Confirm"):
+                        button.emit("clicked")
+                        break
+                    button = button.get_next_sibling()
+            child = child.get_next_sibling()
+        self.until(lambda: self.ui.cfg["profile"] == "private-assistant-custom")
         self.connect_model()
         # A CUSTOM clone never silently inherits a granted capability.
         self.assertFalse(self.ui.talk.get_sensitive())
@@ -527,6 +566,15 @@ class ProfileUITests(DesktopFixture):
         self.click(self.ui.profile_activate)
         self.until(lambda: self.ui.talk.get_sensitive())
         self.assertEqual(self.ui.store.load("private-assistant").based_on_mode, "LOCAL_ONLY")
+
+    def test_stale_clone_selection_cannot_create_copy(self):
+        self.save_profile(Profile(id="extra", name="Old"))
+        self.pick("extra")
+        self.ui.store.save(Profile(id="extra", version=2, name="New"))
+        self.click(self.ui.profile_clone)
+        self.assertNotIn("extra-custom", self.ui.store.ids())
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+        self.assertEqual(self.ui.status.get_text(), "profile_changed")
 
     def test_import_is_pending_review_and_cannot_be_activated(self):
         text = profiles.Store._dump(profiles.Profile(
@@ -1956,6 +2004,45 @@ class EscalationConsentTests(ProfileUITests):
         self.assertEqual(self.ui.cfg["profile"], "private-assistant")
         self.assertEqual(self.ui.store.load(self.ui.cfg["profile"]).based_on_mode, "LOCAL_ONLY")
 
+    def test_activate_button_cannot_bypass_escalation_confirmation(self):
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                         based_on_mode="CLOUD_CHAT"))
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_activate)
+        self.until(lambda: self.dialog() is not None)
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+
+    def test_confirmation_rejects_target_replacement_even_same_version(self):
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                         based_on_mode="CLOUD_CHAT"))
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.dialog() is not None)
+        path = self.ui.store._path("cloud-chat")
+        self.ui.store._write(path, profiles.Store._dump(profiles.Profile(
+            id="cloud-chat", name="Changed", based_on_mode="SECURE_HYBRID")))
+        for button in self.buttons_of(self.dialog()):
+            if button.get_label() and button.get_label().startswith("Confirm"):
+                button.emit("clicked")
+        self.until(lambda: self.dialog() is None)
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+        self.assertEqual(self.ui.status.get_text(), "profile_changed")
+
+    def test_confirmation_rejects_changed_source_generation(self):
+        self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
+                                         based_on_mode="CLOUD_CHAT"))
+        self.pick_profile("cloud-chat")
+        self.click(self.ui.profile_switch)
+        self.until(lambda: self.dialog() is not None)
+        self.ui.store.save(profiles.Profile(id="private-assistant", version=2,
+                                           name="Changed"))
+        for button in self.buttons_of(self.dialog()):
+            if button.get_label() and button.get_label().startswith("Confirm"):
+                button.emit("clicked")
+        self.until(lambda: self.dialog() is None)
+        self.assertEqual(self.ui.cfg["profile"], "private-assistant")
+        self.assertEqual(self.ui.status.get_text(), "profile_changed")
+
     def test_an_escalation_can_be_confirmed_and_is_recorded(self):
         chat = self.add_profile(profiles.Profile(id="cloud-chat", name="Cloud Chat",
                                                  based_on_mode="CLOUD_CHAT").checked())
@@ -2170,13 +2257,13 @@ class DisclosureUITests(EscalationConsentTests):
 
     def test_the_local_boundary_is_stated_before_a_message(self):
         self.connect_model()
-        self.assertIn("Content stays on this computer", self.ui.disclosure_note.get_text())
+        self.assertIn("Upstream processing is unverified", self.ui.disclosure_note.get_text())
         self.text("Merhaba!")
         rows = profiles.read_audit(self.ui.store.root)
         self.assertTrue(any(r["action"] == "disclosure" for r in rows))
         row = [r for r in rows if r["action"] == "disclosure"][-1]
         self.assertEqual(row["decision"], "shown")
-        self.assertEqual(row["reason"], "loopback_transport_only")
+        self.assertEqual(row["reason"], "loopback_upstream_unverified")
 
     def test_a_cloud_mode_states_the_permission_and_the_transport_limit(self):
         self.connect_model()
@@ -2186,7 +2273,7 @@ class DisclosureUITests(EscalationConsentTests):
         self.switch_to("cloud-chat")
         note = self.ui.disclosure_note.get_text()
         self.assertIn("fixture-provider", note)
-        self.assertIn("nothing leaves this computer", note)
+        self.assertIn("Upstream processing is unverified", note)
 
     def test_a_cloud_mode_without_providers_says_routes_are_refused(self):
         self.connect_model()
@@ -2534,6 +2621,18 @@ class AuditFilterUITests(AuditTrailUITests):
         self.until(lambda: self.ui.audit_list.get_text()
                    == "No decision matches this filter.")
 
+    def test_corrupt_audit_is_not_reported_as_empty(self):
+        profiles.audit_path(self.ui.store.root).write_text("[]\n")
+        self.ui.refresh_audit()
+        self.assertEqual(self.ui.audit_list.get_text(), "audit_unavailable")
+
+    def test_rejected_endpoint_is_audited_without_raw_credentials(self):
+        with self.assertRaises(Hold):
+            self.ui.require_endpoint("http://user:fixture-secret@example.invalid")
+        row = profiles.read_audit(self.ui.store.root)[-1]
+        self.assertEqual(row["scope"], ["not_loopback"])
+        self.assertNotIn("fixture-secret", profiles.audit_path(self.ui.store.root).read_text())
+
     def test_an_empty_log_is_different_from_a_filter_with_no_match(self):
         self.assertEqual(self.ui.audit_list.get_text(),
                          "No policy decisions recorded yet.")
@@ -2630,6 +2729,43 @@ class StreamingReplyTests(DesktopTests):
         self.assertIn("JARVIS\n", self.bubbles()[-1])
         self.assertEqual(self.bubbles()[-1], "JARVIS\n")
         self.assertEqual(self.ui.session.history, ())
+
+    def test_attachment_revocation_during_stream_clears_partial_reply(self):
+        self.connect_model()
+        profile = Profile(id="stream-revocation", name="Stream revocation",
+            filesystem_rules=(Rule("filesystem_read", ("attachment",), "allow",
+                                   "fixture", time.time() + 3600),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        path = Path(self.profile_home).resolve() / "stream-fixture.txt"
+        path.write_text("SYNTHETIC-INPUT", encoding="utf-8")
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+
+        async def chat(messages, on_delta=None):
+            self.backend.requests.append(messages)
+            on_delta("Merhaba")
+            self.backend.chat_entered = True
+            await self.backend.chat_release.wait()
+            on_delta("FORBIDDEN-LATE-DELTA")
+            return "Merhaba!"
+
+        self.backend.chat = chat
+        self.ui.entry.set_text("Merhaba!")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.chat_entered)
+        self.assertIn("JARVIS\nMerhaba", self.bubbles())
+        try:
+            self.ui.store.save(Profile(id=profile.id, version=2, name=profile.name,
+                filesystem_rules=(Rule("filesystem_read", ("attachment",), "deny"),)))
+        finally:
+            self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "attachment_context_changed")
+        self.assertEqual(self.bubbles()[-1], "JARVIS\n")
+        self.assertFalse(any("FORBIDDEN-LATE-DELTA" in x for x in self.bubbles()))
+        self.assertEqual(self.ui.session.history, ())
+        self.assertFalse(self.ui.session.has_attachment_history)
+        self.assertIsNone(self.ui.history_attachment_live)
 
     def test_a_whole_reply_without_streaming_is_unchanged(self):
         self.connect_model()
@@ -3301,7 +3437,7 @@ class TopbarTests(DesktopTests):
         self.assertIn("LOCAL_ONLY", text)
         self.assertIn("Private Assistant", text)
         self.assertIn("fixture-chat", text)
-        self.assertIn("content stays on this computer", text)
+        self.assertIn("loopback only; upstream unverified", text)
 
     def test_an_absent_model_is_said_to_be_absent(self):
         self.ui.cfg["llm"] = ""
@@ -3329,9 +3465,8 @@ class TopbarTests(DesktopTests):
         self.connect_model()
         self.ui.url.set_text("https://provider.example/v1")
         self.until(lambda: "endpoint not a loopback address" in self.ui.topbar_note.get_text())
-        # The microphone stays local either way: this build transports only to
-        # a numeric loopback endpoint, so nothing leaves the computer.
-        self.assertIn("content stays on this computer", self.ui.topbar_note.get_text())
+        # A refused endpoint does not prove the entire machine is private.
+        self.assertIn("privacy boundary unverified", self.ui.topbar_note.get_text())
 
     def widgets_of(self, widget):
         out, item = [], widget.get_first_child()
@@ -4333,6 +4468,17 @@ class PickerLifecycleTests(DesktopFixture):
         self.assertIsNone(self.ui.owned_picker)
         self.assertEqual(self.ui.status.get_text(), "picker_context_changed")
 
+    def test_same_version_replacement_rejects_picker_acceptance(self):
+        self.ui.choose("stt")
+        self.assertIsNotNone(self.ui.owned_picker)
+        old = self.ui.active_profile()
+        self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+        with patch.object(self.ui, "register_choice") as register:
+            self.ui.owned_picker.emit("response", Gtk.ResponseType.ACCEPT)
+            register.assert_not_called()
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertEqual(self.ui.status.get_text(), "picker_context_changed")
+
     def test_cloud_mode_denies_legacy_attachment_read(self):
         self.connect_model()
         profile = Profile(id="cloud-file-test", name="Cloud", based_on_mode="CLOUD_CHAT")
@@ -4424,6 +4570,30 @@ class HistoryRouteTests(DesktopFixture):
         self.text("Naber nasılsın?")
         self.assert_no_failed_turn()
         self.assertGreater(len(self.backend.requests), count)
+        self.assertFalse(any("SYNTHETIC-PRIVATE-CASE-9E37" in m.content
+                             for m in self.backend.requests[-1]))
+
+    def test_ordinary_route_checkpoint_uses_identity_without_json_reparse(self):
+        self.connect_model()
+        _, route = self.ui.conversation_backend()
+        with patch.object(self.ui.store, "load") as read:
+            self.assertTrue(self.ui.conversation_authorized(route))
+            read.assert_not_called()
+        self.ui.url.set_text("http://127.0.0.1:9877")
+        self.assertFalse(self.ui.conversation_authorized(route))
+
+    def test_same_version_file_replacement_blocks_text_history(self):
+        self.seed_history()
+        count = len(self.backend.requests)
+        old = self.ui.active_profile()
+        self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+        self.text("Naber nasılsın?")
+        self.assertEqual(len(self.backend.requests), count)
+        self.assertEqual(str(self.ui.session.active.exception()),
+                         "conversation_route_changed_end_conversation")
+        self.ui.interrupt(True)
+        self.text("Naber nasılsın?")
+        self.assert_no_failed_turn()
         self.assertFalse(any("SYNTHETIC-PRIVATE-CASE-9E37" in m.content
                              for m in self.backend.requests[-1]))
 
@@ -4536,11 +4706,14 @@ class ReviewSecurityTests(DesktopFixture):
             if not release.wait(10):
                 raise AssertionError("worker test timeout")
             # The worker is now expired, before the actual content reader.
-            with patch.object(selected_csv.os, "open", side_effect=AssertionError("expired open")) as op:
+            # Observe only the selected-data reader's opens, not policy-clock
+            # checkpoint I/O in the shared os module.
+            with patch.object(selected_csv, "os", wraps=selected_csv.os) as file_os:
+                file_os.open.side_effect = AssertionError("expired open")
                 try:
                     return reader(*args, **kwargs)
                 finally:
-                    calls.extend(op.call_args_list)
+                    calls.extend(file_os.open.call_args_list)
         with patch.object(profiles.time, "time", side_effect=lambda: clock[0]), \
              patch.object(ac, "read_selected_csv", side_effect=delayed):
             self.ui.analysis.start_selected(str(path))
@@ -4564,11 +4737,14 @@ class ReviewSecurityTests(DesktopFixture):
             entered.set()
             if not release.wait(10):
                 raise AssertionError("worker test timeout")
-            with patch.object(selected_csv.os, "open", side_effect=AssertionError("revoked open")) as op:
+            # Observe only the selected-data reader's opens, not policy-clock
+            # checkpoint I/O in the shared os module.
+            with patch.object(selected_csv, "os", wraps=selected_csv.os) as file_os:
+                file_os.open.side_effect = AssertionError("revoked open")
                 try:
                     return reader(*args, **kwargs)
                 finally:
-                    calls.extend(op.call_args_list)
+                    calls.extend(file_os.open.call_args_list)
         with patch.object(ac, "read_selected_csv", side_effect=delayed):
             self.ui.analysis.start_selected(str(path))
             try:
@@ -4643,6 +4819,61 @@ class ReviewSecurityTests(DesktopFixture):
             capture.assert_not_called()
         self.assertEqual(str(self.ui.session.active.exception()), "approval_expired")
 
+
+    def test_voice_expiry_during_capture_blocks_transcription_and_backend(self):
+        self.connect_model()
+        clock = [time.time()]
+        profile = Profile(id="review-expiring-voice", name="Review voice",
+            tool_rules=(Rule("local_audio_device", ("push_to_talk",), "allow",
+                             "fixture", clock[0] + 60),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch.object(profiles.time, "time", side_effect=lambda: clock[0]):
+            self.begin_voice()
+            clock[0] += 120
+            self.click(self.ui.finish_btn)
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "approval_expired")
+        self.assertFalse(self.backend.requests)
+        self.assertFalse(self.backend.speeches)
+        self.assertFalse(self.ui.session.history)
+        self.assertFalse(self.bubbles())
+
+    def test_voice_expiry_during_backend_discards_reply_and_speech(self):
+        self.connect_model()
+        clock = [time.time()]
+        profile = Profile(id="review-expiring-voice", name="Review voice",
+            tool_rules=(Rule("local_audio_device", ("push_to_talk",), "allow",
+                             "fixture", clock[0] + 60),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.backend.hold_chat = True
+        with patch.object(profiles.time, "time", side_effect=lambda: clock[0]):
+            self.begin_voice()
+            self.click(self.ui.finish_btn)
+            self.until(lambda: self.backend.chat_entered)
+            self.assertEqual(len(self.backend.requests), 1)
+            clock[0] += 120
+            self.backend.chat_release.set()
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(self.backend.requests), 1)
+        self.assertFalse(self.backend.speeches)
+        self.assertFalse(self.ui.session.history)
+        self.assertEqual(str(self.ui.session.active.exception()), "attachment_context_changed")
+        self.assertFalse(any(bubble.startswith("JARVIS") for bubble in self.bubbles()))
+
+    def test_voice_policy_replacement_during_capture_blocks_transcription(self):
+        self.connect_model()
+        self.begin_voice()
+        old = self.ui.active_profile()
+        self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+        self.click(self.ui.finish_btn)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(str(self.ui.session.active.exception()), "profile_changed")
+        self.assertFalse(self.backend.requests)
+        self.assertFalse(self.backend.speeches)
+        self.assertFalse(self.ui.session.history)
+        self.assertFalse(self.bubbles())
 
     def test_attachment_expiry_between_submission_and_backend(self):
         self.connect_model()

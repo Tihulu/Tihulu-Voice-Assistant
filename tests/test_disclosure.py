@@ -59,14 +59,24 @@ class FactsTests(unittest.TestCase):
         self.assertIn("cloud_inference", data["grants"])
         self.assertEqual(data["transport"], "loopback_only")
 
-    def test_this_build_never_sends_content_off_the_machine(self):
+    def test_direct_transport_does_not_prove_upstream_locality(self):
         for mode in ("LOCAL_ONLY", "CLOUD_CHAT", "SECURE_HYBRID", "CUSTOM"):
             for providers in ((), ("fixture-provider",)):
                 with self.subTest(mode=mode, providers=providers):
                     data = facts(profile(based_on_mode=mode, allowed_providers=providers),
                                  LOOPBACK)
-                    self.assertFalse(data["content_leaves"])
-                    self.assertEqual(data["leak_reason"], "loopback_transport_only")
+                    self.assertIsNone(data["content_leaves"])
+                    self.assertFalse(data["direct_remote_inference"])
+                    self.assertFalse(data["upstream_verified"])
+                    self.assertEqual(data["leak_reason"], "loopback_upstream_unverified")
+
+    def test_clock_floor_controls_disclosure_grants(self):
+        timed = profile(based_on_mode="SECURE_HYBRID",
+                        shell_rules=(Rule("host_shell", ("jan-qwen",), "allow",
+                                          "fixture", 110),))
+        self.assertIn("host_shell", facts(timed, LOOPBACK, 100)["grants"])
+        self.assertNotIn("host_shell", facts(timed, LOOPBACK, 120)["grants"])
+        self.assertNotIn("host_shell", facts(timed, LOOPBACK, float("inf"))["grants"])
 
     def test_a_non_loopback_endpoint_is_stated_not_implied(self):
         data = facts(profile(), "http://example.test/x")
@@ -75,7 +85,7 @@ class FactsTests(unittest.TestCase):
 
     def test_the_statement_matches_the_boundary(self):
         self.assertEqual(statement(facts(profile(), LOOPBACK)),
-                         "content stays on this computer")
+                         "loopback transport only; upstream processing is unverified")
         approved = facts(profile(based_on_mode="CLOUD_CHAT",
                                  allowed_providers=("fixture-provider",)), LOOPBACK)
         self.assertIn("permits cloud reasoning", statement(approved))

@@ -217,6 +217,113 @@ class StoreTests(unittest.TestCase):
             Store._parse(text)
 
 
+class StoreMutationTests(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.store = Store(root.name)
+        self.other = Store(root.name)
+        self.store.save(base())
+
+    def test_conflicting_writer_and_rollback_cannot_pass_version_check(self):
+        with self.store._mutation_lock():
+            with self.assertRaisesRegex(Hold, "profile_store_busy_or_unavailable"):
+                self.other.save(base(version=2, name="stale"))
+            with self.assertRaisesRegex(Hold, "profile_store_busy_or_unavailable"):
+                self.other.rollback("local-only", 1)
+            self.store._save_locked(base(version=2, name="winner"))
+        with self.assertRaisesRegex(Hold, "version_must_increase"):
+            self.other.save(base(version=2, name="stale"))
+        self.assertEqual(self.other.load("local-only").name, "winner")
+        self.assertEqual([p.version for p in self.other.versions("local-only")], [1, 2])
+
+    def test_delete_refuses_stale_or_contended_generation_and_preserves_history(self):
+        shown = self.store.load("local-only")
+        with self.store._mutation_lock():
+            with self.assertRaisesRegex(Hold, "profile_store_busy_or_unavailable"):
+                self.other.delete("local-only", expected=shown)
+        updated = self.store.save(base(version=2, name="new"))
+        with self.assertRaisesRegex(Hold, "profile_changed"):
+            self.other.delete("local-only", expected=shown)
+        self.other.delete("local-only", expected=updated)
+        self.assertNotIn("local-only", self.store.ids())
+        self.assertEqual([p.version for p in self.store.versions("local-only")], [1, 2])
+
+    def test_startup_does_not_select_arbitrary_or_disabled_profile(self):
+        self.store.save(base(id="privileged", based_on_mode="CUSTOM"))
+        with self.assertRaisesRegex(Hold, "profile_not_found"):
+            self.store.startup_profile("")
+        self.store.save(base(id="private-assistant"))
+        self.assertEqual(self.store.startup_profile("").id, "private-assistant")
+        self.assertEqual(self.store.startup_profile("privileged").id, "privileged")
+        self.store.save(base(id="privileged", version=2, state="disabled"))
+        with self.assertRaisesRegex(Hold, "profile_not_active"):
+            self.store.startup_profile("privileged")
+        with self.assertRaisesRegex(Hold, "profile_not_found"):
+            self.store.startup_profile("missing")
+
+    def test_create_only_refuses_even_higher_version_of_existing_profile(self):
+        with self.assertRaisesRegex(Hold, "profile_already_exists"):
+            self.other.save(base(version=9, name="import"), create_only=True)
+        self.assertEqual(self.store.load("local-only").version, 1)
+
+    def test_existing_history_generation_cannot_be_replaced(self):
+        path = self.store.history / "local-only-v2.json"
+        original = Store._dump(base(version=2, name="archived"))
+        path.write_text(original)
+        with self.assertRaisesRegex(Hold, "version_must_increase"):
+            self.store.save(base(version=2, name="replacement"))
+        self.assertEqual(path.read_text(), original)
+        self.assertEqual(self.store.load("local-only").version, 1)
+
+    def test_profile_identity_and_history_prefix_are_isolated(self):
+        self.store.save(base(id="local-only-v2", name="other profile"))
+        self.assertEqual([p.id for p in self.store.versions("local-only")], ["local-only"])
+        rolled = self.store.rollback("local-only", 1)
+        self.assertEqual((rolled.id, rolled.version), ("local-only", 2))
+        self.store._path("local-only").write_text(Store._dump(base(id="wrong")))
+        with self.assertRaisesRegex(Hold, "profile_changed"):
+            self.store.load("local-only")
+        with self.assertRaisesRegex(Hold, "profile_changed"):
+            self.store.save(base(version=3))
+
+    def test_rollback_after_failed_history_write_uses_active_version(self):
+        from unittest.mock import patch
+        original = self.store._write
+        def write(path, text):
+            if path.parent == self.store.history:
+                raise OSError("fixture")
+            original(path, text)
+        with patch.object(self.store, "_write", side_effect=write):
+            with self.assertRaisesRegex(Hold, "profile_history_write_failed"):
+                self.store.save(base(version=2, name="active without archive"))
+        self.assertEqual(self.store.load("local-only").version, 2)
+        self.assertEqual(self.store.rollback("local-only", 1).version, 3)
+        self.assertEqual([p.version for p in self.store.versions("local-only")], [1, 2, 3])
+        self.assertEqual(self.store.versions("local-only")[1].name, "active without archive")
+
+    def test_failed_recovery_preserves_active_generation(self):
+        from unittest.mock import patch
+        self.store.save(base(version=2, name="active"))
+        (self.store.history / "local-only-v2.json").unlink()
+        with patch.object(self.other, "_write", side_effect=OSError("fixture")):
+            with self.assertRaisesRegex(Hold, "profile_history_write_failed"):
+                self.other.save(base(version=3, name="new"))
+        self.assertEqual(self.store.load("local-only").name, "active")
+        self.assertFalse((self.store.history / "local-only-v3.json").exists())
+
+    def test_recovery_never_replays_historical_grants(self):
+        granted = base(version=2, tool_rules=(Rule("local_audio_device", (), ALLOW),))
+        self.store.save(granted)
+        revoked = base(version=3, tool_rules=(Rule("local_audio_device", (), DENY),))
+        self.store.save(revoked)
+        (self.store.history / "local-only-v3.json").unlink()
+        reopened = Store(self.store.root)
+        self.assertEqual(effective(reopened.load("local-only")).evaluate("local_audio_device")[0], DENY)
+        reopened.save(base(version=4, name="updated", tool_rules=revoked.tool_rules))
+        self.assertEqual(effective(reopened.versions("local-only")[2]).evaluate("local_audio_device")[0], DENY)
+
+
 class EndpointEnforcementTests(unittest.TestCase):
     def profile(self, **kw):
         values = {"id": "local-only", "name": "Assistant", "based_on_mode": "LOCAL_ONLY", "version": 1}
@@ -332,6 +439,53 @@ class AuditTrailTests(unittest.TestCase):
         profiles.audit_path(self.tmp).write_text("{not json", encoding="utf-8")
         with self.assertRaisesRegex(Hold, "audit_unreadable"):
             profiles.read_audit(self.tmp)
+
+    def test_audit_rejects_special_oversize_and_invalid_rows(self):
+        import os
+        from unittest.mock import patch
+        path = profiles.audit_path(self.tmp)
+        target = self.tmp / "fixture"
+        target.write_text("secret")
+        for kind in ("fifo", "symlink", "oversize"):
+            if kind == "fifo":
+                os.mkfifo(path)
+            elif kind == "symlink":
+                path.symlink_to(target)
+            else:
+                path.write_bytes(b"x" * (profiles.AUDIT_BYTES + 1))
+            try:
+                with patch.object(profiles, "read_selected_bytes") as reader:
+                    with self.assertRaisesRegex(Hold, "audit_unreadable"):
+                        profiles.read_audit(self.tmp)
+                    reader.assert_not_called()
+            finally:
+                path.unlink()
+        for raw in ("[]", '{"at":1}', '{"at":NaN}'):
+            path.write_text(raw + "\n")
+            with self.assertRaisesRegex(Hold, "audit_unreadable"):
+                profiles.read_audit(self.tmp)
+
+    def test_endpoint_credentials_not_recorded_or_rewritten(self):
+        path = profiles.audit_path(self.tmp)
+        old = {"at": 1, "profile": "local-only", "action": "endpoint",
+               "scope": ["http://user:fixture-secret@example.invalid"], "decision": "deny",
+               "reason": "mode_policy"}
+        path.write_text(json.dumps(old) + "\n")
+        self.assertEqual(profiles.read_audit(self.tmp)[0]["scope"], ["redacted"])
+        profiles.record_decision(self.tmp, "local-only", "endpoint",
+                                 ("http://fixture-new-secret@example.invalid",),
+                                 "deny", "mode_policy", now=2)
+        self.assertNotIn("fixture-secret", path.read_text())
+        self.assertNotIn("fixture-new-secret", path.read_text())
+
+    def test_contended_audit_writer_does_not_lose_previous_record(self):
+        profiles.record_decision(self.tmp, "local-only", "endpoint", ("loopback",),
+                                 "allow", "mode_policy", now=1)
+        with profiles._audit_lock(self.tmp):
+            with self.assertRaisesRegex(Hold, "audit_unavailable"):
+                profiles.record_decision(self.tmp, "local-only", "endpoint", ("not_loopback",),
+                                         "deny", "mode_policy", now=2)
+        self.assertEqual(len(profiles.read_audit(self.tmp)), 1)
 
     def test_the_log_carries_no_private_material(self):
         profiles.record_decision(self.tmp, "local-only", "local_audio_device", ("push_to_talk",), "deny", "profile_forbids_local_audio_device", now=9.0)
@@ -484,9 +638,394 @@ class LivePolicyTests(unittest.TestCase):
         self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
                          (DENY, "policy_changed"))
 
+    def test_policy_replaced_during_clock_check_is_denied(self):
+        from unittest.mock import patch
+        live = self.store.bind_live(self.profile.id)
+        def replace_policy():
+            self.store.save(base(version=2, filesystem_rules=(
+                Rule("filesystem_read", ("csv_analysis",), DENY),)))
+            return 90.0
+        with patch.object(self.store._clock, "now", side_effect=replace_policy):
+            self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
+                             (DENY, "policy_changed"))
+
+    def test_snapshot_identity_checkpoint_does_not_read_profile_contents(self):
+        from unittest.mock import patch
+        _, stamp = self.store.snapshot(self.profile.id)
+        with patch.object(self.store, "_read_profile") as read:
+            self.assertTrue(self.store.is_current(self.profile.id, stamp))
+            read.assert_not_called()
+        self.store._write(self.store._path(self.profile.id), Store._dump(self.profile))
+        self.assertFalse(self.store.is_current(self.profile.id, stamp))
+
     def test_removed_policy_fails_closed(self):
         live = self.store.bind_live(self.profile.id)
         self.store._path(self.profile.id).unlink()
         self.assertFalse(live.unchanged())
         self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
                          (DENY, "policy_changed"))
+
+
+class GrantInheritanceTests(unittest.TestCase):
+    def source(self):
+        return base(id="private", filesystem_rules=(
+            Rule("filesystem_read", ("file",), ALLOW, "expired", 99),
+            Rule("filesystem_read", ("live",), ALLOW, "current", 1e12),
+            Rule("filesystem_read", ("timed",), ALLOW, expires_at=99),
+            Rule("filesystem_read", ("plain",), ALLOW),
+            Rule("filesystem_write", ("project",), DENY),
+            Rule("filesystem_write", ("notes",), ASK),
+        ), network_rules=(Rule("browser_navigate", ("public",), ALLOW),))
+
+    def assert_no_copied_grants(self, profile):
+        for rule in profile.rules():
+            self.assertNotEqual(rule.decision, ALLOW)
+            self.assertEqual((rule.approval, rule.expires_at), ("", 0))
+        self.assertEqual(effective(profile).evaluate("filesystem_write", ("project",))[0], DENY)
+        self.assertEqual(effective(profile).evaluate("filesystem_write", ("notes",))[0], ASK)
+
+    def test_clone_requires_new_authorization_even_for_plain_or_live_allow(self):
+        source = self.source()
+        clone = clone_to_custom(source, "Clone")
+        self.assert_no_copied_grants(clone)
+        for scope in ("file", "live", "timed", "plain"):
+            with self.subTest(scope=scope), self.assertRaisesRegex(Hold, "approval_required"):
+                profiles.require_tool(clone, "filesystem_read", (scope,), now=100, selected=True)
+        self.assertEqual(effective(clone).evaluate("browser_navigate", ("public",))[0], ASK)
+        self.assertEqual(effective(source).evaluate("filesystem_read", ("live",), now=100)[0], ALLOW)
+
+    def test_sanitization_never_launders_an_allow(self):
+        clean = sanitized(self.source())
+        self.assertEqual(clean.state, "pending_review")
+        self.assert_no_copied_grants(clean)
+
+    def test_rollback_requires_reauthorization_even_for_historical_allow(self):
+        from dataclasses import replace
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root))
+            source = replace(self.source(), voice_activation="wake_word",
+                             background_processing_enabled=True)
+            store.save(source)
+            store.save(replace(source, version=2, filesystem_rules=(), network_rules=()))
+            rolled = store.rollback(source.id, 1)
+            self.assertEqual(rolled.version, 3)
+            self.assert_no_copied_grants(rolled)
+            self.assertEqual(rolled.voice_activation, "off")
+            self.assertFalse(rolled.background_processing_enabled)
+            with self.assertRaisesRegex(Hold, "approval_required"):
+                profiles.require_tool(store.load(source.id), "filesystem_read", ("file",), now=100)
+
+
+class LiveExpiryHighWaterTests(unittest.TestCase):
+    def test_observed_forward_expiry_cannot_revive_after_clock_correction(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root))
+            profile = base(filesystem_rules=(Rule("filesystem_read", ("csv_analysis",),
+                           ALLOW, approval="fixture", expires_at=100),))
+            store.save(profile)
+            with (patch.object(profiles.time, "time", return_value=90),
+                  patch.object(profiles.time, "monotonic", return_value=10)):
+                live = store.bind_live(profile.id)
+            with (patch.object(profiles.time, "time", return_value=120),
+                  patch.object(profiles.time, "monotonic", return_value=11)):
+                self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
+                                 (ASK, "approval_expired"))
+            with (patch.object(profiles.time, "time", return_value=91),
+                  patch.object(profiles.time, "monotonic", return_value=12)):
+                self.assertEqual(live.evaluate("filesystem_read", ("csv_analysis",)),
+                                 (ASK, "approval_expired"))
+
+
+class SharedPolicyClockTests(unittest.TestCase):
+    def test_new_binding_and_direct_gate_share_irreversible_expiry(self):
+        from unittest.mock import patch
+        with tempfile.TemporaryDirectory() as root:
+            store = Store(Path(root))
+            profile = base(tool_rules=(Rule("local_audio_device", ("push_to_talk",),
+                           ALLOW, approval="fixture", expires_at=110),))
+            store.save(profile)
+            wall, mono = [100], [50]
+            with (patch.object(profiles.time, "time", side_effect=lambda: wall[0]),
+                  patch.object(profiles.time, "monotonic", side_effect=lambda: mono[0])):
+                live = store.bind_live(profile.id)
+                self.assertEqual(live.evaluate("local_audio_device", ("push_to_talk",))[0], ALLOW)
+                wall[0], mono[0] = 120, 51
+                self.assertEqual(live.evaluate("local_audio_device", ("push_to_talk",)),
+                                 (ASK, "approval_expired"))
+                wall[0], mono[0] = 101, 52
+                rebound = store.bind_live(profile.id)
+                self.assertGreaterEqual(store.policy_now(), 121)
+                self.assertEqual(rebound.evaluate("local_audio_device", ("push_to_talk",)),
+                                 (ASK, "approval_expired"))
+                with self.assertRaisesRegex(Hold, "approval_expired"):
+                    profiles.require_tool(store.load(profile.id), "local_audio_device",
+                                          ("push_to_talk",), store.policy_now())
+
+    def test_clone_and_import_do_not_copy_automatic_activation(self):
+        source = base(id="private", voice_activation="wake_word",
+                      background_processing_enabled=True)
+        for copied in (clone_to_custom(source, "Clone"), sanitized(source)):
+            self.assertEqual(copied.voice_activation, "off")
+            self.assertFalse(copied.background_processing_enabled)
+
+
+class BoundedProfileReadTests(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.store = Store(Path(root.name))
+        self.path = self.store._path("local-only")
+
+    def test_fifo_symlink_and_oversize_refused_before_content_reader(self):
+        import os
+        from unittest.mock import patch
+        target = self.store.root / "fixture"
+        target.write_text(Store._dump(base()), encoding="utf-8")
+        for kind in ("fifo", "symlink", "oversize"):
+            with self.subTest(kind=kind):
+                if kind == "fifo":
+                    os.mkfifo(self.path)
+                elif kind == "symlink":
+                    self.path.symlink_to(target)
+                else:
+                    self.path.write_bytes(b"x" * (Store.LIMIT * 4 + 1))
+                try:
+                    with patch.object(profiles, "read_selected_bytes") as reader:
+                        with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                            self.store.load("local-only")
+                        with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                            self.store.bind_live("local-only")
+                        reader.assert_not_called()
+                finally:
+                    self.path.unlink()
+
+    def test_profile_import_rejects_special_and_oversize_files_before_read(self):
+        import os
+        from unittest.mock import patch
+        source = self.store.root / "import.json"
+        target = self.store.root / "fixture"
+        target.write_text(Store._dump(base()))
+        for kind in ("fifo", "symlink", "oversize"):
+            with self.subTest(kind=kind):
+                if kind == "fifo":
+                    os.mkfifo(source)
+                elif kind == "symlink":
+                    source.symlink_to(target)
+                else:
+                    source.write_bytes(b"x" * (Store.LIMIT * 4 + 1))
+                try:
+                    with patch.object(profiles, "read_selected_bytes") as reader:
+                        with self.assertRaisesRegex(Hold, "profile_import_rejected"):
+                            self.store.import_file(str(source))
+                        reader.assert_not_called()
+                finally:
+                    source.unlink()
+        source.write_text(Store._dump(base()))
+        self.assertEqual(self.store.import_file(str(source)).id, "local-only")
+
+    def test_replacement_between_stamp_and_read_is_refused(self):
+        from unittest.mock import patch
+        self.store.save(base())
+        reader = profiles.read_selected_bytes
+        def replaced(path, **kwargs):
+            self.path.rename(self.path.with_suffix(".old"))
+            self.path.write_text(Store._dump(base(version=2)), encoding="utf-8")
+            return reader(path, **kwargs)
+        with patch.object(profiles, "read_selected_bytes", side_effect=replaced):
+            with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                self.store.load("local-only")
+
+    def test_malformed_fields_and_encoding_fail_closed(self):
+        for raw in (b"{}", b"[]", b"\xff"):
+            with self.subTest(raw=raw):
+                self.path.write_bytes(raw)
+                with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                    self.store.load("local-only")
+
+
+class StrictProfileDecodeTests(unittest.TestCase):
+    def test_no_implicit_conversion_of_security_relevant_fields(self):
+        original = json.loads(Store._dump(base()))
+        for key, value in (
+                ("background_processing_enabled", "false"),
+                ("background_processing_enabled", 1),
+                ("version", True), ("version", "1"), ("version", 1.5),
+                ("credential_refs", "key"), ("allowed_providers", {"x": True}),
+                ("voice_by_language", []), ("rules", {}),
+                ("created_at", float("inf")), ("updated_at", True)):
+            with self.subTest(key=key, value=value):
+                with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                    Store._parse(json.dumps(dict(original, **{key: value})))
+
+    def test_rule_fields_and_duplicate_keys_are_rejected(self):
+        original = json.loads(Store._dump(base()))
+        rule = {"action": "local_audio_device", "decision": ALLOW,
+                "scope": [], "approval": "", "expires_at": 0}
+        for key, value in (("scope", "push_to_talk"), ("scope", [True]),
+                           ("approval", 0), ("expires_at", True),
+                           ("expires_at", "120"), ("expires_at", float("nan")),
+                           ("action", [])):
+            with self.subTest(key=key, value=value):
+                with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                    Store._parse(json.dumps(dict(original, rules=[dict(rule, **{key: value})])))
+        for raw in ('{"id":"a","id":"b"}',
+                    '{"rules":[{"decision":"deny","decision":"allow"}]}'):
+            with self.assertRaisesRegex(Hold, "profile_unreadable"):
+                Store._parse(raw)
+
+    def test_save_does_not_emit_non_roundtrippable_policy(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        store = Store(root.name)
+        with self.assertRaisesRegex(Hold, "profile_unreadable"):
+            store.save(base(background_processing_enabled="false"))
+        self.assertEqual(store.ids(), ())
+
+
+class RestartPolicyClockTests(unittest.TestCase):
+    def setUp(self):
+        root = tempfile.TemporaryDirectory()
+        self.addCleanup(root.cleanup)
+        self.root = Path(root.name)
+        self.store = Store(self.root)
+        self.profile = base(tool_rules=(Rule("local_audio_device", ("push_to_talk",),
+                            ALLOW, approval="fixture", expires_at=110),))
+        self.store.save(self.profile)
+        self.scope = ("push_to_talk",)
+
+    def test_observed_expiry_survives_reopen_with_earlier_wall_clock(self):
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=50)):
+            live = self.store.bind_live(self.profile.id)
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ALLOW)
+        with (patch.object(profiles.time, "time", return_value=120),
+              patch.object(profiles.time, "monotonic", return_value=51)):
+            self.assertEqual(live.evaluate("local_audio_device", self.scope),
+                             (ASK, "approval_expired"))
+        with (patch.object(profiles.time, "time", return_value=101),
+              patch.object(profiles.time, "monotonic", return_value=1)):
+            reopened = Store(self.root)
+            self.assertGreaterEqual(reopened.policy_now(), 120)
+            self.assertEqual(reopened.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope), (ASK, "approval_expired"))
+            with self.assertRaisesRegex(Hold, "approval_expired"):
+                profiles.require_tool(reopened.load(self.profile.id), "local_audio_device",
+                                      self.scope, reopened.policy_now())
+        self.assertNotIn(".policy-clock", self.store.ids())
+        self.assertEqual((self.root / ".policy-clock").stat().st_mode & 0o077, 0)
+
+    def test_invalid_checkpoint_denies_timed_allow(self):
+        path = self.root / ".policy-clock"
+        path.write_bytes(b"not a clock")
+        self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+            "local_audio_device", self.scope), (ASK, "approval_expired"))
+
+    def test_failed_checkpoint_write_latches_timed_denial(self):
+        from unittest.mock import patch
+        with patch.object(self.store._clock, "_persist", side_effect=OSError("fixture")):
+            self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope), (ASK, "approval_expired"))
+        self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+            "local_audio_device", self.scope), (ASK, "approval_expired"))
+
+    def test_checkpoint_reserves_ceiling_without_writing_each_check(self):
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=100.1),
+              patch.object(profiles.time, "monotonic", side_effect=[10.0, 10.1, 10.2]),
+              patch.object(self.store._clock, "_persist", wraps=self.store._clock._persist) as persist):
+            for _ in range(3):
+                self.assertLess(self.store.policy_now(), 101)
+            persist.assert_called_once_with(101)
+
+    def test_two_stores_cannot_overwrite_or_authorize_below_newer_floor(self):
+        from unittest.mock import patch
+        other = Store(self.root)
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=10)):
+            old = self.store.bind_live(self.profile.id)
+            newer = other.bind_live(self.profile.id)
+            self.assertEqual(old.evaluate("local_audio_device", self.scope)[0], ALLOW)
+        with (patch.object(profiles.time, "time", return_value=120),
+              patch.object(profiles.time, "monotonic", return_value=11)):
+            self.assertEqual(newer.evaluate("local_audio_device", self.scope)[0], ASK)
+        with (patch.object(profiles.time, "time", return_value=102),
+              patch.object(profiles.time, "monotonic", return_value=12)):
+            self.assertEqual(old.evaluate("local_audio_device", self.scope),
+                             (ASK, "approval_expired"))
+            self.assertGreaterEqual(int((self.root / ".policy-clock").read_text()), 120)
+            self.assertEqual(Store(self.root).bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+
+    def test_deleted_or_lowered_checkpoint_fails_closed_in_observing_store(self):
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=10)):
+            live = self.store.bind_live(self.profile.id)
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ALLOW)
+            path = self.root / ".policy-clock"
+            path.unlink()
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ASK)
+            path.write_text("100\n")
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ASK)
+            other = Store(self.root)
+            second = other.bind_live(self.profile.id)
+            self.assertEqual(second.evaluate("local_audio_device", self.scope)[0], ALLOW)
+            path.write_text("99\n")
+            self.assertEqual(second.evaluate("local_audio_device", self.scope)[0], ASK)
+
+    def test_missing_initialized_checkpoint_refused_after_reopen(self):
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=120),
+              patch.object(profiles.time, "monotonic", return_value=10)):
+            self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+        marker = self.root / ".policy-clock-initialized"
+        self.assertTrue(marker.is_file())
+        self.assertEqual(marker.stat().st_mode & 0o077, 0)
+        (self.root / ".policy-clock").unlink()
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=1)):
+            reopened = Store(self.root)
+            self.assertEqual(reopened.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+            self.assertFalse((self.root / ".policy-clock").exists())
+
+    def test_first_checkpoint_failure_is_not_fresh_store_on_restart(self):
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=10),
+              patch.object(self.store._clock, "_persist", side_effect=OSError("fixture"))):
+            self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+            self.assertEqual(Store(self.root).bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+
+    def test_intact_legacy_checkpoint_is_migrated_without_reset(self):
+        from unittest.mock import patch
+        (self.root / ".policy-clock").write_text("120\n")
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=10)):
+            self.assertEqual(self.store.bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+        self.assertTrue((self.root / ".policy-clock-initialized").is_file())
+        self.assertEqual((self.root / ".policy-clock").read_text(), "120\n")
+
+
+    def test_contended_checkpoint_lock_fails_closed_without_waiting(self):
+        import fcntl
+        import os
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=10)):
+            live = self.store.bind_live(self.profile.id)
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ALLOW)
+            fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ASK)
+            finally:
+                os.close(fd)
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ASK)
+

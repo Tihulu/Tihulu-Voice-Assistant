@@ -381,20 +381,7 @@ def create_window(app, loop, bridge=None):
             self.build_market_page()
             try:
                 profiles.ensure_default(self.store)
-                wanted = self.cfg.get("profile") or ""
-                active = None
-                if wanted:
-                    candidate = self.store.load(wanted)
-                    if candidate.state == "active":
-                        active = candidate
-                if active is None:
-                    for pid in self.store.ids():
-                        found = self.store.load(pid)
-                        if found.state == "active":
-                            active = found
-                            break
-                if active is None:
-                    raise Hold("no_active_profile")
+                active = self.store.startup_profile(self.cfg.get("profile"))
                 self.activate_profile(active.id, quiet=True)
             except Hold as exc:
                 read_error = (read_error + " " if read_error else "") + str(exc)
@@ -512,6 +499,10 @@ def create_window(app, loop, bridge=None):
             self.stack.add_titled(view,"profiles",tr("Profiles","Profiller","Profile"))
             self.profile_note = Gtk.Label(xalign=0,wrap=True)
             page.append(self.profile_note)
+            self.profile_storage_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.profile_storage_note)
+            self.policy_clock_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.policy_clock_note)
             self.profile_list = Gtk.ListBox()
             self.profile_list.connect("row-selected", lambda *_: self.refresh_profile_buttons())
             page.append(self.profile_list)
@@ -575,6 +566,8 @@ def create_window(app, loop, bridge=None):
             try:
                 self.rebuild_audit_filters()
                 self.show_audit_rows()
+            except Hold:
+                self.audit_list.set_text("audit_unavailable")
             finally:
                 self.audit_building = False
 
@@ -596,7 +589,8 @@ def create_window(app, loop, bridge=None):
                 rows = profiles.read_audit(self.store.root, 40, action=chosen,
                                            decision=decision)
             except Hold:
-                rows = ()
+                self.audit_list.set_text("audit_unavailable")
+                return
             if not rows:
                 # An empty log and a filter that matches nothing are different
                 # facts; the reader is told which one holds.
@@ -625,8 +619,13 @@ def create_window(app, loop, bridge=None):
             for row in list(self.policy_rows):
                 self.profile_list.remove(row)
             self.policy_rows = {}
+            invalid = 0
             for pid in self.store.ids():
-                entry = self.store.load(pid)
+                try:
+                    entry = self.store.load(pid)
+                except Hold:
+                    invalid += 1
+                    continue
                 label = Gtk.Label(label="%s · %s · %s" % (entry.name, entry.based_on_mode, entry.state),xalign=0)
                 row = Gtk.ListBoxRow()
                 row.set_child(label)
@@ -637,13 +636,18 @@ def create_window(app, loop, bridge=None):
                 if entry.id == active:
                     self.profile_list.select_row(row)
                     break
+            self.profile_storage_note.set_text(tr(
+                "%d unreadable profile(s); skipped, not activated." % invalid,
+                "%d okunamayan profil; atlandı, etkinleştirilmedi." % invalid,
+                "%d unlesbare Profile; übersprungen, nicht aktiviert." % invalid
+            ) if invalid else "")
             self.refresh_profile_buttons()
 
         def picker_context(self):
-            profile = self.active_profile()
+            profile, stamp = self.store.snapshot(self.cfg.get("profile"))
             if profile.state != "active":
                 raise Hold("profile_not_active")
-            return (profile.id, profile.version, profile.based_on_mode, self.session.epoch)
+            return (profile.id, profile.version, profile.based_on_mode, self.session.epoch, stamp)
 
         def dismiss_picker(self):
             dialog, handler = self.owned_picker, self.owned_picker_handler
@@ -700,12 +704,16 @@ def create_window(app, loop, bridge=None):
             self.attachment_note.set_text("")
 
         def attachment_route(self):
-            profile = self.active_profile()
+            profile, stamp = self.store.snapshot(self.cfg.get("profile"))
+            if profile.state != "active":
+                raise Hold("profile_not_active")
             return (profile.id, profile.version, profile.based_on_mode,
-                    self.url.get_text().strip(), self.cfg["llm"])
+                    self.url.get_text().strip(), self.cfg["llm"], stamp)
 
-        def activate_profile(self, profile_id, quiet=False):
-            entry = self.store.load(profile_id).checked()
+        def activate_profile(self, profile_id, quiet=False, expected=None):
+            entry, stamp = self.store.snapshot(profile_id)
+            if expected is not None and (entry, stamp) != expected:
+                raise Hold("profile_changed")
             if entry.state != "active":
                 raise Hold("profile_not_active")
             self.dismiss_picker()
@@ -737,22 +745,33 @@ def create_window(app, loop, bridge=None):
             except Hold as exc:
                 self.set_state("ready", str(exc))
 
-        def switch_profile(self, profile_id):
-            target = self.store.load(profile_id).checked()
+        def switch_context(self):
+            active = self.cfg.get("profile")
             try:
-                current = self.store.load(self.cfg["profile"]).checked()
+                current = self.store.snapshot(active)
             except (Hold, KeyError):
                 current = None
-            if current is None:
-                extra = profiles.granted(target)
-            else:
-                extra = profiles.escalation(current, target)
-            if not extra:
-                self.activate_profile(profile_id)
-                return None
-            return self.confirm_escalation(target, extra)
+            return active, current
 
-        def confirm_escalation(self, target, extra):
+        def switch_profile(self, profile_id):
+            if self.busy or self.closing:
+                raise Hold("profile_switch_busy")
+            target, stamp = self.store.snapshot(profile_id)
+            if target.state != "active":
+                raise Hold("profile_not_active")
+            context = self.switch_context()
+            current = context[1]
+            now = self.store.policy_now()
+            extra = (profiles.granted(target, now) if current is None
+                     else profiles.escalation(current[0], target, now))
+            if not extra:
+                if self.switch_context() != context:
+                    raise Hold("profile_changed")
+                self.activate_profile(profile_id, expected=(target, stamp))
+                return None
+            return self.confirm_escalation(target, extra, stamp, context)
+
+        def confirm_escalation(self, target, extra, stamp, context):
             """Show exactly which privileges the switch would add."""
             lines = profiles.describe(extra)
             dialog = Gtk.Window(title=tr("Confirm added privileges",
@@ -775,7 +794,7 @@ def create_window(app, loop, bridge=None):
             self.button(row, tr("Cancel", "Vazgeç", "Abbrechen"),
                         lambda: self.cancel_escalation(target, dialog))
             self.button(row, tr("Confirm switch", "Geçişi onayla", "Wechsel bestätigen"),
-                        lambda: self.apply_escalation(target, dialog, lines))
+                        lambda: self.apply_escalation(target, dialog, lines, extra, stamp, context))
             dialog.connect("close-request", lambda *_: self.forget_confirmation(dialog) or False)
             self.confirmations.append(dialog)
             self.refresh_state_row()
@@ -788,10 +807,22 @@ def create_window(app, loop, bridge=None):
             self.refresh_state_row()
             return False
 
-        def apply_escalation(self, target, dialog, lines):
+        def apply_escalation(self, target, dialog, lines, extra, stamp, context):
+            if dialog not in self.confirmations:
+                return
+            self.forget_confirmation(dialog)
             dialog.close()
             try:
-                self.activate_profile(target.id)
+                if (self.busy or self.closing or self.switch_context() != context
+                        or self.store.snapshot(target.id) != (target, stamp)):
+                    raise Hold("profile_changed")
+                now = self.store.policy_now()
+                current = context[1]
+                remaining = (profiles.granted(target, now) if current is None
+                             else profiles.escalation(current[0], target, now))
+                if not remaining <= extra or self.switch_context() != context:
+                    raise Hold("profile_changed")
+                self.activate_profile(target.id, expected=(target, stamp))
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return
@@ -811,22 +842,21 @@ def create_window(app, loop, bridge=None):
                                        "Wechsel abgebrochen."))
 
         def activate_selected(self):
-            chosen = self.selected_profile()
-            if chosen is None or self.busy:
-                return
-            try:
-                self.activate_profile(chosen.id)
-            except Hold as exc:
-                self.set_state("ready", str(exc))
+            # Both visible entry points must use the same consent boundary.
+            self.switch_selected()
 
         def clone_selected(self):
             chosen = self.selected_profile()
             if chosen is None or self.busy:
                 return
             try:
-                clone = profiles.clone_to_custom(chosen, chosen.name + " copy")
-                self.store.save(clone)
-                self.activate_profile(clone.id)
+                current, _ = self.store.snapshot(chosen.id)
+                if current != chosen:
+                    raise Hold("profile_changed")
+                clone = profiles.clone_to_custom(current, current.name + " copy")
+                self.store.save(clone, create_only=True)
+                self.refresh_profiles()
+                self.switch_profile(clone.id)
             except Hold as exc:
                 self.set_state("ready", str(exc))
 
@@ -835,10 +865,10 @@ def create_window(app, loop, bridge=None):
             if chosen is None or self.busy or chosen.id == self.cfg.get("profile"):
                 return
             try:
-                (self.store.root / (chosen.id + ".json")).unlink(missing_ok=True)
+                self.store.delete(chosen.id, expected=chosen)
                 self.refresh_profiles()
-            except OSError:
-                self.set_state("ready", "profile_not_deletable")
+            except Hold as exc:
+                self.set_state("ready", str(exc))
 
         def create_template(self):
             if self.busy:
@@ -848,18 +878,19 @@ def create_window(app, loop, bridge=None):
                 entry = profiles.template(key)
                 if (self.store.root / (entry.id + ".json")).is_file():
                     raise Hold("profile_already_exists")
-                self.store.save(entry)
-                self.activate_profile(entry.id)
+                self.store.save(entry, create_only=True)
+                self.refresh_profiles()
+                self.switch_profile(entry.id)
             except Hold as exc:
                 self.set_state("ready", str(exc))
 
         def import_profile_text(self, raw):
             """An imported copy arrives pending review, never activated."""
-            entry = profiles.Store._parse(raw)
+            return self.store_imported_profile(profiles.Store._parse(raw))
+
+        def store_imported_profile(self, entry):
             clean = profiles.sanitized(entry)
-            if (self.store.root / (clean.id + ".json")).is_file():
-                raise Hold("profile_already_exists")
-            self.store.save(clean)
+            self.store.save(clean, create_only=True)
             self.refresh_profiles()
             return clean
 
@@ -877,8 +908,7 @@ def create_window(app, loop, bridge=None):
                         return
                     file = d.get_file()
                     path = file.get_path() if file else None
-                    raw = Path(path).read_text(encoding="utf-8") if path else ""
-                    self.import_profile_text(raw)
+                    self.store_imported_profile(self.store.import_file(path))
                     self.set_state("ready", "profile_imported_pending_review")
                 except (Hold, OSError, ValueError):
                     self.set_state("ready", "profile_import_rejected")
@@ -1107,17 +1137,22 @@ def create_window(app, loop, bridge=None):
                 mode, name = profile.based_on_mode, profile.name or profile.id
             model = self.cfg["llm"] or tr("no model selected", "model seçili değil",
                                           "kein Modell ausgewählt")
-            boundary = tr("content stays on this computer",
-                          "içerik bu bilgisayarda kalır",
-                          "Inhalt bleibt auf diesem Computer")
+            boundary = tr("privacy boundary unverified",
+                          "gizlilik sınırı doğrulanmadı",
+                          "Datenschutzgrenze nicht verifiziert")
             try:
-                data = disclosure.facts(profile, self.url.get_text().strip())
+                data = disclosure.facts(profile, self.url.get_text().strip(), self.store.policy_now())
             except (Hold, UnboundLocalError):
                 data = None
-            if data is not None and data["boundary"] != disclosure.STAYS_LOCAL:
-                boundary = tr("cloud reasoning permitted",
-                              "bulut çıkarımına izinli",
-                              "Cloud-Schlussfolgerung erlaubt")
+            if data is not None:
+                if data["boundary"] != disclosure.STAYS_LOCAL:
+                    boundary = tr("cloud reasoning permitted; upstream unverified",
+                                  "bulut çıkarımına izinli; üst servis doğrulanmadı",
+                                  "Cloud-Schlussfolgerung erlaubt; Upstream nicht verifiziert")
+                elif data["endpoint"] == "loopback":
+                    boundary = tr("loopback only; upstream unverified",
+                                  "yalnızca geri döngü; üst servis doğrulanmadı",
+                                  "Nur Loopback; Upstream nicht verifiziert")
             parts = [mode or tr("no mode", "mod yok", "kein Modus"), name, model, boundary]
             if data is not None and data["endpoint"] != "loopback":
                 # The boundary is about the profile; the endpoint is its own
@@ -1133,8 +1168,8 @@ def create_window(app, loop, bridge=None):
             privileged tools, a pending approval, connection and idle state."""
             try:
                 profile = self.active_profile()
-                data = disclosure.facts(profile, self.url.get_text().strip())
-                grants = profiles.granted(profile)
+                data = disclosure.facts(profile, self.url.get_text().strip(), self.store.policy_now())
+                grants = data["grants"]
             except Hold:
                 self.state_row.set_text("")
                 self.topbar_note.set_text(self.topbar_text())
@@ -1177,26 +1212,23 @@ def create_window(app, loop, bridge=None):
             except Hold:
                 self.disclosure_note.set_text("")
                 return
-            data = disclosure.facts(profile, endpoint)
-            if data["boundary"] == disclosure.CLOUD_WITH_APPROVAL:
-                body = tr("Content you write may go to: %s." % ", ".join(data["providers"]),
-                          "Yazdığın içerik şuraya gidebilir: %s." % ", ".join(data["providers"]),
-                          "Inhalt, den du schreibst, kann an %s gehen." % ", ".join(data["providers"]))
-                body += " " + tr("This build only transports to a loopback endpoint, so nothing leaves this computer yet.",
-                                 "Bu sürüm yalnızca geri döngü uç noktasına taşır, bu yüzden şimdilik hiçbir şey bilgisayardan çıkmaz.",
-                                 "Dieser Build transportiert nur zu einem Loopback-Endpunkt, deshalb verlässt nichts diesen Computer.")
-            elif data["boundary"] == disclosure.CLOUD_WITHOUT_APPROVAL:
-                body = tr("This mode permits cloud reasoning but no provider is approved, so cloud routes are refused.",
-                          "Bu mod bulut çıkarımına izin verir ama onaylı sağlayıcı yok, bulut rotaları reddedilir.",
-                          "Dieser Modus erlaubt Cloud-Schlussfolgerung, aber kein Anbieter ist genehmigt, daher werden Cloud-Routen abgelehnt.")
-            elif data["endpoint"] != "loopback":
+            data = disclosure.facts(profile, endpoint, self.store.policy_now())
+            if data["endpoint"] != "loopback":
                 body = tr("The configured endpoint is not a loopback address; this build refuses it.",
                           "Yapılandırılan uç nokta geri döngü adresi değil; bu sürüm onu reddeder.",
                           "Der konfigurierte Endpunkt ist keine Loopback-Adresse; dieser Build lehnt ihn ab.")
             else:
-                body = tr("Content stays on this computer.",
-                          "İçerik bu bilgisayarda kalır.",
-                          "Inhalt bleibt auf diesem Computer.")
+                body = tr("Loopback transport only. Upstream processing is unverified.",
+                          "Yalnızca geri döngü bağlantısı. Üst servisin veri işlemesi doğrulanmadı.",
+                          "Nur Loopback-Transport. Upstream-Verarbeitung nicht verifiziert.")
+                if data["boundary"] == disclosure.CLOUD_WITH_APPROVAL:
+                    body += " " + tr("Approved providers: %s. Direct cloud transport is unavailable." % ", ".join(data["providers"]),
+                                     "Onaylı sağlayıcılar: %s. Doğrudan bulut bağlantısı kullanılamıyor." % ", ".join(data["providers"]),
+                                     "Genehmigte Anbieter: %s. Direkter Cloud-Transport nicht verfügbar." % ", ".join(data["providers"]))
+                elif data["boundary"] == disclosure.CLOUD_WITHOUT_APPROVAL:
+                    body += " " + tr("No provider is approved; direct cloud routes are refused.",
+                                     "Onaylı sağlayıcı yok; doğrudan bulut rotaları reddedilir.",
+                                     "Kein Anbieter genehmigt; direkte Cloud-Routen werden abgelehnt.")
             self.disclosure_note.set_text(tr("Privacy: ", "Gizlilik: ", "Privatsphäre: ") + body)
 
         def refresh_send(self):
@@ -1230,8 +1262,18 @@ def create_window(app, loop, bridge=None):
             self.attach.set_sensitive(not self.busy and self.cfg["llm"] in self.inventory)
             self.entry.set_sensitive(not self.busy)
             self.refresh_send()
-            allowed = getattr(self, "policy", None) is not None and \
-                self.policy.evaluate("local_audio_device", ("push_to_talk",), time.time())[0] == profiles.ALLOW
+            now = self.store.policy_now()
+            self.policy_clock_note.set_text(tr(
+                "Permission clock unavailable. Timed permissions are blocked; restart after checking local storage.",
+                "İzin saati kullanılamıyor. Süreli izinler engellendi; yerel depolamayı kontrol edip yeniden başlatın.",
+                "Berechtigungsuhr nicht verfügbar. Befristete Berechtigungen sind gesperrt; lokalen Speicher prüfen und neu starten."
+            ) if now == float("inf") else "")
+            try:
+                active = self.active_profile()
+                allowed = (active.state == "active" and profiles.effective(active).evaluate(
+                    "local_audio_device", ("push_to_talk",), now)[0] == profiles.ALLOW)
+            except Hold:
+                allowed = False
             self.talk.set_sensitive(not self.busy and connected and allowed \
                 and bool(self.cfg["stt"]) and bool(self.cfg["voices"]) \
                 and audio.tools_ready("arecord","whisper-cli","piper","aplay"))
@@ -3025,19 +3067,36 @@ def create_window(app, loop, bridge=None):
 
             Every decision is appended to the local audit trail.
             """
-            profile = self.active_profile()
+            active = self.cfg.get("profile")
+            profile, stamp = self.store.snapshot(active)
+            def unchanged():
+                return (self.cfg.get("profile") == active
+                        and self.store.is_current(active, stamp))
             for action, scope in requests:
                 try:
-                    decision, reason = profiles.require_tool(profile, action, scope, time.time(), selected=selected)
+                    now = self.store.policy_now()
+                    if not unchanged():
+                        raise Hold("profile_changed")
+                    decision, reason = profiles.require_tool(profile, action, scope, now, selected=selected)
+                    if not unchanged():
+                        raise Hold("profile_changed")
                 except Hold as exc:
                     self.record_policy(action, scope, "deny", str(exc))
                     raise
                 self.record_policy(action, scope, decision, reason)
+                # Audit I/O may take time; do not allow a stale generation
+                # to leave this synchronous authorization boundary.
+                if not unchanged():
+                    raise Hold("profile_changed")
+                # Time may have advanced during the audit write.
+                profiles.require_tool(profile, action, scope, self.store.policy_now(), selected=selected)
+                if not unchanged():
+                    raise Hold("profile_changed")
 
         def record_disclosure(self):
             """Record that the boundary was stated before the message was sent."""
             try:
-                data = disclosure.facts(self.active_profile(), self.url.get_text().strip())
+                data = disclosure.facts(self.active_profile(), self.url.get_text().strip(), self.store.policy_now())
             except Hold:
                 return
             self.record_policy("disclosure", (data["boundary"], data["endpoint"]),
@@ -3060,9 +3119,9 @@ def create_window(app, loop, bridge=None):
             except KeyError:
                 raise Hold("no_active_profile") from None
             except Hold as exc:
-                self.record_policy("endpoint", (raw[:64],), "deny", str(exc))
+                self.record_policy("endpoint", (disclosure.endpoint_scope(raw),), "deny", str(exc))
                 raise
-            self.record_policy("endpoint", (raw[:64],), "allow", "mode_policy")
+            self.record_policy("endpoint", (disclosure.endpoint_scope(raw),), "allow", "mode_policy")
             return result
 
         def backend_for_test(self):
@@ -3070,12 +3129,13 @@ def create_window(app, loop, bridge=None):
 
         def conversation_backend(self):
             """Bind prior messages to current profile version and endpoint/model."""
-            endpoint = self.require_endpoint()
-            profile = self.active_profile()
-            model = self.cfg["llm"]
-            route = (profile.id, profile.version, profile.based_on_mode, endpoint, model)
+            route = self.attachment_route()
+            endpoint = self.require_endpoint(route[3])
+            model = route[4]
+            if endpoint != route[3] or not self.route_current(route):
+                raise Hold("profile_changed")
             self.session.require_route(route)
-            if self.session.has_attachment_history and not self.conversation_authorized(route):
+            if not self.conversation_authorized(route):
                 raise Hold("attachment_context_changed")
             return Jan(endpoint, model), route
 
@@ -3086,13 +3146,23 @@ def create_window(app, loop, bridge=None):
             decision, reason = live.evaluate(attachments.ACTION, attachments.SCOPE)
             return decision == profiles.ALLOW or reason == "no_rule_matches"
 
+        def route_current(self, route):
+            # Trusted immutable route created from a validated active profile.
+            # Compare current UI selection and exact inode metadata instead
+            # of parsing the JSON repeatedly for every streamed text delta.
+            return (not self.closing and self.cfg.get("profile") == route[0]
+                    and self.url.get_text().strip() == route[3]
+                    and self.cfg["llm"] == route[4]
+                    and self.store.is_current(route[0], route[5]))
+
         def conversation_authorized(self, route):
             try:
-                if self.closing or self.attachment_route() != route or self.active_profile().state != "active":
+                if not self.route_current(route):
                     return False
                 if self.session.has_attachment_history:
                     self.attachment_policy()
-                    return self.attachment_live_allowed(self.history_attachment_live)
+                    return (self.attachment_live_allowed(self.history_attachment_live)
+                            and self.route_current(route))
                 return True
             except Hold:
                 return False
@@ -3291,7 +3361,7 @@ def create_window(app, loop, bridge=None):
             if profile.state != "active" or profile.based_on_mode != "LOCAL_ONLY":
                 raise Hold("attachment_mode_denied")
             decision, reason = profiles.effective(profile).evaluate(
-                attachments.ACTION, attachments.SCOPE, time.time())
+                attachments.ACTION, attachments.SCOPE, self.store.policy_now())
             if decision == profiles.ALLOW or reason == "no_rule_matches":
                 return
             if decision == profiles.ASK:
@@ -3343,6 +3413,7 @@ def create_window(app, loop, bridge=None):
                                 and live.policy.profile_id == route[0]
                                 and live.policy.version == route[1]
                                 and live.policy.mode == route[2]
+                                and live.stamp == route[5]
                                 and self.attachment_live_allowed(live))
                     except Hold:
                         return False
@@ -3439,11 +3510,20 @@ def create_window(app, loop, bridge=None):
                 def grow(piece):
                     if epoch == self.session.epoch:
                         self.extend(answer,"JARVIS",piece)
-                result,_=await self.session.reply(text,backend,
-                                                  epoch,on_delta=grow,route=route,
-                                                  attachment=item,model=self.cfg["llm"],
-                                                  authorize=permitted)
-                self.session.check(epoch)
+                try:
+                    result,_=await self.session.reply(text,backend,
+                                                      epoch,on_delta=grow,route=route,
+                                                      attachment=item,model=self.cfg["llm"],
+                                                      authorize=permitted)
+                    self.session.check(epoch)
+                except (Hold, asyncio.CancelledError):
+                    # Earlier authorized deltas cannot be unseen, but a
+                    # rejected turn must not retain a partial assistant reply.
+                    self.growing.pop(answer, None)
+                    if answer.get_parent() == self.log:
+                        # Preserve the existing empty cancelled-turn label.
+                        answer.set_text("JARVIS\n")
+                    raise
                 if item is not None and self.history_attachment_live is None:
                     self.history_attachment_live = selected_live
                 self.extend(answer,"JARVIS",result,replace=True)
@@ -3456,6 +3536,30 @@ def create_window(app, loop, bridge=None):
                         self.set_state(stage)
 
                 self.require_tools(("local_audio_device", ("push_to_talk",)))
+                capture_route = self.attachment_route()
+                capture_live = self.store.bind_live(capture_route[0])
+                if capture_live.stamp != capture_route[5]:
+                    raise Hold("profile_changed")
+
+                def check_voice_grant():
+                    self.session.check(epoch)
+                    if not self.route_current(capture_route):
+                        raise Hold("profile_changed")
+                    decision, reason = capture_live.evaluate("local_audio_device", ("push_to_talk",))
+                    if decision != profiles.ALLOW:
+                        raise Hold("approval_expired" if reason == "approval_expired" else
+                                   "profile_changed" if reason == "policy_changed" else
+                                   "profile_forbids_local_audio_device")
+                    if not self.route_current(capture_route):
+                        raise Hold("profile_changed")
+
+                def voice_authorized(route):
+                    try:
+                        check_voice_grant()
+                        return self.conversation_authorized(route)
+                    except Hold:
+                        return False
+
                 self.turn_note = tr("a spoken turn", "sesli tur", "eine gesprochene Runde")
                 voices = audio.SelectedVoices(self.cfg["voices"])
                 self.finish=asyncio.Event()
@@ -3464,10 +3568,12 @@ def create_window(app, loop, bridge=None):
                 async with self.leases.hold("microphone", "voice-turn-%d" % epoch):
                     self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
+                    check_voice_grant()
                     text=await audio.listen(self.cfg["stt"],self.finish,progress)
-                # The microphone is free again the moment the capture ends.
+                # Already captured samples cannot be undone. Refuse to display
+                # or dispatch the returned transcription after revocation.
                 self.note_leases()
-                self.session.check(epoch)
+                check_voice_grant()
                 self.bubble("You",text)
                 if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
                     if self.analysis.dialog is not None:
@@ -3476,9 +3582,12 @@ def create_window(app, loop, bridge=None):
                     return
                 self.set_state("thinking")
                 backend, route = self.conversation_backend()
+                check_voice_grant()
                 result,speech=await self.session.reply(text,backend,epoch,voices,route=route,
-                    authorize=lambda: self.conversation_authorized(route))
-                self.session.check(epoch)
+                    authorize=lambda: voice_authorized(route))
+                check_voice_grant()
+                if not self.conversation_authorized(route):
+                    raise Hold("attachment_context_changed")
                 self.bubble("JARVIS",result)
                 self.spoken_line(speech, epoch)
                 if self.mute.get_active():
@@ -3492,8 +3601,12 @@ def create_window(app, loop, bridge=None):
                                                "Antwort stumm; als Text angezeigt."))
                     return
                 async with self.leases.hold("audio_playback", "voice-turn-%d" % epoch):
+                    self.session.check(epoch)
+                    if not self.conversation_authorized(route):
+                        raise Hold("attachment_context_changed")
                     self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
+                    check_voice_grant()
                     playback = loop.create_task(audio.speak(speech, progress))
                     self.playback = playback
                     try:

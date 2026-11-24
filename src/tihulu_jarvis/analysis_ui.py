@@ -85,7 +85,7 @@ class AnalysisView:
         if profile.state != "active" or profile.based_on_mode != "LOCAL_ONLY":
             raise Hold("analysis_mode_denied")
         decision, reason = profiles.effective(profile).evaluate(
-            "filesystem_read", ("csv_analysis",), time.time())
+            "filesystem_read", ("csv_analysis",), self.ui.store.policy_now())
         if decision != profiles.ALLOW and reason != "no_rule_matches":
             raise Hold("analysis_not_authorized")
         return profile
@@ -299,7 +299,7 @@ class AnalysisView:
         try:
             profile = self._profile()
             if profiles.effective(profile).evaluate(
-                    "local_audio_device", ("push_to_talk",), time.time())[0] != profiles.ALLOW:
+                    "local_audio_device", ("push_to_talk",), self.ui.store.policy_now())[0] != profiles.ALLOW:
                 raise Hold("analysis_audio_denied")
             voice = audio.SelectedVoices(self.ui.cfg["voices"])[artifact.language]
             if not audio.tools_ready("piper", "aplay"):
@@ -312,6 +312,10 @@ class AnalysisView:
             return
         try:
             async with self.ui.leases.hold("audio_playback", "analysis-%d" % epoch):
+                self.ui.session.check(epoch)
+                self._matches(context)
+                if self.live_policy.evaluate("local_audio_device", ("push_to_talk",))[0] != profiles.ALLOW:
+                    raise Hold("analysis_audio_denied")
                 self.ui.note_leases()
                 if self.ui.cfg.get("show_spoken_text") and self.rows:
                     label = self.Gtk.Label(label=self.tr("Spoken: ", "Okunan: ", "Gesprochen: ") + speech.text,
@@ -382,7 +386,7 @@ class AnalysisView:
         self._matches(context)
         profile = self._profile()
         decision, reason = profiles.effective(profile).evaluate(
-            "filesystem_write", ("csv_analysis_export",), time.time())
+            "filesystem_write", ("csv_analysis_export",), self.ui.store.policy_now())
         if decision != profiles.ALLOW and reason != "no_rule_matches":
             raise Hold("export_not_authorized")
         return self.controller.get(ident)

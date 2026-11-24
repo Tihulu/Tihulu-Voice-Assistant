@@ -7,9 +7,9 @@ its approved providers and the kind of endpoint configured. No endpoint is
 contacted here, and no message is inspected: the answer is a fact about the
 configuration, never a guess about the future.
 
-This build's only transport is a numeric loopback endpoint on this machine, so
-the truthful default is that content does not leave the computer. A mode that
-permits cloud reasoning states that permission without implying a road.
+This build's direct inference transport is numeric loopback only. That does
+not prove the receiving service's model or upstream network behavior.
+A profile's permitted capabilities are separate from transport availability.
 """
 from .profiles import granted
 from .voice.m1 import Hold
@@ -21,13 +21,13 @@ CLOUD_WITHOUT_APPROVAL = "cloud_without_approval"
 LOOPBACK_ONLY = "loopback_only"
 
 
-def boundary(profile):
+def boundary(profile, now=None):
     """(level, reason) for what the active mode permits about leaving.
 
     The level comes from granted privileges, never from the mode name alone:
     a CLOUD_CHAT profile whose rules deny cloud reasoning stays local.
     """
-    tokens = granted(profile)
+    tokens = granted(profile, now)
     leaves = "cloud_disclosure" in tokens or "cloud_inference" in tokens
     if not leaves:
         return STAYS_LOCAL, "mode_grants_no_cloud"
@@ -46,9 +46,9 @@ def endpoint_scope(endpoint):
     return "loopback"
 
 
-def facts(profile, endpoint):
+def facts(profile, endpoint, now=None):
     """The disclosure as data: no address, no transcript, no provider secret."""
-    level, reason = boundary(profile)
+    level, reason = boundary(profile, now)
     scope = endpoint_scope(endpoint)
     return {
         "boundary": level,
@@ -56,24 +56,23 @@ def facts(profile, endpoint):
         "endpoint": scope,
         "transport": LOOPBACK_ONLY,
         "providers": tuple(profile.allowed_providers or ()),
-        "grants": tuple(sorted(granted(profile))),
-        # This build cannot send content off this machine, so this is always
-        # False. It is stated anyway, so the answer never has to be inferred.
-        "content_leaves": False,
-        "leak_reason": "loopback_transport_only",
+        "grants": tuple(sorted(granted(profile, now))),
+        "direct_remote_inference": False,
+        # None means unknown, not False. The receiver is a separate service.
+        "content_leaves": None if scope == "loopback" else False,
+        "upstream_verified": False,
+        "leak_reason": "loopback_upstream_unverified" if scope == "loopback"
+                       else "endpoint_refused",
     }
 
 
 def statement(data):
-    """One short English line for the disclosure; the UI translates it."""
-    if data["content_leaves"]:
-        return "content may leave this computer"
-    if data["boundary"] == CLOUD_WITH_APPROVAL:
-        return ("this mode permits cloud reasoning with approved providers, "
-                "but this build transports only to a loopback endpoint")
-    if data["boundary"] == CLOUD_WITHOUT_APPROVAL:
-        return ("this mode permits cloud reasoning without an approved provider, "
-                "so every cloud route is refused; content stays on this computer")
+    """Describe direct transport and uncertainty without promising locality."""
     if data["endpoint"] != "loopback":
         return "the configured endpoint is not a loopback address; this build refuses it"
-    return "content stays on this computer"
+    suffix = "loopback transport only; upstream processing is unverified"
+    if data["boundary"] == CLOUD_WITH_APPROVAL:
+        return "this mode permits cloud reasoning with approved providers, but " + suffix
+    if data["boundary"] == CLOUD_WITHOUT_APPROVAL:
+        return "this mode permits cloud reasoning; direct cloud routes are refused; " + suffix
+    return suffix
