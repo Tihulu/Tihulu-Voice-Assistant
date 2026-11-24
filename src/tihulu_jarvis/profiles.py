@@ -13,6 +13,7 @@ Decision order (fail closed):
   3. the most specific matching rule wins; on equal specificity deny wins;
   4. an approval that has expired degrades to ASK, never to silent ALLOW.
 """
+import fcntl
 import json
 import math
 import os
@@ -20,6 +21,7 @@ import re
 import tempfile
 import stat
 import time
+from contextlib import contextmanager
 from threading import Lock
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -224,12 +226,13 @@ def _policy_stamp(path):
 
 
 class PolicyClock:
-    """Nondecreasing policy time, with a restart floor for one Store writer.
+    """Nondecreasing policy time with a shared restart floor for cooperating Stores.
 
     Persist a rounded-up one-second ceiling before returning an observed time.
-    A later Store opening the same intact directory starts at that floor.
-    No trusted elapsed time across shutdown, anti-tamper or concurrent-writer
-    guarantee. An unavailable checkpoint fails closed for timed permissions.
+    Cooperating Stores serialize checkpoint reads and updates using a local
+    directory advisory lock. No trusted elapsed time across shutdown or
+    anti-tamper guarantee. An unavailable checkpoint or contended lock fails
+    closed for timed permissions in that Store.
     """
     def __init__(self, wall=None, monotonic=None, *, checkpoint=None):
         self._lock = Lock()
@@ -278,30 +281,59 @@ class PolicyClock:
             if tmp is not None:
                 Path(tmp).unlink(missing_ok=True)
 
+    @contextmanager
+    def _checkpoint_lock(self):
+        if self._checkpoint is None:
+            yield
+            return
+        # Lock the directory inode, not the atomically replaced checkpoint.
+        # No lock file to create, truncate or follow. Never wait on another
+        # process from a UI authorization path.
+        fd = os.open(self._checkpoint.parent, os.O_RDONLY | os.O_DIRECTORY |
+                     os.O_CLOEXEC | os.O_NOFOLLOW)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            yield
+        finally:
+            os.close(fd)
+
     def now(self):
         with self._lock:
             if self._failed:
                 return float("inf")
             try:
-                wall, mono = time.time(), time.monotonic()
-                if not math.isfinite(wall) or not math.isfinite(mono):
-                    raise Hold("policy_clock_unreadable")
-                if self._reserved is None:
-                    self._reserved = self._restore()
-                    self._observed = max(self._reserved, self._observed or 0)
-                if self._monotonic is None:
-                    self._observed = max(wall, self._observed)
-                else:
-                    self._observed = max(wall, self._observed +
-                                         max(0, mono - self._monotonic))
-                self._monotonic = mono if self._monotonic is None else max(mono, self._monotonic)
-                if not 0 <= self._observed <= 10**12:
-                    raise Hold("policy_clock_unreadable")
-                if self._checkpoint is not None and self._observed > self._reserved:
-                    ceiling = math.ceil(self._observed)
-                    self._persist(ceiling)
-                    self._reserved = ceiling
-                return self._observed
+                with self._checkpoint_lock():
+                    wall, mono = time.time(), time.monotonic()
+                    if not math.isfinite(wall) or not math.isfinite(mono):
+                        raise Hold("policy_clock_unreadable")
+                    # Reload under the same lock as the write. A stale Store
+                    # must neither authorize below nor overwrite a newer floor.
+                    disk = self._restore()
+                    if self._reserved is None:
+                        self._reserved = disk
+                        self._observed = max(disk, self._observed or 0)
+                    elif self._checkpoint is not None and disk < self._reserved:
+                        # Missing or regressed after this Store saw a floor.
+                        raise Hold("policy_clock_unreadable")
+                    if self._monotonic is None:
+                        self._observed = max(wall, self._observed)
+                    else:
+                        self._observed = max(wall, self._observed +
+                                             max(0, mono - self._monotonic))
+                    self._monotonic = mono if self._monotonic is None else max(mono, self._monotonic)
+                    # Do not advance elapsed time twice when adopting a floor
+                    # written by another process. Our own rounded reservation
+                    # is not an observation until a new Store opens it.
+                    if disk > self._reserved:
+                        self._observed = max(self._observed, disk)
+                        self._reserved = disk
+                    if not 0 <= self._observed <= 10**12:
+                        raise Hold("policy_clock_unreadable")
+                    if self._checkpoint is not None and self._observed > self._reserved:
+                        ceiling = math.ceil(self._observed)
+                        self._persist(ceiling)
+                        self._reserved = ceiling
+                    return self._observed
             except (OSError, Hold, ValueError, OverflowError):
                 # Do not revive a timed ALLOW after a failed clock check.
                 # Untimed permissions retain their ordinary policy semantics.

@@ -701,3 +701,56 @@ class RestartPolicyClockTests(unittest.TestCase):
             for _ in range(3):
                 self.assertLess(self.store.policy_now(), 101)
             persist.assert_called_once_with(101)
+
+    def test_two_stores_cannot_overwrite_or_authorize_below_newer_floor(self):
+        from unittest.mock import patch
+        other = Store(self.root)
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=10)):
+            old = self.store.bind_live(self.profile.id)
+            newer = other.bind_live(self.profile.id)
+            self.assertEqual(old.evaluate("local_audio_device", self.scope)[0], ALLOW)
+        with (patch.object(profiles.time, "time", return_value=120),
+              patch.object(profiles.time, "monotonic", return_value=11)):
+            self.assertEqual(newer.evaluate("local_audio_device", self.scope)[0], ASK)
+        with (patch.object(profiles.time, "time", return_value=102),
+              patch.object(profiles.time, "monotonic", return_value=12)):
+            self.assertEqual(old.evaluate("local_audio_device", self.scope),
+                             (ASK, "approval_expired"))
+            self.assertGreaterEqual(int((self.root / ".policy-clock").read_text()), 120)
+            self.assertEqual(Store(self.root).bind_live(self.profile.id).evaluate(
+                "local_audio_device", self.scope)[0], ASK)
+
+    def test_deleted_or_lowered_checkpoint_fails_closed_in_observing_store(self):
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=10)):
+            live = self.store.bind_live(self.profile.id)
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ALLOW)
+            path = self.root / ".policy-clock"
+            path.unlink()
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ASK)
+            path.write_text("100\n")
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ASK)
+            other = Store(self.root)
+            second = other.bind_live(self.profile.id)
+            self.assertEqual(second.evaluate("local_audio_device", self.scope)[0], ALLOW)
+            path.write_text("99\n")
+            self.assertEqual(second.evaluate("local_audio_device", self.scope)[0], ASK)
+
+    def test_contended_checkpoint_lock_fails_closed_without_waiting(self):
+        import fcntl
+        import os
+        from unittest.mock import patch
+        with (patch.object(profiles.time, "time", return_value=100),
+              patch.object(profiles.time, "monotonic", return_value=10)):
+            live = self.store.bind_live(self.profile.id)
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ALLOW)
+            fd = os.open(self.root, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ASK)
+            finally:
+                os.close(fd)
+            self.assertEqual(live.evaluate("local_audio_device", self.scope)[0], ASK)
+
