@@ -127,3 +127,284 @@ jobs:
           assert names == expected, (names, expected)
           PY
           done
+  native_security:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 126987ccb34cf083aedea585b005e76367170f40
+          persist-credentials: false
+      - name: Verify frozen candidate and native fixture
+        run: |
+          test "$(git rev-parse HEAD)" = "126987ccb34cf083aedea585b005e76367170f40"
+          test "$(git rev-parse HEAD^{tree})" = "c002a8c2cd049a54224c42d6d1e21c79555e1a4d"
+          test "$(git hash-object tests/gtk/test_desktop.py)" = "c9ead17d01caa3e8a14836d36454a1b672516892"
+      - name: Install existing native test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+      - name: Targeted native security integration (no physical devices)
+        env:
+          PYTHONPATH: src:tests/gtk
+          PYTHONDONTWRITEBYTECODE: '1'
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          GTK_A11Y: none
+          G_DEBUG: fatal-criticals
+        run: |
+          dbus-run-session -- xvfb-run -a /usr/bin/python3 - <<'PY'
+          import asyncio
+          import json
+          import sys
+          import unittest
+          from unittest.mock import patch
+          from test_desktop import DesktopFixture
+          from tihulu_jarvis import profiles
+          from tihulu_jarvis.owned_wait import await_authorized
+          from tihulu_jarvis.voice import audio
+          from tihulu_jarvis.voice.m1 import Hold
+
+          class NativeSecurityEvidence(DesktopFixture):
+              def test_audit_malformed_text_is_bounded_in_real_widgets(self):
+                  path = profiles.audit_path(self.ui.store.root)
+                  for bad in ("\ud800", "bad\x00text"):
+                      for field in ("action", "reason", "decision", "scope"):
+                          with self.subTest(field=field, bad=repr(bad)):
+                              row = dict(at=1, profile="fixture", action="read",
+                                         scope=["file"], decision="deny", reason="rule")
+                              row[field] = [bad] if field == "scope" else bad
+                              raw = json.dumps(row).encode() + b"\n"
+                              path.write_bytes(raw)
+                              self.ui.refresh_audit()
+                              self.assertEqual(self.ui.audit_list.get_text(), "audit_unavailable")
+                              self.assertEqual(path.read_bytes(), raw)
+                  path.unlink()
+                  profiles.record_decision(self.ui.store.root, "fixture", "read",
+                                           ("file",), "deny", "Türkçe · Deutsch · 日本語")
+                  self.ui.refresh_audit()
+                  self.assertIn("Türkçe · Deutsch · 日本語", self.ui.audit_list.get_text())
+
+              def test_profile_export_and_import_clear_all_model_references(self):
+                  source = profiles.Profile("portable-fixture", name="Portable fixture",
+                      stt_model_id="/fixture/private-stt.bin", llm_model_id="private-model",
+                      tts_model_id="/fixture/private-tts.onnx",
+                      voice_by_language={"en": "/fixture/private-en.onnx"})
+                  self.ui.store.save(source)
+                  self.ui.refresh_profiles()
+                  row = next(row for row, entry in self.ui.policy_rows.items()
+                             if entry.id == source.id)
+                  self.ui.profile_list.select_row(row)
+                  raw = self.ui.export_selected()
+                  self.assertIsInstance(raw, str)
+                  self.assertNotIn("private-", raw)
+                  clean = profiles.Store._parse(raw)
+                  self.assertEqual((clean.stt_model_id, clean.llm_model_id,
+                                    clean.tts_model_id, clean.voice_by_language),
+                                   ("", "", "", {}))
+                  self.assertEqual(self.ui.store.load(source.id).stt_model_id,
+                                   source.stt_model_id)
+                  incoming = json.loads(profiles.Store._dump(source))
+                  incoming["id"] = "incoming-fixture"
+                  active_before = self.ui.cfg["profile"]
+                  local_choices = (self.ui.cfg["stt"], self.ui.cfg["llm"],
+                                   dict(self.ui.cfg["voices"]))
+                  self.ui.import_profile_text(json.dumps(incoming))
+                  imported = self.ui.store.load("incoming-fixture")
+                  self.assertEqual((imported.state, imported.stt_model_id,
+                                    imported.llm_model_id, imported.tts_model_id,
+                                    imported.voice_by_language),
+                                   ("pending_review", "", "", "", {}))
+                  self.assertEqual(self.ui.cfg["profile"], active_before)
+                  self.assertEqual((self.ui.cfg["stt"], self.ui.cfg["llm"],
+                                    self.ui.cfg["voices"]), local_choices)
+
+              def test_close_during_revocation_reaps_real_child(self):
+                  # Only the executable/argv are substituted. Actual owned wait,
+                  # audio.child, terminate, Session, GTK close and busy callback run.
+                  original_spawn = asyncio.create_subprocess_exec
+                  original_terminate = audio.terminate
+                  children = []
+                  entered, terminating = asyncio.Event(), asyncio.Event()
+                  allowed = True
+                  async def spawn(*args, **kwargs):
+                      p = await original_spawn(sys.executable, "-c",
+                          "import signal,time; signal.signal(signal.SIGTERM, signal.SIG_IGN); print('ready',flush=True); time.sleep(30)",
+                          stdout=asyncio.subprocess.PIPE)
+                      children.append(p)
+                      self.assertEqual(await asyncio.wait_for(p.stdout.readline(), 3), b"ready\n")
+                      return p
+                  async def terminate(p):
+                      terminating.set()
+                      await original_terminate(p)
+                  async def run(epoch):
+                      def check():
+                          self.ui.session.check(epoch)
+                          if not allowed:
+                              raise Hold("fixture_revoked")
+                      async def worker():
+                          async with audio.child("arecord", checkpoint=check):
+                              entered.set()
+                              await asyncio.Future()
+                      await await_authorized(worker, 10, check, interval=.01)
+                  try:
+                      with patch.object(audio.shutil, "which", return_value=sys.executable), \
+                           patch.object(audio.asyncio, "create_subprocess_exec", side_effect=spawn), \
+                           patch.object(audio, "terminate", side_effect=terminate):
+                          self.ui.submit(run)
+                          self.until(entered.is_set)
+                          allowed = False
+                          self.until(terminating.is_set)
+                          self.assertTrue(self.ui.busy)
+                          self.ui.win.close()
+                          self.ui.win.close()
+                          self.assertTrue(self.ui.busy)
+                          self.assertFalse(self.ui.session.active.done())
+                          self.until(lambda: not self.app.get_windows())
+                          self.assertFalse(self.ui.busy)
+                          self.assertEqual(len(children), 1)
+                          self.assertIsNotNone(children[0].returncode)
+                  finally:
+                      for p in children:
+                          if p.returncode is None:
+                              p.kill()
+                          self.until(lambda: p.returncode is not None)
+
+          # Run only the three new integration methods, not inherited fixtures.
+          names = [name for name in NativeSecurityEvidence.__dict__ if name.startswith("test_")]
+          assert len(names) == 3
+          result = unittest.TextTestRunner(verbosity=2).run(unittest.TestSuite(
+              NativeSecurityEvidence(name) for name in names))
+          assert result.testsRun == 3 and result.wasSuccessful() and not result.skipped
+          PY
+
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: 126987ccb34cf083aedea585b005e76367170f40
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify exact cumulative target
+        run: |
+          test "$(git rev-parse HEAD)" = "126987ccb34cf083aedea585b005e76367170f40"
+          test "$(git rev-parse HEAD^{tree})" = "c002a8c2cd049a54224c42d6d1e21c79555e1a4d"
+          test "$(git hash-object tests/test_conflict_check.py)" = "b09752f2a25e5380e20ff220cd98edaa54493200"
+          test -z "$(git status --porcelain)"
+      - name: Restore exact historical local branches
+        run: |
+          python3 - <<'PY'
+          import subprocess
+          def git(*args):
+              return subprocess.check_output(['git', *args], text=True).strip()
+          pins = {
+              'feat/usage-report': '60f237df43631a1c4ec3619ac3e6f409935a251a',
+              'feat/approved-sources': '36cc9fdf9d0103cb6a6101d3a37cdb7d6456d3a2',
+              'feat/profile-ui': '627309491c568cef3d799fcbd1853ebc8c106f96',
+              'feat/modes-and-profiles': '6a21bf7003039d8d63684c9e5572859ad22ec5a2',
+              'feat/market-ui': 'c9e8c87bb52505f21532f94025307962feaeb220',
+              'feat/market-consolidated': '29cc369acd052efb526d9c3c51320a9323f5a0bb',
+          }
+          for name, sha in pins.items():
+              actual = git('rev-parse', 'refs/remotes/origin/' + name)
+              if actual != sha:
+                  raise SystemExit('Historical ref changed: ' + name)
+              git('cat-file', '-e', sha + '^{commit}')
+              git('branch', name, sha)
+              assert git('rev-parse', 'refs/heads/' + name) == sha
+              print('Verified', name, sha, flush=True)
+          PY
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5.6.0
+        with:
+          python-version: '3.12'
+      - name: Install target-system native runtime for Debian launch check
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+      - name: Build sdist and wheel, then verify the installed package
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          python -m venv .buildvenv
+          .buildvenv/bin/pip install -q build
+          .buildvenv/bin/python -m build --sdist --wheel --outdir dist
+          ls -l dist
+          python - <<'CHECK'
+          import pathlib, zipfile
+          wheels = sorted(pathlib.Path("dist").glob("*.whl"))
+          sdists = sorted(pathlib.Path("dist").glob("*.tar.gz"))
+          assert len(wheels) == 1 and len(sdists) == 1, (wheels, sdists)
+          names = set(zipfile.ZipFile(wheels[0]).namelist())
+          tag = "tihulu_jarvis-0.1.0.dev0"
+          required = {
+              "tihulu_jarvis/__init__.py", "tihulu_jarvis/desktop.py", "tihulu_jarvis/settings.py",
+              "tihulu_jarvis/profiles.py", "tihulu_jarvis/market.py", "tihulu_jarvis/contracts.py",
+              "tihulu_jarvis/transfer_http.py",
+              "tihulu_jarvis/selected_csv.py", "tihulu_jarvis/temperature_engine.py",
+              "tihulu_jarvis/analysis_controller.py", "tihulu_jarvis/analysis_ui.py",
+              "tihulu_jarvis/analysis_intent.py", "tihulu_jarvis/analysis_export.py",
+              "tihulu_jarvis/voice/__init__.py", "tihulu_jarvis/voice/m1.py",
+              "tihulu_jarvis/voice/jan.py", "tihulu_jarvis/voice/audio.py",
+              "tihulu_jarvis/voice/session.py",
+              tag + ".dist-info/licenses/LICENSE",
+              tag + ".dist-info/entry_points.txt",
+              tag + ".data/data/share/applications/io.github.Tihulu.Jarvis.desktop",
+              tag + ".data/data/share/icons/hicolor/scalable/apps/io.github.Tihulu.Jarvis.svg",
+          }
+          missing = required - names
+          assert not missing, missing
+          leaks = [n for n in names
+                   if n.startswith(("tests/", "docs/", "data/")) and "/share/" not in n]
+          assert not leaks, leaks
+          for banned in ("password", "nvapi-", "/home/", "jarvis.json"):
+              assert not any(banned in n for n in names), banned
+          print("wheel content verified:", len(names), "entries")
+          CHECK
+          python -m venv .runvenv
+          .runvenv/bin/pip install -q dist/*.whl
+          # Repository root exposes the test-only tools namespace, not src.
+          (cd /tmp && PYTHONPATH="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.runvenv/bin/python" -c 'import pathlib, sys, tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).resolve().is_relative_to(pathlib.Path(sys.prefix).resolve())')
+          (cd /tmp && PYTHONPATH="$GITHUB_WORKSPACE" "$GITHUB_WORKSPACE/.runvenv/bin/python" -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
+          .runvenv/bin/python -c "import tihulu_jarvis; print('installed import ok')"
+          .runvenv/bin/python -c "import tihulu_jarvis.market as m; print('installed market ok', m.CATEGORIES)"
+          .runvenv/bin/python -c "import tihulu_jarvis.desktop as d; print('entry module ok', hasattr(d, 'main'))"
+          test -x .runvenv/bin/tihulu-jarvis && echo "console script installed"
+          (cd /tmp && "$GITHUB_WORKSPACE/.runvenv/bin/python" "$GITHUB_WORKSPACE/tools/smoke.py")
+      - name: Assemble a Debian package and verify its contents
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          sh packaging/deb/build.sh .release-work/deb dist
+          dpkg-deb --info .release-work/tihulu-jarvis.deb | grep -E "Package:|Version:|Architecture:|Depends:"
+          dpkg-deb --contents .release-work/tihulu-jarvis.deb | awk '{print $6}' | sed 's|^\./|/|' > .release-work/deb-files.txt
+          grep -qE "^/usr/bin/tihulu-jarvis$" .release-work/deb-files.txt
+          grep -qE "^/usr/share/applications/io\\.github\\.Tihulu\\.Jarvis\\.desktop$" .release-work/deb-files.txt
+          grep -qE "^/usr/share/icons/hicolor/scalable/apps/io\\.github\\.Tihulu\\.Jarvis\\.svg$" .release-work/deb-files.txt
+          grep -qE "^/usr/share/tihulu-jarvis/launch\\.py$" .release-work/deb-files.txt
+          for module in desktop market profiles transfer_http selected_csv temperature_engine analysis_controller analysis_ui analysis_intent analysis_export; do
+            grep -qFx "/usr/share/tihulu-jarvis/python/tihulu_jarvis/$module.py" .release-work/deb-files.txt
+          done
+          if grep -qE '/venv/|/pyvenv.cfg$' .release-work/deb-files.txt; then
+            echo "package carries a build-machine virtual environment"; exit 1
+          fi
+          grep -qE "licenses/LICENSE$" .release-work/deb-files.txt
+          if grep -E "/home/|/Users/|/tmp/|nvapi-|gh[pousr]_[A-Za-z0-9]{12}|sk-[A-Za-z0-9]{20}" .release-work/deb-files.txt; then
+            echo "package carries workstation or credential material"; exit 1
+          fi
+          if grep -E " tests/" .release-work/deb-files.txt; then
+            echo "package ships tests"; exit 1
+          fi
+          echo "package file list verified: $(wc -l < .release-work/deb-files.txt) entries"
+      - name: Extract and exercise the actual Debian launcher
+        run: |
+          mkdir -p .release-work/root
+          dpkg-deb -x .release-work/tihulu-jarvis.deb .release-work/root
+          launcher="$GITHUB_WORKSPACE/.release-work/root/usr/bin/tihulu-jarvis"
+          runtime="$GITHUB_WORKSPACE/.release-work/root/usr/share/tihulu-jarvis/python"
+          test -x "$launcher"
+          (cd /tmp && GDK_BACKEND=x11 GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a "$launcher" --check-runtime)
+          (cd /tmp && PYTHONPATH="$runtime" /usr/bin/python3 "$GITHUB_WORKSPACE/tools/smoke.py")
+          (cd /tmp && PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -c 'import pathlib, os, tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).resolve().is_relative_to(pathlib.Path(os.environ["PYTHONPATH"].split(":")[0]).resolve())')
+          (cd /tmp && PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests")
