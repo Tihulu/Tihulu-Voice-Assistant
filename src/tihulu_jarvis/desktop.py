@@ -175,6 +175,8 @@ def create_window(app, loop, bridge=None):
             self.owned_picker = None
             self.owned_picker_handler = None
             self.attachment_context = None
+            self.attachment_live = None
+            self.history_attachment_live = None
             self.leases = locks.Leases()
             self.search_matches = ()
             self.growing = {}
@@ -694,7 +696,7 @@ def create_window(app, loop, bridge=None):
             self.refresh()
 
         def clear_attachment(self):
-            self.attachment = self.attachment_context = None
+            self.attachment = self.attachment_context = self.attachment_live = None
             self.attachment_note.set_text("")
 
         def attachment_route(self):
@@ -2457,7 +2459,7 @@ def create_window(app, loop, bridge=None):
                 return None
             url = catalog_sources.safe_url(source)
             try:
-                profiles.require_tool(self.active_profile(), "external_network", ("catalog",))
+                self.require_tools(("external_network", ("catalog", source.host)))
                 raw = self.loop.run_until_complete(
                     catalog_sources.fetch(source, self.source_opener()))
                 cards, refused = catalog_sources.cards(
@@ -2551,8 +2553,8 @@ def create_window(app, loop, bridge=None):
         def require_catalog_fetch(self, url, hosts):
             if not hosts:
                 raise Hold("catalog_host_not_allowed")
-            profiles.require_tool(self.active_profile(), "external_network", ("catalog",))
-            catalog_fetch.allowed(url, hosts)
+            host = catalog_fetch.allowed(url, hosts)
+            self.require_tools(("external_network", ("catalog", host)))
 
         def import_catalog(self):
             if self.busy:
@@ -3074,7 +3076,27 @@ def create_window(app, loop, bridge=None):
             model = self.cfg["llm"]
             route = (profile.id, profile.version, profile.based_on_mode, endpoint, model)
             self.session.require_route(route)
+            if self.session.has_attachment_history and not self.conversation_authorized(route):
+                raise Hold("attachment_context_changed")
             return Jan(endpoint, model), route
+
+        @staticmethod
+        def attachment_live_allowed(live):
+            if live is None:
+                return False
+            decision, reason = live.evaluate(attachments.ACTION, attachments.SCOPE)
+            return decision == profiles.ALLOW or reason == "no_rule_matches"
+
+        def conversation_authorized(self, route):
+            try:
+                if self.closing or self.attachment_route() != route or self.active_profile().state != "active":
+                    return False
+                if self.session.has_attachment_history:
+                    self.attachment_policy()
+                    return self.attachment_live_allowed(self.history_attachment_live)
+                return True
+            except Hold:
+                return False
 
         def submit(self, work):
             if self.busy:
@@ -3256,6 +3278,7 @@ def create_window(app, loop, bridge=None):
                     self.analysis.cancel()
             self.session.invalidate(clear=clear)
             if clear:
+                self.history_attachment_live = None
                 child=self.log.get_first_child()
                 while child is not None:
                     nxt=child.get_next_sibling()
@@ -3312,11 +3335,16 @@ def create_window(app, loop, bridge=None):
                 return None
             try:
                 route = self.attachment_route()
+                live = self.store.bind_live(route[0])
                 def authorized():
                     try:
                         self.attachment_policy()
                         return (not self.busy and not self.closing
-                                and self.attachment_route() == route)
+                                and self.attachment_route() == route
+                                and live.policy.profile_id == route[0]
+                                and live.policy.version == route[1]
+                                and live.policy.mode == route[2]
+                                and self.attachment_live_allowed(live))
                     except Hold:
                         return False
                 # Capture identity at the trusted callback before opening data.
@@ -3343,6 +3371,7 @@ def create_window(app, loop, bridge=None):
                 return None
             self.attachment = item
             self.attachment_context = route
+            self.attachment_live = live
             self.attachment_note.set_text(tr("Attached: %s" % attachments.describe(item),
                                              "Eklendi: %s" % attachments.describe(item),
                                              "Angehängt: %s" % attachments.describe(item)))
@@ -3372,12 +3401,14 @@ def create_window(app, loop, bridge=None):
             self.record_disclosure()
             item = self.attachment
             selected_route = self.attachment_context
+            selected_live = self.attachment_live
             def allowed():
                 if item is None:
                     return True
                 try:
                     self.attachment_policy()
-                    return not self.closing and self.attachment_route() == selected_route
+                    return (not self.closing and self.attachment_route() == selected_route
+                            and self.attachment_live_allowed(selected_live))
                 except Hold:
                     return False
             if item is not None and (not allowed() or self.require_attachment() is None):
@@ -3395,7 +3426,9 @@ def create_window(app, loop, bridge=None):
             async def run(epoch):
                 self.session.check(epoch)
                 backend, route = self.conversation_backend()
-                if not allowed():
+                def permitted():
+                    return allowed() and self.conversation_authorized(route)
+                if not permitted():
                     raise Hold("attachment_context_changed")
                 self.session.prepare_text(text, attachment=item, model=self.cfg["llm"])
                 self.entry.set_text("")
@@ -3410,8 +3443,10 @@ def create_window(app, loop, bridge=None):
                 result,_=await self.session.reply(text,backend,
                                                   epoch,on_delta=grow,route=route,
                                                   attachment=item,model=self.cfg["llm"],
-                                                  authorize=allowed)
+                                                  authorize=permitted)
                 self.session.check(epoch)
+                if item is not None and self.history_attachment_live is None:
+                    self.history_attachment_live = selected_live
                 self.extend(answer,"JARVIS",result,replace=True)
             self.submit(run)
 
@@ -3442,7 +3477,8 @@ def create_window(app, loop, bridge=None):
                     return
                 self.set_state("thinking")
                 backend, route = self.conversation_backend()
-                result,speech=await self.session.reply(text,backend,epoch,voices,route=route)
+                result,speech=await self.session.reply(text,backend,epoch,voices,route=route,
+                    authorize=lambda: self.conversation_authorized(route))
                 self.session.check(epoch)
                 self.bubble("JARVIS",result)
                 self.spoken_line(speech, epoch)
