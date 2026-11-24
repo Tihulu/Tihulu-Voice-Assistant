@@ -259,6 +259,7 @@ def create_window(app, loop, bridge=None):
                 "Find in conversation", "Sohbette bul", "Im Gespräch suchen"))
             searchbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
             self.search_panel.set_child(searchbox)
+            self.search_panel.connect("notify::expanded", lambda *_: self.run_search())
             chat.append(self.search_panel)
             searchrow = Gtk.Box(spacing=8)
             self.search_entry = Gtk.Entry(hexpand=True,placeholder_text=tr("Search this conversation…","Bu sohbette ara…","In diesem Gespräch suchen…"))
@@ -384,6 +385,9 @@ def create_window(app, loop, bridge=None):
             self.transcribe_button = self.button(models, tr("Transcribe a recording","Kayıttan yazıya çevir","Aufnahme transkribieren"), self.transcribe_recording)
             self.test_note = Gtk.Label(xalign=0, wrap=True)
             models.append(self.test_note)
+            self.return_to_chat = self.button(models, tr(
+                "Return to chat", "Sohbete dön", "Zum Chat zurück"),
+                lambda: self.stack.set_visible_child_name("conversation"))
             self.update_labels()
             self.store = profiles.Store(profiles.profile_dir())
             self.policy_rows = {}
@@ -475,6 +479,7 @@ def create_window(app, loop, bridge=None):
             return True
 
         def run_focus_search(self, *_):
+            self.stack.set_visible_child_name("conversation")
             self.search_panel.set_expanded(True)
             self.search_entry.grab_focus()
             return True
@@ -1025,6 +1030,8 @@ def create_window(app, loop, bridge=None):
             Nothing leaves this machine, and the field is disabled while a turn
             runs so a search can never race a reply.
             """
+            if not self.search_panel.get_expanded():
+                return
             query = self.search_entry.get_text().strip()
             rows, item = [], self.search_results.get_first_child()
             while item is not None:
@@ -1082,13 +1089,19 @@ def create_window(app, loop, bridge=None):
                 row.query = query
                 row.set_child(Gtk.Label(label=query, xalign=0, wrap=True))
                 row.set_activatable(True)
-                row.connect("activate", lambda item: self.recall_search(item.query))
+                row.connect("activate", self.activate_search_history)
                 self.search_history.append(row)
             self.search_history_label.set_visible(bool(self.cfg.get("search_history")))
             self.search_forget.set_sensitive(bool(self.cfg.get("search_history")))
 
+        def activate_search_history(self, row):
+            # Rebuilding the list during GTK's row activation can invalidate
+            # the row whose native activation is still being dispatched.
+            if not self.busy and self.search_panel.get_expanded():
+                GLib.idle_add(self.recall_search, row.query)
+
         def recall_search(self, query):
-            if not self.busy:
+            if not self.busy and not self.closing and self.search_panel.get_expanded():
                 self.search_entry.set_text(query)
                 self.run_search(remember=True)
 
@@ -1149,7 +1162,8 @@ def create_window(app, loop, bridge=None):
 
         def clear_search(self):
             self.search_entry.set_text("")
-            self.search_entry.grab_focus()
+            if self.search_panel.get_expanded():
+                self.search_entry.grab_focus()
 
         def topbar_text(self):
             """Mode, profile, model and boundary, as one line of words.
@@ -1277,6 +1291,7 @@ def create_window(app, loop, bridge=None):
         def refresh(self):
             connected = self.cfg["llm"] in self.inventory
             self.setup.set_visible(not connected)
+            self.return_to_chat.set_sensitive(not self.busy and connected)
             self.setup_connect.set_sensitive(not self.busy)
             if not self.url.get_text().strip():
                 self.setup_note.set_text(tr(
@@ -3577,6 +3592,10 @@ def create_window(app, loop, bridge=None):
                 self.submit(task_run)
                 return
             if self.cfg["llm"] not in self.inventory:
+                self.set_state("ready", tr(
+                    "Connect and select a local model before sending a message.",
+                    "Mesaj göndermeden önce yerel model bağla ve seç.",
+                    "Vor dem Senden ein lokales Modell verbinden und auswählen."))
                 return
             self.record_disclosure()
             item = self.attachment

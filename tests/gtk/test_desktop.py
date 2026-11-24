@@ -293,6 +293,23 @@ class FreshStartTests(DesktopFixture):
         self.assertIn("Enter the local Jan API URL", self.ui.status.get_text())
         self.jan.assert_not_called()
 
+    def test_setup_requires_explicit_model_choice_then_returns_to_chat(self):
+        self.ui.setup_connect.emit("clicked")
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.ui.reload.emit("clicked")
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.inventory, ("fixture-chat",))
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.ui.models.set_active(0)
+        self.assertTrue(self.ui.return_to_chat.get_sensitive())
+        self.ui.return_to_chat.emit("clicked")
+        self.assertEqual(self.ui.stack.get_visible_child_name(), "conversation")
+        self.assertFalse(self.ui.setup.get_visible())
+        self.assertFalse(self.ui.talk.get_sensitive())
+        self.text("Merhaba!")
+        self.assertEqual(len(self.ui.session.history), 2)
+
     def test_blank_start_keeps_local_analysis_available(self):
         self.assertTrue(self.ui.analysis.choose_button.get_sensitive())
         self.ui.entry.set_text("Bu dosyayı analiz et")
@@ -2465,6 +2482,7 @@ class ConversationSearchTests(DesktopTests):
     """Searching the conversation stays local, bounded and snippet-only."""
 
     def search(self, query):
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text(query)
         # The note names the query, so this waits for this search to have run.
         self.until(lambda: '"%s"' % query in self.ui.search_note.get_text())
@@ -2519,6 +2537,7 @@ class ConversationSearchTests(DesktopTests):
         self.click(self.ui.send)
         self.until(lambda: self.backend.chat_entered)
         self.assertFalse(self.ui.search_entry.get_sensitive())
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("naber")
         # While the turn runs the field does not search, so no row is claimed.
         self.assertEqual(self.rows(), [])
@@ -2964,6 +2983,7 @@ class KeyboardTests(DesktopTests):
 
     def test_enter_on_a_search_row_shows_the_match(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         row = self.ui.search_results.get_first_child()
@@ -2973,6 +2993,7 @@ class KeyboardTests(DesktopTests):
     def test_escape_cancels_or_clears_and_never_does_both(self):
         self.turn()
         # With no turn running, Escape clears a saved search.
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         self.ui.run_cancel_turn()
@@ -3015,6 +3036,7 @@ class KeyboardTests(DesktopTests):
         self.assertTrue(self.ui.run_focus_search() is True)
         self.assertTrue(self.ui.search_entry.get_sensitive())
         self.assertTrue(self.ui.search_entry.get_can_focus())
+        self.assertTrue(self.ui.search_panel.get_expanded())
 
 
 class ReceiptUITests(EscalationConsentTests):
@@ -3482,6 +3504,7 @@ class SearchHistoryTests(ConversationSearchTests):
     def test_live_prefixes_are_not_persisted_until_submission(self):
         self.turn()
         for query in ("n", "na", "nab", "naber"):
+            self.ui.search_panel.set_expanded(True)
             self.ui.search_entry.set_text(query)
             self.assertEqual(self.ui.cfg.get("search_history"), [])
             self.assertEqual(settings.load()["search_history"], [])
@@ -3492,6 +3515,7 @@ class SearchHistoryTests(ConversationSearchTests):
 
     def test_a_query_that_ran_is_remembered(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
         self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
@@ -3501,12 +3525,14 @@ class SearchHistoryTests(ConversationSearchTests):
 
     def test_a_refused_query_is_not_remembered(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("absent-word")
         self.ui.search_entry.emit("activate")
         self.until(lambda: '"absent-word"' in self.ui.search_note.get_text())
         # A query that ran but matched nothing was still searched for.
         self.assertEqual(self.ui.cfg.get("search_history"), ["absent-word"])
         # A query the client refuses to run leaves no memory behind.
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("x" * 200)
         self.ui.search_entry.emit("activate")
         self.until(lambda: self.ui.search_note.get_text() == "invalid_search_query")
@@ -3514,12 +3540,15 @@ class SearchHistoryTests(ConversationSearchTests):
 
     def test_re_asking_moves_a_query_to_the_front(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
         self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("mavi")
         self.ui.search_entry.emit("activate")
         self.until(lambda: '"mavi"' in self.ui.search_note.get_text())
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
         self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
@@ -3527,9 +3556,11 @@ class SearchHistoryTests(ConversationSearchTests):
 
     def test_a_remembered_query_re_runs_the_search(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
         self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("")
         self.assertEqual(self.rows(), [])
         self.history_rows()[0].emit("activate")
@@ -3538,6 +3569,7 @@ class SearchHistoryTests(ConversationSearchTests):
 
     def test_forgetting_clears_the_store_not_just_the_row(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
         self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
