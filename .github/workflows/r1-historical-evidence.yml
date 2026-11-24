@@ -12,7 +12,7 @@ jobs:
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: af0bbaa9207b195ad736ff96b295150e9bd12b3f
+          ref: 5a8acf5c88060caf842c2495a041283927e7997c
           fetch-depth: 0
           persist-credentials: false
       - name: Verify pinned source and historical refs; run exact tests
@@ -25,9 +25,9 @@ jobs:
           import unittest
           def git(*args):
               return subprocess.check_output(['git', *args], text=True).strip()
-          head = 'af0bbaa9207b195ad736ff96b295150e9bd12b3f'
+          head = '5a8acf5c88060caf842c2495a041283927e7997c'
           assert git('rev-parse', 'HEAD') == head
-          assert set(git('diff', '--name-only', '0749fc74d427b7893252ca25f625803471797e33', head).splitlines()) == {'src/tihulu_jarvis/voice/audio.py', 'tests/test_audio_capture_deadline.py'}
+          assert set(git('diff', '--name-only', 'af0bbaa9207b195ad736ff96b295150e9bd12b3f', head).splitlines()) == {'src/tihulu_jarvis/voice/audio.py', 'tests/test_audio_stage_deadline.py'}
           assert git('hash-object', 'tests/test_conflict_check.py') == 'b09752f2a25e5380e20ff220cd98edaa54493200'
           assert git('rev-parse', '--is-shallow-repository') == 'false'
           assert not git('status', '--porcelain')
@@ -35,7 +35,7 @@ jobs:
               'feat/usage-report': '60f237df43631a1c4ec3619ac3e6f409935a251a',
               'feat/approved-sources': '36cc9fdf9d0103cb6a6101d3a37cdb7d6456d3a2',
               'feat/profile-ui': '627309491c568cef3d799fcbd1853ebc8c106f96',
-              'feat/modes-and-profiles': '6a21bf7003039d8d63684c9e5572859ad22ec5a2',
+              'feat/modes-and-profiles': '6a21bf7003039d8d63684c9e5692859ad22ec5a2',
               'feat/market-ui': 'c9e8c87bb52505f21532f94025307962feaeb220',
               'feat/market-consolidated': '29cc369acd052efb526d9c3c51320a9323f5a0bb',
           }
@@ -51,36 +51,36 @@ jobs:
           import yaml
           print('Python', sys.version.split()[0], 'PyYAML', yaml.__version__, flush=True)
           suite = unittest.TestLoader().discover('tests')
-          assert suite.countTestCases() == 557, suite.countTestCases()
+          assert suite.countTestCases() == 569, suite.countTestCases()
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           print('Full core ran', result.testsRun, 'skips', len(result.skipped), flush=True)
-          failed = not result.wasSuccessful() or bool(result.skipped) or result.testsRun != 557
+          failed = not result.wasSuccessful() or bool(result.skipped) or result.testsRun != 569
           assert git('rev-parse', 'HEAD') == head
           assert not git('status', '--porcelain')
           raise SystemExit(int(failed))
           PY
-  capture_comparison:
+  stage_comparison:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: 0749fc74d427b7893252ca25f625803471797e33
+          ref: af0bbaa9207b195ad736ff96b295150e9bd12b3f
           path: original
           persist-credentials: false
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
-          ref: af0bbaa9207b195ad736ff96b295150e9bd12b3f
+          ref: 5a8acf5c88060caf842c2495a041283927e7997c
           path: fixed
           persist-credentials: false
       - name: Verify exact before and after sources
         run: |
-          test "$(git -C original rev-parse HEAD)" = "0749fc74d427b7893252ca25f625803471797e33"
-          test "$(git -C fixed rev-parse HEAD)" = "af0bbaa9207b195ad736ff96b295150e9bd12b3f"
-          test "$(git -C original hash-object src/tihulu_jarvis/voice/audio.py)" = "a02bfdd2c48c35b2dac3f6e341c61fbe4af46462"
-          test "$(git -C fixed hash-object src/tihulu_jarvis/voice/audio.py)" = "51981e55542f8c4ebf633298f203b66c7a29c2fd"
-          test "$(git -C fixed hash-object tests/test_audio_capture_deadline.py)" = "0d3adabad16c20337a0e4b1fe7cbf51231aa2c2d"
-      - name: Compare same six tests on both implementations
+          test "$(git -C original rev-parse HEAD)" = "af0bbaa9207b195ad736ff96b295150e9bd12b3f"
+          test "$(git -C fixed rev-parse HEAD)" = "5a8acf5c88060caf842c2495a041283927e7997c"
+          test "$(git -C original hash-object src/tihulu_jarvis/voice/audio.py)" = "51981e55542f8c4ebf633298f203b66c7a29c2fd"
+          test "$(git -C fixed hash-object src/tihulu_jarvis/voice/audio.py)" = "935a3817fd0b567bd363beeb1994f7e7f598faea"
+          test "$(git -C fixed hash-object tests/test_audio_stage_deadline.py)" = "a9bcecc49ede2d8da29dc8c49b348d41451e2929"
+      - name: Compare same twelve tests on both implementations
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
@@ -94,20 +94,22 @@ jobs:
           root = pathlib.Path(os.environ['GITHUB_WORKSPACE'])
           assert pathlib.Path(audio.__file__).resolve().is_relative_to(root / version / 'src')
           suite = unittest.TestLoader().discover(str(root / 'fixed' / 'tests'),
-                                                pattern='test_audio_capture_deadline.py')
-          assert suite.countTestCases() == 6
+                                                pattern='test_audio_stage_deadline.py')
+          assert suite.countTestCases() == 12
           result = unittest.TextTestRunner(verbosity=2).run(suite)
           names = {case._testMethodName for case, _ in result.failures}
           expected = {
-              'test_late_spawn_refuses_capture',
-              'test_late_first_sample_refuses_publication',
-              'test_total_deadline_refuses_publication_and_signal',
-              'test_callback_crossing_deadline_refuses_signal',
-              'test_effect_check_after_environment_preparation',
+              'test_late_synthesis_publication_refuses_spawn',
+              'test_late_piper_spawn_refuses_input',
+              'test_late_playback_spawn_refuses_publication',
+              'test_late_speaking_callback_refuses_wait',
+              'test_late_transcription_publication_refuses_whisper',
+              'test_late_whisper_spawn_refuses_wait',
+              'test_late_transcription_publication_refuses_runner',
           } if version == 'original' else set()
           print(version, 'ran', result.testsRun, 'failures', sorted(names),
                 'errors', len(result.errors), 'skips', len(result.skipped), flush=True)
-          assert result.testsRun == 6 and not result.errors and not result.skipped
+          assert result.testsRun == 12 and not result.errors and not result.skipped
           assert names == expected, (names, expected)
           PY
           done
