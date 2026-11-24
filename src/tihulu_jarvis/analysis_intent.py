@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Bounded local task intent routing; never a general command interpreter."""
 import json
-import re
 from dataclasses import dataclass
 
 from .temperature_engine import COLORS
