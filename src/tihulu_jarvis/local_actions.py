@@ -13,6 +13,11 @@ COMMANDS = {
         "bir kaydi yazıya cevir", "transkribiere eine aufnahme",
         "transkribiere diese audiodatei",
     ),
+    "explore_folder": (
+        "explore a local folder", "list a local folder",
+        "yerel klasoru incele", "bir klasoru listele",
+        "untersuche einen lokalen ordner", "liste einen lokalen ordner auf",
+    ),
     "discover_audio_models": (
         "find existing audio models", "find local audio models",
         "mevcut ses modellerini bul", "yerel ses modellerini bul",

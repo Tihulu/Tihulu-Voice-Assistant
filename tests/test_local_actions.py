@@ -13,6 +13,14 @@ class LocalActionTests(unittest.TestCase):
                      "Finde lokale Audiomodelle"):
             self.assertEqual(local_actions.direct(text), "discover_audio_models")
 
+    def test_folder_commands_are_exact_and_multilingual(self):
+        for text in ("Explore a local folder", "Bir klasörü listele",
+                     "Liste einen lokalen Ordner auf"):
+            self.assertEqual(local_actions.direct(text), "explore_folder")
+        for text in ("Explore a local folder?", "List a local folder /tmp",
+                     "Task: explore a local folder"):
+            self.assertIsNone(local_actions.direct(text))
+
     def test_questions_quotes_paths_and_compound_commands_are_not_actions(self):
         for text in ('"Transcribe a recording"', "Transcribe a recording?",
                      "Transcribe a recording /tmp/clip.wav",

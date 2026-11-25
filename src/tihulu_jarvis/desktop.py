@@ -17,6 +17,7 @@ from .voice.jan import MAX_TEXT as STREAM_CAP
 from . import catalog_fetch, disclosure, routing, model_discovery
 from .owned_wait import finish_owned
 from .analysis_ui import AnalysisView
+from .chat_files import ChatFiles
 from .selected_csv import selection_identity
 from . import analysis_intent, local_actions
 from . import locks, search, states
@@ -467,6 +468,7 @@ def create_window(app, loop, bridge=None):
             toolbox.append(self.chat_transcribe_note)
             self.analysis = AnalysisView(self, toolbox, Gtk, GLib, tr, lang,
                                          result_parent=self.result_actions_slot)
+            self.chat_files = ChatFiles(self, toolbox, self.result_actions_slot, Gtk, tr)
             self.refresh()
             self.win.present()
 
@@ -793,6 +795,8 @@ def create_window(app, loop, bridge=None):
             self.clear_model_probe()
             if hasattr(self, "folder_entries"):
                 self.clear_folder_view()
+            if hasattr(self, "chat_files"):
+                self.chat_files.reset()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             self.cfg["profile"] = entry.id
@@ -1442,6 +1446,11 @@ def create_window(app, loop, bridge=None):
                 analysis_live = bool(self.analysis.dialog is not None or self.analysis.last or self.owned_picker is not None)
                 self.hard.set_sensitive(self.busy or analysis_live)
                 self.quick_stop.set_sensitive(self.busy or analysis_live)
+            if hasattr(self, "chat_files"):
+                self.chat_files.refresh()
+                if self.chat_files.folder is not None:
+                    self.hard.set_sensitive(True)
+                    self.quick_stop.set_sensitive(True)
             # Keep turn-specific actions visible only while they can be used.
             # The top-bar hard stop remains permanently visible.
             self.finish_btn.set_visible(self.finish_btn.get_sensitive())
@@ -3785,6 +3794,8 @@ def create_window(app, loop, bridge=None):
 
         def hard_stop(self):
             self.clear_attachment()
+            if hasattr(self, "chat_files"):
+                self.chat_files.reset()
             if hasattr(self, "folder_entries"):
                 self.clear_folder_view()
             if hasattr(self, "analysis"):
@@ -3796,6 +3807,8 @@ def create_window(app, loop, bridge=None):
             self.clear_model_scan()
             if clear:
                 self.clear_attachment()
+                if hasattr(self, "chat_files"):
+                    self.chat_files.reset()
             if hasattr(self, "analysis"):
                 if clear:
                     self.analysis.reset()
@@ -3927,6 +3940,8 @@ def create_window(app, loop, bridge=None):
                 opened = self.choose_model_folder()
                 if opened:
                     self.stack.set_visible_child_name("models")
+            elif action == "explore_folder":
+                opened = self.chat_files.choose()
             else:
                 self.set_state("ready", "local_task_unsupported")
                 return

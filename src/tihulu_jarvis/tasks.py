@@ -16,7 +16,7 @@ from .voice.m1 import Hold
 MAX_TASKS = 64
 STATES = ("queued", "running", "done", "cancelled", "failed")
 RUNNING = ("queued", "running")
-KINDS = ("turn", "download", "transcription", "catalog_fetch", "update")
+KINDS = ("turn", "download", "transcription", "catalog_fetch", "update", "file_research")
 
 
 @dataclass(frozen=True)

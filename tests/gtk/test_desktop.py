@@ -3771,6 +3771,98 @@ class FilesResearchTests(DesktopTests):
         return out
 
 
+class ChatFilesTests(DesktopFixture):
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        (self.tmp / "notes.txt").write_text("PRIVATE-LOCAL-CANARY")
+        (self.tmp / "nested").mkdir()
+
+    def test_typed_folder_request_opens_native_picker_without_jan(self):
+        self.ui.entry.set_text("Bir klasörü listele")
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.click(self.ui.send)
+        self.assertIsNotNone(self.ui.owned_picker)
+        self.assertEqual(self.ui.owned_picker.get_action(), Gtk.FileChooserAction.SELECT_FOLDER)
+        self.ui.hard_stop()
+        self.assertIsNone(self.ui.owned_picker)
+        self.jan.assert_not_called()
+
+    def test_chat_folder_and_preview_remain_outside_model_history(self):
+        view = self.ui.chat_files
+        view.start(str(self.tmp))
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertTrue(view.panel.get_visible())
+        self.assertIn("notes.txt", view.listing.get_text())
+        self.assertIn("nested/", view.listing.get_text())
+        self.assertEqual(view.preview.get_text(), "")
+        self.assertIsNone(view.entries.get_active_id())
+        view.entries.set_active_id("1")
+        self.click(view.read_button)
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertEqual(view.preview.get_text(), "PRIVATE-LOCAL-CANARY")
+        self.assertEqual(self.ui.session.history, ())
+        self.assertEqual(self.ui.board.rows[-1].kind, "file_research")
+        self.jan.assert_not_called()
+        self.assertTrue(self.ui.quick_stop.get_sensitive())
+        self.ui.hard_stop()
+        self.assertFalse(view.panel.get_visible())
+        self.assertEqual(view.preview.get_text(), "")
+        self.assertIsNone(view.folder)
+
+    def test_replaced_entry_never_publishes_new_contents(self):
+        view = self.ui.chat_files
+        view.start(str(self.tmp))
+        self.until(lambda: not self.ui.busy)
+        view.entries.set_active_id("1")
+        path = self.tmp / "notes.txt"
+        path.unlink()
+        path.write_text("REPLACEMENT-CANARY")
+        self.click(view.read_button)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "file_changed")
+        self.assertEqual(view.preview.get_text(), "")
+        self.jan.assert_not_called()
+
+    def test_cancelled_listing_drains_worker_before_releasing_task(self):
+        from threading import Event
+        entered, release = Event(), Event()
+        real_list = desktop.files.list_dir
+        def delayed(root, *, checkpoint):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("worker test timeout")
+            checkpoint()
+            return real_list(root, checkpoint=checkpoint)
+        view = self.ui.chat_files
+        with patch.object(desktop.files, "list_dir", side_effect=delayed):
+            view.start(str(self.tmp))
+            try:
+                self.until(entered.is_set)
+                self.ui.hard_stop()
+                self.assertTrue(self.ui.busy)
+                self.assertTrue(self.ui.board.busy())
+            finally:
+                release.set()
+            self.until(lambda: not self.ui.busy)
+        self.assertIsNone(view.folder)
+        self.assertFalse(view.panel.get_visible())
+        self.assertEqual(self.ui.board.rows[-1].state, "cancelled")
+
+    def test_profile_generation_change_clears_result(self):
+        view = self.ui.chat_files
+        view.start(str(self.tmp))
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(view.panel.get_visible())
+        old = self.ui.active_profile()
+        self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+        self.ui.refresh()
+        self.assertIsNone(view.folder)
+        self.assertFalse(view.panel.get_visible())
+
+
 class ReadinessUITests(DesktopTests):
     """What this machine can do is stated, before a turn fails."""
 
