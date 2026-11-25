@@ -42,7 +42,7 @@ jobs:
               def setUp(self):
                   super().setUp()
                   self.root=Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
-                  (self.root/'a.txt').write_text('SYNTHETIC [needle]\\n'*40)
+                  (self.root/'a.txt').write_text('SYNTHETIC [needle]\n'*40)
                   (self.root/'b.txt').write_text('other')
               def listing(self):
                   v=self.ui.chat_files
