@@ -13,6 +13,7 @@ import wave
 from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from pathlib import Path
+from threading import Event
 
 from .. import resources
 from ..owned_wait import OperationDeadline, await_with_deadline, finish_owned
@@ -142,7 +143,8 @@ async def child(name, *args, stdin=False, checkpoint=lambda: None):
         await finish_owned(terminate(p))
 
 
-def has_signal(path):
+def has_signal(path, *, checkpoint=lambda: None):
+    checkpoint()
     try:
         with wave.open(str(path),"rb") as w:
             if (w.getnchannels(),w.getsampwidth(),w.getframerate()) != (1,2,16000):
@@ -151,20 +153,57 @@ def has_signal(path):
             # quality guarantee. Never transcribe a silent/truncated capture.
             hits = 0
             for _ in range(1550):
+                checkpoint()
                 block = w.readframes(320)
+                checkpoint()
                 if len(block) < 640:
                     break
                 rms = math.sqrt(sum(x*x for (x,) in struct.iter_unpack("<h", block)) / 320)
                 hits += rms >= 90
                 if hits >= 5:
+                    checkpoint()
                     return True
     except (OSError, EOFError, wave.Error, struct.error):
         pass
+    checkpoint()
     return False
 
 
 # Only active audio operations poll. The deadline includes polling time.
 AUTH_POLL = .25
+
+
+async def validate_signal(path, *, checkpoint):
+    """Retain the private WAV and task ownership until the worker drains.
+
+    The owner checks live authorization on the event loop; the worker only
+    receives a thread-safe stop signal, never GTK or mutable UI callbacks.
+    Blocking filesystem calls cannot be forcibly interrupted by cancellation.
+    """
+    checkpoint()
+    stop = Event()
+    def worker_check():
+        if stop.is_set():
+            raise Hold("turn_cancelled")
+    def work():
+        worker_check()
+        result = has_signal(path, checkpoint=worker_check)
+        worker_check()
+        return result
+    worker = asyncio.create_task(asyncio.to_thread(work))
+    try:
+        while True:
+            checkpoint()
+            done, _ = await asyncio.wait((worker,), timeout=AUTH_POLL)
+            checkpoint()
+            if done:
+                result = worker.result()
+                checkpoint()
+                return result
+    finally:
+        stop.set()
+        # Never cancel the to_thread task: doing so would hide a live thread.
+        await finish_owned(asyncio.gather(worker, return_exceptions=True))
 
 
 async def await_authorized(factory, timeout, checkpoint):
@@ -222,7 +261,7 @@ async def listen(model, finish, publish, *, checkpoint):
         wav, stem = Path(tmp)/"input.wav", Path(tmp)/"transcript"
         await _capture(wav, finish, publish, checkpoint=checkpoint)
         checkpoint()
-        if not await asyncio.to_thread(has_signal, wav):
+        if not await validate_signal(wav, checkpoint=checkpoint):
             raise Hold("no_speech_signal")
         return await _transcription_stage(model, wav, stem, None, publish,
                                           checkpoint=checkpoint)
@@ -275,7 +314,7 @@ async def transcribe(model, recording, runner=None, publish=None, *, checkpoint,
                 raise Hold("recording_changed") from None
             raise
         checkpoint()
-        if not await asyncio.to_thread(has_signal, snapshot):
+        if not await validate_signal(snapshot, checkpoint=checkpoint):
             raise Hold("no_speech_signal")
         return await _transcription_stage(model, snapshot, stem, runner, publish,
                                           checkpoint=checkpoint)
