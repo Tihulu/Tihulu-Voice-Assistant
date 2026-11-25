@@ -185,6 +185,7 @@ def create_window(app, loop, bridge=None):
             self.growing = {}
             self.transcribe_runner = None
             self.result_watch = None
+            self.research_folder = self.research_context = None
             self.win = Gtk.ApplicationWindow(application=app, title="TIHULU JARVIS")
             self.win.set_default_size(920, 650)
             self.session, self.inventory = Session(), ()
@@ -1453,9 +1454,7 @@ def create_window(app, loop, bridge=None):
                 if self.chat_files.folder is not None:
                     self.hard.set_sensitive(True)
                     self.quick_stop.set_sensitive(True)
-            if self.research_folder is not None or self.model_scan_result is not None:
-                self.hard.set_sensitive(True)
-                self.quick_stop.set_sensitive(True)
+            self.refresh_local_stop()
             self.watch_local_results()
             # Keep turn-specific actions visible only while they can be used.
             # The top-bar hard stop remains permanently visible.
@@ -2338,6 +2337,9 @@ def create_window(app, loop, bridge=None):
                 return False
 
         def refresh_research_scope(self):
+            # Initial profile activation refreshes before secondary pages exist.
+            if not hasattr(self, "file_read"):
+                return
             if self.research_folder is not None and not self.research_allowed("folder", self.research_context):
                 self.clear_folder_view()
             row = self.folder_entries.get_selected_row()
@@ -2349,6 +2351,16 @@ def create_window(app, loop, bridge=None):
                 if self.research_folder is None or not self.research_allowed("file", self.research_context):
                     self.file_preview.set_text("")
             self.file_read.set_sensitive(readable)
+
+        def refresh_local_stop(self):
+            active = (self.busy or self.owned_picker is not None
+                      or self.research_folder is not None or self.model_scan_result is not None
+                      or (hasattr(self, "chat_files") and self.chat_files.folder is not None)
+                      or (hasattr(self, "analysis") and
+                          (self.analysis.dialog is not None or self.analysis.last is not None)))
+            self.hard.set_sensitive(bool(active))
+            self.quick_stop.set_sensitive(bool(active))
+            self.hard.set_visible(bool(active))
 
         def watch_local_results(self):
             # No polling when there is no retained private result. This checks
@@ -2363,6 +2375,7 @@ def create_window(app, loop, bridge=None):
                 self.refresh_model_scan()
                 if hasattr(self, "chat_files"):
                     self.chat_files.refresh()
+                self.refresh_local_stop()
                 if (self.research_folder is None and self.model_scan_result is None
                         and (not hasattr(self, "chat_files") or self.chat_files.folder is None)):
                     self.result_watch = None
@@ -2452,8 +2465,9 @@ def create_window(app, loop, bridge=None):
                 note += " " + tr("Listing limit reached.", "Listeleme sınırına ulaşıldı.",
                                   "Listengrenze erreicht.")
             self.file_note.set_text(note)
-            self.watch_local_results()
             self.refresh_research_scope()
+            self.refresh_local_stop()
+            self.watch_local_results()
             return self.research_folder
 
         def show_folder(self, folder):
@@ -2478,6 +2492,7 @@ def create_window(app, loop, bridge=None):
             self.file_preview.set_text("")
             self.file_read.set_sensitive(not self.busy and row is not None and not row.entry.directory
                                          and self.research_folder is not None
+                                         and self.research_allowed("folder", self.research_context)
                                          and self.research_allowed("file", self.research_context))
 
         def read_selected_file(self):
@@ -4261,7 +4276,8 @@ def create_window(app, loop, bridge=None):
         def close(self,*_):
             self.dismiss_picker()
             self.clear_attachment()
-            self.clear_folder_view()
+            if hasattr(self, "file_read"):
+                self.clear_folder_view()
             self.clear_model_scan()
             if hasattr(self, "chat_files"):
                 self.chat_files.reset()

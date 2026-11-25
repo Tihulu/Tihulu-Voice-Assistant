@@ -3987,16 +3987,22 @@ class SuccessorBoundaryRegressionTests(DesktopFixture):
             self.assertFalse(self.ui.model_candidate_choose.get_sensitive())
 
 
+    def test_result_watcher_is_idle_at_startup(self):
+        self.assertIsNone(self.ui.result_watch)
+        self.assertIsNone(self.ui.research_folder)
+
     def test_idle_result_expiry_clears_without_manual_refresh(self):
         clock = [time.time()]
         self.reader(clock[0] + 60)
         with patch.object(profiles.time, "time", side_effect=lambda: clock[0]):
             self.legacy_preview()
             self.assertIsNotNone(self.ui.result_watch)
+            self.assertTrue(self.ui.quick_stop.get_sensitive())
             clock[0] += 120
             self.until(lambda: self.ui.research_folder is None)
             self.assertEqual(self.ui.file_preview.get_text(), "")
             self.assertIsNone(self.ui.result_watch)
+            self.assertFalse(self.ui.quick_stop.get_sensitive())
 
     def test_file_preview_requires_folder_grant_as_well(self):
         clock = [time.time()]
