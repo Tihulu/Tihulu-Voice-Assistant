@@ -320,8 +320,13 @@ class Workspace:
             if self._research_draft is not None and draft is not self._research_draft[0]:
                 raise Refused("stale_research_draft")
             self._state="running"
+        def check():
+            with self._lock:
+                self._live()
+                if self._state!="running":
+                    raise Refused("stale_turn")
         try:
-            answer=await self._chat.submit(draft,grant,response,confirmed=True)
+            answer=await self._chat.submit(draft,grant,response,confirmed=True,guard=check)
             with self._lock:
                 self._live()
                 if self._state!="running":

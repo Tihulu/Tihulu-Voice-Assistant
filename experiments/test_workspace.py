@@ -438,3 +438,54 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Refused):
             self.g.checkpoint(lg,lg.request)
         self.card("fresh","text",b"fresh")
+
+    async def test_attachment_revoked_after_adapter_claim_prevents_first_delta(self):
+        card,source=self.card("file","text",b"PRIVATE-CANARY")
+        ag=self.grant("engine",attachment_target(self.s.scope,card,"preview","Read"),"private")
+        d=self.s.attach(card.identity,"preview","Read",ag,confirmed=True)
+        g=self.grant("engine",d.target)
+        original=self.g.claim
+        def revoke(grant,req):
+            original(grant,req)
+            if grant is g:
+                self.g.revoke(source.identity)
+        with patch.object(self.g,"claim",side_effect=revoke), patch("jan_replay.LocalAdapter.event",autospec=True) as event_call:
+            with self.assertRaises(Refused):
+                await self.s.submit(d,g,frame([event("answer"),b"[DONE]"]),confirmed=True)
+            event_call.assert_not_called()
+        self.assertEqual(self.s.poll(),"held")
+        self.assertEqual(self.s._chat._history,())
+
+    async def test_root_revoked_between_deltas_blocks_next_delta(self):
+        from adapter_protocol import LocalAdapter
+        d=self.s.draft("hello")
+        g=self.grant("engine",d.target)
+        original=LocalAdapter.event
+        seen=[]
+        def revoke(adapter,identity,sequence,kind,value):
+            seen.append(sequence)
+            original(adapter,identity,sequence,kind,value)
+            self.g.revoke(self.root.identity)
+        with patch.object(LocalAdapter,"event",new=revoke):
+            with self.assertRaises(Refused):
+                await self.s.submit(d,g,frame([event("one"),event("two"),b"[DONE]"]),confirmed=True)
+        self.assertEqual(seen,[1])
+        self.assertEqual(self.s.poll(),"held")
+        self.assertEqual(self.s._timeline,[])
+
+    async def test_research_revoked_before_replay_claim_refuses_adapter(self):
+        _,scope=self.research_setup()
+        card,n,s,p=self.research_card(scope)
+        from workspace import research_attachment_target
+        ag=self.grant("engine",research_attachment_target(scope,card,"Read"),"private")
+        d=self.s.attach_research(card.identity,"Read",ag,confirmed=True)
+        g=self.grant("engine",d.target)
+        original=__import__("jan_replay").replay
+        async def revoke(*args):
+            self.g.revoke(n.identity)
+            return await original(*args)
+        with patch("conversation.replay",side_effect=revoke),patch("jan_replay.LocalAdapter") as adapter:
+            with self.assertRaises(Refused):
+                await self.s.submit(d,g,frame([event("answer"),b"[DONE]"]),confirmed=True)
+            adapter.assert_not_called()
+        self.assertEqual(self.s.poll(),"held")

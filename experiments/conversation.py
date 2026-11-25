@@ -104,7 +104,7 @@ class Conversation:
             self._draft=None
             self._state="ready"
 
-    async def submit(self,draft,grant,response,*,confirmed=False):
+    async def submit(self,draft,grant,response,*,confirmed=False,guard=None):
         with self._lock:
             self._live()
             if self._state!="review" or draft is not self._draft or confirmed is not True:
@@ -114,8 +114,19 @@ class Conversation:
             turns=(*self._history,Turn("user",draft.text))
             self._pending=(grant,req)
             self._state="running"
+        def check():
+            # The parent guard runs outside the child lock: workspace -> chat
+            # is the only permitted cross-component lock order.
+            if guard is not None:
+                guard()
+            with self._lock:
+                self._live()
+                if self._state!="running" or self._draft is not draft:
+                    raise Refused("stale_turn")
         try:
-            data=await replay(self._g,grant,self._ctx,self._candidate,draft.identity,self._url,turns,response)
+            check()
+            data=await replay(self._g,grant,self._ctx,self._candidate,draft.identity,self._url,turns,response,check)
+            check()
             with self._lock:
                 self._live()
                 if self._state!="running" or self._draft is not draft:
