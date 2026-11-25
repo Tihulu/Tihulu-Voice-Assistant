@@ -7,7 +7,7 @@ from inference import Candidate
 from conversation import session_target
 from rich_chat import room_target,source_target,publish_target,export_target
 from voice_review import target
-from workspace import Workspace,identities,workspace_target
+from workspace import Workspace,identities,workspace_target,attachment_target
 from test_jan_replay import frame,event
 from test_voice_gate import LOUD
 from test_rich_chat import CSV
@@ -135,3 +135,59 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.s.export_card(c.identity,"chart","slot",g,confirmed=True),c.parts[1].data)
         self.s.clear_card(c.identity)
         self.assertEqual(self.s.timeline(),())
+
+    async def test_explicit_local_attachment_exact_part_and_question(self):
+        c,_=self.card("file","text",b"PRIVATE-CANARY")
+        req=attachment_target("workspace",c,"preview","Summarize")
+        g=self.grant("engine",req,"private")
+        with self.assertRaises(Refused):
+            self.s.attach(c.identity,"preview","Summarize",g)
+        with self.assertRaises(Refused):
+            self.s.attach(c.identity,"preview","Different",g,confirmed=True)
+        d=self.s.attach(c.identity,"preview","Summarize",g,confirmed=True)
+        with patch("conversation.replay",wraps=__import__("conversation").replay) as replay:
+            await self.send(d,"summary")
+            turns=replay.call_args.args[6]
+            self.assertIn("PRIVATE-CANARY",turns[-1].text)
+            self.assertIn("untrusted_text",turns[-1].text)
+        self.assertEqual([i.kind for i in self.s.timeline()],["card","user","assistant"])
+
+    async def test_attachment_revocation_before_send_clears_draft(self):
+        c,sg=self.card("file","text",b"private")
+        g=self.grant("engine",attachment_target("workspace",c,"preview","Read"),"private")
+        d=self.s.attach(c.identity,"preview","Read",g,confirmed=True)
+        self.g.revoke(sg.identity)
+        self.assertEqual(self.s.poll(),"held")
+        with self.assertRaises(Refused):
+            await self.send(d,"late")
+        self.assertEqual(self.s._chat._history,())
+
+    async def test_used_attachment_clear_invalidates_derived_history(self):
+        c,_=self.card("file","text",b"private")
+        g=self.grant("engine",attachment_target("workspace",c,"preview","Read"),"private")
+        await self.send(self.s.attach(c.identity,"preview","Read",g,confirmed=True),"derived")
+        with self.assertRaises(Refused):
+            self.s.clear_card(c.identity)
+        self.assertEqual(self.s.state,"held")
+        self.assertEqual(self.s._timeline,[])
+        self.assertEqual(self.s._chat._history,())
+
+    async def test_attachment_cannot_include_svg_or_oversized_file(self):
+        c,_=self.card()
+        with self.assertRaises(Refused):
+            attachment_target("workspace",c,"chart","Read")
+        f,_=self.card("big","text",b"x"*4097)
+        with self.assertRaises(Refused):
+            attachment_target("workspace",f,"preview","Read")
+
+    async def test_discarded_attachment_is_not_in_next_request(self):
+        c,_=self.card("file","text",b"PRIVATE-CANARY")
+        g=self.grant("engine",attachment_target("workspace",c,"preview","Read"),"private")
+        self.s.attach(c.identity,"preview","Read",g,confirmed=True)
+        self.s.discard_draft()
+        with self.assertRaises(Refused):
+            self.g.checkpoint(g,g.request)
+        d=self.s.draft("ordinary")
+        with patch("conversation.replay",wraps=__import__("conversation").replay) as replay:
+            await self.send(d,"ok")
+            self.assertNotIn("PRIVATE-CANARY",repr(replay.call_args.args[6]))
