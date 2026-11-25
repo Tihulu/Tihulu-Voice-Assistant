@@ -107,6 +107,7 @@ class FixtureGateway:
         self._clock = clock
         self._grants = {}
         self._revoked = set()
+        self._claimed = set()
         self._closed = False
         self._lock = Lock()
 
@@ -157,8 +158,8 @@ class FixtureGateway:
             self._grants[identity] = grant
             return grant
 
-    def checkpoint(self, grant, req):
-        """Return a fixture-only status; no permission token leaves this seam."""
+    def _validate_grant(self, grant, req, *, claim=False):
+        """Validate or atomically claim a fixture initiation, not an OS effect."""
         if type(grant) is not Grant:
             raise Refused("invalid_grant")
         token(grant.identity)
@@ -176,7 +177,18 @@ class FixtureGateway:
             except Refused:
                 self._revoked.add(grant.identity)
                 raise
+            if claim:
+                if grant.identity in self._claimed:
+                    raise Refused("grant_already_claimed")
+                self._claimed.add(grant.identity)
             return "SIMULATED_ALLOW"
+
+    def checkpoint(self, grant, req):
+        return self._validate_grant(grant, req)
+
+    def claim(self, grant, req):
+        """One initiation per grant; checkpoints remain valid until expiry/revoke."""
+        return self._validate_grant(grant, req, claim=True)
 
     def revoke(self, identity):
         token(identity)
