@@ -1861,6 +1861,74 @@ class UpdateUITests(DownloadFixture):
         self.assertEqual(self.ui.market.card("fixture-update").state, "ACTIVE")
         # The failed update replaced nothing; only the explicit rename revision exists.
         self.assertEqual(len(self.ui.market.history("fixture-update")), 1)
+class StagingCleanupUITests(MarketFixture):
+    def setUp(self):
+        super().setUp()
+        self.folder = Path(self.market_home, "transfers")
+        self.folder.mkdir(mode=0o700, exist_ok=True)
+        for model in ("fixture-staging", "other-staging"):
+            self.ui.market.save_card(market.ModelCard(
+                model_id=model, display_name=model, category="stt"))
+        self.ui.market_filter.set_active(0)
+        self.ui.build_market_page()
+        self.pick_card("fixture-staging")
+
+    def stage(self, model="fixture-staging"):
+        fd, name = tempfile.mkstemp(prefix=market._staging_prefix(model), dir=self.folder)
+        os.close(fd)
+        path = Path(name)
+        path.write_bytes(b"synthetic staging")
+        return path
+
+    def test_inspect_then_explicit_select_and_delete_only_one_file(self):
+        first = self.stage()
+        second = self.stage()
+        other = self.stage("other-staging")
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+        self.click(self.ui.staging_scan)
+        self.assertEqual(len(self.ui.staging_rows), 2)
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+        self.assertTrue(first.exists() and second.exists() and other.exists())
+        self.ui.staging_choice.set_active(0)
+        name, _ = self.ui.staging_rows[0]
+        self.click(self.ui.staging_discard)
+        self.assertFalse((self.folder / name).exists())
+        self.assertTrue(other.exists())
+        self.assertEqual(sum(path.exists() for path in (first, second)), 1)
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+
+    def test_switching_model_invalidates_review(self):
+        stage = self.stage()
+        self.click(self.ui.staging_scan)
+        self.ui.staging_choice.set_active(0)
+        self.pick_card("other-staging")
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+        self.ui.discard_staging()
+        self.assertTrue(stage.exists())
+        self.pick_card("fixture-staging")
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+
+    def test_changed_file_requires_new_review(self):
+        stage = self.stage()
+        self.click(self.ui.staging_scan)
+        self.ui.staging_choice.set_active(0)
+        replacement = self.stage()
+        replacement.replace(stage)
+        self.click(self.ui.staging_discard)
+        self.assertTrue(stage.exists())
+        self.assertEqual(self.ui.status.get_text(), "staging_changed")
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+
+    def test_active_transfer_prevents_cleanup(self):
+        stage = self.stage()
+        self.click(self.ui.staging_scan)
+        self.ui.staging_choice.set_active(0)
+        with self.ui.market.transfer_lease("fixture-staging"):
+            self.click(self.ui.staging_discard)
+        self.assertTrue(stage.exists())
+        self.assertEqual(self.ui.status.get_text(), "transfer_busy")
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+
 class QueueRestoreTests(DownloadFixture):
     """A restart rebuilds the queue from disk; a partial stays resumable."""
 
