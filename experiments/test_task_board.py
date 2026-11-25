@@ -3,17 +3,19 @@ import unittest
 from unittest.mock import patch
 from tihulu_jarvis import profiles
 from gateway import Context,Request,FixtureGateway,Refused
-from task_board import TaskBoard,plan,scoped
+from task_board import TaskBoard,plan,scoped,board_target,board_scope
 
 class TaskBoardTests(unittest.TestCase):
     def setUp(self):
         self.ctx=Context("task","session","profile",1,"route","LOCAL_ONLY")
         self.g=FixtureGateway(self.ctx,(profiles.Rule("host_shell",(),"allow"),),clock=profiles.PolicyClock())
-        self.b=TaskBoard(self.g,self.ctx,"room",2,10)
+        self.root=self.g.fixture_grant("root",Request(self.ctx,"agent",board_target("room",2,10),"local"),60)
+        self.scope=board_scope("room","root")
+        self.b=TaskBoard(self.g,self.ctx,"room",2,10,self.root)
         self.addCleanup(self.b.close)
         self.n=0
     def grants(self,i,memory=4,priority=50,payload=b"fixture"):
-        job,spec=plan("room",i,"opencode","plan",payload,memory,priority)
+        job,spec=plan(self.scope,i,"opencode","plan",payload,memory,priority)
         result=[]
         for target in (job.target(),spec.target()):
             self.n+=1
@@ -24,7 +26,7 @@ class TaskBoardTests(unittest.TestCase):
         self.b.queue(i,"opencode","plan",b"fixture",memory,priority,*g)
         return g
     def event(self,i,seq,kind):
-        return json.dumps(dict(session="room",job=scoped("room",i),sequence=seq,kind=kind)).encode()
+        return json.dumps(dict(session=self.scope,job=scoped(self.scope,i),sequence=seq,kind=kind)).encode()
     def test_priority_capacity_and_completion(self):
         self.queue("low",4,10)
         self.queue("high",7,90)
@@ -39,7 +41,8 @@ class TaskBoardTests(unittest.TestCase):
         g=self.grants("one")
         with self.assertRaises(Refused):
             self.b.queue("one","opencode","plan",b"changed",4,50,*g)
-        other=TaskBoard(self.g,self.ctx,"other",2,10)
+        root=self.g.fixture_grant("other",Request(self.ctx,"agent",board_target("room",2,10),"local"),60)
+        other=TaskBoard(self.g,self.ctx,"room",2,10,root)
         self.addCleanup(other.close)
         with self.assertRaises(Refused):
             other.queue("one","opencode","plan",b"fixture",4,50,*g)
@@ -93,3 +96,20 @@ class TaskBoardTests(unittest.TestCase):
             self.b.receive("one",self.event("one",2,"progress"))
         with self.assertRaises(Refused):
             self.queue("one")
+
+    def test_board_root_revocation_clears_all_reservations(self):
+        a=self.queue("a")
+        self.b.dispatch()
+        self.g.revoke(self.root.identity)
+        with self.assertRaises(Refused):
+            self.b.snapshot()
+        self.assertEqual(self.b._scheduler.poll(),(0,0,0))
+        for grant in a:
+            with self.assertRaises(Refused):
+                self.g.checkpoint(grant,grant.request)
+
+    def test_scope_encoding_and_root_replay_refused(self):
+        self.assertNotEqual(scoped("a:b","c"),scoped("a","b:c"))
+        with self.assertRaises(Refused):
+            TaskBoard(self.g,self.ctx,"room",2,10,self.root)
+        self.assertEqual(self.b.snapshot(),())

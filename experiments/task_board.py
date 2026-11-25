@@ -3,13 +3,25 @@
 from dataclasses import dataclass
 from hashlib import sha256
 from threading import RLock
+import json
 from gateway import Context, FixtureGateway, Request, Refused, token
 from scheduler import Scheduler, Job
 from connector_protocol import Connector, JobSpec
 from event_channel import EventChannel
 
+def _key(*values):
+    return sha256(json.dumps(values,separators=(",",":"),ensure_ascii=True).encode("ascii")).hexdigest()
+
+def board_target(room,slots,memory):
+    if type(slots) is not int or not 1<=slots<=10 or type(memory) is not int or not 1<=memory<=1048576:
+        raise Refused("invalid_capacity")
+    return _key("board",token(room),slots,memory)
+
+def board_scope(room,grant_identity):
+    return _key("board-scope",token(room),token(grant_identity))
+
 def scoped(room,identity):
-    return sha256(("task:"+token(room)+":"+token(identity)).encode("ascii")).hexdigest()
+    return _key("task",token(room),token(identity))
 
 def plan(room,identity,adapter,capability,payload,memory,priority):
     if type(payload) is not bytes or not 0<len(payload)<=16384:
@@ -41,18 +53,31 @@ class _Record:
     channel: object=None
 
 class TaskBoard:
-    def __init__(self,gateway,context,room,slots,memory):
+    def __init__(self,gateway,context,room,slots,memory,grant):
         if type(gateway) is not FixtureGateway or type(context) is not Context or gateway.context!=context or context.mode=="CLOUD_CHAT":
             raise Refused("local_context_required")
-        self._g,self._ctx,self._room=gateway,context,token(room)
+        req=Request(context,"agent",board_target(room,slots,memory),"local")
+        gateway.claim(grant,req)
+        self._root=(grant,req)
+        self._g,self._ctx,self._room=gateway,context,board_scope(room,grant.identity)
         self._scheduler=Scheduler(gateway,context,slots,memory)
         self._records={}
         self._closed=False
         self._lock=RLock()
+        try:
+            self._open()
+        except BaseException:
+            self.close()
+            raise
 
     def _open(self):
         if self._closed:
             raise Refused("board_closed")
+        try:
+            self._g.checkpoint(*self._root)
+        except Refused:
+            self.close()
+            raise
 
     def _requests(self,r):
         return ((r.schedule_grant,Request(self._ctx,"agent",r.job.target(),"local")),
@@ -132,6 +157,7 @@ class TaskBoard:
                     r.payload=b""
                     r.channel=EventChannel(r.connector,owned,r.spec.session,r.spec.job)
                     self._check(r)
+                    self._open()
                     result.append(Status(identity,"running",0))
                 except BaseException:
                     self._stop(r,"held")
@@ -163,6 +189,7 @@ class TaskBoard:
                     r.state=state
                     if state=="cancelled":
                         self._stop(r,state)
+                self._open()
                 return Status(identity,r.state,r.sequence)
             except BaseException:
                 self._stop(r,"held")
@@ -196,3 +223,4 @@ class TaskBoard:
             finally:
                 self._scheduler.close()
                 self._records.clear()
+                self._g.revoke(self._root[0].identity)
