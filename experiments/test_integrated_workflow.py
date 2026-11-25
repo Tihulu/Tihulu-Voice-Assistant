@@ -161,3 +161,26 @@ class IntegratedTests(unittest.TestCase):
         with self.assertRaises(Refused):
             self.w.result()
         self.assertEqual(self.w.state,"held")
+
+    def test_model_and_connector_grants_cannot_be_cross_replayed(self):
+        from adapter_protocol import LocalAdapter, prepare
+        from connector_protocol import Connector, JobSpec
+        data=b"synthetic plan"
+        candidate=self.candidates[0]
+        call=prepare(candidate,"call","llm",data)
+        eg=self.g.fixture_grant("model-call",Request(self.ctx,"engine",call.target,"local"),60)
+        spec=JobSpec("opencode-fixture","s","j","plan",sha256(data).hexdigest())
+        ag=self.g.fixture_grant("connector-call",Request(self.ctx,"agent",spec.target(),"local"),60)
+        a=LocalAdapter(self.g,self.ctx,candidate,"call","llm",data,eg)
+        c=Connector(self.g,self.ctx,"opencode-fixture","s")
+        h=c.begin(spec,ag,data)
+        with self.assertRaises(Refused):
+            LocalAdapter(self.g,self.ctx,candidate,"call","llm",data,ag)
+        with self.assertRaises(Refused):
+            Connector(self.g,self.ctx,"opencode-fixture","s").begin(spec,ag,data)
+        a.cancel()
+        c.cancel(h)
+        with self.assertRaises(Refused):
+            LocalAdapter(self.g,self.ctx,candidate,"call","llm",data,eg)
+        with self.assertRaises(Refused):
+            c.event(h,"s","j",1,"completed")

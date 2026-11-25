@@ -54,7 +54,7 @@ class LocalAdapter:
         self.call=prepare(candidate,identity,operation,data)
         self._g,self._grant=gateway,grant
         self._req=Request(context,"engine",self.call.target,"local")
-        self._g.checkpoint(grant,self._req)
+        self._g.claim(grant,self._req)
         self._state="ready"
         self._seq=0
         self._result=bytearray()

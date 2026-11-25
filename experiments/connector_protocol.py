@@ -45,7 +45,7 @@ class Connector:
                 or spec.job in self._seen or len(self._seen)>=64):
             raise Refused("invalid_job")
         req=Request(self._ctx,"agent",spec.target(),"local")
-        self._g.checkpoint(grant,req)
+        self._g.claim(grant,req)
         handle=object()
         self._seen.add(spec.job)
         self._active=(handle,spec,grant,req,0)
