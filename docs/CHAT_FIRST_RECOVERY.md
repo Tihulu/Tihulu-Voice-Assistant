@@ -27,3 +27,6 @@ Refs #114, #79. Frozen #112 is a reviewed technical baseline, not a usable produ
 4. Retain R2–R5 runtime holds until R0/R1 acceptance or explicit approved roadmap revision; preserve research, native inference, cloud providers, hybrid policy, OpenCode and application-engine scope. Never present disabled placeholders as working features.
 
 No changes to authorization, inference, file I/O or cancellation contracts are intended here. Recheck changed UI boundaries, complete CI and owner review before distributing a successor. No merge, release, installation or acceptance waiver.
+
+## Composer and contextual-result increment
+Move Talk beside Send/Attach, keep inactive finish/stop/cancel/duplicate hard-stop controls hidden, retain permanent header Hard Stop and keyboard routes. Make optional voice setup secondary to text-model selection. Put the explicit local CSV tool under a collapsed Local tools panel; keep the existing last-result controls in a clearly labelled adjacent chat result area only while a validated result exists. Hard stop removes that area with the result. This is not yet per-artifact action rendering or complete agent task execution; no change to grants, export destinations, artifact lineage, worker cancellation or model requests. Verify real widgets, visibility and existing analysis/cancellation regressions before preview.

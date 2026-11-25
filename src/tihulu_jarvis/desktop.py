@@ -255,6 +255,8 @@ def create_window(app, loop, bridge=None):
             self.scroll = Gtk.ScrolledWindow(vexpand=True)
             self.scroll.set_child(self.log)
             chat.append(self.scroll)
+            self.result_actions_slot = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            chat.append(self.result_actions_slot)
             self.search_panel = Gtk.Expander(label=tr(
                 "Find in conversation", "Sohbette bul", "Im Gespräch suchen"))
             searchbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
@@ -303,12 +305,12 @@ def create_window(app, loop, bridge=None):
             self.entry.connect("activate",lambda *_:self.send_text())
             self.entry.connect("changed", lambda *_: self.refresh_send())
             self.attachment_note = Gtk.Label(xalign=0, wrap=True)
+            self.talk = self.button(entryrow, tr("Talk", "Konuş", "Sprechen"), self.voice)
             chat.append(entryrow)
             chat.append(self.attachment_note)
             self.attachment = None
             controls = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=6,row_spacing=4)
             chat.append(controls)
-            self.talk = self.button(controls,tr("Talk","Konuş","Sprechen"),self.voice)
             self.finish_btn = self.button(controls,tr("Finish recording","Kaydı bitir","Aufnahme beenden"),lambda:self.finish.set() if self.finish else None)
             self.stop = self.button(controls,tr("Stop speaking","Sesi durdur","Wiedergabe stoppen"),self.stop_speaking)
             # Muting suppresses audio output, never the answer: the reply is
@@ -351,6 +353,12 @@ def create_window(app, loop, bridge=None):
             self.models = Gtk.ComboBoxText()
             models.append(self.models)
             self.models.connect("changed", self.select_model)
+            self.return_to_chat = self.button(models, tr(
+                "Return to chat", "Sohbete dön", "Zum Chat zurück"),
+                lambda: self.stack.set_visible_child_name("conversation"))
+            models.append(Gtk.Label(label=tr(
+                "Optional voice setup", "İsteğe bağlı ses ayarları", "Optionale Spracheinrichtung"),
+                xalign=0))
             self.url.connect("changed", lambda *_:self.forget_inventory())
             self.labels, self.pickers, self.previews = {}, [], {}
             self.preview_locales = {}
@@ -385,9 +393,6 @@ def create_window(app, loop, bridge=None):
             self.transcribe_button = self.button(models, tr("Transcribe a recording","Kayıttan yazıya çevir","Aufnahme transkribieren"), self.transcribe_recording)
             self.test_note = Gtk.Label(xalign=0, wrap=True)
             models.append(self.test_note)
-            self.return_to_chat = self.button(models, tr(
-                "Return to chat", "Sohbete dön", "Zum Chat zurück"),
-                lambda: self.stack.set_visible_child_name("conversation"))
             self.update_labels()
             self.store = profiles.Store(profiles.profile_dir())
             self.policy_rows = {}
@@ -424,7 +429,12 @@ def create_window(app, loop, bridge=None):
             self.build_agents_page()
             self.turn_note = ""
             self.build_activity_page()
-            self.analysis = AnalysisView(self, chat, Gtk, GLib, tr, lang)
+            self.tool_panel = Gtk.Expander(label=tr("Local tools", "Yerel araçlar", "Lokale Werkzeuge"))
+            toolbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            self.tool_panel.set_child(toolbox)
+            chat.insert_child_after(self.tool_panel, self.search_panel)
+            self.analysis = AnalysisView(self, toolbox, Gtk, GLib, tr, lang,
+                                         result_parent=self.result_actions_slot)
             self.refresh()
             self.win.present()
 
@@ -1355,6 +1365,12 @@ def create_window(app, loop, bridge=None):
                 analysis_live = bool(self.analysis.dialog is not None or self.analysis.last or self.owned_picker is not None)
                 self.hard.set_sensitive(self.busy or analysis_live)
                 self.quick_stop.set_sensitive(self.busy or analysis_live)
+            # Keep turn-specific actions visible only while they can be used.
+            # The top-bar hard stop remains permanently visible.
+            self.finish_btn.set_visible(self.finish_btn.get_sensitive())
+            self.stop.set_visible(self.stop.get_sensitive())
+            self.cancel.set_visible(self.cancel.get_sensitive())
+            self.hard.set_visible(self.hard.get_sensitive())
             for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,
                       self.transcribe_button,*self.previews):
                 w.set_sensitive(not self.busy)

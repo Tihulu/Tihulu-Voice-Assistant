@@ -278,6 +278,13 @@ class FreshStartTests(DesktopFixture):
     """Real GTK construction with blank model configuration, fixture transport."""
     fresh_settings = True
 
+    def test_idle_composer_does_not_show_inactive_turn_actions(self):
+        self.assertTrue(self.ui.quick_stop.get_visible())
+        self.assertTrue(self.ui.talk.get_visible())
+        for control in (self.ui.finish_btn, self.ui.stop, self.ui.cancel, self.ui.hard):
+            self.assertFalse(control.get_visible())
+        self.assertFalse(self.ui.tool_panel.get_expanded())
+
     def test_blank_start_guides_setup_without_inference_or_capture(self):
         self.assertEqual(self.ui.stack.get_visible_child_name(), "conversation")
         self.assertTrue(self.ui.setup.get_visible())
@@ -311,6 +318,9 @@ class FreshStartTests(DesktopFixture):
         self.assertEqual(len(self.ui.session.history), 2)
 
     def test_blank_start_keeps_local_analysis_available(self):
+        self.assertFalse(self.ui.tool_panel.get_expanded())
+        self.assertFalse(self.ui.analysis.result_actions.get_visible())
+        self.ui.tool_panel.set_expanded(True)
         self.assertTrue(self.ui.analysis.choose_button.get_sensitive())
         self.ui.entry.set_text("Bu dosyayı analiz et")
         self.assertTrue(self.ui.send.get_sensitive())
@@ -4415,10 +4425,15 @@ class LocalAnalysisTests(DesktopFixture):
         return self.ui.analysis.controller.get(self.ui.analysis.last)
 
     def test_real_chart_without_jan(self):
+        self.assertFalse(self.ui.tool_panel.get_expanded())
+        self.assertFalse(self.ui.analysis.result_actions.get_visible())
+        self.ui.tool_panel.set_expanded(True)
         self.assertTrue(self.ui.analysis.choose_button.get_sensitive())
         self.assertFalse(self.ui.send.get_sensitive())
         artifact = self.analyze()
         self.assertEqual(artifact.series.mean_c, 24)
+        self.assertTrue(self.ui.analysis.result_actions.get_visible())
+        self.assertIs(self.ui.analysis.result_actions.get_parent(), self.ui.result_actions_slot)
         row = self.ui.analysis.rows[-1]
         self.assertIs(row.get_parent(), self.ui.log)
         picture = row.get_first_child().get_next_sibling()
@@ -4451,6 +4466,7 @@ class LocalAnalysisTests(DesktopFixture):
         self.click(self.ui.quick_stop)
         self.assertFalse(self.ui.analysis.rows)
         self.assertIsNone(self.ui.analysis.last)
+        self.assertFalse(self.ui.analysis.result_actions.get_visible())
         self.assertFalse(self.ui.analysis.recolor_button.get_sensitive())
         with self.assertRaisesRegex(Hold, "analysis_mode_denied"):
             self.ui.analysis.controller.get(result.id)
