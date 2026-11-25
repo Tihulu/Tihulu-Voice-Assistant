@@ -199,9 +199,9 @@ class ModelCard:
             raise Hold("invalid_size")
         if not 0 <= self.memory_estimate <= DIGEST_LIMIT:
             raise Hold("invalid_size")
-        if self.artifact_digest and (not isinstance(self.artifact_digest, str)
-                or not re.fullmatch(r"[0-9a-f]{64}", self.artifact_digest)
-                or not self.owned_by_jarvis or self.storage_ref != "sha256-" + self.artifact_digest[:32]):
+        if not isinstance(self.artifact_digest, str) or (self.artifact_digest and (
+                not re.fullmatch(r"[0-9a-f]{64}", self.artifact_digest)
+                or not self.owned_by_jarvis or self.storage_ref != "sha256-" + self.artifact_digest[:32])):
             raise Hold("invalid_artifact_digest")
         if self.storage_ref and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.storage_ref):
             raise Hold("invalid_storage_reference")
@@ -1010,8 +1010,38 @@ class Registry:
         except (ValueError, OSError):
             raise Hold("registry_unreadable") from None
 
-    def store(self, cards, selection):
-        text = self._dump(cards, selection)
+    def _inline_history(self):
+        try:
+            raw = self.path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            return {}
+        except OSError:
+            raise Hold("registry_unreadable") from None
+        try:
+            if len(raw) > self.LIMIT:
+                raise Hold("registry_too_large")
+            data = json.loads(raw)
+            history = data.get("history", {})
+            if not isinstance(history, dict):
+                raise Hold("registry_unreadable")
+            for model, rows in history.items():
+                if (not re.fullmatch(r"[A-Za-z0-9][\\w.:-]{0,127}", model)
+                        or not isinstance(rows, list) or len(rows) > self.HISTORY_LIMIT):
+                    raise Hold("registry_unreadable")
+                previous = -1
+                for row in rows:
+                    card = ModelCard(**_normalized([row])[0]).checked()
+                    if card.model_id != model or type(card.revision) is not int or card.revision <= previous:
+                        raise Hold("registry_unreadable")
+                    previous = card.revision
+            return history
+        except (ValueError, TypeError, AttributeError):
+            raise Hold("registry_unreadable") from None
+
+    def store(self, cards, selection, *, history=None):
+        document = json.loads(self._dump(cards, selection))
+        document["history"] = self._inline_history() if history is None else history
+        text = json.dumps(document, ensure_ascii=False, sort_keys=True)
         if len(text) > self.LIMIT:
             raise Hold("registry_too_large")
         if len(selection) > self.SELECTION_LIMIT:
@@ -1046,42 +1076,31 @@ class Registry:
         for known in cards:
             if known.model_id == card.model_id:
                 previous = known
+        history = self._inline_history()
         if previous is not None and previous != card:
-            replacement = replace(card, revision=previous.revision + 1)
-            if replacement == previous:
-                return previous
-            card = replacement
-            self.append_history(previous)
+            card = replace(card, revision=previous.revision + 1)
+            rows = list(self.history(previous.model_id))
+            if rows and rows[-1].revision >= previous.revision:
+                raise Hold("registry_history_conflict")
+            rows.append(previous)
+            history[previous.model_id] = [row.__dict__ for row in rows[-self.HISTORY_LIMIT:]]
+        elif previous is None:
+            rows = self.history(card.model_id)
+            if rows:
+                card = replace(card, revision=rows[-1].revision + 1)
         kept = tuple(c for c in cards if c.model_id != card.model_id)
-        self.store(kept + (card,), selection)
+        # Current card and its revision history share one atomic JSON replace.
+        # Legacy jsonl files remain read-only fallback; no destructive migration.
+        self.store(kept + (card,), selection, history=history)
         return card
-
-    def append_history(self, card):
-        """Keep a bounded, append-only revision log for one item."""
-        path = self.revisions / (card.model_id + ".jsonl")
-        rows = []
-        if path.is_file():
-            try:
-                rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line]
-            except (ValueError, OSError):
-                raise Hold("registry_unreadable") from None
-        if len(rows) > self.HISTORY_LIMIT - 1:
-            rows = rows[-(self.HISTORY_LIMIT - 1):]
-        rows.append(card.__dict__)
-        text = "".join(json.dumps(row, ensure_ascii=False, sort_keys=True) + "\n" for row in rows)
-        if len(text) > self.HISTORY_BYTES:
-            raise Hold("registry_too_large")
-        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=str(self.revisions), delete=False) as f:
-            tmp = f.name
-            f.write(text)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
 
     def history(self, model_id):
         """Previous revisions of one item, oldest first. Never invented."""
         if not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model_id):
             raise Hold("invalid_model_id")
+        inline = self._inline_history()
+        if model_id in inline:
+            return tuple(ModelCard(**row).checked() for row in _normalized(inline[model_id]))
         path = self.revisions / (model_id + ".jsonl")
         if not path.is_file():
             return ()
@@ -1204,7 +1223,8 @@ class Registry:
                 if current.owned_by_jarvis or candidate.owned_by_jarvis:
                     # Historical approvals are never restored with a revision.
                     restored = replace(restored, network_approval="", approval_expires_at=0.0,
-                                       loaded=False, health_status=UNKNOWN, last_tested_at=0.0)
+                                       loaded=False, health_status=UNKNOWN, last_tested_at=0.0,
+                                       state="REGISTERED", installed=True, registered=True)
                     return self._restore_owned(current, candidate, restored)
                 return self.save_card(restored)
         raise Hold("revision_not_found")

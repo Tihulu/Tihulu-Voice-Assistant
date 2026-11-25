@@ -267,5 +267,32 @@ class TransferBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.target.read_bytes(),b"x"*len(OLD))
         self.assertEqual(self.store.card(old.model_id),old)
 
+    async def test_registry_store_failure_keeps_history_and_active_bytes(self):
+        old=await self.install_verified()
+        history=self.store.history(old.model_id)
+        with patch.object(self.store,"store",side_effect=OSError("fixture commit failure")):
+            with self.assertRaises(OSError):
+                await self.transfer(old,self.source()).update()
+        self.assertEqual(self.store.history(old.model_id),history)
+        self.assertEqual(self.store.card(old.model_id),old)
+        self.assertEqual(self.target.read_bytes(),OLD)
+
+    async def test_legacy_history_read_only_migration(self):
+        import json
+        from dataclasses import replace
+        card=self.card()
+        previous=replace(card,display_name="Older",revision=0)
+        current=replace(card,display_name="Current",revision=1)
+        legacy=self.store.revisions/(card.model_id+".jsonl")
+        legacy.write_text(json.dumps(previous.__dict__)+"\\n")
+        self.store.store((current,),{})
+        self.assertEqual(self.store.history(card.model_id),(previous,))
+        saved=self.store.save_card(replace(current,display_name="Next"))
+        self.assertEqual(saved.revision,2)
+        self.assertEqual(self.store.history(card.model_id),(previous,current))
+        self.assertEqual(legacy.read_text(),json.dumps(previous.__dict__)+"\\n")
+        reopened=market.Registry(self.root)
+        self.assertEqual(reopened.history(card.model_id),(previous,current))
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
