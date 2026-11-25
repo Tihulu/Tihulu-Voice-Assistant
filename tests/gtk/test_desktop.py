@@ -2479,6 +2479,29 @@ class TranscribeFileUITests(DownloadFixture):
         self.assertEqual(self.ui.board.rows[-1].kind, "transcription")
         self.jan.assert_not_called()
 
+    def test_typed_recording_command_opens_owned_picker_without_jan(self):
+        self.ui.forget_inventory()
+        self.jan.reset_mock()
+        self.ui.entry.set_text("Bir ses kaydını yazıya çevir")
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.click(self.ui.send)
+        self.assertIsNotNone(self.ui.owned_picker)
+        self.assertEqual(self.ui.entry.get_text(), "")
+        self.assertFalse(self.ui.busy)
+        self.jan.assert_not_called()
+        self.ui.hard_stop()
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
+
+    def test_typed_recording_command_keeps_draft_on_missing_backend(self):
+        self.ui.forget_inventory()
+        self.ui.entry.set_text("Transcribe a recording")
+        with patch.object(desktop.audio, "tools_ready", return_value=False):
+            self.click(self.ui.send)
+        self.assertEqual(self.ui.entry.get_text(), "Transcribe a recording")
+        self.assertEqual(self.ui.status.get_text(), "transcription_backend_missing")
+        self.assertIsNone(self.ui.owned_picker)
+
     def test_chat_recording_tool_refuses_missing_model_or_backend(self):
         with patch.object(desktop.audio, "tools_ready", return_value=False):
             self.ui.refresh()
@@ -4894,6 +4917,21 @@ class LocalAnalysisTests(DesktopFixture):
 
 
 class PickerLifecycleTests(DesktopFixture):
+    def test_typed_audio_discovery_uses_owned_folder_picker_without_jan(self):
+        self.ui.entry.set_text("Yerel ses modellerini bul")
+        self.assertTrue(self.ui.send.get_sensitive())
+        with patch.object(desktop.model_discovery, "scan") as scan:
+            self.click(self.ui.send)
+            self.assertIsNotNone(self.ui.owned_picker)
+            self.assertEqual(self.ui.owned_picker.get_action(),
+                             Gtk.FileChooserAction.SELECT_FOLDER)
+            self.assertEqual(self.ui.stack.get_visible_child_name(), "models")
+            self.assertEqual(self.ui.entry.get_text(), "")
+            self.ui.hard_stop()
+            scan.assert_not_called()
+        self.assertIsNone(self.ui.owned_picker)
+        self.jan.assert_not_called()
+
     def test_model_picker_is_retained_and_cancelled(self):
         self.ui.choose("stt")
         dialog = self.ui.owned_picker

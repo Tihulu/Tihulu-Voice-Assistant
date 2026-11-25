@@ -18,7 +18,7 @@ from . import catalog_fetch, disclosure, routing, model_discovery
 from .owned_wait import finish_owned
 from .analysis_ui import AnalysisView
 from .selected_csv import selection_identity
-from . import analysis_intent
+from . import analysis_intent, local_actions
 from . import locks, search, states
 from . import market, profiles, settings
 from .voice import audio
@@ -768,6 +768,7 @@ def create_window(app, loop, bridge=None):
             self.owned_picker_handler = dialog.connect("response", dispatch)
             dialog.show()
             self.refresh()
+            return True
 
         def clear_attachment(self):
             self.attachment = self.attachment_context = self.attachment_live = None
@@ -1328,7 +1329,7 @@ def create_window(app, loop, bridge=None):
         def refresh_send(self):
             text = self.entry.get_text()
             connected = self.cfg["llm"] in self.inventory
-            direct = analysis_intent.direct(text) is not None
+            direct = analysis_intent.direct(text) is not None or local_actions.direct(text) is not None
             local = getattr(self, "policy", None) is not None and self.policy.mode == "LOCAL_ONLY"
             self.send.set_sensitive(not self.busy and (connected or (local and direct)))
 
@@ -3181,7 +3182,14 @@ def create_window(app, loop, bridge=None):
                 widget.set_sensitive(idle and current and (matches if widget is self.model_candidate_choose else True))
 
         def choose_model_folder(self):
-            if self.busy:
+            if self.busy or self.closing:
+                return
+            try:
+                if self.active_profile().based_on_mode != "LOCAL_ONLY":
+                    raise Hold("model_discovery_mode_denied")
+                self.require_tools(("filesystem_read", ("folder",)), selected=True)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
                 return
             dialog = Gtk.FileChooserNative.new(tr(
                 "Choose an existing model folder", "Mevcut model klasörünü seç",
@@ -3195,7 +3203,7 @@ def create_window(app, loop, bridge=None):
                         self.scan_model_folder(file.get_path() if file else None)
                 finally:
                     d.destroy()
-            self.show_owned_picker(dialog, response)
+            return self.show_owned_picker(dialog, response)
 
         def scan_model_folder(self, root):
             if self.busy or self.closing:
@@ -3388,7 +3396,7 @@ def create_window(app, loop, bridge=None):
                     self.run_transcribe(p)
                 finally:
                     d.destroy()
-            self.show_owned_picker(dialog, response)
+            return self.show_owned_picker(dialog, response)
 
         def run_transcribe(self, path):
             """Own selected-recording transcription as an ordinary cancellable task."""
@@ -3858,9 +3866,48 @@ def create_window(app, loop, bridge=None):
                                              "Angehängt: %s" % attachments.describe(item)))
             return item
 
+        def send_local_action(self, text, action):
+            # Only the explicit owner composer reaches this dispatcher.
+            # Neither Jan output nor an attachment can provide a file path.
+            if self.busy or self.closing or self.owned_picker is not None or self.analysis.dialog is not None:
+                self.set_state("ready", "local_picker_busy")
+                return
+            if self.attachment is not None:
+                self.set_state("ready", tr(
+                    "Local tools use their own file picker; remove the chat attachment first.",
+                    "Yerel araçlar kendi dosya seçicisini kullanır; önce sohbet ekini kaldır.",
+                    "Lokale Werkzeuge verwenden einen eigenen Dateidialog; zuerst den Chat-Anhang entfernen."))
+                return
+            try:
+                if self.active_profile().based_on_mode != "LOCAL_ONLY":
+                    raise Hold("local_task_mode_denied")
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
+            if action == "transcribe_recording":
+                opened = self.transcribe_recording()
+            elif action == "discover_audio_models":
+                opened = self.choose_model_folder()
+                if opened:
+                    self.stack.set_visible_child_name("models")
+            else:
+                self.set_state("ready", "local_task_unsupported")
+                return
+            if opened:
+                self.entry.set_text("")
+                self.bubble("You", text)
+                self.set_state("ready", tr(
+                    "Choose a file or folder to continue. Nothing has been executed yet.",
+                    "Devam etmek için dosya veya klasör seç. Henüz işlem yapılmadı.",
+                    "Zum Fortfahren Datei oder Ordner wählen. Noch nichts ausgeführt."))
+
         def send_text(self):
             text=self.entry.get_text().strip()
             if self.busy or not text:
+                return
+            action = local_actions.direct(text)
+            if action is not None:
+                self.send_local_action(text, action)
                 return
             if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
                 if self.attachment is not None:
