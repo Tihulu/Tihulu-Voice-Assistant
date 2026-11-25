@@ -61,9 +61,13 @@ class ResumeBook:
             req=Request(self._ctx,"transfer",manifest.identity,"local","public")
             self._g.checkpoint(grant,req)
             t=FixtureTransfer(self._g,grant,self._ctx,manifest)
-            for pos in range(0,len(prefix),MAX_CHUNK):
-                t.append(manifest.identity,pos,prefix[pos:pos+MAX_CHUNK])
-            self._g.checkpoint(grant,req)
+            try:
+                for pos in range(0,len(prefix),MAX_CHUNK):
+                    t.append(manifest.identity,pos,prefix[pos:pos+MAX_CHUNK])
+                self._g.checkpoint(grant,req)
+            except BaseException:
+                t.cancel()
+                raise
             self._issued=[r for r in self._issued if r is not receipt]
             return t
 

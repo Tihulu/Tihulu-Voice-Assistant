@@ -82,3 +82,22 @@ class MarketTests(unittest.TestCase):
         with self.assertRaises(Refused):
             transfer.finish(self.r)
         self.assertIsNone(self.r.current("model"))
+
+    def test_success_consumes_transfer_grant_and_rejects_direct_replay(self):
+        t=self.transfer(self.m,"a")
+        t.append(self.m.identity,0,self.data)
+        t.finish(self.r)
+        with self.assertRaises(Refused):
+            FixtureRegistry().commit(self.g,t._grant,self.ctx,self.m,self.data)
+        self.assertEqual(self.r.current_bytes("model"),self.data)
+
+    def test_failed_commit_discards_partial_and_retires_grant(self):
+        t=self.transfer(self.m,"a")
+        t.append(self.m.identity,0,b"x"*self.m.size)
+        with self.assertRaises(Refused):
+            t.finish(self.r)
+        self.assertEqual(bytes(t._data),b"")
+        self.assertTrue(t._done)
+        with self.assertRaises(Refused):
+            self.g.checkpoint(t._grant,t._req)
+        self.assertIsNone(self.r.current("model"))

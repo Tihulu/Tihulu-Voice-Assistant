@@ -71,3 +71,21 @@ class ResumeTests(unittest.TestCase):
         self.book.close()
         with self.assertRaises(Refused):
             self.book.resume(self.new,self.m,self.receipt,self.prefix)
+
+    def test_failed_resume_retires_claimed_grant_and_keeps_receipt(self):
+        from unittest.mock import patch
+        original=FixtureTransfer.append
+        def fail(t,*args):
+            original(t,*args)
+            raise Refused("fixture_interrupted")
+        with patch.object(FixtureTransfer,"append",fail):
+            with self.assertRaises(Refused):
+                self.book.resume(self.new,self.m,self.receipt,self.prefix)
+        with self.assertRaises(Refused):
+            self.g.checkpoint(self.new,self.req)
+        fresh=self.g.fixture_grant("fresh",self.req,60)
+        t=self.book.resume(fresh,self.m,self.receipt,self.prefix)
+        t.append(self.m.identity,len(self.prefix),self.data[len(self.prefix):])
+        r=FixtureRegistry()
+        t.finish(r)
+        self.assertEqual(r.current_bytes("model"),self.data)

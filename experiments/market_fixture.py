@@ -37,9 +37,15 @@ class FixtureRegistry:
     def __init__(self):
         self._objects = {}
         self._current = {}
+        self._lock = Lock()
 
     def current(self, model):
-        return self._current.get(model)
+        with self._lock:
+            return self._current.get(model)
+
+    def current_bytes(self, model):
+        with self._lock:
+            return self._objects.get(self._current.get(model))
 
     def commit(self, gateway, grant, context, manifest, data):
         manifest.checked()
@@ -48,15 +54,21 @@ class FixtureRegistry:
         if (type(data) is not bytes or len(data) != manifest.size
                 or hashlib.sha256(data).hexdigest() != manifest.sha256):
             raise Refused("integrity_mismatch")
-        old = self._objects.get(manifest.identity)
-        if old is not None and old != data:
-            raise Refused("immutable_conflict")
-        if old is None and len(self._objects) >= 64:
-            raise Refused("registry_limit")
-        gateway.checkpoint(grant, req)
-        self._objects[manifest.identity] = data
-        self._current[manifest.model] = manifest.identity
-        return "INTEGRITY_ONLY_NOT_TRUST"
+        with self._lock:
+            old = self._objects.get(manifest.identity)
+            if old is not None and old != data:
+                raise Refused("immutable_conflict")
+            if old is None and len(self._objects) >= 64:
+                raise Refused("registry_limit")
+            # Prepare both maps before mutating any visible state.
+            objects = dict(self._objects)
+            current = dict(self._current)
+            objects[manifest.identity] = data
+            current[manifest.model] = manifest.identity
+            gateway.checkpoint(grant, req)
+            self._objects, self._current = objects, current
+            gateway.revoke(grant.identity)
+            return "INTEGRITY_ONLY_NOT_TRUST"
 
 class FixtureTransfer:
     def __init__(self, gateway, grant, context, manifest):
@@ -86,10 +98,12 @@ class FixtureTransfer:
                 raise Refused("already_finished")
             if type(registry) is not FixtureRegistry:
                 raise Refused("invalid_registry")
-            result=registry.commit(self._g,self._grant,self._ctx,self.manifest,bytes(self._data))
-            self._done=True
-            self._data.clear()
-            return result
+            try:
+                return registry.commit(self._g,self._grant,self._ctx,self.manifest,bytes(self._data))
+            finally:
+                self._done=True
+                self._data.clear()
+                self._g.revoke(self._grant.identity)
 
     def cancel(self):
         with self._lock:

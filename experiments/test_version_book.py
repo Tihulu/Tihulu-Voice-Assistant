@@ -4,13 +4,15 @@ from dataclasses import replace
 from tihulu_jarvis import profiles
 from gateway import Context, Request, FixtureGateway, Refused
 from market_fixture import Manifest
-from version_book import VersionBook
+from version_book import VersionBook, root_target
+from unittest.mock import patch
 
 class VersionBookTests(unittest.TestCase):
     def setUp(self):
         self.ctx=Context("task","session","profile",1,"route","LOCAL_ONLY")
         self.g=FixtureGateway(self.ctx,(profiles.Rule("publish_artifact",(),"allow"),),clock=profiles.PolicyClock())
-        self.v=VersionBook(self.g,self.ctx)
+        self.root=self.g.fixture_grant("root",Request(self.ctx,"publish",root_target(self.ctx),"local"),60)
+        self.v=VersionBook(self.g,self.ctx,self.root)
         self.a=Manifest("model","v1","w.bin",1,sha256(b"a").hexdigest(),"fixture")
         self.b=Manifest("model","v2","w.bin",1,sha256(b"b").hexdigest(),"fixture")
         self.v.record(self.a,b"a")
@@ -69,3 +71,45 @@ class VersionBookTests(unittest.TestCase):
             winners=[x for x in pool.map(apply,range(2)) if x is not None]
         self.assertEqual(len(winners),1)
         self.assertEqual(self.v.current("model"),winners[0])
+
+    def test_exact_old_bytes_after_rollback(self):
+        for i,m,data in ((0,self.a,b"a"),(1,self.b,b"b"),(2,self.a,b"a")):
+            c=self.v.plan("model",m.identity)
+            self.v.apply(c,self.grant(c,str(i)))
+            self.assertEqual(self.v.current_bytes("model"),data)
+
+    def test_cross_book_grant_refused_and_root_is_single_use(self):
+        with self.assertRaises(Refused):
+            VersionBook(self.g,self.ctx,self.root)
+        root=self.g.fixture_grant("other-root",self.root.request,60)
+        other=VersionBook(self.g,self.ctx,root)
+        other.record(self.a,b"a")
+        c=self.v.plan("model",self.a.identity)
+        g=self.grant(c,"a")
+        with self.assertRaises(Refused):
+            other.apply(other.plan("model",self.a.identity),g)
+        self.assertIsNone(other.current("model"))
+        self.v.apply(c,g)
+
+    def test_revocation_after_claim_keeps_old_bytes(self):
+        c=self.v.plan("model",self.a.identity)
+        self.v.apply(c,self.grant(c,"a"))
+        next=self.v.plan("model",self.b.identity)
+        g=self.grant(next,"b")
+        original=self.g.claim
+        def revoke(grant,request):
+            original(grant,request)
+            self.g.revoke(grant.identity)
+        with patch.object(self.g,"claim",side_effect=revoke):
+            with self.assertRaises(Refused):
+                self.v.apply(next,g)
+        self.assertEqual(self.v.current_bytes("model"),b"a")
+
+    def test_root_revocation_and_close(self):
+        c=self.v.plan("model",self.a.identity)
+        self.v.apply(c,self.grant(c,"a"))
+        self.g.revoke(self.root.identity)
+        with self.assertRaises(Refused):
+            self.v.current_bytes("model")
+        self.v.close()
+        self.assertEqual(self.v._items,{})
