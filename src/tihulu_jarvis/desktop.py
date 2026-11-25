@@ -3098,26 +3098,23 @@ def create_window(app, loop, bridge=None):
             self.submit(lambda epoch: self.download(epoch, model_id), kind="download",
                         label=tr("Model download", "Model indirme", "Modelldownload"))
 
-        def transfer_checkpoint(self, epoch, card, source):
+        def transfer_checkpoint(self, epoch):
             context = self.picker_context()
             def check():
                 self.session.check(epoch)
                 if self.closing or self.picker_context() != context:
                     raise Hold("profile_changed")
-                current = self.market.card(card.model_id)
-                if market.source_of(current) != source:
-                    raise Hold("download_terms_changed")
             check()
             return check
 
+        def bound_transfer(self, epoch, model_id):
+            return market.Transfer.from_registry(
+                self.market, model_id, transport=self.transport,
+                checkpoint=self.transfer_checkpoint(epoch))
+
         async def download(self, epoch, model_id):
-            card = self.market.card(model_id)
-            source = market.source_of(card)
-            transport = self.transport or market.transport_for(source.reference)
-            if transport is None:
-                raise Hold("download_transport_not_available")
-            transfer = market.Transfer(self.market, card, source, transport,
-                                           checkpoint=self.transfer_checkpoint(epoch, card, source))
+            transfer = self.bound_transfer(epoch, model_id)
+            source = transfer.source
             entry = {"id": model_id, "state": "QUEUED", "received": 0, "total": source.size,
                      "note": "", "resume": 0}
             self.downloads.append(entry)
@@ -3287,15 +3284,10 @@ def create_window(app, loop, bridge=None):
                     self.refresh_partial_entry(entry)
                     self.build_downloads_page()
                     raise Hold("partial_changed")
-                card = self.market.card(entry["id"])
-                source = market.source_of(card)
-                transport = self.transport or market.transport_for(source.reference)
-                if transport is None:
-                    raise Hold("download_transport_not_available")
+                transfer = self.bound_transfer(epoch, entry["id"])
+                source = transfer.source
                 entry["state"], entry["note"] = "DOWNLOADING", tr("Resuming…","Sürdürülüyor…",
                                                                  "Fortsetzung…")
-                transfer = market.Transfer(self.market, card, source, transport,
-                                           checkpoint=self.transfer_checkpoint(epoch, card, source))
                 try:
                     result = await transfer.resume(self.download_progress(entry, start), start)
                     self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
@@ -3388,16 +3380,11 @@ def create_window(app, loop, bridge=None):
                 return
 
             async def run(epoch):
-                card = self.market.card(model_id)
-                source = market.source_of(card)
-                transport = self.transport or market.transport_for(source.reference)
-                if transport is None:
-                    raise Hold("download_transport_not_available")
+                transfer = self.bound_transfer(epoch, model_id)
+                source = transfer.source
                 entry = {"id": model_id, "state": "DOWNLOADING", "received": 0,
                          "total": source.size, "note": "", "resume": 0}
                 self.downloads.append(entry)
-                transfer = market.Transfer(self.market, card, source, transport,
-                                           checkpoint=self.transfer_checkpoint(epoch, card, source))
                 try:
                     result = await transfer.update(self.download_progress(entry, 0))
                     self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
