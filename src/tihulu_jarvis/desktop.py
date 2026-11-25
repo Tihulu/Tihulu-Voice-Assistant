@@ -1874,12 +1874,20 @@ def create_window(app, loop, bridge=None):
                 card = market.advance(card, "TESTABLE")
             if card.state == "TESTABLE":
                 card = market.advance(card, market.ACTIVE)
-            card = self.market.save_card(card, expected=expected)
+            proposed = settings.checked(self.cfg)
             if card.category == "stt":
-                self.cfg["stt"] = path
+                proposed["stt"] = path
             else:
-                self.cfg["voices"][lang] = path
-            self.save()
+                proposed["voices"][lang] = path
+            # Lock order: model, registry, settings. No await or network here.
+            # On ordinary write failure restore old settings, and publish no
+            # in-memory choice until both writes have completed.
+            with self.market.transfer_lease(model_id), self.market._write_guard():
+                if self.market.card(model_id) != expected:
+                    raise Hold("registry_card_changed")
+                with settings.choice_transaction(proposed):
+                    card = self.market.save_card(card, expected=expected)
+            self.cfg = proposed
             self.update_labels()
             self.refresh()
 
@@ -3187,6 +3195,8 @@ def create_window(app, loop, bridge=None):
                 self.set_state("ready", tr("Model selected.","Model seçildi.","Modell ausgewählt."))
             except Hold as exc:
                 self.set_state("ready", str(exc))
+            except OSError:
+                self.set_state("ready", "model_selection_write_failed")
 
         def discover_market(self):
             if self.busy:
