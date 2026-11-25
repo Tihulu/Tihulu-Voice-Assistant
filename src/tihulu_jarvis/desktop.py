@@ -417,6 +417,8 @@ def create_window(app, loop, bridge=None):
             self.test_chat_button = self.button(models, tr("Test selected model","Seçilen modeli dene","Ausgewähltes Modell testen"), self.test_chat)
             self.transcribe_button = self.button(models, tr("Transcribe a recording","Kayıttan yazıya çevir","Aufnahme transkribieren"), self.transcribe_recording)
             self.test_note = Gtk.Label(xalign=0, wrap=True)
+            self.test_probe_route = None
+            self.test_probe_pending = False
             models.append(self.test_note)
             self.update_labels()
             self.store = profiles.Store(profiles.profile_dir())
@@ -782,6 +784,7 @@ def create_window(app, loop, bridge=None):
             self.dismiss_picker()
             self.clear_attachment()
             self.clear_model_scan()
+            self.clear_model_probe()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             self.cfg["profile"] = entry.id
@@ -1342,6 +1345,7 @@ def create_window(app, loop, bridge=None):
                                 "Keine aktuelle Modellliste. Verbindung suchen oder erneut versuchen.")
             self.model_discovery_note.set_text(model_note)
             self.refresh_model_scan()
+            self.refresh_model_probe(connected)
             self.setup_connect.set_sensitive(not self.busy)
             if not self.url.get_text().strip():
                 self.setup_note.set_text(tr(
@@ -1671,7 +1675,25 @@ def create_window(app, loop, bridge=None):
             except (Hold,OSError):
                 self.status.set_text("Could not save local choices")
 
+        def clear_model_probe(self):
+            self.test_probe_route = None
+            self.test_probe_pending = False
+            self.test_note.set_text("")
+
+        def refresh_model_probe(self, connected):
+            if self.test_probe_route is not None and (
+                    not connected or not self.route_current(self.test_probe_route)):
+                self.clear_model_probe()
+            if self.test_probe_pending and not self.busy:
+                # Also covers cancellation before the coroutine starts.
+                self.test_probe_pending = False
+                self.test_note.set_text(tr(
+                    "Model test did not complete. Check status and retry.",
+                    "Model testi tamamlanmadı. Durumu kontrol edip yeniden dene.",
+                    "Modelltest nicht abgeschlossen. Status prüfen und erneut versuchen."))
+
         def forget_inventory(self):
+            self.clear_model_probe()
             self.inventory = ()
             self.models.remove_all()
             self.refresh()
@@ -1679,6 +1701,8 @@ def create_window(app, loop, bridge=None):
         def select_model(self, widget):
             value = widget.get_active_text()
             if value and value in self.inventory:
+                if value != self.cfg["llm"]:
+                    self.clear_model_probe()
                 self.cfg["llm"] = value
                 self.save()
                 self.refresh()
@@ -3283,6 +3307,8 @@ def create_window(app, loop, bridge=None):
         def test_chat(self):
             if self.busy or self.cfg["llm"] not in self.inventory:
                 return
+            self.clear_model_probe()
+            self.test_probe_pending = True
             self.test_note.set_text(tr("Testing…","Sınanıyor…","Test läuft…"))
             async def run(epoch):
                 # A disposable session: a test never enters the conversation.
@@ -3297,9 +3323,11 @@ def create_window(app, loop, bridge=None):
                 text = tr("Hello there! In one short sentence, what can you do?",
                           "Merhaba! Tek cümleyle cevapla: neler yapabilirsin?",
                           "Hallo! Antworte in einem kurzen Satz: was kannst du?")
-                backend, checkpoint, _ = self.bound_jan(epoch)
+                backend, checkpoint, route = self.bound_jan(epoch)
                 reply, _ = await probe.reply(text, backend, epoch)
                 checkpoint()
+                self.test_probe_route = route
+                self.test_probe_pending = False
                 self.test_note.set_text("%s · %s" % (reply.strip()[:240], probe.context.response_language or "unknown"))
             self.submit(run)
 

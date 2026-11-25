@@ -1092,6 +1092,42 @@ class PreviewTests(MarketFixture):
         self.assertTrue(any(any(probe in m.content for probe in probes) for m in prompts))
         self.assertEqual(len(self.ui.session.history), 2)
 
+    def test_failed_model_probe_finishes_and_can_retry(self):
+        self.connect_model()
+        with patch.object(self.ui, "bound_jan", side_effect=Hold("jan_unavailable")):
+            self.click(self.ui.test_chat_button)
+            self.until(lambda: not self.ui.busy)
+        self.assertFalse(self.ui.test_probe_pending)
+        self.assertIsNone(self.ui.test_probe_route)
+        self.assertIn(self.ui.test_note.get_text(), (
+            "Model test did not complete. Check status and retry.",
+            "Model testi tamamlanmadı. Durumu kontrol edip yeniden dene.",
+            "Modelltest nicht abgeschlossen. Status prüfen und erneut versuchen."))
+        self.assertEqual(self.ui.status.get_text(), "jan_unavailable")
+        self.backend.answers.append("Kısa bir test yanıtı.")
+        self.click(self.ui.test_chat_button)
+        self.until(lambda: not self.ui.busy)
+        self.assertIn("Kısa bir test yanıtı.", self.ui.test_note.get_text())
+        self.assertIsNotNone(self.ui.test_probe_route)
+
+    def test_model_probe_result_is_cleared_when_selection_or_endpoint_changes(self):
+        self.backend.inventory = ("fixture-chat", "other-model")
+        self.connect_model()
+        self.backend.answers.append("Kısa bir test yanıtı.")
+        self.click(self.ui.test_chat_button)
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(self.ui.test_note.get_text())
+        self.ui.models.set_active(1)
+        self.assertEqual(self.ui.cfg["llm"], "other-model")
+        self.assertEqual(self.ui.test_note.get_text(), "")
+        self.backend.answers.append("Kısa bir test yanıtı.")
+        self.click(self.ui.test_chat_button)
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(self.ui.test_note.get_text())
+        self.ui.url.set_text("http://127.0.0.1:9877")
+        self.assertEqual(self.ui.test_note.get_text(), "")
+        self.assertIsNone(self.ui.test_probe_route)
+
     def test_test_chat_requires_a_selected_model(self):
         self.assertFalse(self.ui.test_chat_button.get_sensitive())
         self.ui.inventory = ("fixture-chat",)
