@@ -2028,6 +2028,20 @@ class QueueRestoreTests(DownloadFixture):
         fresh.win.close()
         self.until(lambda: fresh.win.get_visible() is False)
 
+    def test_unsafe_transfer_directory_is_reported_without_startup_failure(self):
+        folder = Path(self.market_home, "transfers")
+        outside = Path(self.market_home, "outside")
+        outside.mkdir()
+        folder.symlink_to(outside, target_is_directory=True)
+        fresh = desktop.create_window(self.app, self.loop, self.bridge)
+        self.addCleanup(fresh.win.close)
+        self.assertEqual(fresh.downloads, [])
+        self.assertIn("transfer_directory_untrusted", fresh.download_note.get_text())
+        self.assertFalse(fresh.download_resume.get_sensitive())
+        self.assertFalse(fresh.download_discard.get_sensitive())
+        fresh.win.close()
+        self.until(lambda: fresh.win.get_visible() is False)
+
     def test_an_orphan_partial_is_ignored(self):
         transfers = Path(self.market_home, "transfers")
         transfers.mkdir(parents=True, exist_ok=True)
