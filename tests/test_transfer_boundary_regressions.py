@@ -1767,5 +1767,96 @@ class StagingCleanupTests(unittest.TestCase):
         with self.assertRaisesRegex(Hold, "staging_directory_untrusted"):
             self.registry.staging_candidates(self.model_id)
 
+class TransferDirectoryBoundaryTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.card = self.registry.save_card(market.ModelCard(
+            model_id="fixture-model", display_name="Fixture", category="stt"))
+        self.source = market.Source(reference="catalog:fixture",
+                                    checksum=hashlib.sha256(NEW).hexdigest(),
+                                    size=len(NEW), network_approval="fixture",
+                                    approval_expires_at=1e12)
+        self.folder = self.root / "transfers"
+        self.calls = []
+
+    async def fetch(self, path, note, start=0):
+        self.calls.append(start)
+        Path(path).write_bytes(NEW)
+        note(len(NEW))
+        return len(NEW)
+
+    def transfer(self, fetch=None):
+        return market.Transfer(self.registry, self.card, self.source,
+                               fetch or self.fetch, now=1)
+
+    async def test_symlink_transfer_directory_refused_before_transport(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        self.folder.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(Hold, "transfer_directory_untrusted"):
+            self.transfer()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(list(outside.iterdir()), [])
+
+    async def test_writable_shared_transfer_directory_refused(self):
+        self.folder.mkdir()
+        self.folder.chmod(0o777)
+        with self.assertRaisesRegex(Hold, "transfer_directory_untrusted"):
+            self.transfer()
+        self.assertEqual(self.calls, [])
+
+    async def test_replaced_transfer_directory_refused_before_transport(self):
+        transfer = self.transfer()
+        old_folder = self.root / "old-transfers"
+        self.folder.rename(old_folder)
+        self.folder.mkdir(mode=0o700)
+        with self.assertRaisesRegex(Hold, "transfer_directory_changed"):
+            await transfer.run()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(list(self.folder.iterdir()), [])
+
+    async def test_replacement_during_transport_preserves_foreign_file(self):
+        old_folder = self.root / "old-transfers"
+        replacement_path = None
+
+        async def changed(path, note):
+            nonlocal replacement_path
+            Path(path).write_bytes(NEW)
+            self.folder.rename(old_folder)
+            self.folder.mkdir(mode=0o700)
+            replacement_path = Path(path)
+            replacement_path.write_bytes(b"foreign")
+            note(len(NEW))
+            return len(NEW)
+
+        transfer = self.transfer(changed)
+        with self.assertRaisesRegex(Hold, "transfer_directory_changed"):
+            await transfer.run()
+        self.assertEqual(replacement_path.read_bytes(), b"foreign")
+        self.assertEqual((old_folder / replacement_path.name).read_bytes(), NEW)
+        self.assertFalse((self.root / "artifacts" / self.card.model_id).exists())
+        self.assertIsNone(transfer.temp)
+
+    async def test_symlink_artifact_directory_refused(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        (self.root / "artifacts").symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(Hold, "transfer_directory_untrusted"):
+            await self.transfer().run()
+        self.assertEqual(list(outside.iterdir()), [])
+        self.assertFalse(self.registry.publication_journal.exists())
+
+    async def test_scan_limit_counts_unrelated_entries(self):
+        from types import SimpleNamespace
+        from contextlib import nullcontext
+        self.folder.mkdir(mode=0o700)
+        entries = (SimpleNamespace(name="unrelated-%d" % i) for i in range(4097))
+        with patch.object(market.os, "scandir", return_value=nullcontext(entries)):
+            with self.assertRaisesRegex(Hold, "staging_scan_limit"):
+                self.registry.staging_candidates(self.card.model_id)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)

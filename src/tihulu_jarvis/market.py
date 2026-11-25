@@ -619,6 +619,18 @@ def _staging_prefix(model_id):
     return "tihulu-transfer-" + hashlib.sha256(model_id.encode("utf-8")).hexdigest() + "-"
 
 
+def _directory_identity(path):
+    """Check the actual directory, not a symlink to a different directory."""
+    try:
+        info = Path(path).lstat()
+    except OSError:
+        raise Hold("transfer_directory_untrusted") from None
+    if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+            or info.st_mode & 0o022):
+        raise Hold("transfer_directory_untrusted")
+    return info.st_dev, info.st_ino
+
+
 def _staging_identity(path):
     info = path.lstat()
     if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
@@ -732,6 +744,7 @@ class Transfer:
         self._checkpoint = checkpoint
         self.root = Path(root) if root else registry.root / "transfers"
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        self._root_identity = _directory_identity(self.root)
         self.temp = None
         self.received = 0
         self.state = card.state
@@ -762,7 +775,12 @@ class Transfer:
         if self.registry.card(self.card.model_id) != self.card:
             raise Hold("transfer_card_changed")
 
+    def _check_directory(self):
+        if _directory_identity(self.root) != self._root_identity:
+            raise Hold("transfer_directory_changed")
+
     def _check(self):
+        self._check_directory()
         self._checkpoint()
         if not self.source.authorized(self._clock()):
             raise Hold("network_not_authorized")
@@ -802,6 +820,7 @@ class Transfer:
             raise Hold("transfer_card_changed")
         target = self.registry.root / "artifacts" / self.card.model_id
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        _directory_identity(target.parent)
         if _exists_entry(target):
             if (not replacing or not self.card.owned_by_jarvis
                     or self.card.shared_storage_owner or self.card.loaded
@@ -878,6 +897,13 @@ class Transfer:
             return
         temp = Path(self.temp)
         try:
+            self._check_directory()
+        except Hold:
+            # The pathname is no longer ours. Do not delete or preserve bytes
+            # in a replacement directory. Explicit inspection can recover them.
+            self.temp = None
+            return
+        try:
             if keep:
                 with self.registry._write_guard():
                     self._save_partial(temp)
@@ -897,6 +923,7 @@ class Transfer:
         try:
             with self.registry._write_guard():
                 self._assert_current()
+                self._check_directory()
                 partial, metadata = self._partial_paths()
                 info = partial.lstat()
                 actual = (info.st_dev, info.st_ino, info.st_size,
@@ -1728,16 +1755,21 @@ class Registry:
         if folder is None:
             return ()
         candidates = []
-        for path in folder.iterdir():
-            if not re.fullmatch(re.escape(prefix) + r"[a-z0-9_]{8}", path.name):
-                continue
-            try:
-                identity = _staging_identity(path)
-            except (Hold, OSError):
-                continue
-            candidates.append((path.name, identity))
-            if len(candidates) > 128:
-                raise Hold("staging_candidate_limit")
+        # Bound total entries, including unrelated names; do not materialize
+        # an unbounded directory listing while holding the registry lock.
+        with os.scandir(folder) as entries:
+            for count, entry in enumerate(entries, 1):
+                if count > 4096:
+                    raise Hold("staging_scan_limit")
+                if not re.fullmatch(re.escape(prefix) + r"[a-z0-9_]{8}", entry.name):
+                    continue
+                try:
+                    identity = _staging_identity(Path(entry.path))
+                except (Hold, OSError):
+                    continue
+                candidates.append((entry.name, identity))
+                if len(candidates) > 128:
+                    raise Hold("staging_candidate_limit")
         return tuple(sorted(candidates))
 
     @_model_leased
