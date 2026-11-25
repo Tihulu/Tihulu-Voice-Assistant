@@ -146,6 +146,7 @@ jobs:
         run: |
           mkdir -p .release-work/root
           dpkg-deb -x .release-work/tihulu-jarvis.deb .release-work/root
+          python3 tools/owner_preview.py --root .release-work/root --commit "$(git rev-parse HEAD)"
           launcher="$GITHUB_WORKSPACE/.release-work/root/usr/bin/tihulu-jarvis"
           runtime="$GITHUB_WORKSPACE/.release-work/root/usr/share/tihulu-jarvis/python"
           test -x "$launcher"

@@ -16,7 +16,7 @@ from .voice.m1 import Hold, SpeechRequest, speech_text
 
 
 class AnalysisView:
-    def __init__(self, desktop, parent, Gtk, GLib, tr, language):
+    def __init__(self, desktop, parent, Gtk, GLib, tr, language, *, result_parent=None):
         self.ui, self.Gtk, self.GLib = desktop, Gtk, GLib
         self.tr = tr
         self.language = language if language in ac.LANGUAGES else "en"
@@ -34,17 +34,23 @@ class AnalysisView:
         parent.append(row)
         self.choose_button = desktop.button(row, tr("Analyze local CSV",
             "Yerel CSV analiz et", "Lokale CSV analysieren"), self.choose)
+        self.result_actions = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+        (result_parent if result_parent is not None else parent).append(self.result_actions)
+        self.result_actions.append(Gtk.Label(label=tr("Latest result", "Son sonuç",
+            "Letztes Ergebnis"), xalign=0))
+        result_row = Gtk.Box(spacing=6)
+        self.result_actions.append(result_row)
         self.color = Gtk.ComboBoxText()
         for token, caption in (("blue", tr("Blue", "Mavi", "Blau")),
                                ("green", tr("Green", "Yeşil", "Grün")),
                                ("orange", tr("Orange", "Turuncu", "Orange"))):
             self.color.append(token, caption)
         self.color.set_active_id("blue")
-        row.append(self.color)
-        self.recolor_button = desktop.button(row, tr("Recolor last chart",
+        result_row.append(self.color)
+        self.recolor_button = desktop.button(result_row, tr("Recolor last chart",
             "Son grafiği renklendir", "Letztes Diagramm umfärben"), self.recolor)
         export_row = Gtk.Box(spacing=6)
-        parent.append(export_row)
+        self.result_actions.append(export_row)
         self.export_format = Gtk.ComboBoxText()
         for token, caption in (
             ("svg", tr("Chart (SVG)", "Grafik (SVG)", "Diagramm (SVG)")),
@@ -124,7 +130,8 @@ class AnalysisView:
                    and self.dialog is None and self.ui.owned_picker is None and policy is not None
                    and policy.mode == "LOCAL_ONLY")
         self.choose_button.set_sensitive(enabled)
-        self.color.set_sensitive(enabled)
+        self.result_actions.set_visible(self.last is not None)
+        self.color.set_sensitive(enabled and self.last is not None)
         self.recolor_button.set_sensitive(enabled and self.last is not None)
         self.export_button.set_sensitive(enabled and self.last is not None)
         self.export_format.set_sensitive(enabled and self.last is not None)

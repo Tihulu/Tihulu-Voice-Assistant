@@ -6,6 +6,7 @@ import json
 import locale
 import os
 import time
+from threading import Event
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -13,10 +14,12 @@ from pathlib import Path
 from . import (a11y, agents, attachments, catalog_sources, files, keys, queries,
                  readiness, receipts, resources, tasks, transcript, usage, web)
 from .voice.jan import MAX_TEXT as STREAM_CAP
-from . import catalog_fetch, disclosure, routing
+from . import catalog_fetch, disclosure, routing, model_discovery
+from .owned_wait import finish_owned
 from .analysis_ui import AnalysisView
+from .chat_files import ChatFiles
 from .selected_csv import selection_identity
-from . import analysis_intent
+from . import analysis_intent, local_actions
 from . import locks, search, states
 from . import market, profiles, settings
 from .voice import audio
@@ -232,34 +235,59 @@ def create_window(app, loop, bridge=None):
             self.state_row = Gtk.Label(xalign=0, wrap=True)
             root.append(self.state_row)
             self.stack = Gtk.Stack(vexpand=True)
-            tabs = Gtk.StackSwitcher(stack=self.stack)
-            root.append(tabs)
-            root.append(self.stack)
+            workspace = Gtk.Box(spacing=12, vexpand=True)
+            root.append(workspace)
+            self.navigation = Gtk.StackSidebar(stack=self.stack)
+            nav_scroll = Gtk.ScrolledWindow(vexpand=True)
+            nav_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+            nav_scroll.set_child(self.navigation)
+            workspace.append(nav_scroll)
+            self.stack.set_hexpand(True)
+            workspace.append(self.stack)
             chat = Gtk.Box(orientation=Gtk.Orientation.VERTICAL,spacing=10)
             self.stack.add_titled(chat,"conversation",tr("Chat & Voice","Sohbet ve ses","Chat & Sprache"))
+            self.setup = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            chat.append(self.setup)
+            self.setup_note = Gtk.Label(xalign=0, wrap=True)
+            self.setup.append(self.setup_note)
+            self.setup_connect = self.button(self.setup, tr(
+                "Connect local model", "Yerel model bağla", "Lokales Modell verbinden"),
+                lambda: self.stack.set_visible_child_name("models"))
+            self.setup_connect.set_halign(Gtk.Align.START)
             self.log = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8)
             self.scroll = Gtk.ScrolledWindow(vexpand=True)
             self.scroll.set_child(self.log)
             chat.append(self.scroll)
+            self.result_actions_slot = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+            chat.append(self.result_actions_slot)
+            self.search_panel = Gtk.Expander(label=tr(
+                "Find in conversation", "Sohbette bul", "Im Gespräch suchen"))
+            searchbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            self.search_panel.set_child(searchbox)
+            self.search_panel.connect("notify::expanded", lambda *_: self.run_search())
+            chat.append(self.search_panel)
             searchrow = Gtk.Box(spacing=8)
             self.search_entry = Gtk.Entry(hexpand=True,placeholder_text=tr("Search this conversation…","Bu sohbette ara…","In diesem Gespräch suchen…"))
             searchrow.append(self.search_entry)
+            self.search_submit = self.button(searchrow, tr("Search", "Ara", "Suchen"),
+                                             lambda: self.run_search(remember=True))
             self.search_clear = self.button(searchrow,tr("Clear","Temizle","Leeren"),self.clear_search)
             self.export_chat = self.button(searchrow, tr("Export conversation",
                                                          "Sohbeti dışa aktar",
                                                          "Gespräch exportieren"),
                                            self.export_conversation)
-            chat.append(searchrow)
+            searchbox.append(searchrow)
             self.search_results = Gtk.ListBox()
-            chat.append(self.search_results)
+            searchbox.append(self.search_results)
             self.search_note = Gtk.Label(xalign=0, wrap=True)
-            chat.append(self.search_note)
+            searchbox.append(self.search_note)
             self.search_entry.connect("changed", lambda *_: self.run_search())
+            self.search_entry.connect("activate", lambda *_: self.run_search(remember=True))
             self.search_results.connect("row-selected", lambda *_: self.show_match())
             self.search_history = Gtk.ListBox()
-            chat.append(self.search_history)
+            searchbox.append(self.search_history)
             historyrow = Gtk.Box(spacing=8)
-            chat.append(historyrow)
+            searchbox.append(historyrow)
             self.search_history_label = Gtk.Label(xalign=0, wrap=True)
             historyrow.append(self.search_history_label)
             self.search_history_label.set_text(tr("Recent searches",
@@ -280,12 +308,12 @@ def create_window(app, loop, bridge=None):
             self.entry.connect("activate",lambda *_:self.send_text())
             self.entry.connect("changed", lambda *_: self.refresh_send())
             self.attachment_note = Gtk.Label(xalign=0, wrap=True)
+            self.talk = self.button(entryrow, tr("Talk", "Konuş", "Sprechen"), self.voice)
             chat.append(entryrow)
             chat.append(self.attachment_note)
             self.attachment = None
             controls = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=6,row_spacing=4)
             chat.append(controls)
-            self.talk = self.button(controls,tr("Talk","Konuş","Sprechen"),self.voice)
             self.finish_btn = self.button(controls,tr("Finish recording","Kaydı bitir","Aufnahme beenden"),lambda:self.finish.set() if self.finish else None)
             self.stop = self.button(controls,tr("Stop speaking","Sesi durdur","Wiedergabe stoppen"),self.stop_speaking)
             # Muting suppresses audio output, never the answer: the reply is
@@ -325,12 +353,41 @@ def create_window(app, loop, bridge=None):
             self.url = Gtk.Entry(text=self.cfg["endpoint"],placeholder_text="Jan · HTTP loopback URL")
             models.append(self.url)
             self.reload = self.button(models,tr("Discover Jan models","Jan modellerini bul","Jan-Modelle suchen"),self.discover)
+            self.model_discovery_note = Gtk.Label(xalign=0, wrap=True)
+            models.append(self.model_discovery_note)
             self.models = Gtk.ComboBoxText()
             models.append(self.models)
             self.models.connect("changed", self.select_model)
+            self.return_to_chat = self.button(models, tr(
+                "Return to chat", "Sohbete dön", "Zum Chat zurück"),
+                lambda: self.stack.set_visible_child_name("conversation"))
+            models.append(Gtk.Label(label=tr(
+                "Optional voice setup", "İsteğe bağlı ses ayarları", "Optionale Spracheinrichtung"),
+                xalign=0))
             self.url.connect("changed", lambda *_:self.forget_inventory())
             self.labels, self.pickers, self.previews = {}, [], {}
             self.preview_locales = {}
+            self.voice_setup_note = Gtk.Label(xalign=0, wrap=True)
+            models.append(self.voice_setup_note)
+            self.model_scan_result = self.model_scan_context = None
+            self.model_scan = self.button(models, tr(
+                "Find existing audio models in a folder", "Klasörde mevcut ses modellerini bul",
+                "Vorhandene Audiomodelle im Ordner suchen"), self.choose_model_folder)
+            self.model_scan_note = Gtk.Label(xalign=0, wrap=True)
+            models.append(self.model_scan_note)
+            self.model_candidates = Gtk.ComboBoxText()
+            models.append(self.model_candidates)
+            self.model_kind = Gtk.ComboBoxText()
+            for key, caption in (("stt", "Whisper STT"), ("tr", "Piper TR"),
+                                 ("en", "Piper EN"), ("de", "Piper DE")):
+                self.model_kind.append(key, caption)
+            self.model_kind.set_active_id("stt")
+            models.append(self.model_kind)
+            self.model_candidate_choose = self.button(models, tr(
+                "Review selected file", "Seçilen dosyayı incele", "Ausgewählte Datei prüfen"),
+                self.review_model_candidate)
+            self.model_candidates.connect("changed", lambda *_: self.refresh_model_scan())
+            self.model_kind.connect("changed", lambda *_: self.refresh_model_scan())
             for key, caption in [("stt","STT · Whisper (.bin)"),("tr","Piper · Türkçe"),("en","Piper · English"),("de","Piper · Deutsch")]:
                 row = Gtk.Box(spacing=8)
                 models.append(row)
@@ -361,6 +418,8 @@ def create_window(app, loop, bridge=None):
             self.test_chat_button = self.button(models, tr("Test selected model","Seçilen modeli dene","Ausgewähltes Modell testen"), self.test_chat)
             self.transcribe_button = self.button(models, tr("Transcribe a recording","Kayıttan yazıya çevir","Aufnahme transkribieren"), self.transcribe_recording)
             self.test_note = Gtk.Label(xalign=0, wrap=True)
+            self.test_probe_route = None
+            self.test_probe_pending = False
             models.append(self.test_note)
             self.update_labels()
             self.store = profiles.Store(profiles.profile_dir())
@@ -398,7 +457,18 @@ def create_window(app, loop, bridge=None):
             self.build_agents_page()
             self.turn_note = ""
             self.build_activity_page()
-            self.analysis = AnalysisView(self, chat, Gtk, GLib, tr, lang)
+            self.tool_panel = Gtk.Expander(label=tr("Local tools", "Yerel araçlar", "Lokale Werkzeuge"))
+            toolbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
+            self.tool_panel.set_child(toolbox)
+            chat.insert_child_after(self.tool_panel, self.search_panel)
+            self.chat_transcribe = self.button(toolbox, tr(
+                "Transcribe a recording", "Kayıttan yazıya çevir", "Aufnahme transkribieren"),
+                self.transcribe_recording)
+            self.chat_transcribe_note = Gtk.Label(xalign=0, wrap=True)
+            toolbox.append(self.chat_transcribe_note)
+            self.analysis = AnalysisView(self, toolbox, Gtk, GLib, tr, lang,
+                                         result_parent=self.result_actions_slot)
+            self.chat_files = ChatFiles(self, toolbox, self.result_actions_slot, Gtk, tr)
             self.refresh()
             self.win.present()
 
@@ -453,6 +523,8 @@ def create_window(app, loop, bridge=None):
             return True
 
         def run_focus_search(self, *_):
+            self.stack.set_visible_child_name("conversation")
+            self.search_panel.set_expanded(True)
             self.search_entry.grab_focus()
             return True
 
@@ -698,6 +770,7 @@ def create_window(app, loop, bridge=None):
             self.owned_picker_handler = dialog.connect("response", dispatch)
             dialog.show()
             self.refresh()
+            return True
 
         def clear_attachment(self):
             self.attachment = self.attachment_context = self.attachment_live = None
@@ -718,6 +791,12 @@ def create_window(app, loop, bridge=None):
                 raise Hold("profile_not_active")
             self.dismiss_picker()
             self.clear_attachment()
+            self.clear_model_scan()
+            self.clear_model_probe()
+            if hasattr(self, "folder_entries"):
+                self.clear_folder_view()
+            if hasattr(self, "chat_files"):
+                self.chat_files.reset()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             self.cfg["profile"] = entry.id
@@ -996,12 +1075,14 @@ def create_window(app, loop, bridge=None):
                             "%s bu bilgisayarda" % row.route.model_id,
                             "%s auf diesem Computer" % row.route.model_id))
 
-        def run_search(self):
+        def run_search(self, *, remember=False):
             """Search the local conversation; results are snippets, bounded.
 
             Nothing leaves this machine, and the field is disabled while a turn
             runs so a search can never race a reply.
             """
+            if not self.search_panel.get_expanded():
+                return
             query = self.search_entry.get_text().strip()
             rows, item = [], self.search_results.get_first_child()
             while item is not None:
@@ -1017,8 +1098,9 @@ def create_window(app, loop, bridge=None):
                 self.search_matches = ()
                 self.search_note.set_text(str(exc))
                 return
-            # Only a query that ran is remembered, and only once it ran.
-            self.remember_search(query)
+            # Live results are transient. Only explicit submission saves a query.
+            if remember and not self.busy:
+                self.remember_search(query)
             for index, role, text in self.search_matches:
                 row = Gtk.ListBoxRow()
                 label = Gtk.Label(label="%s · %s" % (role, text), xalign=0, wrap=True)
@@ -1058,10 +1140,21 @@ def create_window(app, loop, bridge=None):
                 row.query = query
                 row.set_child(Gtk.Label(label=query, xalign=0, wrap=True))
                 row.set_activatable(True)
-                row.connect("activate", lambda *_: self.search_entry.set_text(row.query))
+                row.connect("activate", self.activate_search_history)
                 self.search_history.append(row)
             self.search_history_label.set_visible(bool(self.cfg.get("search_history")))
             self.search_forget.set_sensitive(bool(self.cfg.get("search_history")))
+
+        def activate_search_history(self, row):
+            # Rebuilding the list during GTK's row activation can invalidate
+            # the row whose native activation is still being dispatched.
+            if not self.busy and self.search_panel.get_expanded():
+                GLib.idle_add(self.recall_search, row.query)
+
+        def recall_search(self, query):
+            if not self.busy and not self.closing and self.search_panel.get_expanded():
+                self.search_entry.set_text(query)
+                self.run_search(remember=True)
 
         def remember_search(self, query):
             """Remember a query that was actually searched for."""
@@ -1120,7 +1213,8 @@ def create_window(app, loop, bridge=None):
 
         def clear_search(self):
             self.search_entry.set_text("")
-            self.search_entry.grab_focus()
+            if self.search_panel.get_expanded():
+                self.search_entry.grab_focus()
 
         def topbar_text(self):
             """Mode, profile, model and boundary, as one line of words.
@@ -1154,7 +1248,10 @@ def create_window(app, loop, bridge=None):
                                   "yalnızca geri döngü; üst servis doğrulanmadı",
                                   "Nur Loopback; Upstream nicht verifiziert")
             parts = [mode or tr("no mode", "mod yok", "kein Modus"), name, model, boundary]
-            if data is not None and data["endpoint"] != "loopback":
+            if not self.url.get_text().strip():
+                parts.append(tr("connection not configured", "bağlantı yapılandırılmadı",
+                                "Verbindung nicht eingerichtet"))
+            elif data is not None and data["endpoint"] != "loopback":
                 # The boundary is about the profile; the endpoint is its own
                 # fact, and a build that cannot use it says so rather than
                 # leaving a reader to assume it will work.
@@ -1213,7 +1310,11 @@ def create_window(app, loop, bridge=None):
                 self.disclosure_note.set_text("")
                 return
             data = disclosure.facts(profile, endpoint, self.store.policy_now())
-            if data["endpoint"] != "loopback":
+            if not endpoint:
+                body = tr("No connection configured. Choose a local Jan endpoint to chat.",
+                          "Bağlantı yapılandırılmadı. Sohbet için yerel Jan bağlantısını seç.",
+                          "Keine Verbindung eingerichtet. Lokalen Jan-Zugang zum Chatten wählen.")
+            elif data["endpoint"] != "loopback":
                 body = tr("The configured endpoint is not a loopback address; this build refuses it.",
                           "Yapılandırılan uç nokta geri döngü adresi değil; bu sürüm onu reddeder.",
                           "Der konfigurierte Endpunkt ist keine Loopback-Adresse; dieser Build lehnt ihn ab.")
@@ -1234,12 +1335,40 @@ def create_window(app, loop, bridge=None):
         def refresh_send(self):
             text = self.entry.get_text()
             connected = self.cfg["llm"] in self.inventory
-            direct = analysis_intent.direct(text) is not None
+            direct = analysis_intent.direct(text) is not None or local_actions.direct(text) is not None
             local = getattr(self, "policy", None) is not None and self.policy.mode == "LOCAL_ONLY"
             self.send.set_sensitive(not self.busy and (connected or (local and direct)))
 
         def refresh(self):
             connected = self.cfg["llm"] in self.inventory
+            self.setup.set_visible(not connected)
+            self.return_to_chat.set_sensitive(not self.busy and connected)
+            if connected:
+                model_note = tr("Model selected. Text chat is available.",
+                                "Model seçildi. Yazılı sohbet kullanılabilir.",
+                                "Modell ausgewählt. Textchat verfügbar.")
+            elif self.inventory:
+                model_note = tr("Choose one of the discovered models.",
+                                "Bulunan modellerden birini seç.",
+                                "Eines der gefundenen Modelle auswählen.")
+            else:
+                model_note = tr("No current model inventory. Discover or retry the connection.",
+                                "Güncel model listesi yok. Bağlantıyı keşfet veya yeniden dene.",
+                                "Keine aktuelle Modellliste. Verbindung suchen oder erneut versuchen.")
+            self.model_discovery_note.set_text(model_note)
+            self.refresh_model_scan()
+            self.refresh_model_probe(connected)
+            self.setup_connect.set_sensitive(not self.busy)
+            if not self.url.get_text().strip():
+                self.setup_note.set_text(tr(
+                    "Start with your local model. Open Jan, enter its local API URL, discover models and choose one. No download is needed.",
+                    "Yerel modelinle başla. Jan'ı aç, yerel API adresini gir, modelleri bul ve birini seç. İndirme gerekmez.",
+                    "Mit dem lokalen Modell starten. Jan öffnen, lokale API-Adresse eingeben, Modelle suchen und eines wählen. Kein Download nötig."))
+            else:
+                self.setup_note.set_text(tr(
+                    "Discover and select a model to start chatting. Voice setup is optional for text chat.",
+                    "Sohbet için model bul ve seç. Yazılı sohbet için ses ayarları isteğe bağlıdır.",
+                    "Zum Chatten ein Modell suchen und auswählen. Spracheinrichtung ist für Textchat optional."))
             # Whether the audio tools exist is asked once per refresh, and the
             # answer is what the readiness row states.
             self.tools_available = audio.tools_ready("arecord", "whisper-cli",
@@ -1257,6 +1386,8 @@ def create_window(app, loop, bridge=None):
             self.refresh_state_row()
             self.search_entry.set_sensitive(not self.busy)
             self.search_clear.set_sensitive(not self.busy)
+            self.search_submit.set_sensitive(not self.busy)
+            self.search_history.set_sensitive(not self.busy)
             # An export needs something to export; an empty log offers nothing.
             self.export_chat.set_sensitive(not self.busy and bool(self.session.history))
             self.attach.set_sensitive(not self.busy and self.cfg["llm"] in self.inventory)
@@ -1274,9 +1405,34 @@ def create_window(app, loop, bridge=None):
                     "local_audio_device", ("push_to_talk",), now)[0] == profiles.ALLOW)
             except Hold:
                 allowed = False
-            self.talk.set_sensitive(not self.busy and connected and allowed \
-                and bool(self.cfg["stt"]) and bool(self.cfg["voices"]) \
-                and audio.tools_ready("arecord","whisper-cli","piper","aplay"))
+            stt_present = bool(self.cfg["stt"]) and Path(self.cfg["stt"]).is_file()
+            voices_present = tuple(lang for lang, path in self.cfg["voices"].items()
+                                   if path and Path(path).is_file())
+            missing_tools = tuple(name for name in readiness.AUDIO_TOOLS
+                                  if not audio.tools_ready(name))
+            voice_ready = allowed and stt_present and bool(voices_present) and not missing_tools
+            if not allowed:
+                voice_note = tr("Audio permission is not granted.", "Ses izni verilmemiş.",
+                                "Audiofreigabe fehlt.")
+            elif missing_tools:
+                voice_note = tr("Missing audio tools: ", "Eksik ses araçları: ",
+                                "Fehlende Audiowerkzeuge: ") + ", ".join(missing_tools)
+            elif not stt_present:
+                voice_note = tr("Choose an existing Whisper model.", "Mevcut bir Whisper modeli seç.",
+                                "Vorhandenes Whisper-Modell wählen.")
+            elif not voices_present:
+                voice_note = tr("Choose an existing Piper voice.", "Mevcut bir Piper sesi seç.",
+                                "Vorhandene Piper-Stimme wählen.")
+            else:
+                voice_note = tr("Audio files and tools detected; test playback and microphone.",
+                                "Ses dosyaları ve araçlar bulundu; ses ve mikrofonu test et.",
+                                "Audiodateien und Werkzeuge gefunden; Wiedergabe und Mikrofon testen.")
+                absent = tuple(lang for lang in ("tr", "en", "de") if lang not in voices_present)
+                if absent:
+                    voice_note += " " + tr("Unconfigured voices: ", "Ayarlanmamış sesler: ",
+                                           "Nicht eingerichtete Stimmen: ") + ", ".join(absent)
+            self.voice_setup_note.set_text(voice_note)
+            self.talk.set_sensitive(not self.busy and connected and voice_ready)
             self.stop.set_sensitive(self.stage in ("synthesizing","speaking") and self.playback is not None)
             # Muting is available while a turn is idle or while output plays.
             self.mute.set_sensitive(not self.busy or self.playback is not None)
@@ -1290,15 +1446,40 @@ def create_window(app, loop, bridge=None):
                 analysis_live = bool(self.analysis.dialog is not None or self.analysis.last or self.owned_picker is not None)
                 self.hard.set_sensitive(self.busy or analysis_live)
                 self.quick_stop.set_sensitive(self.busy or analysis_live)
+            if hasattr(self, "chat_files"):
+                self.chat_files.refresh()
+                if self.chat_files.folder is not None:
+                    self.hard.set_sensitive(True)
+                    self.quick_stop.set_sensitive(True)
+            # Keep turn-specific actions visible only while they can be used.
+            # The top-bar hard stop remains permanently visible.
+            self.finish_btn.set_visible(self.finish_btn.get_sensitive())
+            self.stop.set_visible(self.stop.get_sensitive())
+            self.cancel.set_visible(self.cancel.get_sensitive())
+            self.hard.set_visible(self.hard.get_sensitive())
             for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,
                       self.transcribe_button,*self.previews):
                 w.set_sensitive(not self.busy)
+            transcribe_ready = stt_present and audio.tools_ready("whisper-cli")
+            self.transcribe_button.set_sensitive(not self.busy and transcribe_ready)
+            if hasattr(self, "chat_transcribe"):
+                self.chat_transcribe.set_sensitive(not self.busy and transcribe_ready)
+                if not stt_present:
+                    note = tr("Select a local Whisper model in Installed models.",
+                              "Kurulu modellerden yerel Whisper modeli seç.",
+                              "Unter Installierte Modelle ein lokales Whisper-Modell wählen.")
+                elif not transcribe_ready:
+                    note = tr("Missing whisper-cli.", "whisper-cli eksik.", "whisper-cli fehlt.")
+                else:
+                    note = tr("Local WAV transcription; no chat model or microphone needed.",
+                              "Yerel WAV yazıya çevirme; sohbet modeli veya mikrofon gerekmez.",
+                              "Lokale WAV-Transkription; kein Chatmodell oder Mikrofon nötig.")
+                self.chat_transcribe_note.set_text(note)
             if not self.busy:
                 self.test_chat_button.set_sensitive(connected)
-                self.transcribe_button.set_sensitive(connected and bool(self.cfg["stt"]))
                 for widget, lang in self.previews.items():
                     # A preview speaks only the locale that is actually selected.
-                    widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
+                    widget.set_sensitive(lang in voices_present and allowed
                                          and audio.tools_ready("piper","aplay"))
 
         def build_resources_page(self):
@@ -1525,7 +1706,25 @@ def create_window(app, loop, bridge=None):
             except (Hold,OSError):
                 self.status.set_text("Could not save local choices")
 
+        def clear_model_probe(self):
+            self.test_probe_route = None
+            self.test_probe_pending = False
+            self.test_note.set_text("")
+
+        def refresh_model_probe(self, connected):
+            if self.test_probe_route is not None and (
+                    not connected or not self.route_current(self.test_probe_route)):
+                self.clear_model_probe()
+            if self.test_probe_pending and not self.busy:
+                # Also covers cancellation before the coroutine starts.
+                self.test_probe_pending = False
+                self.test_note.set_text(tr(
+                    "Model test did not complete. Check status and retry.",
+                    "Model testi tamamlanmadı. Durumu kontrol edip yeniden dene.",
+                    "Modelltest nicht abgeschlossen. Status prüfen und erneut versuchen."))
+
         def forget_inventory(self):
+            self.clear_model_probe()
             self.inventory = ()
             self.models.remove_all()
             self.refresh()
@@ -1533,6 +1732,8 @@ def create_window(app, loop, bridge=None):
         def select_model(self, widget):
             value = widget.get_active_text()
             if value and value in self.inventory:
+                if value != self.cfg["llm"]:
+                    self.clear_model_probe()
                 self.cfg["llm"] = value
                 self.save()
                 self.refresh()
@@ -1579,6 +1780,7 @@ def create_window(app, loop, bridge=None):
                 card = self.market.save_card(market.register_installed(card))
                 self.cfg["llm"] = model_id
                 self.remember("llm", model_id)
+                self.models.set_active(self.inventory.index(model_id))
                 self.save()
                 self.refresh()
                 return
@@ -1973,14 +2175,16 @@ def create_window(app, loop, bridge=None):
             return getattr(self, "turn_note", "") or tr("a local turn", "yerel tur",
                                                         "eine lokale Runde")
 
-        def finish_task(self, board_id, t, message):
-            """Record how a turn ended: done, cancelled or failed, with the reason."""
+        def finish_task(self, board_id, t, message, *, invalidated=False):
+            """Publish a terminal state only after the owned task has drained."""
             try:
+                row = self.board.get(board_id)
                 state = "failed" if message else "done"
-                if t.cancelled():
+                if t.cancelled() or invalidated:
                     state = "cancelled"
-                    message = message or "Stopped"
+                    message = row.reason or message or "Stopped"
                 self.board.finish(board_id, state, message or "")
+                self.board.update(board_id, locks=())
             except Hold:
                 pass
 
@@ -2022,6 +2226,8 @@ def create_window(app, loop, bridge=None):
                 pass
 
         def refresh_activity(self):
+            selected = self.activity_list.get_selected_row()
+            selected_id = selected.task.id if selected is not None else None
             rows, item = [], self.activity_list.get_first_child()
             while item is not None:
                 nxt = item.get_next_sibling()
@@ -2043,10 +2249,15 @@ def create_window(app, loop, bridge=None):
                     detail += " · " + ",".join(row.locks)
                 if row.counted_total:
                     detail += " · %d/%d bytes" % (row.counted, row.counted_total)
+                elif row.kind in ("download", "update"):
+                    detail += " · %d bytes · " % row.counted + tr(
+                        "total unknown", "toplam bilinmiyor", "Gesamtgröße unbekannt")
                 label = Gtk.Label(label=detail, xalign=0, wrap=True)
                 line.set_child(label)
                 line.set_activatable(True)
                 self.activity_list.append(line)
+                if row.id == selected_id:
+                    self.activity_list.select_row(line)
             self.activity_stop.set_sensitive(bool(self.board.busy()))
             self.refresh_queue_note()
             self.activity_note.set_text(tr(
@@ -2060,13 +2271,15 @@ def create_window(app, loop, bridge=None):
             chosen = row.task if row is not None else None
             if chosen is None or not chosen.busy:
                 return
-            self.board.cancel(chosen.id, "stopped_by_owner")
-            # A running turn is cancelled through the real cancellation path.
-            if chosen.kind == "turn" and self.busy:
-                self.interrupt(False)
+            if chosen.id != self.active_task or not self.busy or self.session.active.done():
+                return
+            # Cancellation is a request, not completion. Keep the task and its
+            # leases visible until the real owned worker has finished cleanup.
+            self.board.update(chosen.id, reason="stopped_by_owner")
+            self.interrupt(False)
             self.refresh_activity()
-            self.set_state("ready", tr("Task stopped.", "Görev durduruldu.",
-                                       "Aufgabe gestoppt."))
+            self.set_state("stopping", tr("Stopping task…", "Görev durduruluyor…",
+                                          "Aufgabe wird gestoppt…"))
 
         def build_files_page(self):
             """A folder the owner chose, listed and previewed behind the policy.
@@ -2101,6 +2314,18 @@ def create_window(app, loop, bridge=None):
             page.append(self.file_preview)
             self.file_read = self.button(page, tr("Read the selected file", "Seçili dosyayı oku",
                                                   "Ausgewählte Datei lesen"), self.read_selected_file)
+            self.research_folder = self.research_context = None
+            self.folder_root.connect("changed", lambda *_: self.clear_folder_view())
+            self.refresh_files_buttons()
+
+        def clear_folder_view(self):
+            self.research_folder = self.research_context = None
+            item = self.folder_entries.get_first_child()
+            while item is not None:
+                nxt = item.get_next_sibling()
+                self.folder_entries.remove(item)
+                item = nxt
+            self.file_note.set_text("")
             self.refresh_files_buttons()
 
         def choose_folder(self):
@@ -2125,10 +2350,9 @@ def create_window(app, loop, bridge=None):
             """Store a chosen folder and list it; nothing is read yet."""
             try:
                 root = files.checked_root(path)
-                self.cfg["research_root"] = root
-                self.save()
                 self.folder_root.set_text(root)
-                self.list_folder(root)
+                if self.list_folder(root) is None:
+                    return None
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return None
@@ -2138,9 +2362,15 @@ def create_window(app, loop, bridge=None):
             if self.busy:
                 return
             root = root or self.folder_root.get_text().strip()
+            self.clear_folder_view()
             try:
+                context = self.picker_context()
                 self.require_tools(("filesystem_read", ("folder",)), selected=True)
-                folder = files.list_dir(root)
+                check = self.tool_checkpoint("filesystem_read", ("folder",),
+                    self.session.epoch, selected=True,
+                    expected_generation=(context[0], context[4]))
+                folder = files.list_dir(root, checkpoint=check)
+                check()
             except Hold as exc:
                 # A refused or unreadable folder is a bounded reason.
                 if "filesystem_read" in str(exc) or "profile_forbids" in str(exc):
@@ -2150,10 +2380,16 @@ def create_window(app, loop, bridge=None):
             self.cfg["research_root"] = folder.root
             self.save()
             self.folder_root.set_text(folder.root)
+            self.research_folder = folder
+            self.research_context = (context[0], context[4])
             self.show_folder(folder)
-            self.file_note.set_text(tr("%d entries, folders first." % len(folder.entries),
-                                       "%d girdi, önce klasörler." % len(folder.entries),
-                                       "%d Einträge, Ordner zuerst." % len(folder.entries)))
+            note = tr("%d entries, folders first." % len(folder.entries),
+                      "%d girdi, önce klasörler." % len(folder.entries),
+                      "%d Einträge, Ordner zuerst." % len(folder.entries))
+            if folder.limited:
+                note += " " + tr("Listing limit reached.", "Listeleme sınırına ulaşıldı.",
+                                  "Listengrenze erreicht.")
+            self.file_note.set_text(note)
             return folder
 
         def show_folder(self, folder):
@@ -2176,6 +2412,8 @@ def create_window(app, loop, bridge=None):
         def refresh_files_buttons(self):
             row = self.folder_entries.get_selected_row()
             self.file_preview.set_text("")
+            self.file_read.set_sensitive(row is not None and not row.entry.directory
+                                         and self.research_folder is not None)
 
         def read_selected_file(self):
             row = self.folder_entries.get_selected_row()
@@ -2184,9 +2422,17 @@ def create_window(app, loop, bridge=None):
             entry = row.entry
             if entry.directory:
                 return None
+            self.file_preview.set_text("")
             try:
+                folder = self.research_folder
+                if folder is None or folder.root != self.folder_root.get_text().strip():
+                    raise Hold("folder_changed")
                 self.require_tools(("filesystem_read", ("file",)), selected=True)
-                text = files.preview(self.cfg.get("research_root", ""), entry.name)
+                check = self.tool_checkpoint("filesystem_read", ("file",),
+                    self.session.epoch, selected=True, expected_generation=self.research_context)
+                text = files.preview(folder.root, entry.name, expected_root=folder.identity,
+                                     expected_entry=entry.identity, checkpoint=check)
+                check()
             except Hold as exc:
                 if "profile_forbids" in str(exc):
                     self.receipt("refused", "read a file (filesystem_read)")
@@ -2669,16 +2915,13 @@ def create_window(app, loop, bridge=None):
                 self.set_state("ready", str(exc))
 
         def discover_market(self):
+            if self.busy:
+                return
+            self.forget_inventory()
             async def run(epoch):
                 client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 cards = await market.from_models(client, languages=(), now=0.0)
                 checkpoint()
-                raw = route[3]
-                self.cfg["endpoint"] = raw
-                self.inventory = tuple(card.model_id for card in cards)
-                self.models.remove_all()
-                for model_id in self.inventory:
-                    self.models.append_text(model_id)
                 for card in cards:
                     known = None
                     try:
@@ -2688,17 +2931,27 @@ def create_window(app, loop, bridge=None):
                     if known is None or known.state == "DISCOVERED":
                         # Re-discovery refreshes a card, never silently upgrades it.
                         self.market.save_card(card)
+                checkpoint()
+                self.cfg["endpoint"] = route[3]
+                self.inventory = tuple(card.model_id for card in cards)
+                self.models.remove_all()
+                for model_id in self.inventory:
+                    self.models.append_text(model_id)
+                if self.cfg["llm"] in self.inventory:
+                    self.models.set_active(self.inventory.index(self.cfg["llm"]))
                 self.save()
                 self.build_market_page()
                 self.refresh()
-            self.submit(run)
+            self.submit(run, label=tr("Discover model inventory", "Model listesini keşfet",
+                                      "Modellbestand suchen"))
 
         def download_selected_card(self):
             """Queue a discovered item for download; nothing installed is replaced."""
             model_id = self.selected_card()
             if model_id is None or self.busy:
                 return
-            self.submit(lambda epoch: self.download(epoch, model_id))
+            self.submit(lambda epoch: self.download(epoch, model_id), kind="download",
+                        label=tr("Model download", "Model indirme", "Modelldownload"))
 
         async def download(self, epoch, model_id):
             card = self.market.card(model_id)
@@ -2715,14 +2968,12 @@ def create_window(app, loop, bridge=None):
                 entry["state"] = "DOWNLOADING"
                 self.build_downloads_page()
 
-            def progress(count):
-                entry["received"] = count
-                entry["state"] = "DOWNLOADING"
-                self.build_downloads_page()
+            progress = self.download_progress(entry, 0)
             try:
                 self.session.check(epoch)
                 started()
                 result = await transfer.run(progress)
+                self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
                 entry["state"] = result.state
                 entry["note"] = tr("Registered.","Kaydedildi.","Registriert.")
             finally:
@@ -2844,6 +3095,7 @@ def create_window(app, loop, bridge=None):
                 transfer = market.Transfer(self.market, card, source, transport)
                 try:
                     result = await transfer.resume(self.download_progress(entry, start), start)
+                    self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
                     entry["state"], entry["note"] = result.state, tr(
                         "Registered.", "Kaydedildi.", "Registriert.")
                 finally:
@@ -2852,10 +3104,11 @@ def create_window(app, loop, bridge=None):
                                        "partial-" + entry["id"])
                         if partial.is_file():
                             entry["state"], entry["resume"] = "RESUMABLE", partial.stat().st_size
-                    self.session.check(epoch)
                     self.build_downloads_page()
                     self.build_market_page()
-            self.submit(run)
+            self.submit(run, kind="download",
+                        label=tr("Resume model download", "Model indirmeyi sürdür",
+                                 "Modelldownload fortsetzen"))
 
         def restore_download_queue(self):
             """Rebuild the queue from disk: a partial transfer is resumable."""
@@ -2873,11 +3126,38 @@ def create_window(app, loop, bridge=None):
                                "Von der Festplatte wiederhergestellt."),
                     "resume": size})
 
+        def note_transfer_bytes(self, count, total, epoch, task_id, *, redraw=True):
+            # Ignore callbacks from old work, not merely from another model.
+            if epoch != self.session.epoch or task_id is None or task_id != self.active_task:
+                return
+            row = self.board.get(task_id)
+            if not row.busy or row.kind not in ("download", "update"):
+                return
+            if (type(count) is not int or type(total) is not int
+                    or not 0 <= count <= market.DIGEST_LIMIT
+                    or not 0 <= total <= market.DIGEST_LIMIT):
+                raise Hold("invalid_task_count")
+            self.board.update(task_id, counted=count, counted_total=total)
+            if redraw:
+                self.refresh_activity()
+
         def download_progress(self, entry, offset):
+            epoch, task_id = self.session.epoch, self.active_task
+            total = entry["total"]
+            self.note_transfer_bytes(offset, total, epoch, task_id)
+            last_draw = 0.0
             def progress(count):
+                nonlocal last_draw
+                if epoch != self.session.epoch or task_id != self.active_task:
+                    return
+                now = time.monotonic()
+                redraw = now - last_draw >= .25
+                self.note_transfer_bytes(count, total, epoch, task_id, redraw=redraw)
                 entry["received"] = count
                 entry["state"] = "DOWNLOADING"
-                self.build_downloads_page()
+                if redraw:
+                    last_draw = now
+                    self.build_downloads_page()
             return progress
 
         def rollback_selected_card(self):
@@ -2915,6 +3195,7 @@ def create_window(app, loop, bridge=None):
                 transfer = market.Transfer(self.market, card, source, transport)
                 try:
                     result = await transfer.update(self.download_progress(entry, 0))
+                    self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
                     entry["state"], entry["note"] = result.state, tr(
                         "Updated.", "Güncellendi.", "Aktualisiert.")
                 finally:
@@ -2929,7 +3210,8 @@ def create_window(app, loop, bridge=None):
                         pass
                     self.build_downloads_page()
                     self.build_market_page()
-            self.submit(run)
+            self.submit(run, kind="update",
+                        label=tr("Model update", "Model güncelleme", "Modellaktualisierung"))
 
         def forget_selected_card(self):
             model_id = self.selected_card()
@@ -2947,11 +3229,143 @@ def create_window(app, loop, bridge=None):
         def ref_still_registered(self, ref):
             return any(card.storage_ref == ref for card in self.market.cards())
 
-        def choose(self, key):
+        def clear_model_scan(self):
+            self.model_scan_result = self.model_scan_context = None
+            self.model_candidates.remove_all()
+            self.model_scan_note.set_text("")
+
+        def refresh_model_scan(self):
+            result = self.model_scan_result
+            current = False
+            if result is not None:
+                try:
+                    current = self.picker_context() == self.model_scan_context
+                except Hold:
+                    pass
+                if not current:
+                    self.clear_model_scan()
+                    result = None
+            index = self.model_candidates.get_active()
+            kind = self.model_kind.get_active_id()
+            candidate = result.candidates[index] if current and 0 <= index < len(result.candidates) else None
+            matches = candidate is not None and (
+                (candidate.kind == "stt" and kind == "stt")
+                or (candidate.kind == "tts" and kind in ("tr", "en", "de")))
+            idle = not self.busy and not self.closing and self.owned_picker is None
+            local = getattr(self, "policy", None) is not None and self.policy.mode == "LOCAL_ONLY"
+            self.model_scan.set_sensitive(idle and local)
+            for widget in (self.model_candidates, self.model_kind, self.model_candidate_choose):
+                widget.set_visible(current and bool(result.candidates))
+                widget.set_sensitive(idle and current and (matches if widget is self.model_candidate_choose else True))
+
+        def choose_model_folder(self):
+            if self.busy or self.closing:
+                return
+            try:
+                if self.active_profile().based_on_mode != "LOCAL_ONLY":
+                    raise Hold("model_discovery_mode_denied")
+                self.require_tools(("filesystem_read", ("folder",)), selected=True)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
+            dialog = Gtk.FileChooserNative.new(tr(
+                "Choose an existing model folder", "Mevcut model klasörünü seç",
+                "Vorhandenen Modellordner wählen"), self.win,
+                Gtk.FileChooserAction.SELECT_FOLDER, tr("Choose", "Seç", "Auswählen"),
+                tr("Cancel", "İptal", "Abbrechen"))
+            def response(d, res):
+                try:
+                    if res == Gtk.ResponseType.ACCEPT:
+                        file = d.get_file()
+                        self.scan_model_folder(file.get_path() if file else None)
+                finally:
+                    d.destroy()
+            return self.show_owned_picker(dialog, response)
+
+        def scan_model_folder(self, root):
+            if self.busy or self.closing:
+                return
+            self.clear_model_scan()
+            try:
+                profile, stamp = self.store.snapshot(self.cfg["profile"])
+                if profile.based_on_mode != "LOCAL_ONLY":
+                    raise Hold("model_discovery_mode_denied")
+                self.require_tools(("filesystem_read", ("folder",)), selected=True)
+                live = self.store.bind_live(profile.id)
+                if live.stamp != stamp:
+                    raise Hold("profile_changed")
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
+            stop = Event()
+            def checkpoint():
+                if stop.is_set():
+                    raise Hold("turn_cancelled")
+                decision, reason = live.evaluate("filesystem_read", ("folder",))
+                if decision != profiles.ALLOW and reason != "no_rule_matches":
+                    raise Hold("model_discovery_not_authorized")
+            async def run(epoch):
+                self.session.check(epoch)
+                checkpoint()
+                worker = asyncio.create_task(asyncio.to_thread(model_discovery.scan, root, checkpoint))
+                try:
+                    result = await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    stop.set()
+                    await finish_owned(asyncio.gather(worker, return_exceptions=True))
+                    raise
+                self.session.check(epoch)
+                checkpoint()
+                if self.cfg["profile"] != profile.id or not self.store.is_current(profile.id, stamp):
+                    raise Hold("profile_changed")
+                self.model_scan_context = self.picker_context()
+                self.model_scan_result = result
+                for item in result.candidates:
+                    self.model_candidates.append_text(item.relative)
+                note = tr("%d candidate files; compatibility not tested.",
+                          "%d aday dosya; uyumluluk test edilmedi.",
+                          "%d Dateikandidaten; Kompatibilität ungeprüft.") % len(result.candidates)
+                if result.limited:
+                    note += " " + tr("Scan limit reached.", "Tarama sınırına ulaşıldı.", "Suchgrenze erreicht.")
+                self.model_scan_note.set_text(note)
+                self.refresh_model_scan()
+            self.turn_note = tr("Finding local audio candidates", "Yerel ses adayları aranıyor",
+                                "Lokale Audiokandidaten suchen")
+            self.submit(run)
+
+        def review_model_candidate(self):
+            result = self.model_scan_result
+            try:
+                if self.busy or self.closing or result is None or self.picker_context() != self.model_scan_context:
+                    raise Hold("model_discovery_stale")
+                index = self.model_candidates.get_active()
+                key = self.model_kind.get_active_id()
+                if not 0 <= index < len(result.candidates):
+                    raise Hold("select_local_model")
+                item = result.candidates[index]
+                if not ((item.kind == "stt" and key == "stt") or
+                        (item.kind == "tts" and key in ("tr", "en", "de"))):
+                    raise Hold("incompatible_model_file")
+                self.require_tools(("filesystem_read", ("folder",)), selected=True)
+                # This only seeds a native chooser. The actual owner selection
+                # and existing registration/locale validation still decide.
+                self.choose(key, initial=str(Path(result.root) / item.relative))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def choose(self, key, *, initial=None):
             dialog=Gtk.FileChooserNative.new("Select a trusted installed local model", self.win,Gtk.FileChooserAction.OPEN,"Select","Cancel")
             filt=Gtk.FileFilter()
             filt.add_pattern("*.bin" if key=="stt" else "*.onnx")
             dialog.add_filter(filt)
+            if initial is not None:
+                from gi.repository import Gio
+                try:
+                    dialog.set_file(Gio.File.new_for_path(initial))
+                except GLib.Error:
+                    dialog.destroy()
+                    self.set_state("ready", "model_candidate_unavailable")
+                    return
             def response(d, res):
                 try:
                     if res!=Gtk.ResponseType.ACCEPT or self.busy:
@@ -2975,14 +3389,17 @@ def create_window(app, loop, bridge=None):
             self.show_owned_picker(dialog, response)
 
         def preview(self, lang):
-            if self.busy or self.cfg["llm"] not in self.inventory:
+            if self.busy or lang not in ("tr", "en", "de"):
+                return
+            if not audio.tools_ready("piper", "aplay"):
+                self.set_state("ready", "audio_backend_missing")
                 return
             sample = {"tr": "Bu bir ses önizlemesidir.",
                       "en": "This is a voice preview.",
                       "de": "Das ist eine Stimmprobe."}[lang]
             try:
                 self.require_tools(("local_audio_device", ("push_to_talk",)))
-                speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"][lang], lang).id)
+                speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"].get(lang), lang).id)
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return
@@ -2998,11 +3415,13 @@ def create_window(app, loop, bridge=None):
                                                      epoch, selection=lambda: self.cfg["voices"].get(lang),
                                                      expected=speech.voice_id)
                     await audio.speak(speech, progress, checkpoint=checkpoint)
-            self.submit(run)
+            self.submit(run, label=tr("Voice preview", "Ses önizlemesi", "Stimmprobe"))
 
         def test_chat(self):
             if self.busy or self.cfg["llm"] not in self.inventory:
                 return
+            self.clear_model_probe()
+            self.test_probe_pending = True
             self.test_note.set_text(tr("Testing…","Sınanıyor…","Test läuft…"))
             async def run(epoch):
                 # A disposable session: a test never enters the conversation.
@@ -3010,18 +3429,18 @@ def create_window(app, loop, bridge=None):
                 # A disposable session shares this turn's epoch, so cancellation
                 # and staleness checks still apply; its history is never merged.
                 probe.epoch = epoch
-                self.turn_note = tr("testing the selected model",
-                                    "seçilen model sınanıyor",
-                                    "ausgewähltes Modell wird getestet")
                 # A short, anchor-bearing probe so the reply language is provable.
                 text = tr("Hello there! In one short sentence, what can you do?",
                           "Merhaba! Tek cümleyle cevapla: neler yapabilirsin?",
                           "Hallo! Antworte in einem kurzen Satz: was kannst du?")
-                backend, checkpoint, _ = self.bound_jan(epoch)
+                backend, checkpoint, route = self.bound_jan(epoch)
                 reply, _ = await probe.reply(text, backend, epoch)
                 checkpoint()
+                self.test_probe_route = route
+                self.test_probe_pending = False
                 self.test_note.set_text("%s · %s" % (reply.strip()[:240], probe.context.response_language or "unknown"))
-            self.submit(run)
+            self.submit(run, label=tr("Test selected model", "Seçilen modeli dene",
+                                      "Ausgewähltes Modell testen"))
 
         def active_profile(self):
             """The profile whose policy is in force for this turn."""
@@ -3031,8 +3450,15 @@ def create_window(app, loop, bridge=None):
                 raise Hold("no_active_profile") from None
 
         def transcribe_recording(self):
-            if self.busy or not self.cfg["stt"]:
-                self.set_state("ready", "select_local_model")
+            if self.busy or self.closing:
+                return
+            try:
+                audio.selected_file(self.cfg["stt"], ".bin")
+                if not audio.tools_ready("whisper-cli"):
+                    raise Hold("transcription_backend_missing")
+                self.require_tools(("filesystem_read", ("recording",)), selected=True)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
                 return
             dialog=Gtk.FileChooserNative.new("Select a recording to transcribe", self.win,Gtk.FileChooserAction.OPEN,"Select","Cancel")
             filt=Gtk.FileFilter()
@@ -3047,7 +3473,7 @@ def create_window(app, loop, bridge=None):
                     self.run_transcribe(p)
                 finally:
                     d.destroy()
-            self.show_owned_picker(dialog, response)
+            return self.show_owned_picker(dialog, response)
 
         def run_transcribe(self, path):
             """Own selected-recording transcription as an ordinary cancellable task."""
@@ -3084,7 +3510,7 @@ def create_window(app, loop, bridge=None):
                 return raw
             self.turn_note = tr("Transcribe selected recording", "Seçili kaydı yazıya çevir",
                                 "Ausgewählte Aufnahme transkribieren")
-            self.submit(run)
+            self.submit(run, kind="transcription")
 
         def tool_checkpoint(self, action, scope, epoch, *, selected=False,
                             selection=lambda: None, expected=None, expected_generation=None):
@@ -3222,9 +3648,11 @@ def create_window(app, loop, bridge=None):
             except Hold:
                 return False
 
-        def submit(self, work):
-            if self.busy:
+        def submit(self, work, *, kind="turn", label=None):
+            if self.busy or self.closing:
                 return
+            task_label = label if label is not None else self.turn_label()
+            self.turn_note = ""
             self.dismiss_picker()
             self.busy=True
             # Work is being submitted: ask for the fast tick instead of the
@@ -3236,7 +3664,7 @@ def create_window(app, loop, bridge=None):
             self.set_state("starting")
             # Every turn the client runs is a task on the board, with no
             # percentage: its state is the truth until it ends.
-            board_id = self.board.start("turn", self.turn_label(), now=time.time())
+            board_id = self.board.start(kind, task_label, now=time.time())
             self.active_task = board_id
             self.turn_outcome = ""
             # A running task is visible while it runs, not only after it ends.
@@ -3255,7 +3683,8 @@ def create_window(app, loop, bridge=None):
                     message="Local operation failed"
                 self.busy=False
                 self.finish=self.playback=None
-                self.finish_task(board_id, t, message)
+                self.finish_task(board_id, t, message, invalidated=epoch != self.session.epoch)
+                self.active_task = None
                 self.refresh_activity()
                 # A turn that stated its own outcome keeps it: a generic
                 # "ready" must not overwrite "reply muted; shown as text".
@@ -3270,6 +3699,17 @@ def create_window(app, loop, bridge=None):
             task.add_done_callback(finished)
 
         def discover(self):
+            if self.busy:
+                return
+            # A new discovery must not leave an old inventory actionable on failure.
+            # Keep the saved preference, but restore it only if returned again.
+            self.forget_inventory()
+            if not self.url.get_text().strip():
+                self.set_state("ready", tr(
+                    "Enter the local Jan API URL first.",
+                    "Önce yerel Jan API adresini gir.",
+                    "Zuerst lokale Jan-API-Adresse eingeben."))
+                return
             async def run(epoch):
                 client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 models=await client.models()
@@ -3286,7 +3726,8 @@ def create_window(app, loop, bridge=None):
                 self.save()
                 if not models:
                     raise Hold("no_installed_chat_models")
-            self.submit(run)
+            self.submit(run, label=tr("Discover local models", "Yerel modelleri keşfet",
+                                      "Lokale Modelle suchen"))
 
         def receipt(self, kind, what):
             """Record one decision in the conversation, as a receipt.
@@ -3386,14 +3827,21 @@ def create_window(app, loop, bridge=None):
 
         def hard_stop(self):
             self.clear_attachment()
+            if hasattr(self, "chat_files"):
+                self.chat_files.reset()
+            if hasattr(self, "folder_entries"):
+                self.clear_folder_view()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             self.interrupt(False)
 
         def interrupt(self, clear):
             self.dismiss_picker()
+            self.clear_model_scan()
             if clear:
                 self.clear_attachment()
+                if hasattr(self, "chat_files"):
+                    self.chat_files.reset()
             if hasattr(self, "analysis"):
                 if clear:
                     self.analysis.reset()
@@ -3501,9 +3949,50 @@ def create_window(app, loop, bridge=None):
                                              "Angehängt: %s" % attachments.describe(item)))
             return item
 
+        def send_local_action(self, text, action):
+            # Only the explicit owner composer reaches this dispatcher.
+            # Neither Jan output nor an attachment can provide a file path.
+            if self.busy or self.closing or self.owned_picker is not None or self.analysis.dialog is not None:
+                self.set_state("ready", "local_picker_busy")
+                return
+            if self.attachment is not None:
+                self.set_state("ready", tr(
+                    "Local tools use their own file picker; remove the chat attachment first.",
+                    "Yerel araçlar kendi dosya seçicisini kullanır; önce sohbet ekini kaldır.",
+                    "Lokale Werkzeuge verwenden einen eigenen Dateidialog; zuerst den Chat-Anhang entfernen."))
+                return
+            try:
+                if self.active_profile().based_on_mode != "LOCAL_ONLY":
+                    raise Hold("local_task_mode_denied")
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
+            if action == "transcribe_recording":
+                opened = self.transcribe_recording()
+            elif action == "discover_audio_models":
+                opened = self.choose_model_folder()
+                if opened:
+                    self.stack.set_visible_child_name("models")
+            elif action == "explore_folder":
+                opened = self.chat_files.choose()
+            else:
+                self.set_state("ready", "local_task_unsupported")
+                return
+            if opened:
+                self.entry.set_text("")
+                self.bubble("You", text)
+                self.set_state("ready", tr(
+                    "Choose a file or folder to continue. Nothing has been executed yet.",
+                    "Devam etmek için dosya veya klasör seç. Henüz işlem yapılmadı.",
+                    "Zum Fortfahren Datei oder Ordner wählen. Noch nichts ausgeführt."))
+
         def send_text(self):
             text=self.entry.get_text().strip()
             if self.busy or not text:
+                return
+            action = local_actions.direct(text)
+            if action is not None:
+                self.send_local_action(text, action)
                 return
             if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
                 if self.attachment is not None:
@@ -3521,6 +4010,10 @@ def create_window(app, loop, bridge=None):
                 self.submit(task_run)
                 return
             if self.cfg["llm"] not in self.inventory:
+                self.set_state("ready", tr(
+                    "Connect and select a local model before sending a message.",
+                    "Mesaj göndermeden önce yerel model bağla ve seç.",
+                    "Vor dem Senden ein lokales Modell verbinden und auswählen."))
                 return
             self.record_disclosure()
             item = self.attachment
@@ -3618,7 +4111,6 @@ def create_window(app, loop, bridge=None):
                     except Hold:
                         return False
 
-                self.turn_note = tr("a spoken turn", "sesli tur", "eine gesprochene Runde")
                 voices = audio.SelectedVoices(self.cfg["voices"])
                 self.finish=asyncio.Event()
                 # The microphone is exclusive: a turn that cannot get the lease
@@ -3688,7 +4180,7 @@ def create_window(app, loop, bridge=None):
                         self.playback = None
                         self.playback_stopping = False
                 self.note_leases()
-            self.submit(run)
+            self.submit(run, label=tr("a spoken turn", "sesli tur", "eine gesprochene Runde"))
 
         def close(self,*_):
             self.dismiss_picker()

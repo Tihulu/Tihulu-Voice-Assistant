@@ -133,7 +133,8 @@ class DesktopFixture(unittest.TestCase):
             model.with_name(model.name + ".json").write_text(
                 json.dumps({"language": {"code": lang}}), encoding="utf-8")
             cfg["voices"][lang] = str(model)
-        settings.save(cfg, tmp / "models.json")
+        settings.save(settings.empty() if getattr(self, "fresh_settings", False) else cfg,
+                      tmp / "models.json")
         self.stack.enter_context(patch.object(settings, "config_path", return_value=tmp / "models.json"))
         # Profiles and market state live in a private directory per test:
         # a fixture must never write to the owner's real store, and a saved
@@ -273,6 +274,187 @@ class DesktopFixture(unittest.TestCase):
             rows.append(item.get_text())
             item = item.get_next_sibling()
         return rows
+class FreshStartTests(DesktopFixture):
+    """Real GTK construction with blank model configuration, fixture transport."""
+    fresh_settings = True
+
+    def test_idle_composer_does_not_show_inactive_turn_actions(self):
+        self.assertTrue(self.ui.quick_stop.get_visible())
+        self.assertTrue(self.ui.talk.get_visible())
+        for control in (self.ui.finish_btn, self.ui.stop, self.ui.cancel, self.ui.hard):
+            self.assertFalse(control.get_visible())
+        self.assertFalse(self.ui.tool_panel.get_expanded())
+
+    def test_blank_start_guides_setup_without_inference_or_capture(self):
+        self.assertEqual(self.ui.stack.get_visible_child_name(), "conversation")
+        self.assertTrue(self.ui.setup.get_visible())
+        self.assertFalse(self.ui.search_panel.get_expanded())
+        self.assertIn("connection not configured", self.ui.topbar_note.get_text())
+        self.assertNotIn("not a loopback address", self.ui.disclosure_note.get_text())
+        self.assertFalse(self.ui.send.get_sensitive())
+        self.assertFalse(self.ui.talk.get_sensitive())
+        self.jan.assert_not_called()
+        self.ui.setup_connect.emit("clicked")
+        self.assertEqual(self.ui.stack.get_visible_child_name(), "models")
+        self.ui.reload.emit("clicked")
+        self.assertIn("Enter the local Jan API URL", self.ui.status.get_text())
+        self.jan.assert_not_called()
+
+    def test_setup_requires_explicit_model_choice_then_returns_to_chat(self):
+        self.ui.setup_connect.emit("clicked")
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.ui.reload.emit("clicked")
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.inventory, ("fixture-chat",))
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.ui.models.set_active(0)
+        self.assertTrue(self.ui.return_to_chat.get_sensitive())
+        self.ui.return_to_chat.emit("clicked")
+        self.assertEqual(self.ui.stack.get_visible_child_name(), "conversation")
+        self.assertFalse(self.ui.setup.get_visible())
+        self.assertFalse(self.ui.talk.get_sensitive())
+        self.text("Merhaba!")
+        self.assertEqual(len(self.ui.session.history), 2)
+
+    def test_discovery_failure_invalidates_previously_ready_inventory(self):
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.ui.reload.emit("clicked")
+        self.until(lambda: not self.ui.busy)
+        self.ui.models.set_active(0)
+        self.assertTrue(self.ui.return_to_chat.get_sensitive())
+        with patch.object(self.backend, "models", side_effect=Hold("jan_unavailable")):
+            self.ui.reload.emit("clicked")
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.inventory, ())
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.assertFalse(self.ui.send.get_sensitive())
+        self.assertEqual(self.ui.cfg["llm"], "fixture-chat")
+        self.ui.reload.emit("clicked")
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(self.ui.return_to_chat.get_sensitive())
+
+    def test_selected_folder_discovery_does_not_activate_or_register_weights(self):
+        folder = Path(self.profile_home) / "models"
+        folder.mkdir()
+        (folder / "fixture.bin").write_bytes(b"synthetic fixture")
+        (folder / "fixture.onnx").write_bytes(b"synthetic fixture")
+        self.ui.scan_model_folder(str(folder))
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertEqual(len(self.ui.model_scan_result.candidates), 2)
+        self.assertEqual(self.ui.cfg["stt"], "")
+        self.assertFalse(self.ui.cfg["voices"])
+        self.assertFalse(self.ui.market.cards())
+        self.jan.assert_not_called()
+        self.ui.model_candidates.set_active(0)
+        self.ui.model_kind.set_active_id("stt")
+        self.assertTrue(self.ui.model_candidate_choose.get_sensitive())
+        with patch.object(self.ui, "choose") as chooser:
+            self.ui.review_model_candidate()
+        chooser.assert_called_once_with("stt", initial=str(folder / "fixture.bin"))
+        self.ui.hard_stop()
+        self.assertIsNone(self.ui.model_scan_result)
+        self.assertFalse(self.ui.model_candidate_choose.get_sensitive())
+
+    def test_selected_folder_discovery_respects_read_denial(self):
+        profile = Profile(id="no-model-scan", name="No scan",
+                          filesystem_rules=(Rule("filesystem_read", (), "deny"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch.object(desktop.model_discovery, "scan") as scan:
+            self.ui.scan_model_folder(self.profile_home)
+            scan.assert_not_called()
+        self.assertIsNone(self.ui.model_scan_result)
+        self.assertIn("profile_forbids_filesystem_read", self.ui.status.get_text())
+
+    def test_blank_start_keeps_local_analysis_available(self):
+        self.assertFalse(self.ui.tool_panel.get_expanded())
+        self.assertFalse(self.ui.analysis.result_actions.get_visible())
+        self.ui.tool_panel.set_expanded(True)
+        self.assertTrue(self.ui.analysis.choose_button.get_sensitive())
+        self.ui.entry.set_text("Bu dosyayı analiz et")
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.jan.assert_not_called()
+
+
+class FirstRunTransportTests(DesktopFixture):
+    """Actual GTK, Jan HTTP client and loopback TCP; deterministic replies only."""
+    fresh_settings = True
+
+    def test_first_run_discovery_failure_retry_and_streaming_chat(self):
+        from http.server import BaseHTTPRequestHandler, HTTPServer
+        from threading import Thread
+        from tihulu_jarvis.voice.jan import Jan
+
+        traffic = []
+        available = [False]
+        class Service(BaseHTTPRequestHandler):
+            def log_message(self, *_):
+                pass
+
+            def answer(self, status, body, media):
+                self.send_response(status)
+                self.send_header("Content-Type", media)
+                self.send_header("Content-Length", str(len(body)))
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write(body)
+
+            def do_GET(self):
+                traffic.append(("GET", self.path))
+                if self.path != "/v1/models" or not available[0]:
+                    self.answer(503, b"{}", "application/json")
+                    return
+                self.answer(200, b'{"data":[{"id":"fixture-chat"}]}', "application/json")
+
+            def do_POST(self):
+                data = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                traffic.append(("POST", self.path, data))
+                payload = b"".join(
+                    b"data: " + json.dumps({"choices": [{"delta": {"content": part}}]}).encode()
+                    + b"\r\n\r\n" for part in ("Merhaba! ", "Size yardımcı olabilirim."))
+                self.answer(200, payload + b"data: [DONE]\r\n\r\n", "text/event-stream")
+
+        server = HTTPServer(("127.0.0.1", 0), Service)
+        thread = Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        def stop():
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+            self.assertFalse(thread.is_alive())
+        self.addCleanup(stop)
+        self.stack.enter_context(patch.object(desktop, "Jan", Jan))
+        self.assertFalse(traffic)
+        self.click(self.ui.setup_connect)
+        self.ui.url.set_text("http://127.0.0.1:%d" % server.server_port)
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertIn("jan_http_503", self.ui.status.get_text())
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.assertEqual(self.ui.inventory, ())
+        available[0] = True
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.inventory, ("fixture-chat",))
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.ui.models.set_active(0)
+        self.click(self.ui.return_to_chat)
+        self.text("Merhaba! Bana yardımcı olur musun?")
+        self.assert_no_failed_turn()
+        self.assertEqual(len(self.ui.session.history), 2)
+        self.assertEqual(self.ui.session.history[-1].content, "Merhaba! Size yardımcı olabilirim.")
+        self.assertEqual([x[:2] for x in traffic],
+                         [("GET", "/v1/models"), ("GET", "/v1/models"),
+                          ("POST", "/v1/chat/completions")])
+        self.assertTrue(traffic[-1][2]["stream"])
+        self.assertEqual(traffic[-1][2]["model"], "fixture-chat")
+        self.assertEqual(traffic[-1][2]["messages"][-1]["content"],
+                         "Merhaba! Bana yardımcı olur musun?")
+        self.assertFalse(self.backend.speeches)
+
+
 class DesktopTests(DesktopFixture):
     """Voice, cancellation and mode-independent desktop controls."""
 
@@ -834,6 +1016,7 @@ class MarketInventoryTests(MarketFixture):
         self.assertEqual(self.ui.profile_note.get_text().count("LOCAL_ONLY"), 1)
         # An active model is one the endpoint actually serves.
         self.assertEqual(self.ui.inventory, ("fixture-qwen", "fixture-llama"))
+        self.assertEqual(self.ui.models.get_active_text(), "fixture-qwen")
         self.assertTrue(self.ui.send.get_sensitive())
 
     def test_a_model_the_endpoint_does_not_serve_is_refused(self):
@@ -851,6 +1034,20 @@ class MarketInventoryTests(MarketFixture):
         self.until(lambda: self.ui.status.get_text() == "model_not_in_inventory")
         self.assertEqual(self.ui.cfg["llm"], "fixture-chat")
         self.assertEqual(self.ui.market.card("fixture-qwen").state, "DISCOVERED")
+
+    def test_market_discovery_preserves_selected_model_and_clears_stale_inventory(self):
+        self.connect_model()
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.models.get_active_text(), "fixture-chat")
+        self.assertTrue(self.ui.send.get_sensitive())
+        with patch.object(self.backend, "models", side_effect=Hold("jan_unavailable")):
+            self.click(self.ui.market_find)
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.inventory, ())
+        self.assertIsNone(self.ui.models.get_active_text())
+        self.assertFalse(self.ui.send.get_sensitive())
+        self.assertEqual(self.ui.cfg["llm"], "fixture-chat")
 
     def test_rediscovery_never_upgrades_a_registered_card(self):
         self.backend.inventory = ("fixture-qwen",)
@@ -895,12 +1092,76 @@ class PreviewTests(MarketFixture):
         self.assertTrue(any(any(probe in m.content for probe in probes) for m in prompts))
         self.assertEqual(len(self.ui.session.history), 2)
 
+    def test_failed_model_probe_finishes_and_can_retry(self):
+        self.connect_model()
+        with patch.object(self.ui, "bound_jan", side_effect=Hold("jan_unavailable")):
+            self.click(self.ui.test_chat_button)
+            self.until(lambda: not self.ui.busy)
+        self.assertFalse(self.ui.test_probe_pending)
+        self.assertIsNone(self.ui.test_probe_route)
+        self.assertIn(self.ui.test_note.get_text(), (
+            "Model test did not complete. Check status and retry.",
+            "Model testi tamamlanmadı. Durumu kontrol edip yeniden dene.",
+            "Modelltest nicht abgeschlossen. Status prüfen und erneut versuchen."))
+        self.assertEqual(self.ui.status.get_text(), "jan_unavailable")
+        self.backend.answers.append("Kısa bir test yanıtı.")
+        self.click(self.ui.test_chat_button)
+        self.until(lambda: not self.ui.busy)
+        self.assertIn("Kısa bir test yanıtı.", self.ui.test_note.get_text())
+        self.assertIsNotNone(self.ui.test_probe_route)
+
+    def test_model_probe_result_is_cleared_when_selection_or_endpoint_changes(self):
+        self.backend.inventory = ("fixture-chat", "other-model")
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.inventory, ("fixture-chat", "other-model"))
+        self.backend.answers.append("Kısa bir test yanıtı.")
+        self.click(self.ui.test_chat_button)
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(self.ui.test_note.get_text())
+        self.ui.models.set_active(1)
+        self.assertEqual(self.ui.cfg["llm"], "other-model")
+        self.assertEqual(self.ui.test_note.get_text(), "")
+        self.backend.answers.append("Kısa bir test yanıtı.")
+        self.click(self.ui.test_chat_button)
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(self.ui.test_note.get_text())
+        self.ui.url.set_text("http://127.0.0.1:9877")
+        self.assertEqual(self.ui.test_note.get_text(), "")
+        self.assertIsNone(self.ui.test_probe_route)
+
     def test_test_chat_requires_a_selected_model(self):
         self.assertFalse(self.ui.test_chat_button.get_sensitive())
         self.ui.inventory = ("fixture-chat",)
         self.ui.cfg["llm"] = "fixture-chat"
         self.ui.refresh()
         self.assertTrue(self.ui.test_chat_button.get_sensitive())
+
+    def test_preview_does_not_require_a_chat_model(self):
+        self.assertEqual(self.ui.inventory, ())
+        self.assertTrue(self.preview_of("tr").get_sensitive())
+        self.click(self.preview_of("tr"))
+        self.until(lambda: bool(self.backend.speeches))
+        self.assertEqual(self.backend.speeches[-1].language, "tr")
+        self.jan.assert_not_called()
+        self.ui.interrupt(False)
+        self.backend.playback_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(self.backend.playback_cleaned)
+
+    def test_missing_voice_file_is_not_ready(self):
+        Path(self.ui.cfg["voices"]["tr"]).unlink()
+        self.ui.refresh()
+        self.assertFalse(self.preview_of("tr").get_sensitive())
+        self.assertIn("tr", self.ui.voice_setup_note.get_text())
+
+    def test_missing_whisper_file_disables_talk_but_not_text(self):
+        self.connect_model()
+        Path(self.ui.cfg["stt"]).unlink()
+        self.ui.refresh()
+        self.assertFalse(self.ui.talk.get_sensitive())
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.assertIn("Whisper", self.ui.voice_setup_note.get_text())
 
     def test_preview_checkpoint_refuses_replaced_profile(self):
         self.connect_model()
@@ -1318,6 +1579,9 @@ class DownloadQueueTests(DownloadTransportTests):
         self.assertIn("%d of %s bytes" % (len(payload), market.human_size(len(payload))), line)
         entry = self.pick_download("fixture-download")
         self.assertEqual((entry["state"], entry["received"]), ("REGISTERED", len(payload)))
+        task = self.ui.board.rows[-1]
+        self.assertEqual((task.kind, task.state, task.counted, task.counted_total),
+                         ("download", "done", len(payload), len(payload)))
         self.assertFalse(self.ui.download_cancel.get_sensitive())
 
     def test_unknown_size_is_reported_as_unknown(self):
@@ -1329,6 +1593,8 @@ class DownloadQueueTests(DownloadTransportTests):
         self.until(lambda: not self.ui.busy)
         self.assertEqual(self.ui.market.card("fixture-download").state, "REGISTERED")
         self.assertIn("0 of unknown/not tested bytes", self.download_rows()[0])
+        task = self.ui.board.rows[-1]
+        self.assertEqual((task.counted, task.counted_total), (len(payload), 0))
 
     def test_cancellation_removes_the_partial_and_marks_the_entry(self):
         url, payload = self.loopback_server()
@@ -2199,6 +2465,60 @@ class TranscribeFileUITests(DownloadFixture):
         self.ui.cfg["stt"] = ""
         self.ui.refresh()
         self.assertFalse(self.ui.transcribe_button.get_sensitive())
+        self.assertFalse(self.ui.chat_transcribe.get_sensitive())
+
+    def test_chat_recording_tool_works_offline_without_jan(self):
+        self.ui.forget_inventory()
+        self.jan.reset_mock()
+        self.assertFalse(self.ui.send.get_sensitive())
+        self.assertTrue(self.ui.chat_transcribe.get_sensitive())
+        self.assertTrue(self.ui.transcribe_button.get_sensitive())
+        clip = self.clip()
+        runner, calls = self.runner()
+        self.ui.transcribe_runner = runner
+        # Simulate the accepted native selection, not a model-generated path.
+        self.ui.run_transcribe(str(clip))
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Merhaba!", self.bubbles()[-1])
+        self.assertEqual(self.ui.board.rows[-1].kind, "transcription")
+        self.jan.assert_not_called()
+
+    def test_typed_recording_command_opens_owned_picker_without_jan(self):
+        self.ui.forget_inventory()
+        self.jan.reset_mock()
+        self.ui.entry.set_text("Bir ses kaydını yazıya çevir")
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.click(self.ui.send)
+        self.assertIsNotNone(self.ui.owned_picker)
+        self.assertEqual(self.ui.entry.get_text(), "")
+        self.assertFalse(self.ui.busy)
+        self.jan.assert_not_called()
+        self.ui.hard_stop()
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
+
+    def test_typed_recording_command_keeps_draft_on_missing_backend(self):
+        self.ui.forget_inventory()
+        self.ui.entry.set_text("Transcribe a recording")
+        with patch.object(desktop.audio, "tools_ready", return_value=False):
+            self.click(self.ui.send)
+        self.assertEqual(self.ui.entry.get_text(), "Transcribe a recording")
+        self.assertEqual(self.ui.status.get_text(), "transcription_backend_missing")
+        self.assertIsNone(self.ui.owned_picker)
+
+    def test_chat_recording_tool_refuses_missing_model_or_backend(self):
+        with patch.object(desktop.audio, "tools_ready", return_value=False):
+            self.ui.refresh()
+            self.assertFalse(self.ui.chat_transcribe.get_sensitive())
+            self.assertFalse(self.ui.transcribe_button.get_sensitive())
+            self.ui.transcribe_recording()
+            self.assertEqual(self.ui.status.get_text(), "transcription_backend_missing")
+            self.assertIsNone(self.ui.owned_picker)
+        Path(self.ui.cfg["stt"]).unlink()
+        self.ui.refresh()
+        self.assertFalse(self.ui.chat_transcribe.get_sensitive())
+        self.assertFalse(self.ui.transcribe_button.get_sensitive())
 
 
 class RoutePolicyUITests(MarketFixture):
@@ -2438,6 +2758,7 @@ class ConversationSearchTests(DesktopTests):
     """Searching the conversation stays local, bounded and snippet-only."""
 
     def search(self, query):
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text(query)
         # The note names the query, so this waits for this search to have run.
         self.until(lambda: '"%s"' % query in self.ui.search_note.get_text())
@@ -2492,6 +2813,7 @@ class ConversationSearchTests(DesktopTests):
         self.click(self.ui.send)
         self.until(lambda: self.backend.chat_entered)
         self.assertFalse(self.ui.search_entry.get_sensitive())
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("naber")
         # While the turn runs the field does not search, so no row is claimed.
         self.assertEqual(self.rows(), [])
@@ -2937,6 +3259,7 @@ class KeyboardTests(DesktopTests):
 
     def test_enter_on_a_search_row_shows_the_match(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         row = self.ui.search_results.get_first_child()
@@ -2946,6 +3269,7 @@ class KeyboardTests(DesktopTests):
     def test_escape_cancels_or_clears_and_never_does_both(self):
         self.turn()
         # With no turn running, Escape clears a saved search.
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         self.ui.run_cancel_turn()
@@ -2988,6 +3312,7 @@ class KeyboardTests(DesktopTests):
         self.assertTrue(self.ui.run_focus_search() is True)
         self.assertTrue(self.ui.search_entry.get_sensitive())
         self.assertTrue(self.ui.search_entry.get_can_focus())
+        self.assertTrue(self.ui.search_panel.get_expanded())
 
 
 class ReceiptUITests(EscalationConsentTests):
@@ -3225,6 +3550,36 @@ class ActivityBoardTests(DesktopTests):
         self.backend.chat_release.set()
         self.until(lambda: not self.ui.busy)
 
+    def test_activity_stop_keeps_running_task_until_backend_drains(self):
+        self.connect_model()
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.chat_entered)
+        task_id = self.ui.active_task
+        self.ui.activity_list.select_row(self.rows()[0])
+        self.click(self.ui.activity_stop)
+        self.until(lambda: self.backend.chat_cancelled)
+        row = self.ui.board.get(task_id)
+        self.assertTrue(row.busy)
+        self.assertEqual(row.reason, "stopped_by_owner")
+        self.assertTrue(self.ui.busy)
+        self.assertEqual(self.ui.stage, "stopping")
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+        row = self.ui.board.get(task_id)
+        self.assertEqual((row.state, row.reason, row.locks),
+                         ("cancelled", "stopped_by_owner", ()))
+        self.assertEqual(self.ui.board.busy(), ())
+
+    def test_model_discovery_does_not_reuse_previous_chat_label(self):
+        self.connect_model()
+        self.text("naber nasilsin")
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertNotIn("naber nasilsin", self.ui.board.rows[-1].label)
+        self.assertEqual(self.ui.board.rows[-1].label, "Discover local models")
+
     def test_the_board_keeps_every_turn_and_the_newest_last(self):
         self.connect_model()
         for index in range(3):
@@ -3381,6 +3736,31 @@ class FilesResearchTests(DesktopTests):
         self.assertIsNone(self.ui.list_folder(str(self.tmp / "missing")))
         self.assertEqual(self.ui.file_note.get_text(), "folder_not_found")
 
+    def test_failed_folder_list_and_changed_root_clear_old_rows(self):
+        self.allow_reads()
+        self.ui.list_folder(str(self.tmp))
+        self.ui.folder_entries.select_row(self.row_named("notes.txt"))
+        self.ui.read_selected_file()
+        self.ui.folder_root.set_text(str(self.tmp / "missing"))
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.ui.file_preview.get_text(), "")
+        self.assertIsNone(self.ui.read_selected_file())
+        self.ui.list_folder(str(self.tmp))
+        self.assertTrue(self.rows())
+        self.assertIsNone(self.ui.list_folder(str(self.tmp / "missing")))
+        self.assertEqual(self.rows(), [])
+
+    def test_replaced_listed_entry_is_refused_without_displaying_contents(self):
+        self.allow_reads()
+        self.ui.list_folder(str(self.tmp))
+        self.ui.folder_entries.select_row(self.row_named("notes.txt"))
+        path = self.tmp / "notes.txt"
+        path.unlink()
+        path.write_text("replacement canary")
+        self.assertIsNone(self.ui.read_selected_file())
+        self.assertEqual(self.ui.file_note.get_text(), "file_changed")
+        self.assertEqual(self.ui.file_preview.get_text(), "")
+
     def test_enter_on_a_row_reads_it(self):
         self.allow_reads()
         self.ui.list_folder(str(self.tmp))
@@ -3394,6 +3774,117 @@ class FilesResearchTests(DesktopTests):
             out.append(item)
             item = item.get_next_sibling()
         return out
+
+
+class ChatFilesTests(DesktopFixture):
+    def setUp(self):
+        super().setUp()
+        self.tmp = Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+        (self.tmp / "notes.txt").write_text("PRIVATE-LOCAL-CANARY")
+        (self.tmp / "nested").mkdir()
+
+    def test_typed_folder_request_opens_native_picker_without_jan(self):
+        self.ui.entry.set_text("Bir klasörü listele")
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.click(self.ui.send)
+        self.assertIsNotNone(self.ui.owned_picker)
+        self.assertEqual(self.ui.owned_picker.get_action(), Gtk.FileChooserAction.SELECT_FOLDER)
+        self.ui.hard_stop()
+        self.assertIsNone(self.ui.owned_picker)
+        self.jan.assert_not_called()
+
+    def test_chat_folder_and_preview_remain_outside_model_history(self):
+        view = self.ui.chat_files
+        view.start(str(self.tmp))
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertTrue(view.panel.get_visible())
+        self.assertIn("notes.txt", view.listing.get_text())
+        self.assertIn("nested/", view.listing.get_text())
+        self.assertEqual(view.preview.get_text(), "")
+        self.assertIsNone(view.entries.get_active_id())
+        view.entries.set_active_id("1")
+        self.click(view.read_button)
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertEqual(view.preview.get_text(), "PRIVATE-LOCAL-CANARY")
+        self.assertEqual(self.ui.session.history, ())
+        self.assertEqual(self.ui.board.rows[-1].kind, "file_research")
+        self.jan.assert_not_called()
+        self.assertTrue(self.ui.quick_stop.get_sensitive())
+        self.ui.hard_stop()
+        self.assertFalse(view.panel.get_visible())
+        self.assertEqual(view.preview.get_text(), "")
+        self.assertIsNone(view.folder)
+
+    def test_local_search_beyond_preview_does_not_reach_jan(self):
+        view = self.ui.chat_files
+        (self.tmp / "notes.txt").write_text("x" * 9000 + "\nPRIVATE-SEARCH-CANARY")
+        view.start(str(self.tmp))
+        self.until(lambda: not self.ui.busy)
+        view.entries.set_active_id("1")
+        view.query.set_text("private-search")
+        self.click(view.search_button)
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertIn("2: PRIVATE-SEARCH-CANARY", view.search_result.get_text())
+        self.assertEqual(self.ui.session.history, ())
+        self.jan.assert_not_called()
+        view.query.set_text("other")
+        self.assertEqual(view.search_result.get_text(), "")
+        self.ui.hard_stop()
+        self.assertEqual(view.query.get_text(), "")
+        self.assertEqual(view.search_result.get_text(), "")
+
+    def test_replaced_entry_never_publishes_new_contents(self):
+        view = self.ui.chat_files
+        view.start(str(self.tmp))
+        self.until(lambda: not self.ui.busy)
+        view.entries.set_active_id("1")
+        path = self.tmp / "notes.txt"
+        path.unlink()
+        path.write_text("REPLACEMENT-CANARY")
+        self.click(view.read_button)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "file_changed")
+        self.assertEqual(view.preview.get_text(), "")
+        self.jan.assert_not_called()
+
+    def test_cancelled_listing_drains_worker_before_releasing_task(self):
+        from threading import Event
+        entered, release = Event(), Event()
+        real_list = desktop.files.list_dir
+        def delayed(root, *, checkpoint):
+            entered.set()
+            if not release.wait(10):
+                raise AssertionError("worker test timeout")
+            checkpoint()
+            return real_list(root, checkpoint=checkpoint)
+        view = self.ui.chat_files
+        with patch.object(desktop.files, "list_dir", side_effect=delayed):
+            view.start(str(self.tmp))
+            try:
+                self.until(entered.is_set)
+                self.ui.hard_stop()
+                self.assertTrue(self.ui.busy)
+                self.assertTrue(self.ui.board.busy())
+            finally:
+                release.set()
+            self.until(lambda: not self.ui.busy)
+        self.assertIsNone(view.folder)
+        self.assertFalse(view.panel.get_visible())
+        self.assertEqual(self.ui.board.rows[-1].state, "cancelled")
+
+    def test_profile_generation_change_clears_result(self):
+        view = self.ui.chat_files
+        view.start(str(self.tmp))
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(view.panel.get_visible())
+        old = self.ui.active_profile()
+        self.ui.store._write(self.ui.store._path(old.id), profiles.Store._dump(old))
+        self.ui.refresh()
+        self.assertIsNone(view.folder)
+        self.assertFalse(view.panel.get_visible())
 
 
 class ReadinessUITests(DesktopTests):
@@ -3452,9 +3943,23 @@ class SearchHistoryTests(ConversationSearchTests):
     def queries(self):
         return [row.query for row in self.history_rows()]
 
+    def test_live_prefixes_are_not_persisted_until_submission(self):
+        self.turn()
+        for query in ("n", "na", "nab", "naber"):
+            self.ui.search_panel.set_expanded(True)
+            self.ui.search_entry.set_text(query)
+            self.assertEqual(self.ui.cfg.get("search_history"), [])
+            self.assertEqual(settings.load()["search_history"], [])
+        self.ui.search_entry.emit("activate")
+        self.assertEqual(settings.load()["search_history"], ["naber"])
+        self.ui.refresh()
+        self.assertEqual(settings.load()["search_history"], ["naber"])
+
     def test_a_query_that_ran_is_remembered(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         self.assertEqual(self.ui.cfg.get("search_history"), ["kelimem"])
         self.assertEqual(self.queries(), ["kelimem"])
@@ -3462,29 +3967,42 @@ class SearchHistoryTests(ConversationSearchTests):
 
     def test_a_refused_query_is_not_remembered(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("absent-word")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"absent-word"' in self.ui.search_note.get_text())
         # A query that ran but matched nothing was still searched for.
         self.assertEqual(self.ui.cfg.get("search_history"), ["absent-word"])
         # A query the client refuses to run leaves no memory behind.
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("x" * 200)
+        self.ui.search_entry.emit("activate")
         self.until(lambda: self.ui.search_note.get_text() == "invalid_search_query")
         self.assertEqual(self.ui.cfg.get("search_history"), ["absent-word"])
 
     def test_re_asking_moves_a_query_to_the_front(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("mavi")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"mavi"' in self.ui.search_note.get_text())
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         self.assertEqual(self.queries(), ["kelimem", "mavi"])
 
     def test_a_remembered_query_re_runs_the_search(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("")
         self.assertEqual(self.rows(), [])
         self.history_rows()[0].emit("activate")
@@ -3493,7 +4011,9 @@ class SearchHistoryTests(ConversationSearchTests):
 
     def test_forgetting_clears_the_store_not_just_the_row(self):
         self.turn()
+        self.ui.search_panel.set_expanded(True)
         self.ui.search_entry.set_text("kelimem")
+        self.ui.search_entry.emit("activate")
         self.until(lambda: '"kelimem"' in self.ui.search_note.get_text())
         self.click(self.ui.search_forget)
         self.until(lambda: not self.history_rows())
@@ -4260,10 +4780,15 @@ class LocalAnalysisTests(DesktopFixture):
         return self.ui.analysis.controller.get(self.ui.analysis.last)
 
     def test_real_chart_without_jan(self):
+        self.assertFalse(self.ui.tool_panel.get_expanded())
+        self.assertFalse(self.ui.analysis.result_actions.get_visible())
+        self.ui.tool_panel.set_expanded(True)
         self.assertTrue(self.ui.analysis.choose_button.get_sensitive())
         self.assertFalse(self.ui.send.get_sensitive())
         artifact = self.analyze()
         self.assertEqual(artifact.series.mean_c, 24)
+        self.assertTrue(self.ui.analysis.result_actions.get_visible())
+        self.assertIs(self.ui.analysis.result_actions.get_parent(), self.ui.result_actions_slot)
         row = self.ui.analysis.rows[-1]
         self.assertIs(row.get_parent(), self.ui.log)
         picture = row.get_first_child().get_next_sibling()
@@ -4296,6 +4821,7 @@ class LocalAnalysisTests(DesktopFixture):
         self.click(self.ui.quick_stop)
         self.assertFalse(self.ui.analysis.rows)
         self.assertIsNone(self.ui.analysis.last)
+        self.assertFalse(self.ui.analysis.result_actions.get_visible())
         self.assertFalse(self.ui.analysis.recolor_button.get_sensitive())
         with self.assertRaisesRegex(Hold, "analysis_mode_denied"):
             self.ui.analysis.controller.get(result.id)
@@ -4532,6 +5058,21 @@ class LocalAnalysisTests(DesktopFixture):
 
 
 class PickerLifecycleTests(DesktopFixture):
+    def test_typed_audio_discovery_uses_owned_folder_picker_without_jan(self):
+        self.ui.entry.set_text("Yerel ses modellerini bul")
+        self.assertTrue(self.ui.send.get_sensitive())
+        with patch.object(desktop.model_discovery, "scan") as scan:
+            self.click(self.ui.send)
+            self.assertIsNotNone(self.ui.owned_picker)
+            self.assertEqual(self.ui.owned_picker.get_action(),
+                             Gtk.FileChooserAction.SELECT_FOLDER)
+            self.assertEqual(self.ui.stack.get_visible_child_name(), "models")
+            self.assertEqual(self.ui.entry.get_text(), "")
+            self.ui.hard_stop()
+            scan.assert_not_called()
+        self.assertIsNone(self.ui.owned_picker)
+        self.jan.assert_not_called()
+
     def test_model_picker_is_retained_and_cancelled(self):
         self.ui.choose("stt")
         dialog = self.ui.owned_picker
