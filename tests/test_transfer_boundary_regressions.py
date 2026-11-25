@@ -1524,5 +1524,78 @@ class CooperativeVerificationTests(unittest.IsolatedAsyncioTestCase):
         with registry.transfer_lease(card.model_id):
             self.assertIsNone(transfer.temp)
 
+class StoragePreflightTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.card = self.registry.save_card(market.ModelCard(
+            model_id="fixture-model", display_name="Fixture", category="stt"))
+        self.source = market.Source(reference="catalog:fixture",
+                                    checksum=hashlib.sha256(NEW).hexdigest(),
+                                    size=len(NEW), network_approval="fixture",
+                                    approval_expires_at=1e12)
+        self.calls = []
+
+    async def fetch(self, path, note, start=0):
+        self.calls.append(start)
+        Path(path).write_bytes(NEW)
+        note(len(NEW))
+        return len(NEW)
+
+    def transfer(self, card=None, source=None):
+        return market.Transfer(self.registry, card or self.card,
+                               source or self.source, self.fetch, now=1)
+
+    def capacity(self, size):
+        from types import SimpleNamespace
+        return patch.object(market.os, "statvfs",
+                            return_value=SimpleNamespace(f_bavail=size, f_frsize=1))
+
+    async def test_insufficient_storage_blocks_initial_transport(self):
+        with self.capacity(len(NEW)-1):
+            with self.assertRaisesRegex(Hold, "insufficient_storage"):
+                await self.transfer().run()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.registry.card(self.card.model_id).state, "HOLD")
+        self.assertFalse((self.root / "artifacts" / self.card.model_id).exists())
+
+    async def test_resume_requires_capacity_for_full_staging_file(self):
+        with self.capacity(len(NEW)-1):
+            with self.assertRaisesRegex(Hold, "insufficient_storage"):
+                await self.transfer().resume(start=0)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    async def test_unknown_source_size_does_not_invent_capacity(self):
+        from dataclasses import replace
+        with patch.object(market.os, "statvfs", side_effect=OSError("unknown capacity")) as probe:
+            saved = await self.transfer(source=replace(self.source, size=0)).run()
+            probe.assert_not_called()
+        self.assertEqual(saved.artifact_digest, self.source.checksum)
+
+    async def test_capacity_probe_failure_blocks_known_size(self):
+        with patch.object(market.os, "statvfs", side_effect=OSError("probe failure")):
+            with self.assertRaisesRegex(Hold, "storage_capacity_unavailable"):
+                await self.transfer().run()
+        self.assertEqual(self.calls, [])
+
+    async def test_archive_capacity_failure_preserves_installed_bytes(self):
+        installed = await self.transfer().run()
+        target = self.root / "artifacts" / installed.model_id
+        with self.capacity(len(NEW)-1):
+            with self.assertRaisesRegex(Hold, "insufficient_storage"):
+                self.registry.retain_artifact(installed, target)
+        self.assertEqual(target.read_bytes(), NEW)
+        self.assertEqual(self.registry.card(installed.model_id), installed)
+        self.assertFalse(self.registry.publication_journal.exists())
+
+    async def test_available_capacity_allows_transfer(self):
+        with self.capacity(len(NEW)):
+            saved = await self.transfer().run()
+        self.assertEqual(saved.artifact_digest, self.source.checksum)
+        self.assertEqual(self.calls, [0])
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
