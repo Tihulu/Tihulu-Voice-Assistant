@@ -883,5 +883,120 @@ sys.exit(99)
         self.assertEqual(self.target.read_bytes(), NEW)
         self.assertEqual(self.backup.read_bytes(), OLD)
 
+class PersistentPartialTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.card = self.registry.save_card(market.ModelCard(
+            model_id="fixture-model", display_name="Fixture", category="stt", state="CANCELLED"))
+        self.source = market.Source(reference="catalog:fixture",
+                                    checksum=hashlib.sha256(NEW).hexdigest(), size=len(NEW),
+                                    version="2.0", license_id="MIT",
+                                    network_approval="fixture", approval_expires_at=100)
+        self.calls = []
+
+    async def fetch(self, path, note, start=0):
+        self.calls.append(start)
+        with open(path, "ab") as stream:
+            stream.write(NEW[start:])
+        note(len(NEW))
+        return len(NEW)
+
+    def transfer(self, card=None, source=None):
+        return market.Transfer(market.Registry(self.root), card or self.card,
+                               source or self.source, self.fetch, now=1)
+
+    def partial(self):
+        t = self.transfer()
+        t.temp = t.root / "fixture-temp"
+        t.temp.write_bytes(NEW[:3])
+        t._finish_temp(keep=True)
+        payload, record = t._partial_paths()
+        self.assertTrue(payload.exists())
+        self.assertTrue(record.exists())
+        return payload, record
+
+    async def test_restart_resume_valid_prefix_and_fresh_grant(self):
+        from dataclasses import replace
+        payload, record = self.partial()
+        t = self.transfer(source=replace(self.source, network_approval="fresh", approval_expires_at=200))
+        saved = await t.resume(start=3)
+        self.assertEqual(self.calls, [3])
+        self.assertEqual(saved.artifact_digest, self.source.checksum)
+        self.assertFalse(payload.exists())
+        self.assertFalse(record.exists())
+
+    async def test_changed_prefix_never_reaches_transport(self):
+        payload, record = self.partial()
+        payload.write_bytes(b"bad")
+        with self.assertRaisesRegex(Hold, "transfer_resume_identity_unverified"):
+            await self.transfer().resume(start=3)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(payload.read_bytes(), b"bad")
+        self.assertTrue(record.exists())
+
+    async def test_changed_source_terms_never_reach_transport(self):
+        from dataclasses import replace
+        self.partial()
+        for source in (replace(self.source, reference="catalog:other"),
+                       replace(self.source, checksum="0"*64),
+                       replace(self.source, version="3.0"),
+                       replace(self.source, license_id="other"),
+                       replace(self.source, size=len(NEW)+1)):
+            with self.subTest(source=source):
+                with self.assertRaisesRegex(Hold, "transfer_resume_identity_unverified"):
+                    await self.transfer(source=source).resume(start=3)
+        self.assertEqual(self.calls, [])
+
+    async def test_changed_card_revision_never_reaches_transport(self):
+        from dataclasses import replace
+        self.partial()
+        newer = self.registry.save_card(replace(self.card, display_name="Changed"))
+        with self.assertRaisesRegex(Hold, "transfer_resume_identity_unverified"):
+            await self.transfer(card=newer).resume(start=3)
+        self.assertEqual(self.calls, [])
+
+    async def test_legacy_unbound_partial_never_reaches_transport(self):
+        t = self.transfer()
+        payload, metadata = t._partial_paths()
+        payload.write_bytes(NEW[:3])
+        with self.assertRaisesRegex(Hold, "transfer_resume_identity_unverified"):
+            await t.resume(start=3)
+        self.assertEqual(self.calls, [])
+        self.assertTrue(payload.exists())
+        self.assertFalse(metadata.exists())
+
+    async def test_corrupt_or_symlink_metadata_never_reaches_transport(self):
+        payload, record = self.partial()
+        original = record.read_bytes()
+        record.write_bytes(b'{"version":1,"version":1}')
+        with self.assertRaisesRegex(Hold, "transfer_resume_identity_unverified"):
+            await self.transfer().resume(start=3)
+        record.unlink()
+        outside = self.root / "outside"
+        outside.write_bytes(original)
+        record.symlink_to(outside)
+        with self.assertRaisesRegex(Hold, "transfer_resume_identity_unverified"):
+            await self.transfer().resume(start=3)
+        self.assertEqual(self.calls, [])
+        self.assertEqual(outside.read_bytes(), original)
+        self.assertTrue(payload.exists())
+
+    async def test_expired_grant_cannot_resume_valid_partial(self):
+        from dataclasses import replace
+        self.partial()
+        with self.assertRaisesRegex(Hold, "network_not_authorized"):
+            await self.transfer(source=replace(self.source, approval_expires_at=0.5)).resume(start=3)
+        self.assertEqual(self.calls, [])
+
+    async def test_metadata_does_not_contain_raw_source_or_grant(self):
+        _, record = self.partial()
+        raw = record.read_text()
+        self.assertNotIn(self.source.reference, raw)
+        self.assertNotIn('"network_approval"', raw)
+        self.assertNotIn('"approval_expires_at"', raw)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
