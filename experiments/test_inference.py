@@ -19,8 +19,8 @@ class InferenceTests(unittest.TestCase):
         for ctx, approved in ((self.ctx, ()), (replace(self.ctx, offline=True), ("fixture-provider",)),
                               (replace(self.ctx, mode="LOCAL_ONLY"), ("fixture-provider",))):
             with self.assertRaises(Refused):
-                choose(ctx, (self.cloud,), "llm", 0, "cloud", approved)
-        self.assertEqual(choose(self.ctx, (self.cloud,), "llm", 0, "cloud", ("fixture-provider",)), self.cloud)
+                choose(ctx, (self.cloud,), "llm", 0, "cloud", approved, purpose="consultation")
+        self.assertEqual(choose(self.ctx, (self.cloud,), "llm", 0, "cloud", ("fixture-provider",), purpose="consultation"), self.cloud)
 
     def test_resource_and_compatibility_metadata_strict(self):
         for c in (replace(self.local, memory_mib=True), replace(self.local, rank=-1)):
@@ -46,3 +46,26 @@ class InferenceTests(unittest.TestCase):
         g.revoke("d")
         with self.assertRaises(Refused):
             envelope(g, grant, self.ctx, "fixture-provider", {"count": 5}, ("count",))
+
+    def test_secure_hybrid_primary_is_local_even_with_cloud_approval(self):
+        with self.assertRaises(Refused):
+            choose(self.ctx,(self.cloud,),"llm",0,"cloud",("fixture-provider",))
+        self.assertEqual(choose(self.ctx,(self.local,self.cloud),"llm",4096,"local"),self.local)
+        for task in ("stt","tts"):
+            remote=replace(self.cloud,task=task)
+            with self.assertRaises(Refused):
+                choose(self.ctx,(remote,),task,0,"cloud",("fixture-provider",),purpose="consultation")
+
+    def test_consultation_requires_secure_cloud_llm(self):
+        for ctx in (replace(self.ctx,mode="STANDARD_HYBRID"),replace(self.ctx,mode="CLOUD_CHAT")):
+            with self.assertRaises(Refused):
+                choose(ctx,(self.cloud,),"llm",0,"cloud",("fixture-provider",),purpose="consultation")
+            self.assertEqual(choose(ctx,(self.cloud,),"llm",0,"cloud",("fixture-provider",)),self.cloud)
+        with self.assertRaises(Refused):
+            choose(self.ctx,(self.local,),"llm",4096,"local",purpose="consultation")
+
+    def test_cloud_chat_local_voice_route_is_not_executable(self):
+        ctx=replace(self.ctx,mode="CLOUD_CHAT")
+        for task in ("stt","tts","llm"):
+            with self.assertRaises(Refused):
+                choose(ctx,(replace(self.local,task=task),),task,4096,"local")
