@@ -16,18 +16,28 @@ class Draft:
     target: str
     identity: str
 
+def session_target(candidate,url,identity):
+    raw=request_bytes(candidate,url,(Turn("user","validation"),))
+    call=prepare(candidate,"validation","llm",raw)
+    return sha256(("conversation:"+token(identity)+":"+call.target).encode("ascii")).hexdigest()
+
 class Conversation:
     """Owner reviews one draft, grants one exact history-bound local turn."""
-    def __init__(self,gateway,context,candidate,url,identity):
+    def __init__(self,gateway,context,candidate,url,identity,session_grant):
         if (type(gateway) is not FixtureGateway or type(context) is not Context
                 or gateway.context!=context or context.mode=="CLOUD_CHAT"):
             raise Refused("local_context_required")
-        token(identity)
-        prepare(candidate,"validation","llm",request_bytes(candidate,url,(Turn("user","validation"),)))
+        req=Request(context,"engine",session_target(candidate,url,identity),"local")
+        gateway.claim(session_grant,req)
+        try:
+            gateway.checkpoint(session_grant,req)
+        except BaseException:
+            gateway.revoke(session_grant.identity)
+            raise
         self._g,self._ctx,self._candidate,self._url=gateway,context,candidate,url
         self._identity=identity
         self._history=()
-        self._checks=[]
+        self._checks=[(session_grant,req)]
         self._draft=None
         self._pending=None
         self._counter=0

@@ -6,7 +6,7 @@ from tihulu_jarvis import profiles
 from gateway import Context,Request,FixtureGateway,Refused
 from inference import Candidate
 from jan_replay import Turn
-from conversation import Conversation,MAX_PAIRS
+from conversation import Conversation,MAX_PAIRS,session_target
 from test_jan_replay import frame,event
 
 class ConversationTests(unittest.IsolatedAsyncioTestCase):
@@ -14,7 +14,10 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.ctx=Context("task","session","profile",1,"route","LOCAL_ONLY")
         self.g=FixtureGateway(self.ctx,(profiles.Rule("filesystem_read",(),"allow"),),clock=profiles.PolicyClock())
         self.c=Candidate("jan","llm","local","jan",True,True,4,80)
-        self.s=Conversation(self.g,self.ctx,self.c,"http://127.0.0.1:1337/v1","chat")
+        self.url="http://127.0.0.1:1337/v1"
+        self.session_req=Request(self.ctx,"engine",session_target(self.c,self.url,"chat"),"local")
+        self.session_grant=self.g.fixture_grant("session",self.session_req,60)
+        self.s=Conversation(self.g,self.ctx,self.c,self.url,"chat",self.session_grant)
         self.addCleanup(self.s.close)
         self.n=0
     def grant(self,d):
@@ -60,7 +63,7 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
     async def test_profile_close_and_stale_route(self):
         await self.send("private","local")
         with self.assertRaises(Refused):
-            Conversation(self.g,replace(self.ctx,route="other"),self.c,"http://127.0.0.1:1337/v1","other")
+            Conversation(self.g,replace(self.ctx,route="other"),self.c,self.url,"other",self.session_grant)
         self.g.close()
         self.assertEqual(self.s.poll(),"held")
         self.assertEqual(self.s._history,())
@@ -105,3 +108,27 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.s.draft("unsent")
         self.s.discard_draft()
         self.assertEqual(self.s.history(),(Turn("user","first"),Turn("assistant","answer")))
+
+    async def test_empty_session_cannot_survive_profile_close(self):
+        self.s.draft("unsent")
+        self.g.close()
+        self.assertEqual(self.s.poll(),"held")
+        self.assertIsNone(self.s._draft)
+        with self.assertRaises(Refused):
+            self.s.draft("after switch")
+
+    async def test_session_grant_cannot_be_replayed_or_redirected(self):
+        with self.assertRaisesRegex(Refused,"grant_already_claimed"):
+            Conversation(self.g,self.ctx,self.c,self.url,"chat",self.session_grant)
+        for url,identity in ((self.url,"other"),("http://127.0.0.1:1338/v1","chat")):
+            with self.assertRaises(Refused):
+                Conversation(self.g,self.ctx,self.c,url,identity,self.session_grant)
+        await self.send("still owned","yes")
+
+    async def test_session_revocation_clears_unsent_draft_and_history(self):
+        await self.send("first","answer")
+        self.s.draft("unsent")
+        self.g.revoke("session")
+        self.assertEqual(self.s.poll(),"held")
+        self.assertIsNone(self.s._draft)
+        self.assertEqual(self.s._history,())
