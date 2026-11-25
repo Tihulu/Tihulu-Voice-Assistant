@@ -46,3 +46,29 @@ class ResearchReportTests(unittest.TestCase):
         self.b.close()
         with self.assertRaises(Refused):
             self.b.preview()
+
+    def test_source_revoked_at_export_claim(self):
+        from unittest.mock import patch
+        report=self.b.preview()
+        g=self.g.fixture_grant("p",Request(self.ctx,"publish",report.digest,"local"),60)
+        original=self.g.claim
+        def revoke(grant,req):
+            original(grant,req)
+            self.g.revoke("r")
+        with patch.object(self.g,"claim",side_effect=revoke):
+            with self.assertRaises(Refused):
+                self.b.export_bytes(g,report.digest)
+
+    def test_report_closed_at_export_claim(self):
+        from unittest.mock import patch
+        report=self.b.preview()
+        g=self.g.fixture_grant("p",Request(self.ctx,"publish",report.digest,"local"),60)
+        original=self.g.claim
+        def close(grant,req):
+            original(grant,req)
+            self.b.close()
+        with patch.object(self.g,"claim",side_effect=close):
+            with self.assertRaises(Refused):
+                self.b.export_bytes(g,report.digest)
+        with self.assertRaises(Refused):
+            self.b.preview()
