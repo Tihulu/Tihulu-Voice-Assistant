@@ -12,10 +12,10 @@ from voice_review import target,review,wav_bytes
 class VoiceReviewTests(unittest.TestCase):
     def setUp(self):
         self.ctx=Context("task","session","profile",1,"route","LOCAL_ONLY")
-        self.g=FixtureGateway(self.ctx,(profiles.Rule("filesystem_read",(),"allow"),),clock=profiles.PolicyClock())
+        self.g=FixtureGateway(self.ctx,(profiles.Rule("filesystem_read",(),"allow"),profiles.Rule("local_audio_device",(),"allow"),),clock=profiles.PolicyClock())
         cfg=Config("fixture",600,3,2,12)
         v=VoiceGate(self.g,self.ctx,cfg)
-        v.arm(self.g.fixture_grant("capture",Request(self.ctx,"engine",cfg.target(),"local","private"),60))
+        v.arm(self.g.fixture_grant("capture",Request(self.ctx,"capture",cfg.target(),"local","private"),60))
         for f in (LOUD,LOUD,LOUD,QUIET,QUIET):
             v.feed(f)
         self.pcm=v.take()

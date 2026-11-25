@@ -49,3 +49,33 @@ class ConnectorTests(unittest.TestCase):
         another=Connector(self.g,self.ctx,"opencode-fixture","s")
         with self.assertRaisesRegex(Refused,"grant_already_claimed"):
             another.begin(self.spec,self.grant,self.data)
+
+    def test_concurrent_close_and_event_cannot_resurrect_session(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        h=self.c.begin(self.spec,self.grant,self.data)
+        barrier=Barrier(2)
+        def event():
+            barrier.wait(timeout=5)
+            try:
+                self.c.event(h,"s","j",1,"completed")
+            except Refused:
+                pass
+        def close():
+            barrier.wait(timeout=5)
+            self.c.close()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            a,b=pool.submit(event),pool.submit(close)
+            a.result(timeout=5)
+            b.result(timeout=5)
+        self.assertEqual(self.c.status,"closed")
+        with self.assertRaises(Refused):
+            self.c.event(h,"s","j",2,"completed")
+
+    def test_malformed_job_identity_and_cancel_revokes(self):
+        with self.assertRaises(Refused):
+            self.c.begin(replace(self.spec,job=[]),self.grant,self.data)
+        h=self.c.begin(self.spec,self.grant,self.data)
+        self.c.cancel(h)
+        with self.assertRaises(Refused):
+            self.g.checkpoint(self.grant,Request(self.ctx,"agent",self.spec.target(),"local"))

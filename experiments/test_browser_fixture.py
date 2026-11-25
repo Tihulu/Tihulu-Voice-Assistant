@@ -8,7 +8,7 @@ from browser_fixture import Plan,BrowserFixture,action_target
 class BrowserFixtureTests(unittest.TestCase):
     def setUp(self):
         self.ctx=Context("task","session","profile",1,"route","LOCAL_ONLY",False,True)
-        self.g=FixtureGateway(self.ctx,(profiles.Rule("external_network",(),"allow"),),clock=profiles.PolicyClock())
+        self.g=FixtureGateway(self.ctx,(profiles.Rule("external_network",(),"allow"),profiles.Rule("browser_navigate",(),"allow"),),clock=profiles.PolicyClock())
         self.root="https://example.com/docs"
         self.a=self.root+"/a"
         self.b=self.root+"/b"
@@ -16,7 +16,7 @@ class BrowserFixtureTests(unittest.TestCase):
         self.launch=self.grant("launch",self.p.target())
         self.f=BrowserFixture(self.g,self.ctx,self.p,self.launch)
     def grant(self,i,target):
-        return self.g.fixture_grant(i,Request(self.ctx,"research",target,"local","public"),60)
+        return self.g.fixture_grant(i,Request(self.ctx,"browser",target,"local","public"),60)
     def navigate(self,url,i):
         g=self.grant(i,action_target(self.p,"navigate",url))
         self.f.navigate(url,g)
