@@ -10,10 +10,10 @@ QUIET=bytes(640)
 class VoiceGateTests(unittest.TestCase):
     def setUp(self):
         self.ctx=Context("task","session","profile",1,"route","LOCAL_ONLY")
-        self.g=FixtureGateway(self.ctx,(profiles.Rule("filesystem_read",(),"allow"),),clock=profiles.PolicyClock())
+        self.g=FixtureGateway(self.ctx,(profiles.Rule("local_audio_device",(),"allow"),),clock=profiles.PolicyClock())
         self.c=Config("fixture",600,3,2,12)
         self.v=VoiceGate(self.g,self.ctx,self.c)
-        self.grant=self.g.fixture_grant("v",Request(self.ctx,"engine",self.c.target(),"local","private"),60)
+        self.grant=self.g.fixture_grant("v",Request(self.ctx,"capture",self.c.target(),"local","private"),60)
     def test_default_off_explicit_review_and_no_auto_restart(self):
         with self.assertRaises(Refused):
             self.v.feed(LOUD)
@@ -63,3 +63,18 @@ class VoiceGateTests(unittest.TestCase):
             self.v.feed(LOUD)
         self.assertEqual(self.v.state,"timeout")
         self.assertEqual(self.v._frames,[])
+
+    def test_idle_wall_deadline_and_revocation_poll(self):
+        from unittest.mock import patch
+        with patch("voice_gate.monotonic",return_value=10):
+            self.v.arm(self.grant)
+            self.v.feed(LOUD)
+        with patch("voice_gate.monotonic",return_value=11):
+            self.assertEqual(self.v.poll(),"timeout")
+        self.assertEqual(self.v._lead,[])
+        grant=self.g.fixture_grant("next",Request(self.ctx,"capture",self.c.target(),"local","private"),60)
+        other=VoiceGate(self.g,self.ctx,self.c)
+        other.arm(grant)
+        self.g.revoke("next")
+        self.assertEqual(other.poll(),"held")
+        self.assertEqual(other._frames,[])

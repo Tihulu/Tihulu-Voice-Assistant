@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from hashlib import sha256
 from struct import unpack
 from threading import Lock
+from time import monotonic
 from gateway import Request,Refused,token
 
 SAMPLES=320
@@ -36,7 +37,7 @@ class VoiceGate:
         if type(config) is not Config:
             raise Refused("invalid_vad_config")
         self._g,self._ctx,self._cfg=gateway,context.checked(),config
-        self._req=Request(context,"engine",config.target(),"local","private")
+        self._req=Request(context,"capture",config.target(),"local","private")
         self._lock=Lock()
         self._state="off"
         self._grant=None
@@ -44,6 +45,7 @@ class VoiceGate:
         self._lead=[]
         self._silence=0
         self._seen=0
+        self._deadline=None
     @property
     def state(self):
         with self._lock:
@@ -54,6 +56,7 @@ class VoiceGate:
                 raise Refused("not_off")
             self._g.claim(grant,self._req)
             self._grant=grant
+            self._deadline=monotonic()+self._cfg.max_frames*0.02
             self._state="listening"
     def _discard(self,state):
         self._frames.clear()
@@ -61,12 +64,29 @@ class VoiceGate:
         self._state=state
         if self._grant is not None:
             self._g.revoke(self._grant.identity)
+    def _live(self):
+        self._g.checkpoint(self._grant,self._req)
+        if self._state in ("listening","speech") and monotonic()>=self._deadline:
+            self._discard("timeout")
+            raise Refused("capture_timeout")
+
+    def poll(self):
+        """Owner event-loop tick; no background worker is started here."""
+        with self._lock:
+            if self._state in ("listening","speech","review"):
+                try:
+                    self._live()
+                except Refused:
+                    if self._state!="timeout":
+                        self._discard("held")
+            return self._state
+
     def feed(self,pcm):
         with self._lock:
             if self._state not in ("listening","speech"):
                 raise Refused("not_listening")
             try:
-                self._g.checkpoint(self._grant,self._req)
+                self._live()
                 if type(pcm) is not bytes or len(pcm)!=FRAME_BYTES:
                     raise Refused("invalid_pcm")
                 self._seen+=1
@@ -92,7 +112,8 @@ class VoiceGate:
                     self._g.checkpoint(self._grant,self._req)
                 return self._state
             except Refused:
-                self._discard("held")
+                if self._state!="timeout":
+                    self._discard("held")
                 raise
     def take(self):
         """Explicit review action returns PCM once, never a submitted turn."""
