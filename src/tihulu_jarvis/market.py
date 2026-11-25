@@ -1578,8 +1578,10 @@ class Registry:
         folder = base / card.model_id
         for path in (base, folder):
             path.mkdir(mode=0o700, exist_ok=True)
-            if path.is_symlink() or not path.is_dir():
-                raise Hold("artifact_archive_unavailable")
+            try:
+                _directory_identity(path)
+            except Hold:
+                raise Hold("artifact_archive_unavailable") from None
         return folder / card.artifact_digest
 
     @_registry_locked
@@ -1587,12 +1589,26 @@ class Registry:
         if card.shared_storage_owner or card.loaded:
             raise Hold("artifact_not_replaceable")
         target = self._archive_path(card)
-        if target.exists() or target.is_symlink():
-            if _verified_artifact(target, card.disk_size_bytes, checkpoint=checkpoint) != card.artifact_digest:
-                raise Hold("rollback_artifact_unverified")
-            if _verified_artifact(source, card.disk_size_bytes, checkpoint=checkpoint) != card.artifact_digest:
-                raise Hold("rollback_artifact_unverified")
-            return target
+        if _exists_entry(target):
+            # A retained revision must not alias the active file. Reuse only
+            # after checking both contents and making the archive durable.
+            try:
+                source_info, archive_info = Path(source).lstat(), target.lstat()
+                if (not stat.S_ISREG(archive_info.st_mode) or archive_info.st_nlink != 1
+                        or (source_info.st_dev, source_info.st_ino)
+                        == (archive_info.st_dev, archive_info.st_ino)):
+                    raise Hold("rollback_artifact_unverified")
+                expected = {"size": card.disk_size_bytes, "digest": card.artifact_digest}
+                if self._payload_record(target, checkpoint=checkpoint) != expected:
+                    raise Hold("rollback_artifact_unverified")
+                if _verified_artifact(source, card.disk_size_bytes, checkpoint=checkpoint) != card.artifact_digest:
+                    raise Hold("rollback_artifact_unverified")
+                _sync_directory(target.parent)
+                _sync_directory(target.parent.parent)
+                _sync_directory(self.root)
+                return target
+            except OSError:
+                raise Hold("rollback_artifact_unverified") from None
         # Bounded retention, no automatic deletion or eviction of older bytes.
         count = 0
         total = 0
@@ -1631,11 +1647,21 @@ class Registry:
                 or not candidate.artifact_digest):
             raise Hold("rollback_artifact_unverified")
         target = self.root / "artifacts" / current.model_id
+        try:
+            _directory_identity(target.parent)
+        except Hold:
+            raise Hold("rollback_artifact_unverified") from None
         if current.artifact_digest == candidate.artifact_digest:
             if _verified_artifact(target, candidate.disk_size_bytes) != candidate.artifact_digest:
                 raise Hold("rollback_artifact_unverified")
             return self.save_card(restored)
         archive = self._archive_path(candidate)
+        try:
+            info = archive.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                raise Hold("rollback_artifact_unverified")
+        except OSError:
+            raise Hold("rollback_artifact_unverified") from None
         if _verified_artifact(archive, candidate.disk_size_bytes) != candidate.artifact_digest:
             raise Hold("rollback_artifact_unverified")
         self.retain_artifact(current, target)
@@ -1898,7 +1924,11 @@ class Registry:
             raise Hold("artifact_not_replaceable")
         target = self.root / "artifacts" / current.model_id
         backup = target.parent / ".publish-backup"
-        if target.parent.is_symlink() or not target.parent.is_dir() or _exists_entry(backup):
+        try:
+            _directory_identity(target.parent)
+        except Hold:
+            raise Hold("publication_recovery_required") from None
+        if _exists_entry(backup):
             raise Hold("publication_recovery_required")
         staged = Path(staged)
         incoming = self._payload_record(staged, checkpoint=checkpoint)
@@ -1975,7 +2005,8 @@ class Registry:
             known = next((c for c in cards if c.model_id == record["model"]), None)
             target = self.root / "artifacts" / record["model"]
             backup = target.parent / ".publish-backup"
-            if target.parent.is_symlink() or not target.parent.is_dir() or known is None:
+            _directory_identity(target.parent)
+            if known is None:
                 raise Hold("publication_recovery_required")
             previous, incoming = record["previous"], record["incoming"]
 
@@ -2055,8 +2086,7 @@ class Registry:
             known = next((card for card in cards if card.model_id == record["model"]), None)
             target = self.root / "artifacts" / record["model"]
             backup = target.parent / ".uninstall-recovery"
-            if target.parent.is_symlink() or not target.parent.is_dir():
-                raise Hold("uninstall_recovery_required")
+            _directory_identity(target.parent)
             has_target, has_backup = _exists_entry(target), _exists_entry(backup)
 
             def verify(path):
@@ -2105,8 +2135,11 @@ class Registry:
             if not approval:
                 raise Hold("uninstall_requires_approval")
             target = self.root / "artifacts" / model_id
-            if target.parent.is_symlink():
-                raise Hold("artifact_not_replaceable")
+            if _exists_entry(target.parent):
+                try:
+                    _directory_identity(target.parent)
+                except Hold:
+                    raise Hold("artifact_not_replaceable") from None
             try:
                 info = target.lstat()
             except FileNotFoundError:
