@@ -671,6 +671,8 @@ class Transfer:
 
     def _publish(self, registered, *, replacing):
         self._check()
+        if self.registry.card(self.card.model_id) != self.card:
+            raise Hold("transfer_card_changed")
         target = self.registry.root / "artifacts" / self.card.model_id
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Preserve the previous inode across ordinary registry write failure.
@@ -694,6 +696,8 @@ class Transfer:
             replaced = True
             try:
                 self._check()
+                if self.registry.card(self.card.model_id) != self.card:
+                    raise Hold("transfer_card_changed")
                 saved = self.registry.save_card(registered)
             except BaseException:
                 # If recovery itself fails, leave the backup intact for review.
@@ -709,12 +713,17 @@ class Transfer:
             return saved
         finally:
             if backup is not None and not replaced:
-                backup.unlink(missing_ok=True)
+                try:
+                    backup.unlink(missing_ok=True)
+                except OSError:
+                    # Do not report a committed update as failed because an
+                    # old backup could not be removed.
+                    pass
 
     def _persist(self, state):
-        self.card = advance(self.card, state)
-        self.state = self.card.state
-        return self.registry.save_card(self.card)
+        saved = self.registry.save_card(advance(self.card, state))
+        self.card, self.state = saved, saved.state
+        return saved
 
     async def resume(self, progress=None, start=0, allow_installed=False):
         """Continue an interrupted transfer from a verified byte offset.
