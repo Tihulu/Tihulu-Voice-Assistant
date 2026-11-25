@@ -598,11 +598,15 @@ def resumable_partials(root):
         return ()
     out = []
     for path in sorted(transfers.glob("partial-*")):
-        if not path.is_file():
+        model_id = path.name[len("partial-"):]
+        if not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model_id):
             continue
-        size = path.stat().st_size
-        if size > 0:
-            out.append((path.name[len("partial-"):], size))
+        try:
+            info = path.lstat()
+        except OSError:
+            continue
+        if stat.S_ISREG(info.st_mode) and 0 < info.st_size <= DIGEST_LIMIT:
+            out.append((model_id, info.st_size))
     return tuple(out)
 
 
@@ -768,12 +772,44 @@ class Transfer:
         except (Hold, OSError):
             self.state = state
 
-    def _current_for_partial(self):
+    def _finish_temp(self, *, keep):
+        """Never overwrite another operation's partial or mask a cancellation."""
+        if self.temp is None:
+            return
+        temp = Path(self.temp)
         try:
-            self._assert_current()
-            return True
+            if keep:
+                with self.registry._write_guard():
+                    self._assert_current()
+                    info = temp.lstat()
+                    if stat.S_ISREG(info.st_mode) and 0 < info.st_size <= DIGEST_LIMIT:
+                        partial = self.root / ("partial-" + self.card.model_id)
+                        # Atomic no-clobber publication. An existing partial wins.
+                        os.link(temp, partial, follow_symlinks=False)
         except (Hold, OSError):
-            return False
+            pass
+        finally:
+            try:
+                temp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            self.temp = None
+
+    def _consume_partial(self, identity):
+        """Remove only the exact partial consumed by this committed resume."""
+        if identity is None:
+            return
+        try:
+            with self.registry._write_guard():
+                self._assert_current()
+                partial = self.root / ("partial-" + self.card.model_id)
+                info = partial.lstat()
+                actual = (info.st_dev, info.st_ino, info.st_size,
+                          info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
+                if actual == identity:
+                    partial.unlink()
+        except (Hold, OSError):
+            pass
 
     async def resume(self, progress=None, start=0, allow_installed=False):
         """Continue an interrupted transfer from a verified byte offset.
@@ -791,6 +827,7 @@ class Transfer:
         fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
         os.close(fd)
         self.temp = Path(name)
+        identity = None
         try:
             os.chmod(self.temp, 0o600)
             if start:
@@ -822,10 +859,7 @@ class Transfer:
                                  license_id=self.source.license_id)
             result = self._publish(registered, replacing=allow_installed)
             # A cleanup failure must not turn a committed result into a failed update.
-            try:
-                (self.root / ("partial-" + self.card.model_id)).unlink(missing_ok=True)
-            except OSError:
-                pass
+            self._consume_partial(identity)
             return result
         except asyncio.CancelledError:
             self.state = "CANCELLED"
@@ -834,13 +868,7 @@ class Transfer:
             self.state = "FAILED"
             raise
         finally:
-            if self.temp is not None:
-                # Keep a cancelled partial so a later resume can continue from it.
-                if (self.state == "CANCELLED" and not allow_installed and self._current_for_partial()
-                        and self.temp.is_file() and not self.temp.is_symlink() and self.temp.stat().st_size > 0):
-                    self.temp.replace(self.root / ("partial-" + self.card.model_id))
-                else:
-                    Path(self.temp).unlink(missing_ok=True)
+            self._finish_temp(keep=self.state == "CANCELLED" and not allow_installed)
 
     async def update(self, progress=None):
         """Replace an installed item with its approved source, keeping history.
@@ -888,13 +916,7 @@ class Transfer:
             self._terminal("FAILED")
             raise
         finally:
-            if self.temp is not None:
-                if (self.state == "CANCELLED" and self._current_for_partial()
-                        and self.temp.is_file() and not self.temp.is_symlink() and self.temp.stat().st_size > 0):
-                    # Keep the partial so a later resume can continue from it.
-                    self.temp.replace(self.root / ("partial-" + self.card.model_id))
-                else:
-                    Path(self.temp).unlink(missing_ok=True)
+            self._finish_temp(keep=self.state == "CANCELLED")
 
     def cancel(self):
         raise Hold("transfer_cancelled_by_owner")
@@ -1405,10 +1427,41 @@ class Registry:
         if card.owned_by_jarvis:
             if not approval:
                 raise Hold("uninstall_requires_approval")
-            # A JARVIS-owned artifact lives only under its own install root.
+            # Keep bytes until the registry removal commits. Ordinary failures
+            # restore the original name; an interrupted process may leave a
+            # quarantined file for manual review (not a crash transaction).
             target = self.root / "artifacts" / model_id
-            if target.is_file():
-                target.unlink()
+            if target.parent.is_symlink():
+                raise Hold("artifact_not_replaceable")
+            try:
+                info = target.lstat()
+            except FileNotFoundError:
+                self.unregister(model_id)
+                return
+            if not stat.S_ISREG(info.st_mode):
+                raise Hold("artifact_not_replaceable")
+            if card.artifact_digest and _verified_artifact(target, card.disk_size_bytes) != card.artifact_digest:
+                raise Hold("artifact_not_replaceable")
+            fd, name = tempfile.mkstemp(prefix=".uninstall-", dir=target.parent)
+            os.close(fd)
+            backup = Path(name)
+            try:
+                os.replace(target, backup)
+            except BaseException:
+                backup.unlink(missing_ok=True)
+                raise
+            try:
+                self.unregister(model_id)
+            except BaseException:
+                # On failed recovery retain the backup, never delete it.
+                os.replace(backup, target)
+                raise
+            # A cleanup error leaves quarantined bytes, not a false rollback.
+            try:
+                backup.unlink()
+            except OSError:
+                raise Hold("uninstall_cleanup_pending") from None
+            return
         elif not approval:
             raise Hold("unregister_only_without_approval")
         self.unregister(model_id)

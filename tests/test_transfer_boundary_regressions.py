@@ -455,5 +455,108 @@ class RegistryIsolationTests(unittest.TestCase):
                 transfer._persist("REVIEWED")
         self.assertEqual(self.registry.card(card.model_id), card)
 
+class RemovalPartialTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        from dataclasses import replace
+        checksum = hashlib.sha256(OLD).hexdigest()
+        self.card = self.registry.save_card(replace(
+            market.ModelCard(model_id="fixture-model", display_name="Fixture", category="stt"),
+            owned_by_jarvis=True, artifact_digest=checksum,
+            storage_ref="sha256-" + checksum[:32], disk_size_bytes=len(OLD)))
+        self.target = self.root / "artifacts" / self.card.model_id
+        self.target.parent.mkdir()
+        self.target.write_bytes(OLD)
+
+    def transfer(self):
+        source = market.Source(reference="catalog:fixture",
+                               checksum=hashlib.sha256(NEW).hexdigest(),
+                               size=len(NEW))
+        return market.Transfer(self.registry, self.card, source, None, now=1)
+
+    def test_uninstall_write_failure_restores_bytes_and_card(self):
+        with patch.object(self.registry, "store", side_effect=OSError("disk fault")):
+            with self.assertRaises(OSError):
+                self.registry.uninstall(self.card.model_id, approval="fixture")
+        self.assertEqual(self.target.read_bytes(), OLD)
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+        self.assertEqual(list(self.target.parent.glob(".uninstall-*")), [])
+
+    def test_uninstall_refuses_changed_verified_bytes(self):
+        self.target.write_bytes(NEW)
+        with self.assertRaises(Hold):
+            self.registry.uninstall(self.card.model_id, approval="fixture")
+        self.assertEqual(self.target.read_bytes(), NEW)
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    def test_uninstall_refuses_symlink(self):
+        outside = self.root / "outside"
+        outside.write_bytes(OLD)
+        self.target.unlink()
+        self.target.symlink_to(outside)
+        with self.assertRaises(Hold):
+            self.registry.uninstall(self.card.model_id, approval="fixture")
+        self.assertTrue(self.target.is_symlink())
+        self.assertEqual(outside.read_bytes(), OLD)
+
+    def test_successful_uninstall_removes_only_approved_owned_file(self):
+        self.registry.uninstall(self.card.model_id, approval="fixture")
+        self.assertFalse(self.target.exists())
+        self.assertEqual(self.registry.cards(), ())
+        self.assertEqual(list(self.target.parent.glob(".uninstall-*")), [])
+
+    def test_cancelled_partial_does_not_clobber_other_partial(self):
+        transfer = self.transfer()
+        partial = transfer.root / ("partial-" + self.card.model_id)
+        partial.write_bytes(OLD)
+        transfer.temp = transfer.root / "fixture-temp"
+        transfer.temp.write_bytes(NEW)
+        transfer._finish_temp(keep=True)
+        self.assertEqual(partial.read_bytes(), OLD)
+        self.assertFalse((transfer.root / "fixture-temp").exists())
+
+    def test_cancelled_partial_with_stale_card_is_discarded(self):
+        from dataclasses import replace
+        transfer = self.transfer()
+        transfer.temp = transfer.root / "fixture-temp"
+        transfer.temp.write_bytes(NEW)
+        self.registry.save_card(replace(self.card, display_name="Changed"))
+        transfer._finish_temp(keep=True)
+        self.assertFalse((transfer.root / ("partial-" + self.card.model_id)).exists())
+        self.assertFalse((transfer.root / "fixture-temp").exists())
+
+    def test_partial_consume_preserves_replacement_inode(self):
+        transfer = self.transfer()
+        partial = transfer.root / ("partial-" + self.card.model_id)
+        partial.write_bytes(OLD)
+        from tihulu_jarvis.selected_csv import selection_identity
+        identity = selection_identity(str(partial.absolute()), authorized=lambda: True,
+                                      max_bytes=len(OLD))
+        replacement = transfer.root / "replacement"
+        replacement.write_bytes(NEW)
+        replacement.replace(partial)
+        transfer._consume_partial(identity)
+        self.assertEqual(partial.read_bytes(), NEW)
+
+    def test_partial_consume_removes_matching_inode(self):
+        transfer = self.transfer()
+        partial = transfer.root / ("partial-" + self.card.model_id)
+        partial.write_bytes(OLD)
+        from tihulu_jarvis.selected_csv import selection_identity
+        identity = selection_identity(str(partial.absolute()), authorized=lambda: True,
+                                      max_bytes=len(OLD))
+        transfer._consume_partial(identity)
+        self.assertFalse(partial.exists())
+
+    def test_partial_listing_rejects_symlink_and_invalid_id(self):
+        transfer = self.transfer()
+        (transfer.root / "partial-link").symlink_to(self.target)
+        (transfer.root / "partial-!invalid").write_bytes(OLD)
+        (transfer.root / "partial-valid").write_bytes(NEW)
+        self.assertEqual(market.resumable_partials(self.root), (("valid", len(NEW)),))
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
