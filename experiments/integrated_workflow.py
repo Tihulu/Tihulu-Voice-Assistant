@@ -11,6 +11,7 @@ from gateway import Request, Refused
 from research import canonical
 from research_session import ResearchSession
 from inference import choose, envelope
+from adapter_protocol import approved_payload, disclosure_target
 from scheduler import Scheduler, Job
 from task_chain import Chain, Step, Artifact, step_target
 
@@ -64,7 +65,7 @@ class FixtureWorkflow:
             destination, grants):
         if self._state != "ready":
             raise Refused("workflow_not_ready")
-        if type(grants) is not dict or set(grants) != {"research","engine","agent","disclose","publish"}:
+        if type(grants) is not dict or set(grants) != {"research","engine","agent","disclose","payload","publish"}:
             raise Refused("invalid_grant_set")
         self._state = "running"
         session = None
@@ -135,10 +136,15 @@ class FixtureWorkflow:
             receipt = chain.complete(step_handle, "report", table + b"\n" + svg)
             checkpoint()
             disclosure = envelope(self._g,grants["disclose"],self._ctx,destination,values,("count",))
+            # A provider-wide permission only permits preparation. Explicit
+            # exact destination + canonical bytes consent is separate.
+            payload = approved_payload(self._g, grants["payload"], self._ctx, disclosure)
+            payload_req = Request(self._ctx,"disclose",disclosure_target(disclosure),"local","minimized")
+            checks += ((grants["payload"],payload_req),)
             scheduler.finish(handle)
             checkpoint()
             self._checks = checks
-            self._report = Report(source.url,digest,candidate.identity,table,svg,disclosure.payload,
+            self._report = Report(source.url,digest,candidate.identity,table,svg,payload,
                                   sha256(table).hexdigest(),sha256(svg).hexdigest(),receipt.digest)
             self._state = "completed"
             return self._report

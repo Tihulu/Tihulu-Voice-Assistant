@@ -5,7 +5,8 @@ from dataclasses import replace
 from unittest.mock import patch
 from tihulu_jarvis import profiles
 from gateway import Context, Request, FixtureGateway, Refused
-from inference import Candidate
+from inference import Candidate, Envelope
+from adapter_protocol import disclosure_target
 from inventory import Inventory, Entry
 from research import canonical
 from integrated_workflow import FixtureWorkflow, REPORT_STEP
@@ -32,6 +33,9 @@ class IntegratedTests(unittest.TestCase):
             ("publish","publish","temperature-report","none")):
             req=Request(self.ctx,action,target,"local",classification)
             self.grants[name]=self.g.fixture_grant(name,req,60)
+        data=b\'{"count":5}\'
+        consent=Envelope(self.destination,data,sha256(data).hexdigest())
+        self.grants["payload"]=self.g.fixture_grant("payload",Request(self.ctx,"disclose",disclosure_target(consent),"local","minimized"),60)
         self.w=FixtureWorkflow(self.g,self.ctx,self.i,self.candidates)
 
     def run_fixture(self, **kw):
@@ -142,3 +146,18 @@ class IntegratedTests(unittest.TestCase):
         self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
         with self.assertRaises(Refused):
             self.w.result()
+
+    def test_preparation_consent_cannot_replace_exact_payload_consent(self):
+        with self.assertRaises(Refused):
+            self.run_fixture(grants=dict(self.grants,payload=self.grants["disclose"]))
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_payload_consent_revocation_invalidates_retained_report(self):
+        self.run_fixture()
+        self.g.revoke("payload")
+        with self.assertRaises(Refused):
+            self.w.result()
+        self.assertEqual(self.w.state,"held")
