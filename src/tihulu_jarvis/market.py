@@ -1120,6 +1120,9 @@ def _exists_entry(path):
         return False
 
 
+_UNCONDITIONAL = object()
+
+
 class Registry:
     """Local registry with per-profile independent STT/LLM/TTS selection."""
 
@@ -1299,11 +1302,31 @@ class Registry:
     def cards(self):
         return self.load()[0]
 
+    def lookup_card(self, model_id):
+        return next((card for card in self.cards() if card.model_id == model_id), None)
+
     def card(self, model_id):
-        for card in self.cards():
-            if card.model_id == model_id:
-                return card
-        raise Hold("model_not_registered")
+        card = self.lookup_card(model_id)
+        if card is None:
+            raise Hold("model_not_registered")
+        return card
+
+    @_registry_locked
+    def snapshot(self):
+        """Return an exact generation token with the decoded registry."""
+        try:
+            raw = self._read_document()
+        except FileNotFoundError:
+            return None, (), {}
+        cards, selection = self._parse(raw)
+        return _text_digest(raw), cards, selection
+
+    @_registry_locked
+    def store_if_current(self, generation, cards, selection):
+        current, _, _ = self.snapshot()
+        if current != generation:
+            raise Hold("registry_generation_changed")
+        self.store(cards, selection)
 
     def _prepared_card(self, card):
         card = card.checked()
@@ -1330,11 +1353,57 @@ class Registry:
         return card, kept + (card,), selection, history
 
     @_registry_locked
-    def save_card(self, card):
-        """Persist a card, keeping the previous entry as a revision."""
+    def save_card(self, card, *, expected=_UNCONDITIONAL):
+        """Persist with optional exact previous-card precondition.
+
+        None means the model must not exist; the legacy unconditional API
+        remains available to explicitly trusted internal callers.
+        """
+        if expected is not _UNCONDITIONAL and self.lookup_card(card.model_id) != expected:
+            raise Hold("registry_card_changed")
         card, cards, selection, history = self._prepared_card(card)
         self.store(cards, selection, history=history)
         return card
+
+    @_registry_locked
+    def record_discovered(self, card):
+        """Discovery cannot overwrite installed or already approved records."""
+        card = card.checked()
+        if card.state != "DISCOVERED" or card.installed or card.registered or card.owned_by_jarvis:
+            raise Hold("invalid_discovery_record")
+        card = replace(card, network_approval="", approval_expires_at=0.0)
+        previous = self.lookup_card(card.model_id)
+        if previous is not None:
+            if (previous.state != "DISCOVERED" or previous.installed or previous.registered
+                    or previous.owned_by_jarvis or previous.loaded):
+                raise Hold("registry_discovery_conflict")
+            comparable = replace(previous, revision=0, network_approval="", approval_expires_at=0.0)
+            if comparable == replace(card, revision=0):
+                return previous
+            if previous.network_approval:
+                raise Hold("registry_discovery_conflict")
+        return self.save_card(card, expected=previous)
+
+    @_registry_locked
+    def approve_catalog_entry(self, entry, approval, expires_at):
+        """Approve only the exact discovered card represented by the entry.
+
+        The caller must already have authenticated the selected catalog.
+        """
+        selected = entry.checked()
+        terms = entry.terms(approval, expires_at).checked()
+        if not terms.authorized(time.time()):
+            raise Hold("network_not_authorized")
+        known = self.lookup_card(selected.model_id)
+        if known is None:
+            known = self.save_card(selected, expected=None)
+        if known.state != "DISCOVERED":
+            raise Hold("lifecycle_transition_rejected:" + known.state + "->REVIEWED")
+        comparable = replace(known, revision=0, network_approval="", approval_expires_at=0.0)
+        if comparable != replace(selected, revision=0):
+            raise Hold("catalog_entry_changed")
+        return self.save_card(replace(known, network_approval=approval,
+                                      approval_expires_at=expires_at), expected=known)
 
     @_registry_locked
     def history(self, model_id):
