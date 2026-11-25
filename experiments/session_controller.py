@@ -33,6 +33,9 @@ class SessionController:
             ctx=Context(task,session,template.identity,self._generation+1,route,template.mode,offline,public_opt_in)
             # Validate original template before downgrading any ALLOW.
             validated=FixtureGateway(ctx,template.rules,clock=self._clock)
+            if not imported and any(r.decision==profiles.ALLOW and len(r.scope)!=1 for r in template.rules):
+                validated.close()
+                raise Refused("exact_template_allow_required")
             if imported:
                 validated.close()
                 rules=tuple(replace(r,decision=profiles.ASK,approval="",expires_at=0.0)

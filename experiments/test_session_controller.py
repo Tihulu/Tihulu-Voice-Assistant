@@ -56,3 +56,13 @@ class SessionControllerTests(unittest.TestCase):
             self.s.activate(self.t,"task","session","route")
         with self.assertRaises(Refused):
             old.checkpoint(g,self.req)
+
+    def test_wildcard_allow_cannot_activate_trusted_controller(self):
+        old=self.s.current()
+        wildcard=replace(self.t,rules=(profiles.Rule("filesystem_read",(),"allow"),))
+        with self.assertRaisesRegex(Refused,"exact_template_allow_required"):
+            self.s.activate(wildcard,"task","session","route")
+        self.assertIs(self.s.current(),old)
+        ctx=self.s.activate(wildcard,"task","session","route",imported=True)
+        with self.assertRaises(Refused):
+            self.s.owner_grant("x",Request(ctx,"engine","file","local"),60,confirmed=True)

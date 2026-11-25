@@ -156,5 +156,17 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaises(Refused):
             g.checkpoint(grant, req)
 
+    def test_context_cannot_be_rebound_through_public_attribute(self):
+        g=self.gateway()
+        with self.assertRaises(AttributeError):
+            g.context=replace(self.ctx,mode="CLOUD_CHAT")
+        self.assertEqual(g.context,self.ctx)
+
+    def test_broad_explicit_deny_is_not_overridden_by_narrow_allow(self):
+        g=self.gateway(rules=(profiles.Rule("filesystem_read",(),"deny"),
+                              profiles.Rule("filesystem_read",("target",),"allow")))
+        with self.assertRaisesRegex(Refused,"explicit_deny"):
+            g.fixture_grant("x",Request(self.ctx,"engine","target","local"),10)
+
 if __name__ == "__main__":
     unittest.main()

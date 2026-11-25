@@ -88,7 +88,7 @@ class FixtureGateway:
     def __init__(self, context, rules, *, clock):
         if type(context) is not Context or type(clock) is not profiles.PolicyClock:
             raise Refused("invalid_fixture")
-        self.context = context.checked()
+        self._context = context.checked()
         if type(rules) not in (tuple, list) or len(rules) > MAX_GRANTS:
             raise Refused("invalid_rules")
         self._rules = tuple(rules)
@@ -110,6 +110,10 @@ class FixtureGateway:
         self._claimed = set()
         self._closed = False
         self._lock = Lock()
+
+    @property
+    def context(self):
+        return self._context
 
     def _check(self, req, now):
         if type(req) is not Request:
@@ -140,6 +144,9 @@ class FixtureGateway:
         if req.action in ("research", "catalog", "transfer") and req.classification != "public":
             raise Refused("public_data_required")
         # No silent selection override or grant inheritance.
+        # Explicit matching deny is a ceiling in the experimental controller.
+        if any(r.decision == profiles.DENY and r.matches(ACTIONS[req.action], (req.target,)) for r in self._rules):
+            raise Refused("explicit_deny")
         decision, reason = profiles.decide(self._rules, ACTIONS[req.action], (req.target,), now)
         if decision != profiles.ALLOW:
             raise Refused(reason)
