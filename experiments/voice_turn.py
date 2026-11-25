@@ -5,12 +5,19 @@ A reviewed transcript never submits itself. Each stage requires fresh exact
 local consent, and TTS returns supplied fixture WAV bytes, never plays audio.
 """
 from threading import RLock
+from hashlib import sha256
 from gateway import Context, FixtureGateway, Request, Refused, token
 from inventory import Inventory
-from voice_pipeline import revalidate
+from voice_pipeline import VoicePlan, revalidate
 from voice_review import review, target as stt_target, wav_bytes
 from jan_replay import Turn, request_bytes, replay
 from adapter_protocol import prepare, text_bytes
+
+
+def reservation_target(plan, identity):
+    if type(plan) is not VoicePlan or type(plan.digest) is not str or len(plan.digest)!=64 or any(c not in '0123456789abcdef' for c in plan.digest):
+        raise Refused("invalid_pipeline_plan")
+    return sha256(("voice-reservation:"+token(identity)+":"+plan.digest).encode("ascii")).hexdigest()
 
 
 def reason_target(candidate, identity, url, text):
@@ -23,7 +30,7 @@ def speech_target(candidate, identity, text):
 
 
 class VoiceTurn:
-    def __init__(self, gateway, context, inventory, expected, candidates, identity):
+    def __init__(self, gateway, context, inventory, expected, candidates, identity, reservation_grant):
         if (type(gateway) is not FixtureGateway or type(context) is not Context
                 or gateway.context != context or type(inventory) is not Inventory
                 or inventory.capacity_snapshot()[0] is None):
@@ -38,7 +45,17 @@ class VoiceTurn:
         self._checks=[]
         self._draft=self._answer=None
         self._state="ready"
-        self._lease=inventory.lease_pipeline(expected,context,candidates)
+        self._lease=None
+        req=Request(context,"engine",reservation_target(self._plan,self._id),"local")
+        self._g.claim(reservation_grant,req)
+        self._checks.append((reservation_grant,req))
+        try:
+            self._g.checkpoint(reservation_grant,req)
+            self._lease=inventory.lease_pipeline(expected,context,candidates)
+            self._live("ready")
+        except BaseException:
+            self._fail()
+            raise
 
     @property
     def state(self):

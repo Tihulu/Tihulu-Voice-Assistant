@@ -9,7 +9,7 @@ from gateway import Context, Request, FixtureGateway, Refused
 from inventory import Inventory,Entry
 from inference import Candidate
 from voice_pipeline import plan_voice
-from voice_turn import VoiceTurn,reason_target,speech_target
+from voice_turn import VoiceTurn,reason_target,speech_target,reservation_target
 from voice_review import target
 from test_voice_gate import LOUD,QUIET
 from test_jan_replay import frame,event
@@ -24,7 +24,8 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
         for n,c in enumerate(self.c):
             self.i.register(Entry(c.identity,str(n+1)*64,c.task,c.provider,True,False))
         self.plan=plan_voice(self.ctx,self.c,10)
-        self.v=VoiceTurn(self.g,self.ctx,self.i,self.plan,self.c,"turn")
+        self.rg=self.grant("reserve",reservation_target(self.plan,"turn"))
+        self.v=VoiceTurn(self.g,self.ctx,self.i,self.plan,self.c,"turn",self.rg)
         self.addCleanup(self.v.close)
         self.pcm=LOUD*3
         self.url="http://127.0.0.1:1337/v1"
@@ -104,9 +105,30 @@ class VoiceTurnTests(unittest.IsolatedAsyncioTestCase):
             await self.v.reason(d,"Hallo",self.llm_grant(),self.url,b"invalid",confirmed=True)
         self.assertEqual(self.i.capacity_snapshot(),(10,0,0))
     async def test_second_turn_respects_aggregate_limit(self):
+        grant=self.grant("reserve2",reservation_target(self.plan,"second"))
         with self.assertRaisesRegex(Refused,"aggregate_capacity_exceeded"):
-            VoiceTurn(self.g,self.ctx,self.i,self.plan,self.c,"second")
+            VoiceTurn(self.g,self.ctx,self.i,self.plan,self.c,"second",grant)
         self.v.close()
-        second=VoiceTurn(self.g,self.ctx,self.i,self.plan,self.c,"second")
+        fresh=self.grant("reserve3",reservation_target(self.plan,"second"))
+        second=VoiceTurn(self.g,self.ctx,self.i,self.plan,self.c,"second",fresh)
         second.close()
+        self.assertEqual(self.i.capacity_snapshot(),(10,0,0))
+
+    async def test_idle_reservation_revocation_releases_all_models(self):
+        self.g.revoke("reserve")
+        self.assertEqual(self.v.poll(),"held")
+        self.assertEqual(self.i.capacity_snapshot(),(10,0,0))
+
+    async def test_wrong_reservation_or_replay_cannot_allocate(self):
+        self.v.close()
+        wrong=self.grant("wrong",reservation_target(self.plan,"other"))
+        with self.assertRaises(Refused):
+            VoiceTurn(self.g,self.ctx,self.i,self.plan,self.c,"turn",wrong)
+        with self.assertRaises(Refused):
+            VoiceTurn(self.g,self.ctx,self.i,self.plan,self.c,"turn",self.rg)
+        self.assertEqual(self.i.capacity_snapshot(),(10,0,0))
+
+    async def test_profile_close_before_any_audio_releases_idle_reservation(self):
+        self.g.close()
+        self.assertEqual(self.v.poll(),"held")
         self.assertEqual(self.i.capacity_snapshot(),(10,0,0))
