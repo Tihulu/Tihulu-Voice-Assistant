@@ -613,6 +613,21 @@ def _read_partial_record(metadata):
 
 
 
+def _staging_prefix(model_id):
+    if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model_id):
+        raise Hold("invalid_model_id")
+    return "tihulu-transfer-" + hashlib.sha256(model_id.encode("utf-8")).hexdigest() + "-"
+
+
+def _staging_identity(path):
+    info = path.lstat()
+    if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+            or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+        raise Hold("staging_file_untrusted")
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode)
+
+
 def _partial_file_identity(path):
     try:
         info = path.lstat()
@@ -913,7 +928,7 @@ class Transfer:
             raise Hold("artifact_not_replaceable")
         # Resume copies the prefix into a separate full-size staging file.
         _require_free_space(self.root, self.source.size)
-        fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
+        fd, name = tempfile.mkstemp(prefix=_staging_prefix(self.card.model_id), dir=str(self.root))
         os.close(fd)
         self.temp = Path(name)
         identity = None
@@ -996,7 +1011,7 @@ class Transfer:
             raise
         self._persist("APPROVED")
         self._persist("QUEUED")
-        fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
+        fd, name = tempfile.mkstemp(prefix=_staging_prefix(self.card.model_id), dir=str(self.root))
         os.close(fd)
         self.temp = Path(name)
         try:
@@ -1688,6 +1703,62 @@ class Registry:
             yield
         finally:
             os.close(fd)
+
+    def _staging_directory(self):
+        folder = self.root / "transfers"
+        try:
+            info = folder.lstat()
+        except FileNotFoundError:
+            return None
+        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                or info.st_mode & 0o077):
+            raise Hold("staging_directory_untrusted")
+        return folder
+
+    @_model_leased
+    @_registry_locked
+    def staging_candidates(self, model_id):
+        """Inspect model-bound abandoned staging files; never delete implicitly.
+
+        The lease excludes cooperating live transfers. Legacy names without
+        a model binding and custom staging roots are deliberately excluded.
+        """
+        prefix = _staging_prefix(model_id)
+        folder = self._staging_directory()
+        if folder is None:
+            return ()
+        candidates = []
+        for path in folder.iterdir():
+            if not re.fullmatch(re.escape(prefix) + r"[a-z0-9_]{8}", path.name):
+                continue
+            try:
+                identity = _staging_identity(path)
+            except (Hold, OSError):
+                continue
+            candidates.append((path.name, identity))
+            if len(candidates) > 128:
+                raise Hold("staging_candidate_limit")
+        return tuple(sorted(candidates))
+
+    @_model_leased
+    @_registry_locked
+    def discard_staging(self, model_id, name, expected_identity):
+        """Explicitly remove one exact, privately owned, inactive staging file."""
+        prefix = _staging_prefix(model_id)
+        if not isinstance(name, str) or not re.fullmatch(re.escape(prefix) + r"[a-z0-9_]{8}", name):
+            raise Hold("staging_name_untrusted")
+        folder = self._staging_directory()
+        if folder is None:
+            raise Hold("staging_changed")
+        path = folder / name
+        try:
+            actual = _staging_identity(path)
+        except FileNotFoundError:
+            raise Hold("staging_changed") from None
+        if actual != expected_identity:
+            raise Hold("staging_changed")
+        path.unlink()
+        _sync_directory(folder)
 
     def _queue_partial_paths(self, model_id):
         if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model_id):
