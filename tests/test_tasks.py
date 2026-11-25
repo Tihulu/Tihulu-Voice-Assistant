@@ -21,7 +21,8 @@ class BoardTests(unittest.TestCase):
         row = self.board.get(task_id)
         self.assertFalse(row.busy)
         self.assertEqual((row.state, row.reason, row.ended_at), ("done", "", 15.0))
-        self.assertEqual(row.elapsed(18.0), 8.0)
+        self.assertEqual(row.elapsed(18.0), 5.0)
+        self.assertEqual(row.elapsed(180.0), 5.0)
 
     def test_progress_is_bytes_or_nothing_never_a_guess(self):
         task_id = self.board.start("download", "fixture-weights", now=1.0)

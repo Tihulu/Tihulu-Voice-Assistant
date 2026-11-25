@@ -3491,6 +3491,36 @@ class ActivityBoardTests(DesktopTests):
         self.backend.chat_release.set()
         self.until(lambda: not self.ui.busy)
 
+    def test_activity_stop_keeps_running_task_until_backend_drains(self):
+        self.connect_model()
+        self.backend.hold_chat = True
+        self.ui.entry.set_text("naber nasilsin")
+        self.click(self.ui.send)
+        self.until(lambda: self.backend.chat_entered)
+        task_id = self.ui.active_task
+        self.ui.activity_list.select_row(self.rows()[0])
+        self.click(self.ui.activity_stop)
+        self.until(lambda: self.backend.chat_cancelled)
+        row = self.ui.board.get(task_id)
+        self.assertTrue(row.busy)
+        self.assertEqual(row.reason, "stopped_by_owner")
+        self.assertTrue(self.ui.busy)
+        self.assertEqual(self.ui.stage, "stopping")
+        self.backend.chat_release.set()
+        self.until(lambda: not self.ui.busy)
+        row = self.ui.board.get(task_id)
+        self.assertEqual((row.state, row.reason, row.locks),
+                         ("cancelled", "stopped_by_owner", ()))
+        self.assertEqual(self.ui.board.busy(), ())
+
+    def test_model_discovery_does_not_reuse_previous_chat_label(self):
+        self.connect_model()
+        self.text("naber nasilsin")
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertNotIn("naber nasilsin", self.ui.board.rows[-1].label)
+        self.assertEqual(self.ui.board.rows[-1].label, "Discover local models")
+
     def test_the_board_keeps_every_turn_and_the_newest_last(self):
         self.connect_model()
         for index in range(3):

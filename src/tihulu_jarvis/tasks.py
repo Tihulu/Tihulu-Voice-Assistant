@@ -50,7 +50,8 @@ class Task:
     def elapsed(self, now=0.0):
         if not self.started_at:
             return 0.0
-        return max(0.0, (now or time.time()) - self.started_at)
+        end = self.ended_at if not self.busy and self.ended_at else (now or time.time())
+        return max(0.0, end - self.started_at)
 
 
 class Board:

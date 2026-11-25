@@ -2144,14 +2144,16 @@ def create_window(app, loop, bridge=None):
             return getattr(self, "turn_note", "") or tr("a local turn", "yerel tur",
                                                         "eine lokale Runde")
 
-        def finish_task(self, board_id, t, message):
-            """Record how a turn ended: done, cancelled or failed, with the reason."""
+        def finish_task(self, board_id, t, message, *, invalidated=False):
+            """Publish a terminal state only after the owned task has drained."""
             try:
+                row = self.board.get(board_id)
                 state = "failed" if message else "done"
-                if t.cancelled():
+                if t.cancelled() or invalidated:
                     state = "cancelled"
-                    message = message or "Stopped"
+                    message = row.reason or message or "Stopped"
                 self.board.finish(board_id, state, message or "")
+                self.board.update(board_id, locks=())
             except Hold:
                 pass
 
@@ -2231,13 +2233,15 @@ def create_window(app, loop, bridge=None):
             chosen = row.task if row is not None else None
             if chosen is None or not chosen.busy:
                 return
-            self.board.cancel(chosen.id, "stopped_by_owner")
-            # A running turn is cancelled through the real cancellation path.
-            if chosen.kind == "turn" and self.busy:
-                self.interrupt(False)
+            if chosen.id != self.active_task or not self.busy or self.session.active.done():
+                return
+            # Cancellation is a request, not completion. Keep the task and its
+            # leases visible until the real owned worker has finished cleanup.
+            self.board.update(chosen.id, reason="stopped_by_owner")
+            self.interrupt(False)
             self.refresh_activity()
-            self.set_state("ready", tr("Task stopped.", "Görev durduruldu.",
-                                       "Aufgabe gestoppt."))
+            self.set_state("stopping", tr("Stopping task…", "Görev durduruluyor…",
+                                          "Aufgabe wird gestoppt…"))
 
         def build_files_page(self):
             """A folder the owner chose, listed and previewed behind the policy.
@@ -2867,14 +2871,16 @@ def create_window(app, loop, bridge=None):
                 self.save()
                 self.build_market_page()
                 self.refresh()
-            self.submit(run)
+            self.submit(run, label=tr("Discover model inventory", "Model listesini keşfet",
+                                      "Modellbestand suchen"))
 
         def download_selected_card(self):
             """Queue a discovered item for download; nothing installed is replaced."""
             model_id = self.selected_card()
             if model_id is None or self.busy:
                 return
-            self.submit(lambda epoch: self.download(epoch, model_id))
+            self.submit(lambda epoch: self.download(epoch, model_id), kind="download",
+                        label=tr("Model download", "Model indirme", "Modelldownload"))
 
         async def download(self, epoch, model_id):
             card = self.market.card(model_id)
@@ -3031,7 +3037,9 @@ def create_window(app, loop, bridge=None):
                     self.session.check(epoch)
                     self.build_downloads_page()
                     self.build_market_page()
-            self.submit(run)
+            self.submit(run, kind="download",
+                        label=tr("Resume model download", "Model indirmeyi sürdür",
+                                 "Modelldownload fortsetzen"))
 
         def restore_download_queue(self):
             """Rebuild the queue from disk: a partial transfer is resumable."""
@@ -3105,7 +3113,8 @@ def create_window(app, loop, bridge=None):
                         pass
                     self.build_downloads_page()
                     self.build_market_page()
-            self.submit(run)
+            self.submit(run, kind="update",
+                        label=tr("Model update", "Model güncelleme", "Modellaktualisierung"))
 
         def forget_selected_card(self):
             model_id = self.selected_card()
@@ -3302,7 +3311,7 @@ def create_window(app, loop, bridge=None):
                                                      epoch, selection=lambda: self.cfg["voices"].get(lang),
                                                      expected=speech.voice_id)
                     await audio.speak(speech, progress, checkpoint=checkpoint)
-            self.submit(run)
+            self.submit(run, label=tr("Voice preview", "Ses önizlemesi", "Stimmprobe"))
 
         def test_chat(self):
             if self.busy or self.cfg["llm"] not in self.inventory:
@@ -3316,9 +3325,6 @@ def create_window(app, loop, bridge=None):
                 # A disposable session shares this turn's epoch, so cancellation
                 # and staleness checks still apply; its history is never merged.
                 probe.epoch = epoch
-                self.turn_note = tr("testing the selected model",
-                                    "seçilen model sınanıyor",
-                                    "ausgewähltes Modell wird getestet")
                 # A short, anchor-bearing probe so the reply language is provable.
                 text = tr("Hello there! In one short sentence, what can you do?",
                           "Merhaba! Tek cümleyle cevapla: neler yapabilirsin?",
@@ -3329,7 +3335,8 @@ def create_window(app, loop, bridge=None):
                 self.test_probe_route = route
                 self.test_probe_pending = False
                 self.test_note.set_text("%s · %s" % (reply.strip()[:240], probe.context.response_language or "unknown"))
-            self.submit(run)
+            self.submit(run, label=tr("Test selected model", "Seçilen modeli dene",
+                                      "Ausgewähltes Modell testen"))
 
         def active_profile(self):
             """The profile whose policy is in force for this turn."""
@@ -3392,7 +3399,7 @@ def create_window(app, loop, bridge=None):
                 return raw
             self.turn_note = tr("Transcribe selected recording", "Seçili kaydı yazıya çevir",
                                 "Ausgewählte Aufnahme transkribieren")
-            self.submit(run)
+            self.submit(run, kind="transcription")
 
         def tool_checkpoint(self, action, scope, epoch, *, selected=False,
                             selection=lambda: None, expected=None, expected_generation=None):
@@ -3530,9 +3537,11 @@ def create_window(app, loop, bridge=None):
             except Hold:
                 return False
 
-        def submit(self, work):
-            if self.busy:
+        def submit(self, work, *, kind="turn", label=None):
+            if self.busy or self.closing:
                 return
+            task_label = label if label is not None else self.turn_label()
+            self.turn_note = ""
             self.dismiss_picker()
             self.busy=True
             # Work is being submitted: ask for the fast tick instead of the
@@ -3544,7 +3553,7 @@ def create_window(app, loop, bridge=None):
             self.set_state("starting")
             # Every turn the client runs is a task on the board, with no
             # percentage: its state is the truth until it ends.
-            board_id = self.board.start("turn", self.turn_label(), now=time.time())
+            board_id = self.board.start(kind, task_label, now=time.time())
             self.active_task = board_id
             self.turn_outcome = ""
             # A running task is visible while it runs, not only after it ends.
@@ -3563,7 +3572,8 @@ def create_window(app, loop, bridge=None):
                     message="Local operation failed"
                 self.busy=False
                 self.finish=self.playback=None
-                self.finish_task(board_id, t, message)
+                self.finish_task(board_id, t, message, invalidated=epoch != self.session.epoch)
+                self.active_task = None
                 self.refresh_activity()
                 # A turn that stated its own outcome keeps it: a generic
                 # "ready" must not overwrite "reply muted; shown as text".
@@ -3605,7 +3615,8 @@ def create_window(app, loop, bridge=None):
                 self.save()
                 if not models:
                     raise Hold("no_installed_chat_models")
-            self.submit(run)
+            self.submit(run, label=tr("Discover local models", "Yerel modelleri keşfet",
+                                      "Lokale Modelle suchen"))
 
         def receipt(self, kind, what):
             """Record one decision in the conversation, as a receipt.
@@ -3942,7 +3953,6 @@ def create_window(app, loop, bridge=None):
                     except Hold:
                         return False
 
-                self.turn_note = tr("a spoken turn", "sesli tur", "eine gesprochene Runde")
                 voices = audio.SelectedVoices(self.cfg["voices"])
                 self.finish=asyncio.Event()
                 # The microphone is exclusive: a turn that cannot get the lease
@@ -4012,7 +4022,7 @@ def create_window(app, loop, bridge=None):
                         self.playback = None
                         self.playback_stopping = False
                 self.note_leases()
-            self.submit(run)
+            self.submit(run, label=tr("a spoken turn", "sesli tur", "eine gesprochene Runde"))
 
         def close(self,*_):
             self.dismiss_picker()
