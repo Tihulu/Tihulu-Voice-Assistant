@@ -926,7 +926,7 @@ class Transfer:
                 pass
             self.temp = None
 
-    def _consume_partial(self, identity, record=None):
+    def _consume_partial(self, identity, record=None, *, pair=None):
         """Remove only the exact partial consumed by this committed resume."""
         if identity is None:
             return
@@ -939,6 +939,8 @@ class Transfer:
                 actual = (info.st_dev, info.st_ino, info.st_size,
                           info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
                 if actual == identity:
+                    if pair is not None and self._partial_pair_identity() != pair:
+                        return
                     if record is not None:
                         if self._read_partial_record() != record:
                             return
@@ -949,8 +951,11 @@ class Transfer:
         except (Hold, OSError):
             pass
 
+    def _partial_pair_identity(self):
+        return tuple(_partial_file_identity(path) for path in self._partial_paths())
+
     @_leased_transfer
-    async def resume(self, progress=None, start=0, allow_installed=False):
+    async def resume(self, progress=None, start=0, allow_installed=False, *, expected_pair=None):
         """Continue an interrupted transfer from a verified byte offset.
 
         The card's lifecycle is not advanced here: an interrupted item stays
@@ -963,6 +968,8 @@ class Transfer:
             raise Hold("transfer_resume_offset_unverified")
         if self.card.shared_storage_owner or self.card.loaded:
             raise Hold("artifact_not_replaceable")
+        if expected_pair is not None and not start:
+            raise Hold("partial_changed")
         # Resume copies the prefix into a separate full-size staging file.
         _require_free_space(self.root, self.source.size)
         fd, name = tempfile.mkstemp(prefix=_staging_prefix(self.card.model_id), dir=str(self.root))
@@ -970,6 +977,7 @@ class Transfer:
         self.temp = Path(name)
         identity = None
         record = None
+        pair = None
         try:
             os.chmod(self.temp, 0o600)
             if start:
@@ -987,17 +995,29 @@ class Transfer:
                     if not stat.S_ISREG(info.st_mode) or info.st_size != start:
                         raise Hold("transfer_resume_offset_unverified")
                     record = self._read_partial_record()
+                    try:
+                        pair = self._partial_pair_identity()
+                    except (Hold, OSError):
+                        raise Hold("transfer_resume_identity_unverified") from None
+                    if expected_pair is not None and pair != expected_pair:
+                        raise Hold("partial_changed")
                     if (record["size"] != start
                             or any(record[k] != v for k, v in self._partial_binding().items())):
                         raise Hold("transfer_resume_identity_unverified")
                     identity = selection_identity(str(partial.absolute()), authorized=authorized, max_bytes=start)
                     if identity[2] != start:
                         raise Hold("transfer_resume_offset_unverified")
+                    if identity != pair[0] or self._partial_pair_identity() != pair:
+                        raise Hold("partial_changed")
                 self.temp.unlink()
                 await copy_selected_to(str(partial.absolute()), self.temp, authorized=authorized,
                                        expected_identity=identity, max_bytes=start)
                 if await _verified_artifact_async(self.temp, start, checkpoint=self._check) != record["digest"]:
                     raise Hold("transfer_resume_identity_unverified")
+                with self.registry._write_guard():
+                    self._check()
+                    if self._partial_pair_identity() != pair:
+                        raise Hold("partial_changed")
             written = await self._fetch(progress, start)
             checksum = await self._verified(written)
             if start and written <= start:
@@ -1013,7 +1033,7 @@ class Transfer:
                                  license_id=self.source.license_id)
             result = self._publish(registered, replacing=allow_installed)
             # A cleanup failure must not turn a committed result into a failed update.
-            self._consume_partial(identity, record)
+            self._consume_partial(identity, record, pair=pair)
             return result
         except asyncio.CancelledError:
             self.state = "CANCELLED"

@@ -3423,7 +3423,8 @@ def create_window(app, loop, bridge=None):
                 entry["state"], entry["note"] = "DOWNLOADING", tr("Resuming…","Sürdürülüyor…",
                                                                  "Fortsetzung…")
                 try:
-                    result = await transfer.resume(self.download_progress(entry, start), start)
+                    result = await transfer.resume(self.download_progress(entry, start), start,
+                                                   expected_pair=expected)
                     self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
                     entry["state"], entry["note"] = result.state, tr(
                         "Registered.", "Kaydedildi.", "Registriert.")
