@@ -65,3 +65,48 @@ class ChainTests(unittest.TestCase):
         with self.assertRaises(Refused):
             c.begin(self.a,c.current)
         self.assertEqual(c.state,"ready")
+
+    def test_same_permission_cannot_start_two_chains(self):
+        c=Chain(self.g,self.ctx,self.steps,"csv",b"csv")
+        self.c.begin(self.a,self.initial)
+        with self.assertRaisesRegex(Refused,"grant_already_claimed"):
+            c.begin(self.a,c.current)
+
+    def test_predecessor_revocation_invalidates_running_successor(self):
+        a=self.c.complete(self.c.begin(self.a,self.initial),"table",b"table")
+        b=self.grant("b",a)
+        h=self.c.begin(b,a)
+        self.g.revoke("a")
+        with self.assertRaises(Refused):
+            self.c.complete(h,"chart",b"chart")
+        self.assertEqual(self.c.state,"held")
+        with self.assertRaises(Refused):
+            self.g.checkpoint(b,b.request)
+
+    def test_predecessor_revocation_invalidates_completed_metadata(self):
+        a=self.c.complete(self.c.begin(self.a,self.initial),"table",b"table")
+        self.c.complete(self.c.begin(self.grant("b",a),a),"chart",b"chart")
+        self.g.revoke("a")
+        with self.assertRaises(Refused):
+            _=self.c.current
+        self.assertEqual(self.c.state,"held")
+
+    def test_cancel_revokes_active_grant(self):
+        self.c.begin(self.a,self.initial)
+        self.c.cancel()
+        with self.assertRaises(Refused):
+            self.g.checkpoint(self.a,self.a.request)
+
+    def test_concurrent_start_one_winner(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        barrier=Barrier(2)
+        def begin(_):
+            barrier.wait(timeout=5)
+            try:
+                self.c.begin(self.a,self.initial)
+                return True
+            except Refused:
+                return False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(sorted(pool.map(begin,range(2))),[False,True])
