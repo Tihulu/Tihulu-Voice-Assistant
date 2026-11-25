@@ -22,7 +22,7 @@ on:
                'feat/ai-market', 'feat/download-queue', 'feat/market-catalog',
                'feat/native-voice-controls', 'feat/release-packaging', 'feat/ci-triggers',
                'feat/merge-log', 'feat/merge-log-2', 'feat/merge-log-3', 'feat/preflight-gpu',
-               'feat/record-card']
+               'feat/record-card', 'feat/merge-log-4', 'plan/recovery-roadmap']
 permissions:
   contents: read
 jobs:
