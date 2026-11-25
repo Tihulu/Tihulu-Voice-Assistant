@@ -38,3 +38,28 @@ class ResearchSessionTests(unittest.TestCase):
             self.add(n,b"x"*65536)
         with self.assertRaises(Refused):
             self.add(4)
+
+    def test_close_during_collect_cannot_restore_source(self):
+        from unittest.mock import patch
+        from research_session import fixture_response as original
+        def close(*args):
+            result=original(*args)
+            self.s.close()
+            return result
+        with patch("research_session.fixture_response",side_effect=close):
+            with self.assertRaisesRegex(Refused,"session_closed"):
+                self.add(1)
+        self.assertEqual(self.s._sources,{})
+        self.assertEqual(self.s._bytes,0)
+
+    def test_close_during_citation_cannot_return_quote(self):
+        from unittest.mock import patch
+        from research_session import citation as original
+        a=self.add(1)
+        def close(*args):
+            quote=original(*args)
+            self.s.close()
+            return quote
+        with patch("research_session.citation",side_effect=close):
+            with self.assertRaisesRegex(Refused,"session_closed"):
+                self.s.cite(a,sha256(b"mavi").hexdigest(),0,4)
