@@ -791,6 +791,8 @@ def create_window(app, loop, bridge=None):
             self.clear_attachment()
             self.clear_model_scan()
             self.clear_model_probe()
+            if hasattr(self, "folder_entries"):
+                self.clear_folder_view()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             self.cfg["profile"] = entry.id
@@ -2296,6 +2298,18 @@ def create_window(app, loop, bridge=None):
             page.append(self.file_preview)
             self.file_read = self.button(page, tr("Read the selected file", "Seçili dosyayı oku",
                                                   "Ausgewählte Datei lesen"), self.read_selected_file)
+            self.research_folder = self.research_context = None
+            self.folder_root.connect("changed", lambda *_: self.clear_folder_view())
+            self.refresh_files_buttons()
+
+        def clear_folder_view(self):
+            self.research_folder = self.research_context = None
+            item = self.folder_entries.get_first_child()
+            while item is not None:
+                nxt = item.get_next_sibling()
+                self.folder_entries.remove(item)
+                item = nxt
+            self.file_note.set_text("")
             self.refresh_files_buttons()
 
         def choose_folder(self):
@@ -2320,10 +2334,9 @@ def create_window(app, loop, bridge=None):
             """Store a chosen folder and list it; nothing is read yet."""
             try:
                 root = files.checked_root(path)
-                self.cfg["research_root"] = root
-                self.save()
                 self.folder_root.set_text(root)
-                self.list_folder(root)
+                if self.list_folder(root) is None:
+                    return None
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return None
@@ -2333,9 +2346,15 @@ def create_window(app, loop, bridge=None):
             if self.busy:
                 return
             root = root or self.folder_root.get_text().strip()
+            self.clear_folder_view()
             try:
+                context = self.picker_context()
                 self.require_tools(("filesystem_read", ("folder",)), selected=True)
-                folder = files.list_dir(root)
+                check = self.tool_checkpoint("filesystem_read", ("folder",),
+                    self.session.epoch, selected=True,
+                    expected_generation=(context[0], context[4]))
+                folder = files.list_dir(root, checkpoint=check)
+                check()
             except Hold as exc:
                 # A refused or unreadable folder is a bounded reason.
                 if "filesystem_read" in str(exc) or "profile_forbids" in str(exc):
@@ -2345,10 +2364,16 @@ def create_window(app, loop, bridge=None):
             self.cfg["research_root"] = folder.root
             self.save()
             self.folder_root.set_text(folder.root)
+            self.research_folder = folder
+            self.research_context = (context[0], context[4])
             self.show_folder(folder)
-            self.file_note.set_text(tr("%d entries, folders first." % len(folder.entries),
-                                       "%d girdi, önce klasörler." % len(folder.entries),
-                                       "%d Einträge, Ordner zuerst." % len(folder.entries)))
+            note = tr("%d entries, folders first." % len(folder.entries),
+                      "%d girdi, önce klasörler." % len(folder.entries),
+                      "%d Einträge, Ordner zuerst." % len(folder.entries))
+            if folder.limited:
+                note += " " + tr("Listing limit reached.", "Listeleme sınırına ulaşıldı.",
+                                  "Listengrenze erreicht.")
+            self.file_note.set_text(note)
             return folder
 
         def show_folder(self, folder):
@@ -2371,6 +2396,8 @@ def create_window(app, loop, bridge=None):
         def refresh_files_buttons(self):
             row = self.folder_entries.get_selected_row()
             self.file_preview.set_text("")
+            self.file_read.set_sensitive(row is not None and not row.entry.directory
+                                         and self.research_folder is not None)
 
         def read_selected_file(self):
             row = self.folder_entries.get_selected_row()
@@ -2379,9 +2406,17 @@ def create_window(app, loop, bridge=None):
             entry = row.entry
             if entry.directory:
                 return None
+            self.file_preview.set_text("")
             try:
+                folder = self.research_folder
+                if folder is None or folder.root != self.folder_root.get_text().strip():
+                    raise Hold("folder_changed")
                 self.require_tools(("filesystem_read", ("file",)), selected=True)
-                text = files.preview(self.cfg.get("research_root", ""), entry.name)
+                check = self.tool_checkpoint("filesystem_read", ("file",),
+                    self.session.epoch, selected=True, expected_generation=self.research_context)
+                text = files.preview(folder.root, entry.name, expected_root=folder.identity,
+                                     expected_entry=entry.identity, checkpoint=check)
+                check()
             except Hold as exc:
                 if "profile_forbids" in str(exc):
                     self.receipt("refused", "read a file (filesystem_read)")
@@ -3750,6 +3785,8 @@ def create_window(app, loop, bridge=None):
 
         def hard_stop(self):
             self.clear_attachment()
+            if hasattr(self, "folder_entries"):
+                self.clear_folder_view()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             self.interrupt(False)

@@ -42,3 +42,6 @@ Task cancellation is a request, not a terminal event: keep the active board row 
 
 ## Typed local picker commands
 Exact TR/EN/DE owner-composer requests for local recording transcription and audio model discovery use the same native owned picker as their explicit buttons. No Jan request, model-generated path or shell action, no file read before selection. Preserve draft on refusal, refuse attachment/picker conflicts and non-local mode, check policy at picker entry and again on actual execution. This adds a bounded command surface, not general natural-language agents or new model engines.
+
+## Local file boundary hardening
+Directory listing scans at most 1024 entries and displays at most 200 regular files/directories, never following links. Descriptor-relative no-follow traversal, nonblocking file open, bounded reads, before/after file identity, selected root identity and live authorization checkpoints protect previews from stale selections and replacement. Clear old listing/preview on changed root, failed listing, profile activation or Hard Stop. This is a synchronous bounded metadata/text operation; slow filesystem I/O can still block and no new chat/agent file access is granted. Hard links and mount boundaries are not a sandbox; owner-selected directories must be trusted.

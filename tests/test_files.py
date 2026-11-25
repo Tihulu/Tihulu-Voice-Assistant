@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Distributed without warranty; see LICENSE for the full terms.
 """Local folder tests: only temporary directories are touched."""
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
+from tihulu_jarvis import files
 from pathlib import Path
 
 from tihulu_jarvis.files import (MAX_ENTRIES, checked_root, inside, list_dir,
@@ -91,3 +94,86 @@ class PreviewTests(unittest.TestCase):
             preview(self.root, "missing.txt")
         with self.assertRaisesRegex(Hold, "file_not_found"):
             preview(self.root, "pictures")  # a directory is not a file
+
+
+class SafeFolderTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.folder = self.root / "selected"
+        self.folder.mkdir()
+        self.outside = self.root / "outside"
+        self.outside.mkdir()
+        (self.outside / "secret.txt").write_text("SECRET")
+
+    def test_links_special_files_and_linked_root_ancestors_are_refused(self):
+        (self.folder / "escape.txt").symlink_to(self.outside / "secret.txt")
+        os.mkfifo(self.folder / "pipe.txt")
+        self.assertEqual(list_dir(str(self.folder)).entries, ())
+        for name in ("escape.txt", "pipe.txt"):
+            with self.assertRaises(Hold):
+                preview(str(self.folder), name)
+        alias = self.root / "alias"
+        alias.symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(Hold):
+            list_dir(str(alias / "outside"))
+
+    def test_bounded_scan_reports_truncation(self):
+        for i in range(12):
+            (self.folder / str(i)).write_text("x")
+        with patch.object(files, "MAX_SCAN", 3):
+            result = list_dir(str(self.folder))
+        self.assertTrue(result.limited)
+        self.assertEqual(len(result.entries), 3)
+
+    def test_replaced_root_and_entry_are_not_previewed(self):
+        name = "notes.txt"
+        path = self.folder / name
+        path.write_text("first")
+        listing = list_dir(str(self.folder))
+        expected = dict(expected_root=listing.identity,
+                        expected_entry=listing.entries[0].identity)
+        path.unlink()
+        path.write_text("second")
+        with self.assertRaisesRegex(Hold, "file_changed"):
+            preview(str(self.folder), name, **expected)
+        self.folder.rename(self.root / "old")
+        self.folder.mkdir()
+        (self.folder / name).write_text("replacement")
+        with self.assertRaisesRegex(Hold, "folder_changed"):
+            preview(str(self.folder), name, **expected)
+
+    def test_swap_to_symlink_between_metadata_check_and_open(self):
+        path = self.folder / "notes.txt"
+        path.write_text("safe")
+        real_open = os.open
+        def swap(name, flags, *args, **kwargs):
+            if name == "notes.txt":
+                path.unlink()
+                path.symlink_to(self.outside / "secret.txt")
+            return real_open(name, flags, *args, **kwargs)
+        with patch.object(files.os, "open", side_effect=swap):
+            with self.assertRaises(Hold):
+                preview(str(self.folder), path.name)
+
+    def test_revocation_before_publication_and_nul_beyond_header(self):
+        path = self.folder / "notes.txt"
+        path.write_bytes(b"a" * 5000 + b"\x00")
+        with self.assertRaisesRegex(Hold, "file_not_text"):
+            preview(str(self.folder), path.name)
+        path.write_text("safe")
+        real_read = os.read
+        finished_reading = []
+        def read(*args):
+            data = real_read(*args)
+            if not data:
+                finished_reading.append(True)
+            return data
+        def revoke():
+            if finished_reading:
+                raise Hold("revoked")
+        with patch.object(files.os, "read", side_effect=read):
+            with self.assertRaisesRegex(Hold, "revoked"):
+                preview(str(self.folder), path.name, checkpoint=revoke)
+        self.assertTrue(finished_reading)

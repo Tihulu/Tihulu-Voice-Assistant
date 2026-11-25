@@ -3731,6 +3731,31 @@ class FilesResearchTests(DesktopTests):
         self.assertIsNone(self.ui.list_folder(str(self.tmp / "missing")))
         self.assertEqual(self.ui.file_note.get_text(), "folder_not_found")
 
+    def test_failed_folder_list_and_changed_root_clear_old_rows(self):
+        self.allow_reads()
+        self.ui.list_folder(str(self.tmp))
+        self.ui.folder_entries.select_row(self.row_named("notes.txt"))
+        self.ui.read_selected_file()
+        self.ui.folder_root.set_text(str(self.tmp / "missing"))
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(self.ui.file_preview.get_text(), "")
+        self.assertIsNone(self.ui.read_selected_file())
+        self.ui.list_folder(str(self.tmp))
+        self.assertTrue(self.rows())
+        self.assertIsNone(self.ui.list_folder(str(self.tmp / "missing")))
+        self.assertEqual(self.rows(), [])
+
+    def test_replaced_listed_entry_is_refused_without_displaying_contents(self):
+        self.allow_reads()
+        self.ui.list_folder(str(self.tmp))
+        self.ui.folder_entries.select_row(self.row_named("notes.txt"))
+        path = self.tmp / "notes.txt"
+        path.unlink()
+        path.write_text("replacement canary")
+        self.assertIsNone(self.ui.read_selected_file())
+        self.assertEqual(self.ui.file_note.get_text(), "file_changed")
+        self.assertEqual(self.ui.file_preview.get_text(), "")
+
     def test_enter_on_a_row_reads_it(self):
         self.allow_reads()
         self.ui.list_folder(str(self.tmp))
