@@ -8,6 +8,7 @@ from conversation import Conversation, session_target
 from rich_chat import RichChat, Card, room_target, key
 from adapter_protocol import text_bytes
 from task_board import TaskBoard, Receipt
+from research_board import ResearchBoard, Card as ResearchCard
 from hashlib import sha256
 from voice_review import review, target as stt_target
 
@@ -43,6 +44,11 @@ def task_result_target(receipt,identity,data,color="blue"):
     return key("task-result",receipt.scope,receipt.identity,receipt.spec_target,
                receipt.payload_digest,token(identity),"temperature",color)
 
+def research_attachment_target(room,card,question):
+    if type(card) is not ResearchCard or len(card.payload)>4096 or not text_bytes(question).strip():
+        raise Refused("invalid_research_attachment")
+    return key("research-attachment",token(room),card.identity,card.digest,question)
+
 class Workspace:
     """Owns both child lifetimes; cards never become automatic model messages."""
     def __init__(self,gateway,context,identity,candidate,url,grant,chat_grant,room_grant):
@@ -53,7 +59,9 @@ class Workspace:
         self._id=token(identity)
         self._lock=RLock()
         self._state="ready"
-        self._chat=self._rich=self._tasks=None
+        self._chat=self._rich=self._tasks=self._research=None
+        self._research_draft=None
+        self._research_checks=[]
         self._voice=None
         self._voice_checks=[]
         self._attachment=None
@@ -111,12 +119,25 @@ class Workspace:
         if self._tasks.receipt(receipt.identity)!=receipt:
             raise Refused("stale_task_result")
 
+    def _drop_research_draft(self):
+        if self._research_draft is not None:
+            _,_,grant,_=self._research_draft
+            self._research_draft=None
+            self._g.revoke(grant.identity)
+
+    def _check_research_link(self,record):
+        _,card,grant,req=record
+        self._g.checkpoint(grant,req)
+        if self._research.read(card.identity) is not card:
+            raise Refused("stale_research")
+
     def _clear(self,state):
         self._state=state
         self._timeline.clear()
         self._drop_voice()
         self._drop_attachment()
         self._drop_task_draft()
+        self._drop_research_draft()
         try:
             for grant,_ in self._voice_checks:
                 self._g.revoke(grant.identity)
@@ -124,10 +145,13 @@ class Workspace:
                 self._g.revoke(grant.identity)
             for _,_,grant,_ in self._task_links.values():
                 self._g.revoke(grant.identity)
+            for _,_,grant,_ in self._research_checks:
+                self._g.revoke(grant.identity)
         finally:
             self._voice_checks.clear()
             self._attachment_checks.clear()
             self._task_links.clear()
+            self._research_checks.clear()
             try:
                 if self._chat is not None:
                     self._chat.close()
@@ -140,7 +164,11 @@ class Workspace:
                         if self._tasks is not None:
                             self._tasks.close()
                     finally:
-                        self._g.revoke(self._root[0].identity)
+                        try:
+                            if self._research is not None:
+                                self._research.close()
+                        finally:
+                            self._g.revoke(self._root[0].identity)
 
     def _live(self):
         if self._state in ("held","closed"):
@@ -167,6 +195,12 @@ class Workspace:
                 for link in self._task_links.values():
                     self._check_task_link(link)
                     self._rich.read(link[0].identity)
+            if self._research is not None:
+                self._research.cards()
+                if self._research_draft is not None:
+                    self._check_research_link(self._research_draft)
+                for record in self._research_checks:
+                    self._check_research_link(record)
             if self._state in ("held","closed"):
                 raise Refused("workspace_unavailable")
         except Refused:
@@ -189,6 +223,7 @@ class Workspace:
             d=self._chat.draft(text)
             self._drop_voice()
             self._drop_attachment()
+            self._drop_research_draft()
             self._live()
             return d
 
@@ -213,6 +248,7 @@ class Workspace:
                 draft=self._chat.draft(voice.text)
                 self._drop_voice()
                 self._drop_attachment()
+                self._drop_research_draft()
                 self._voice=(voice,draft,grant,req)
                 self._live()
                 return draft
@@ -237,6 +273,7 @@ class Workspace:
             self._chat.discard_draft()
             self._drop_voice()
             self._drop_attachment()
+            self._drop_research_draft()
 
     def attach(self,identity,name,question,grant,*,confirmed=False):
         """Explicit local-only selection; attachment remains data, never tool authority."""
@@ -259,6 +296,7 @@ class Workspace:
                 draft=self._chat.draft(raw)
                 self._drop_voice()
                 self._drop_attachment()
+                self._drop_research_draft()
                 self._attachment=(draft,card,grant,req)
                 self._live()
                 return draft
@@ -275,6 +313,8 @@ class Workspace:
                 raise Refused("stale_voice_draft")
             if self._attachment is not None and draft is not self._attachment[0]:
                 raise Refused("stale_attachment_draft")
+            if self._research_draft is not None and draft is not self._research_draft[0]:
+                raise Refused("stale_research_draft")
             self._state="running"
         try:
             answer=await self._chat.submit(draft,grant,response,confirmed=True)
@@ -289,6 +329,9 @@ class Workspace:
                 if self._attachment is not None:
                     self._attachment_checks.append(self._attachment)
                     self._attachment=None
+                if self._research_draft is not None:
+                    self._research_checks.append(self._research_draft)
+                    self._research_draft=None
                 self._append("user",draft.text)
                 self._append("assistant",answer)
                 self._state="ready"
@@ -426,6 +469,91 @@ class Workspace:
         with self._lock:
             return self._board().capacity()
 
+    def research_room(self):
+        return key("workspace-research",self._id,self._root[0].identity)
+
+    def enable_research(self,root,grant,*,confirmed=False):
+        with self._lock:
+            self._ready()
+            if confirmed is not True or self._research is not None:
+                raise Refused("explicit_research_board_required")
+            self._research=ResearchBoard(self._g,self._ctx,self.research_room(),root,grant)
+            self._live()
+
+    def _research_board(self):
+        self._live()
+        if self._research is None:
+            raise Refused("research_disabled")
+        return self._research
+
+    def collect_source(self,url,resolved,peer,headers,body,network_grant,snapshot_grant,*,confirmed=False):
+        with self._lock:
+            board=self._research_board()
+            identity=board.collect(url,resolved,peer,headers,body,network_grant,snapshot_grant,confirmed=confirmed)
+            self._live()
+            return identity
+
+    def prepare_research(self,identity,spans):
+        with self._lock:
+            self._ready()
+            card=self._research_board().prepare(identity,spans)
+            self._live()
+            return card
+
+    def publish_research(self,card,grant,*,confirmed=False):
+        with self._lock:
+            self._ready()
+            result=self._research_board().publish(card,grant,confirmed=confirmed)
+            self._live()
+            self._append("research",result.identity)
+            return result
+
+    def discard_research(self):
+        with self._lock:
+            self._ready()
+            self._research_board().discard()
+
+    def clear_research(self,identity):
+        with self._lock:
+            self._ready()
+            self._research_board().clear(identity)
+            self._timeline=[i for i in self._timeline if not (i.kind=="research" and i.value==identity)]
+            self._live()
+
+    def export_research(self,identity,destination,grant,*,confirmed=False):
+        with self._lock:
+            self._ready()
+            board=self._research_board()
+            data=board.export(identity,destination,grant,confirmed=confirmed)
+            self._live()
+            board.read(identity)
+            return data
+
+    def attach_research(self,identity,question,grant,*,confirmed=False):
+        with self._lock:
+            self._ready()
+            if confirmed is not True:
+                raise Refused("explicit_research_attachment_required")
+            board=self._research_board()
+            card=board.read(identity)
+            req=Request(self._ctx,"engine",research_attachment_target(board.scope,card,question),"local","private")
+            self._g.claim(grant,req)
+            try:
+                raw=json.dumps({"question":question,"untrusted_research":json.loads(card.payload)},
+                               ensure_ascii=False,separators=(",",":"))
+                self._g.checkpoint(grant,req)
+                board.read(identity)
+                draft=self._chat.draft(raw)
+                self._drop_voice()
+                self._drop_attachment()
+                self._drop_research_draft()
+                self._research_draft=(draft,card,grant,req)
+                self._live()
+                return draft
+            except BaseException:
+                self._g.revoke(grant.identity)
+                raise
+
     def timeline(self):
         with self._lock:
             self._live()
@@ -434,11 +562,18 @@ class Workspace:
                             if item.kind!="card" or item.value in cards]
             self._live()
             current=[]
+            research={c.identity:c for c in self._research.cards()} if self._research is not None else {}
+            self._timeline=[i for i in self._timeline if i.kind!="research" or i.value in research]
             tasks={x.identity:x for x in self._tasks.snapshot()} if self._tasks is not None else {}
             for item in self._timeline:
                 if item.kind=="card":
                     try:
                         current.append(Item(item.sequence,item.kind,self._rich.read(item.value)))
+                    except Refused:
+                        self._live()
+                elif item.kind=="research":
+                    try:
+                        current.append(Item(item.sequence,item.kind,self._research.read(item.value)))
                     except Refused:
                         self._live()
                 elif item.kind=="task":

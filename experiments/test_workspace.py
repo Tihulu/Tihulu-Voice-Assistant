@@ -14,8 +14,8 @@ from test_rich_chat import CSV
 
 class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.ctx=Context("task","session","profile",1,"route","LOCAL_ONLY")
-        self.g=FixtureGateway(self.ctx,(profiles.Rule("filesystem_read",(),"allow"),profiles.Rule("publish_artifact",(),"allow"),profiles.Rule("host_shell",(),"allow")),clock=profiles.PolicyClock())
+        self.ctx=Context("task","session","profile",1,"route","LOCAL_ONLY",False,True)
+        self.g=FixtureGateway(self.ctx,(profiles.Rule("filesystem_read",(),"allow"),profiles.Rule("publish_artifact",(),"allow"),profiles.Rule("host_shell",(),"allow"),profiles.Rule("external_network",(),"allow")),clock=profiles.PolicyClock())
         self.c=Candidate("jan","llm","local","jan",True,True,4,80)
         self.stt=Candidate("whisper","stt","local","whisper",True,True,2,80)
         self.url="http://127.0.0.1:1337/v1"
@@ -333,3 +333,79 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
         self.s.discard_card()
         with self.assertRaises(Refused):
             self.g.checkpoint(lg,lg.request)
+
+    def research_setup(self):
+        from research_board import board_target,board_scope
+        root="https://example.com/docs"
+        room=self.s.research_room()
+        grant=self.grant("research",board_target(room,root),"public")
+        self.s.enable_research(root,grant,confirmed=True)
+        return grant,board_scope(room,grant.identity)
+    def research_card(self,scope,identity="report",raw=b"PUBLIC-CANARY"):
+        from research import canonical
+        from research_report import Span
+        from research_board import collect_target,publication_target
+        from hashlib import sha256
+        url="https://example.com/docs/"+identity
+        n=self.grant("research",canonical(url).identity,"public")
+        s=self.grant("research",collect_target(scope,url,raw),"public")
+        i=self.s.collect_source(url,("8.8.8.8",),"8.8.8.8",
+             (("Content-Type","text/plain; charset=utf-8"),("Content-Length",str(len(raw)))),raw,n,s,confirmed=True)
+        c=self.s.prepare_research(identity,(Span(i,sha256(raw).hexdigest(),0,len(raw.decode())),))
+        p=self.grant("publish",publication_target(scope,c))
+        self.s.publish_research(c,p,confirmed=True)
+        return c,n,s,p
+    async def test_research_card_timeline_without_automatic_model_context(self):
+        _,scope=self.research_setup()
+        c,_,_,_=self.research_card(scope)
+        with patch("conversation.replay",wraps=__import__("conversation").replay) as replay:
+            await self.send(self.s.draft("hello"),"answer")
+            self.assertNotIn("PUBLIC-CANARY",repr(replay.call_args.args[6]))
+        self.assertEqual([i.kind for i in self.s.timeline()],["research","user","assistant"])
+        self.assertEqual(self.s.timeline()[0].value,c)
+    async def test_research_attachment_explicit_and_revocable(self):
+        from workspace import research_attachment_target
+        _,scope=self.research_setup()
+        c,n,s,p=self.research_card(scope)
+        g=self.grant("engine",research_attachment_target(scope,c,"Summarize"),"private")
+        with self.assertRaises(Refused):
+            self.s.attach_research(c.identity,"Summarize",g)
+        d=self.s.attach_research(c.identity,"Summarize",g,confirmed=True)
+        with patch("conversation.replay",wraps=__import__("conversation").replay) as replay:
+            await self.send(d,"answer")
+            self.assertIn("PUBLIC-CANARY",repr(replay.call_args.args[6]))
+            self.assertIn("untrusted_research",repr(replay.call_args.args[6]))
+        self.g.revoke(s.identity)
+        self.assertEqual(self.s.poll(),"held")
+        self.assertEqual(self.s._chat._history,())
+    async def test_unused_research_revocation_only_removes_card(self):
+        _,scope=self.research_setup()
+        c,n,s,p=self.research_card(scope)
+        await self.send(self.s.draft("hello"),"answer")
+        self.g.revoke(n.identity)
+        self.assertEqual([i.kind for i in self.s.timeline()],["user","assistant"])
+        self.assertEqual(self.s.state,"ready")
+    async def test_research_exact_export_and_close(self):
+        from research_board import export_target
+        root,scope=self.research_setup()
+        c,n,s,p=self.research_card(scope)
+        g=self.grant("publish",export_target(scope,c,"slot"))
+        with self.assertRaises(Refused):
+            self.s.export_research(c.identity,"other",g,confirmed=True)
+        self.assertEqual(self.s.export_research(c.identity,"slot",g,confirmed=True),c.payload)
+        self.s.close()
+        for grant in (root,n,s,p):
+            with self.assertRaises(Refused):
+                self.g.checkpoint(grant,grant.request)
+    async def test_replaced_research_draft_drops_consent(self):
+        from workspace import research_attachment_target
+        _,scope=self.research_setup()
+        c,n,s,p=self.research_card(scope)
+        g=self.grant("engine",research_attachment_target(scope,c,"Read"),"private")
+        self.s.attach_research(c.identity,"Read",g,confirmed=True)
+        d=self.s.draft("new")
+        with self.assertRaises(Refused):
+            self.g.checkpoint(g,g.request)
+        with patch("conversation.replay",wraps=__import__("conversation").replay) as replay:
+            await self.send(d,"ok")
+            self.assertNotIn("PUBLIC-CANARY",repr(replay.call_args.args[6]))
