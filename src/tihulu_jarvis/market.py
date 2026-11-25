@@ -30,6 +30,8 @@ CATEGORIES = ("stt", "llm", "tts")
 STATES = ("DISCOVERED", "REVIEWED", "APPROVED", "QUEUED", "DOWNLOADING", "VERIFIED",
           "REGISTERED", "TESTABLE", "ACTIVE", "CANCELLED", "HOLD", "FAILED")
 TERMINAL = ("CANCELLED", "HOLD", "FAILED")
+RETRYABLE_TRANSFER = ("REVIEWED", "APPROVED", "QUEUED", "DOWNLOADING", "VERIFIED",
+                      "CANCELLED", "HOLD", "FAILED")
 (DISCOVERED, REVIEWED, APPROVED, QUEUED, DOWNLOADING, VERIFIED, REGISTERED, TESTABLE,
  ACTIVE, CANCELLED, HOLD, FAILED) = STATES
 ALLOWED_NEXT = {
@@ -1847,6 +1849,9 @@ class Registry:
     @_registry_locked
     def partial_status(self, model_id):
         """Cheap metadata-only inspection. Resume verifies the actual prefix."""
+        return self._partial_status_for(model_id, self.lookup_card(model_id))
+
+    def _partial_status_for(self, model_id, card):
         payload, metadata = self._queue_partial_paths(model_id)
         identity = (_partial_file_identity(payload), _partial_file_identity(metadata))
         if identity == (None, None):
@@ -1854,7 +1859,8 @@ class Registry:
         size = identity[0][2] if identity[0] else 0
         state = "UNVERIFIED"
         try:
-            card = self.card(model_id)
+            if card is None:
+                raise Hold("model_not_registered")
             source = source_of(card)
             record = _read_partial_record(metadata)
             if (identity[0] is not None and 0 < size < DIGEST_LIMIT
@@ -1868,6 +1874,55 @@ class Registry:
         except Hold:
             pass
         return {"state": state, "size": size, "identity": identity}
+
+    @_registry_locked
+    def pending_partials(self):
+        """Inspect known registry IDs only, without enumerating the directory.
+
+        A registry snapshot bounds work and avoids re-reading it per card.
+        Untrusted entries are visible but cannot be resumed or removed.
+        """
+        folder = self.root / "transfers"
+        try:
+            folder.lstat()
+        except FileNotFoundError:
+            return ()
+        _directory_identity(folder)
+        out = []
+        for card in sorted(self.cards(), key=lambda card: card.model_id):
+            if card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
+                continue
+            try:
+                status = self._partial_status_for(card.model_id, card)
+            except (Hold, OSError):
+                status = {"state": "UNVERIFIED", "size": 0, "identity": None}
+            if status is not None:
+                out.append((card.model_id, card.source_size, status))
+        return tuple(out)
+
+    @_model_leased
+    @_registry_locked
+    def retry_transfer(self, model_id, expected_card):
+        """Owner-requested restart of an inactive, uninstalled transfer.
+
+        Journal recovery precedes the exact card check. Never infer that
+        abandoned bytes were installed; never delete or reuse them here.
+        Existing approval is neither extended nor recreated.
+        """
+        current = self.card(model_id)
+        if current != expected_card:
+            raise Hold("registry_card_changed")
+        if (current.state not in RETRYABLE_TRANSFER or current.registered
+                or current.loaded or current.owned_by_jarvis
+                or current.shared_storage_owner or current.storage_ref
+                or current.artifact_digest or current.local_or_cloud != "local"
+                or not current.source_ref or not current.source_checksum):
+            raise Hold("transfer_retry_not_available")
+        target = self.root / "artifacts" / model_id
+        if _exists_entry(target):
+            raise Hold("transfer_retry_artifact_exists")
+        restarted = replace(current, state=DISCOVERED, installed=False, registered=False)
+        return self.save_card(restarted, expected=current)
 
     @_model_leased
     @_registry_locked
