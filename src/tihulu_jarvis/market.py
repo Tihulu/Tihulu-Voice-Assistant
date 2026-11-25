@@ -680,6 +680,15 @@ def _transfer_locked(method):
     return locked
 
 
+def _model_leased(method):
+    """Acquire model lease before registry lock for destructive operations."""
+    @wraps(method)
+    def leased(self, model_id, *args, **kwargs):
+        with self.transfer_lease(model_id):
+            return method(self, model_id, *args, **kwargs)
+    return leased
+
+
 def _leased_transfer(method):
     """Keep a per-model lease across await, not the global registry lock."""
     @wraps(method)
@@ -1522,6 +1531,7 @@ class Registry:
         finally:
             temp.unlink(missing_ok=True)
 
+    @_model_leased
     @_registry_locked
     def rollback(self, model_id, revision):
         """Restore a previous revision as current, as a new revision."""
@@ -1635,13 +1645,10 @@ class Registry:
             pass
         return {"state": state, "size": size, "identity": identity}
 
+    @_model_leased
     @_registry_locked
     def discard_partial(self, model_id, expected_identity):
         """Explicitly discard the two exact files observed by the owner."""
-        with self.transfer_lease(model_id):
-            self._discard_partial_locked(model_id, expected_identity)
-
-    def _discard_partial_locked(self, model_id, expected_identity):
         payload, metadata = self._queue_partial_paths(model_id)
         actual = (_partial_file_identity(payload), _partial_file_identity(metadata))
         if actual != expected_identity or actual == (None, None):
@@ -1664,6 +1671,7 @@ class Registry:
         cleaned = {p: v for p, v in cleaned.items() if v}
         return kept, cleaned
 
+    @_model_leased
     @_registry_locked
     def unregister(self, model_id):
         """Remove a registry entry. This never deletes a file by itself."""
@@ -1906,6 +1914,7 @@ class Registry:
         except (OSError, ValueError, TypeError, RecursionError, Hold):
             raise Hold("uninstall_recovery_required") from None
 
+    @_model_leased
     @_registry_locked
     def uninstall(self, model_id, approval=""):
         """Delete JARVIS-owned files only. Shared weights are never removed."""
@@ -1921,7 +1930,7 @@ class Registry:
             try:
                 info = target.lstat()
             except FileNotFoundError:
-                self.unregister(model_id)
+                self.store(*self._without_card(model_id))
                 return
             if not stat.S_ISREG(info.st_mode):
                 raise Hold("artifact_not_replaceable")
@@ -1968,4 +1977,4 @@ class Registry:
             return
         elif not approval:
             raise Hold("unregister_only_without_approval")
-        self.unregister(model_id)
+        self.store(*self._without_card(model_id))

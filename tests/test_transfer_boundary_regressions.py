@@ -1346,5 +1346,68 @@ with r.transfer_lease("fixture-model"):
         with self.other.transfer_lease(self.card.model_id):
             self.assertEqual(self.other.card(self.card.model_id).state, "FAILED")
 
+class LifecycleLeaseTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.other = market.Registry(self.root)
+        from dataclasses import replace
+        digest = hashlib.sha256(OLD).hexdigest()
+        self.card = self.registry.save_card(replace(
+            market.ModelCard(model_id="fixture-model", display_name="Fixture", category="stt"),
+            owned_by_jarvis=True, artifact_digest=digest,
+            storage_ref="sha256-" + digest[:32], disk_size_bytes=len(OLD)))
+        self.target = self.root / "artifacts" / self.card.model_id
+        self.target.parent.mkdir()
+        self.target.write_bytes(OLD)
+
+    def test_active_transfer_blocks_removal_without_mutation(self):
+        with self.registry.transfer_lease(self.card.model_id):
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                self.other.uninstall(self.card.model_id, approval="fixture")
+            self.assertEqual(self.target.read_bytes(), OLD)
+            self.assertEqual(self.other.card(self.card.model_id), self.card)
+            self.assertFalse(self.other.removal_journal.exists())
+        self.other.uninstall(self.card.model_id, approval="fixture")
+        self.assertFalse(self.target.exists())
+        self.assertEqual(self.other.cards(), ())
+
+    def test_active_transfer_blocks_unregister_and_rollback(self):
+        from dataclasses import replace
+        newer = self.registry.save_card(replace(self.card, display_name="Newer"))
+        with self.registry.transfer_lease(self.card.model_id):
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                self.other.unregister(self.card.model_id)
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                self.other.rollback(self.card.model_id, self.card.revision)
+            self.assertEqual(self.other.card(self.card.model_id), newer)
+            self.assertEqual(self.target.read_bytes(), OLD)
+        self.other.unregister(self.card.model_id)
+        self.assertEqual(self.other.cards(), ())
+        self.assertEqual(self.target.read_bytes(), OLD)
+
+    def test_unrelated_model_removal_does_not_block_on_active_lease(self):
+        other = self.registry.save_card(market.ModelCard(
+            model_id="other-model", display_name="Other", category="stt"))
+        with self.registry.transfer_lease(self.card.model_id):
+            self.other.unregister(other.model_id)
+            self.assertEqual(self.other.cards(), (self.card,))
+            self.assertEqual(self.target.read_bytes(), OLD)
+
+    def test_imported_uninstall_does_not_reenter_model_lease(self):
+        other = self.registry.save_card(market.ModelCard(
+            model_id="other-model", display_name="Other", category="stt"))
+        self.other.uninstall(other.model_id, approval="fixture")
+        self.assertEqual(self.other.cards(), (self.card,))
+
+    def test_missing_owned_payload_uninstall_releases_lease(self):
+        self.target.unlink()
+        self.other.uninstall(self.card.model_id, approval="fixture")
+        self.assertEqual(self.other.cards(), ())
+        with self.registry.transfer_lease(self.card.model_id):
+            self.assertFalse(self.target.exists())
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
