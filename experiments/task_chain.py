@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from gateway import Request, Refused, token
 from hashlib import sha256
+from threading import RLock
 
 MAX_BYTES = 65536
 
@@ -51,29 +52,38 @@ class Chain:
         self._current = Artifact(initial_kind,sha256(initial_data).hexdigest(),"")
         self._data = initial_data
         self._state = "ready"
+        self._checks = []
+        self._lock = RLock()
 
     @property
     def state(self):
-        return self._state
+        with self._lock:
+            return self._state
 
     @property
     def current(self):
-        if self._state not in ("ready","running","completed"):
-            raise Refused("no_current_artifact")
-        return self._current
+        with self._lock:
+            if self._state not in ("ready","running","completed"):
+                raise Refused("no_current_artifact")
+            self._check_lineage()
+            return self._current
 
     def target(self, artifact):
-        if self._state != "ready" or artifact is not self._current:
-            raise Refused("stale_input_artifact")
-        return step_target(self._steps[self._index],artifact)
+        with self._lock:
+            if self._state != "ready" or artifact is not self._current:
+                raise Refused("stale_input_artifact")
+            self._check_lineage()
+            return step_target(self._steps[self._index],artifact)
 
     def begin(self, grant, artifact):
-        req=Request(self._ctx,"engine",self.target(artifact),"local")
-        self._g.checkpoint(grant,req)
-        handle=object()
-        self._active=(handle,grant,req,artifact)
-        self._state="running"
-        return handle
+        with self._lock:
+            req=Request(self._ctx,"engine",self.target(artifact),"local")
+            self._g.claim(grant,req)
+            self._g.checkpoint(grant,req)
+            handle=object()
+            self._active=(handle,grant,req,artifact)
+            self._state="running"
+            return handle
 
     def _owned(self,handle):
         if self._active is None or handle is not self._active[0]:
@@ -81,11 +91,27 @@ class Chain:
         return self._active
 
     def _hold(self):
+        if self._active is not None:
+            self._g.revoke(self._active[1].identity)
+        self._checks.clear()
         self._state,self._active,self._current,self._data="held",None,None,b""
 
+    def _check_lineage(self):
+        try:
+            for grant,req in self._checks:
+                self._g.checkpoint(grant,req)
+        except Refused:
+            self._hold()
+            raise
+
     def input_bytes(self,handle):
+        with self._lock:
+            return self._input_bytes(handle)
+
+    def _input_bytes(self,handle):
         _,grant,req,artifact=self._owned(handle)
         try:
+            self._check_lineage()
             self._g.checkpoint(grant,req)
             if artifact is not self._current or sha256(self._data).hexdigest()!=artifact.digest:
                 raise Refused("input_digest_mismatch")
@@ -95,6 +121,10 @@ class Chain:
             raise
 
     def complete(self,handle,kind,data):
+        with self._lock:
+            return self._complete(handle,kind,data)
+
+    def _complete(self,handle,kind,data):
         _,grant,req,artifact=self._owned(handle)
         step=self._steps[self._index]
         try:
@@ -103,9 +133,11 @@ class Chain:
                 raise Refused("invalid_artifact")
             result=Artifact(kind,sha256(data).hexdigest(),artifact.digest)
             self._g.checkpoint(grant,req)
+            self._check_lineage()
         except Refused:
             self._hold()
             raise
+        self._checks.append((grant,req))
         self._current,self._data=result,data
         self._index+=1
         self._active=None
@@ -115,5 +147,9 @@ class Chain:
         return result
 
     def cancel(self):
-        if self._state in ("ready","running"):
-            self._state,self._active,self._current,self._data="cancelled",None,None,b""
+        with self._lock:
+            if self._state in ("ready","running"):
+                if self._active is not None:
+                    self._g.revoke(self._active[1].identity)
+                self._checks.clear()
+                self._state,self._active,self._current,self._data="cancelled",None,None,b""
