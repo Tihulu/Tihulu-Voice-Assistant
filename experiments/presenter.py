@@ -50,6 +50,8 @@ class Presenter:
             ws=self._workspace
             state=ws.poll()
             if state in ("held","closed"):
+                if self._draft is not None:
+                    self._revision+=1
                 self._draft=None
                 return View(self._epoch,self._revision,state,(),False,False)
             try:
@@ -59,25 +61,33 @@ class Presenter:
                 return View(self._epoch,self._revision,ws.poll(),(),False,False)
             return View(self._epoch,self._revision,state,items,state=="ready",True)
 
-    def draft(self,epoch,text):
+    def _editable(self,epoch,revision):
+        ws=self._current(epoch)
+        if type(revision) is not int or revision!=self._revision or ws.poll()!="ready":
+            raise Refused("stale_or_busy_view")
+        return ws
+
+    def draft(self,epoch,revision,text):
         with self._lock:
-            ws=self._current(epoch)
+            ws=self._editable(epoch,revision)
             draft=ws.draft(text)
             self._revision+=1
             self._draft=draft
             return draft
 
-    def discard(self,epoch):
+    def discard(self,epoch,revision):
         with self._lock:
-            self._current(epoch).discard_draft()
+            self._editable(epoch,revision).discard_draft()
             self._draft=None
             self._revision+=1
 
-    async def submit(self,epoch,draft,grant,response,*,confirmed=False):
+    async def submit(self,epoch,revision,draft,grant,response,*,confirmed=False):
         with self._lock:
-            ws=self._current(epoch)
+            ws=self._editable(epoch,revision)
             if confirmed is not True or draft is not self._draft or draft is None:
                 raise Refused("explicit_current_draft_required")
+            # Invalidate pending composer callbacks before yielding.
+            self._revision+=1
             revision=self._revision
         try:
             answer=await ws.submit(draft,grant,response,confirmed=True)
