@@ -27,8 +27,8 @@ def plan(room,identity,adapter,capability,payload,memory,priority):
     if type(payload) is not bytes or not 0<len(payload)<=16384:
         raise Refused("invalid_payload")
     ident=scoped(room,identity)
-    job=Job(ident,adapter,memory,priority)
     spec=JobSpec(adapter,token(room),ident,capability,sha256(payload).hexdigest())
+    job=Job(ident,adapter,memory,priority,spec.target())
     job.target()
     spec.target()
     return job,spec
@@ -130,6 +130,7 @@ class TaskBoard:
             self._records[identity]=r
             try:
                 self._check(r)
+                self._open()
             except BaseException:
                 self._stop(r,"held")
                 raise
@@ -144,6 +145,7 @@ class TaskBoard:
                 except Refused:
                     self._stop(r,"held")
         self._scheduler.poll()
+        self._open()
 
     def dispatch(self):
         with self._lock:
@@ -155,10 +157,12 @@ class TaskBoard:
                 _,r=by_job[j]
                 r.handle=handle
                 r.state="running"
+            self._open()
             for handle,j in selected:
                 identity,r=by_job[j]
                 try:
                     self._check(r)
+                    self._open()
                     r.connector=Connector(self._g,self._ctx,r.spec.adapter,r.spec.session)
                     owned=r.connector.begin(r.spec,r.connector_grant,r.payload)
                     r.payload=b""
@@ -174,6 +178,13 @@ class TaskBoard:
                         if other.state=="running":
                             self._stop(other,"held")
                     raise
+            self._poll()
+            if any(self._records[x.identity].state!="running" for x in result):
+                for x in result:
+                    r=self._records[x.identity]
+                    if r.state=="running":
+                        self._stop(r,"held")
+                raise Refused("dispatch_batch_invalidated")
             return tuple(result)
 
     def receive(self,identity,raw):
@@ -209,6 +220,7 @@ class TaskBoard:
             if r is None or r.state not in ("queued","running"):
                 raise Refused("task_not_active")
             self._stop(r,"cancelled")
+            self._open()
             return Status(identity,"cancelled",r.sequence)
 
     def snapshot(self):
@@ -223,12 +235,15 @@ class TaskBoard:
             if r is None or r.state!="completed" or r.spec.capability!="local-analysis":
                 raise Refused("completed_analysis_required")
             self._check(r)
+            self._open()
             return Receipt(identity,self._room,r.spec.target(),r.spec.payload_digest)
 
     def capacity(self):
         with self._lock:
             self._poll()
-            return self._scheduler.poll()
+            result=self._scheduler.poll()
+            self._open()
+            return result
 
     def close(self):
         with self._lock:

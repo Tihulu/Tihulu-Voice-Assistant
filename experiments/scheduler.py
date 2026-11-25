@@ -11,6 +11,7 @@ class Job:
     adapter: str
     memory: int
     priority: int
+    spec_target: str = ""
 
     def target(self):
         token(self.identity)
@@ -18,8 +19,10 @@ class Job:
         if (type(self.memory) is not int or not 0<self.memory<=1048576
                 or type(self.priority) is not int or not 0<=self.priority<=100):
             raise Refused("invalid_job")
+        if type(self.spec_target) is not str or (self.spec_target and (len(self.spec_target)!=64 or any(c not in "0123456789abcdef" for c in self.spec_target))):
+            raise Refused("invalid_spec_target")
         return sha256(repr(("schedule",self.identity,self.adapter,
-                            self.memory,self.priority)).encode("ascii")).hexdigest()
+                            self.memory,self.priority,self.spec_target)).encode("ascii")).hexdigest()
 
 class Scheduler:
     def __init__(self, gateway, context, slots, memory):
