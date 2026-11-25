@@ -28,20 +28,28 @@ class Candidate:
             raise Refused("invalid_candidate")
         return self
 
-def choose(context, candidates, task, budget, preference, approved_cloud=()):
+def choose(context, candidates, task, budget, preference, approved_cloud=(), *, purpose="primary"):
     """Plan only. Never silently escalate from local to cloud."""
     context.checked()
     if (task not in ("stt", "llm", "tts") or type(candidates) is not tuple
             or len(candidates) > 64 or type(budget) is not int or not 0 <= budget <= 1048576
-            or preference not in ("local", "cloud")
+            or preference not in ("local", "cloud") or purpose not in ("primary", "consultation")
             or type(approved_cloud) is not tuple or len(approved_cloud) > 32):
         raise Refused("invalid_selection")
     for p in approved_cloud:
         token(p)
     if preference == "cloud" and (context.mode == "LOCAL_ONLY" or context.offline):
         raise Refused("cloud_disabled")
-    if context.mode == "CLOUD_CHAT" and task == "llm" and preference == "local":
+    if context.mode == "CLOUD_CHAT" and preference == "local":
         raise Refused("local_reasoning_not_selected")
+    # Secure Hybrid's main planner and executor are always local. A cloud
+    # choice is only a separately approved minimized consultation candidate,
+    # never an alternative primary route or a remote voice engine.
+    if purpose == "consultation":
+        if context.mode != "SECURE_HYBRID" or preference != "cloud" or task != "llm":
+            raise Refused("invalid_consultation_route")
+    elif context.mode == "SECURE_HYBRID" and preference == "cloud":
+        raise Refused("secure_primary_must_be_local")
     seen = set()
     eligible = []
     for candidate in candidates:
