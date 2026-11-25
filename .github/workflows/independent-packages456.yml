@@ -1,0 +1,244 @@
+name: Independent remaining packages 4 5 6
+on:
+  pull_request:
+    branches: [fix/owner-complaint-retained-state]
+    paths: [.github/workflows/independent-packages456.yml]
+permissions:
+  contents: read
+jobs:
+  probes:
+    if: github.head_ref == 'qa/independent-jr128-packages456' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      PYTHONPATH: src:tests/gtk
+      PYTHONDONTWRITEBYTECODE: '1'
+      GDK_BACKEND: x11
+      GSK_RENDERER: cairo
+      GTK_A11Y: none
+      G_DEBUG: fatal-criticals
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 9f9f26344409a7727af6e62937c4e2e9e44c5089
+          persist-credentials: false
+      - run: |
+          test "$(git rev-parse HEAD)" = 9f9f26344409a7727af6e62937c4e2e9e44c5089
+          test "$(git rev-parse HEAD^{tree})" = b0f93490a8f1579d911302565b7d5ce3ab7be14b
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+      - name: Independent adversarial tests
+        run: |
+          dbus-run-session -- xvfb-run -a /usr/bin/python3 - <<'PY'
+          import asyncio, os, tempfile, time, wave, struct, unittest
+          from pathlib import Path
+          from threading import Event
+          from unittest.mock import patch
+          from test_desktop import DesktopFixture, desktop, profiles, GLib
+          from tihulu_jarvis import files
+          from tihulu_jarvis.voice import audio
+          from tihulu_jarvis.voice.m1 import Hold
+          class Boundaries(DesktopFixture):
+              def setUp(self):
+                  super().setUp()
+                  self.root=Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+                  (self.root/'a.txt').write_text('SYNTHETIC [needle]\\n'*40)
+                  (self.root/'b.txt').write_text('other')
+              def listing(self):
+                  v=self.ui.chat_files
+                  v.start(str(self.root))
+                  self.until(lambda:not self.ui.busy)
+                  self.assert_no_failed_turn()
+                  v.entries.set_active_id('0')
+                  return v
+              def wavefile(self):
+                  p=self.root/'sample.wav'
+                  with wave.open(str(p),'wb') as f:
+                      f.setparams((1,2,16000,0,'NONE','not compressed'))
+                      f.writeframes(struct.pack('<hh',1250,-1250)*1600)
+                  return p
+              def test_p4_initial_root_substitution(self):
+                  with tempfile.TemporaryDirectory() as d:
+                      selected=Path(d)/'selected'; selected.mkdir()
+                      (selected/'approved.txt').write_text('fixture')
+                      other=Path(d)/'other'; other.mkdir()
+                      (other/'UNSELECTED-CANARY.txt').write_text('fixture')
+                      real=files.list_dir
+                      def swapped(path,**kw):
+                          selected.rename(Path(d)/'old')
+                          other.rename(selected)
+                          return real(path,**kw)
+                      with patch.object(files,'list_dir',side_effect=swapped):
+                          self.ui.chat_files.start(str(selected))
+                          self.until(lambda:not self.ui.busy)
+                      self.assertNotIn('UNSELECTED-CANARY',self.ui.chat_files.listing.get_text())
+                      self.jan.assert_not_called()
+              def test_p4_search_literal_limit_and_isolation(self):
+                  v=self.listing()
+                  v.query.set_text('[needle]')
+                  v.search()
+                  self.until(lambda:not self.ui.busy)
+                  self.assert_no_failed_turn()
+                  self.assertIn('40 matching lines',v.search_result.get_text())
+                  self.assertEqual(len(v.search_result.get_text().splitlines()),31)
+                  self.assertEqual(self.ui.session.history,())
+                  self.jan.assert_not_called()
+                  self.ui.hard_stop()
+                  self.assertEqual(v.search_result.get_text(),'')
+                  self.assertEqual(v.query.get_text(),'')
+              def test_p4_selection_change_while_preview_pending(self):
+                  v=self.listing()
+                  entered,release=Event(),Event()
+                  real=files.preview
+                  def delayed(*a,**kw):
+                      result=real(*a,**kw)
+                      entered.set()
+                      if not release.wait(10): raise AssertionError('fixture timeout')
+                      return result
+                  with patch.object(files,'preview',side_effect=delayed):
+                      v.read()
+                      try:
+                          self.until(entered.is_set)
+                          v.entries.set_active_id('1')
+                      finally: release.set()
+                      self.until(lambda:not self.ui.busy)
+                  self.assertEqual(v.preview.get_text(),'')
+                  self.assertEqual(str(self.ui.session.active.exception()),'file_selection_changed')
+                  self.jan.assert_not_called()
+              def test_p4_expiry_between_search_and_publication(self):
+                  clock=[time.time()]
+                  p=profiles.Profile(id='review-file-expiry',name='Review file expiry',
+                      filesystem_rules=(profiles.Rule('filesystem_read',('folder',),'allow'),
+                      profiles.Rule('filesystem_read',('file',),'allow','fixture',clock[0]+60)))
+                  self.ui.store.save(p)
+                  self.ui.activate_profile(p.id)
+                  with patch.object(profiles.time,'time',side_effect=lambda:clock[0]):
+                      v=self.listing()
+                      v.query.set_text('[needle]')
+                      entered,release=Event(),Event()
+                      real=files.search_text
+                      def delayed(*a,**kw):
+                          result=real(*a,**kw)
+                          entered.set()
+                          if not release.wait(10): raise AssertionError('fixture timeout')
+                          return result
+                      with patch.object(files,'search_text',side_effect=delayed):
+                          v.search()
+                          try:
+                              self.until(entered.is_set)
+                              clock[0]+=120
+                          finally: release.set()
+                          self.until(lambda:not self.ui.busy)
+                      self.assertEqual(v.search_result.get_text(),'')
+                      self.assertIsNotNone(self.ui.session.active.exception())
+                  self.jan.assert_not_called()
+              def test_p4_special_files_and_growth(self):
+                  (self.root/'link.txt').symlink_to(self.root/'a.txt')
+                  os.mkfifo(self.root/'fifo.txt')
+                  folder=files.list_dir(str(self.root))
+                  self.assertEqual({e.name for e in folder.entries},{'a.txt','b.txt'})
+                  entry=next(e for e in folder.entries if e.name=='a.txt')
+                  with (self.root/'a.txt').open('a') as f: f.write('growth')
+                  with self.assertRaisesRegex(Hold,'file_changed'):
+                      files.preview(folder.root,entry.name,expected_root=folder.identity,expected_entry=entry.identity)
+              def test_p5_old_transfer_callback_and_terminal_elapsed(self):
+                  release=asyncio.Event(); callbacks=[]; entry={'total':0,'received':0,'state':'QUEUED'}
+                  async def first(epoch):
+                      cb=self.ui.download_progress(entry,0)
+                      callbacks.append(cb)
+                      cb(17)
+                      await release.wait()
+                  self.ui.submit(first,kind='download',label='Synthetic transfer')
+                  self.until(lambda:bool(callbacks))
+                  first_id=self.ui.active_task
+                  self.assertEqual(self.ui.board.get(first_id).counted,17)
+                  release.set()
+                  self.until(lambda:not self.ui.busy)
+                  first_row=self.ui.board.get(first_id)
+                  self.assertEqual(first_row.state,'done')
+                  self.assertEqual(first_row.elapsed(first_row.ended_at+100),first_row.elapsed(first_row.ended_at+200))
+                  later=asyncio.Event()
+                  async def second(epoch): await later.wait()
+                  self.ui.submit(second,kind='turn',label='Replacement turn')
+                  try:
+                      callbacks[0](999)
+                      self.assertEqual(entry['received'],17)
+                      self.assertEqual(self.ui.board.get(self.ui.active_task).counted,0)
+                      self.assertEqual(self.ui.board.get(first_id),first_row)
+                  finally:
+                      later.set()
+                      self.until(lambda:not self.ui.busy)
+              def test_p5_cancelled_listing_keeps_owner_until_worker_drained(self):
+                  entered,release,exited=Event(),Event(),Event()
+                  def delayed(*a,**kw):
+                      entered.set()
+                      try:
+                          if not release.wait(10): raise AssertionError('fixture timeout')
+                          kw['checkpoint']()
+                      finally: exited.set()
+                  with patch.object(files,'list_dir',side_effect=delayed):
+                      self.ui.chat_files.start(str(self.root))
+                      try:
+                          self.until(entered.is_set)
+                          self.ui.hard_stop()
+                          self.ui.hard_stop()
+                          self.assertTrue(self.ui.busy)
+                          self.assertTrue(self.ui.board.busy())
+                      finally: release.set()
+                      self.until(lambda:not self.ui.busy)
+                  self.assertTrue(exited.is_set())
+                  self.assertEqual(self.ui.board.rows[-1].state,'cancelled')
+                  self.assertEqual(self.ui.board.rows[-1].locks,())
+                  self.assertIsNone(self.ui.chat_files.folder)
+              def test_p6_offline_wav_snapshot_and_no_capture(self):
+                  p=self.wavefile(); seen=[]
+                  async def engine(model,wav,stem):
+                      seen.append(wav)
+                      self.assertNotEqual(wav,p)
+                      self.assertEqual(wav.read_bytes(),p.read_bytes())
+                      stem.with_suffix('.txt').write_text('Synthetic transcript')
+                  self.ui.transcribe_runner=engine
+                  self.ui.run_transcribe(str(p))
+                  self.until(lambda:not self.ui.busy)
+                  self.assert_no_failed_turn()
+                  self.assertEqual(self.ui.session.active.result(),'Synthetic transcript')
+                  self.assertEqual(len(seen),1)
+                  self.assertFalse(seen[0].exists())
+                  self.jan.assert_not_called()
+                  desktop.audio.listen.assert_not_called()
+                  self.assertEqual(self.ui.session.history,())
+              def test_p6_signal_worker_drains_before_idle_and_cleanup(self):
+                  p=self.wavefile()
+                  entered,release,exited=Event(),Event(),Event()
+                  snapshots=[]; calls=[]
+                  real=audio.has_signal
+                  def delayed(path):
+                      snapshots.append(path); entered.set()
+                      try:
+                          if not release.wait(10): raise AssertionError('fixture timeout')
+                          return real(path)
+                      finally: exited.set()
+                  async def engine(*a): calls.append(a)
+                  self.ui.transcribe_runner=engine
+                  with patch.object(audio,'has_signal',side_effect=delayed):
+                      self.ui.run_transcribe(str(p))
+                      try:
+                          self.until(entered.is_set)
+                          self.ui.hard_stop()
+                          # Let the event loop process cancellation before measuring.
+                          tick=[]
+                          GLib.timeout_add(150,lambda:(tick.append(True),False)[1])
+                          self.until(lambda:bool(tick))
+                          busy=self.ui.busy
+                          owned=bool(self.ui.board.busy())
+                          snapshot_exists=snapshots[0].exists()
+                      finally:
+                          release.set()
+                          self.until(exited.is_set)
+                          self.until(lambda:not self.ui.busy)
+                  self.assertFalse(calls)
+                  self.assertFalse(snapshots[0].exists())
+                  self.assertTrue(busy and owned and snapshot_exists,
+                      'idle/ownership/private snapshot released before signal worker drain: '+str((busy,owned,snapshot_exists)))
+          unittest.main(verbosity=2)
+          PY
