@@ -272,6 +272,11 @@ class RichChat:
                     self._drop_pending()
             return self.cards()
 
+    def pending_is(self,card):
+        with self._lock:
+            self.poll()
+            return self._pending is not None and self._pending[0] is card
+
     def cards(self):
         with self._lock:
             self._live()

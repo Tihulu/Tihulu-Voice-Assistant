@@ -423,3 +423,18 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
         card,_=self.card("file","text",b"private")
         self.assertNotEqual(attachment_target(self.s.scope,card,"preview","Read"),
                             attachment_target(other.scope,card,"preview","Read"))
+
+    async def test_revoked_unpublished_task_card_does_not_block_new_draft(self):
+        from workspace import task_result_target
+        _,scope=self.enable_board()
+        self.completed_analysis(scope)
+        receipt=self.s._tasks.receipt("analysis")
+        sg=self.grant("engine",source_target("result","temperature",CSV,room=self.room),"private")
+        lg=self.grant("engine",task_result_target(receipt,"result",CSV),"private")
+        self.s.prepare_task_card("analysis","result",CSV,sg,lg,confirmed=True)
+        self.g.revoke(sg.identity)
+        self.assertEqual(self.s.poll(),"ready")
+        self.assertIsNone(self.s._task_draft)
+        with self.assertRaises(Refused):
+            self.g.checkpoint(lg,lg.request)
+        self.card("fresh","text",b"fresh")

@@ -192,7 +192,10 @@ class Workspace:
             if self._tasks is not None:
                 self._tasks.snapshot()
                 if self._task_draft is not None:
-                    self._check_task_link(self._task_draft)
+                    if not self._rich.pending_is(self._task_draft[0]):
+                        self._drop_task_draft()
+                    else:
+                        self._check_task_link(self._task_draft)
                 for link in self._task_links.values():
                     self._check_task_link(link)
                     self._rich.read(link[0].identity)
