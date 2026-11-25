@@ -132,3 +132,16 @@ class ConversationTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.s.poll(),"held")
         self.assertIsNone(self.s._draft)
         self.assertEqual(self.s._history,())
+
+    async def test_same_named_conversation_cannot_reuse_unclaimed_turn_grant(self):
+        root=self.g.fixture_grant("second",self.session_req,60)
+        other=Conversation(self.g,self.ctx,self.c,self.url,"chat",root)
+        self.addCleanup(other.close)
+        original=self.s.draft("same")
+        g=self.grant(original)
+        current=other.draft("same")
+        self.assertNotEqual(original.target,current.target)
+        with self.assertRaises(Refused):
+            await other.submit(current,g,frame([event("wrong"),b"[DONE]"]),confirmed=True)
+        self.assertEqual(other.history(),())
+        await self.s.submit(original,g,frame([event("right"),b"[DONE]"]),confirmed=True)
