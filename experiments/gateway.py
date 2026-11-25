@@ -15,7 +15,7 @@ ACTIONS = {
     "catalog": "external_network", "transfer": "external_network",
     "publish": "publish_artifact",
 }
-HOST = frozenset(("engine", "agent", "local_plan"))
+HOST = frozenset(("engine", "agent", "local_plan", "publish"))
 EXTERNAL = frozenset(("research", "provider", "disclose", "catalog", "transfer"))
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 MAX_GRANTS = 64
@@ -65,7 +65,7 @@ class Request:
             raise Refused("invalid_context")
         self.context.checked()
         token(self.target)
-        if (self.action not in ACTIONS or self.actor not in ("local", "cloud", "owner")
+        if (not isinstance(self.action, str) or self.action not in ACTIONS or self.actor not in ("local", "cloud", "owner")
                 or self.classification not in ("none", "public", "minimized", "private", "secret")):
             raise Refused("invalid_request")
         return self
@@ -89,9 +89,21 @@ class FixtureGateway:
         if type(context) is not Context or type(clock) is not profiles.PolicyClock:
             raise Refused("invalid_fixture")
         self.context = context.checked()
-        self._rules = tuple(rules)
-        if len(self._rules) > MAX_GRANTS or any(type(r) is not profiles.Rule for r in self._rules):
+        if type(rules) not in (tuple, list) or len(rules) > MAX_GRANTS:
             raise Refused("invalid_rules")
+        self._rules = tuple(rules)
+        for r in self._rules:
+            if (type(r) is not profiles.Rule or not isinstance(r.action, str)
+                    or r.action not in ACTIONS.values() or r.decision not in profiles.DECISIONS
+                    or type(r.scope) is not tuple or len(r.scope) > 16
+                    or type(r.expires_at) not in (int, float) or not 0 <= r.expires_at <= 10**12
+                    or not isinstance(r.approval, str) or len(r.approval) > 64
+                    or (r.approval and not r.expires_at)):
+                raise Refused("invalid_rules")
+            for scope in r.scope:
+                token(scope)
+            if len(set(r.scope)) != len(r.scope):
+                raise Refused("invalid_rules")
         self._clock = clock
         self._grants = {}
         self._revoked = set()
@@ -109,6 +121,8 @@ class FixtureGateway:
         mode = self.context.mode
         if req.classification == "secret":
             raise Refused("secret_denied")
+        if req.action in EXTERNAL and req.actor != "local":
+            raise Refused("external_actor_denied")
         if req.action in EXTERNAL and self.context.offline:
             raise Refused("offline")
         if req.action in HOST and (mode == "CLOUD_CHAT" or req.actor != "local"):
@@ -119,7 +133,7 @@ class FixtureGateway:
             raise Refused("public_opt_in_required")
         if req.action in EXTERNAL and req.classification == "private":
             raise Refused("private_egress_denied")
-        if req.action == "disclose" and req.classification not in (
+        if req.action in ("disclose", "provider") and req.classification not in (
                 ("public", "minimized") if mode == "SECURE_HYBRID" else ("public",)):
             raise Refused("disclosure_classification_denied")
         if req.action in ("research", "catalog", "transfer") and req.classification != "public":
@@ -147,6 +161,7 @@ class FixtureGateway:
         """Return a fixture-only status; no permission token leaves this seam."""
         if type(grant) is not Grant:
             raise Refused("invalid_grant")
+        token(grant.identity)
         with self._lock:
             now = self._clock.now()
             if self._grants.get(grant.identity) is not grant or grant.identity in self._revoked:
@@ -156,7 +171,11 @@ class FixtureGateway:
                 raise Refused("expired")
             if grant.request != req:
                 raise Refused("request_mismatch")
-            self._check(req, now)
+            try:
+                self._check(req, now)
+            except Refused:
+                self._revoked.add(grant.identity)
+                raise
             return "SIMULATED_ALLOW"
 
     def revoke(self, identity):
