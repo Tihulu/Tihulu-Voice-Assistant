@@ -721,6 +721,28 @@ class Transfer:
         self.received = 0
         self.state = card.state
 
+    @classmethod
+    def from_registry(cls, registry, model_id, *, checkpoint=lambda: None, transport=None):
+        """Production entrypoint: derive transport and terms from one card.
+
+        An explicitly injected transport is a trusted test/host adapter, not
+        a caller-supplied network endpoint. The default transport is selected
+        from the exact approved reference. No fallback to other endpoints.
+        """
+        card = registry.card(model_id)
+        source = source_of(card)
+        if not source.authorized(time.time()):
+            raise Hold("network_not_authorized")
+        fetch = transport if transport is not None else transport_for(source.reference)
+        if fetch is None:
+            raise Hold("download_transport_not_available")
+        def bound_checkpoint():
+            checkpoint()
+            if source_of(registry.card(model_id)) != source:
+                raise Hold("download_terms_changed")
+        bound_checkpoint()
+        return cls(registry, card, source, fetch, checkpoint=bound_checkpoint)
+
     def _assert_current(self):
         if self.registry.card(self.card.model_id) != self.card:
             raise Hold("transfer_card_changed")
