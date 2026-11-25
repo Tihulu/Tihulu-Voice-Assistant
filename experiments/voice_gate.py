@@ -110,6 +110,8 @@ class VoiceGate:
                     self._discard("timeout")
                 if self._state in ("listening","speech","review"):
                     self._g.checkpoint(self._grant,self._req)
+                    if monotonic()>=self._deadline:
+                        self._discard("timeout")
                 return self._state
             except Refused:
                 if self._state!="timeout":
