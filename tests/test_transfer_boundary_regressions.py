@@ -1056,5 +1056,92 @@ class StrictRangeTests(unittest.IsolatedAsyncioTestCase):
         result = await self.request(b"HTTP/1.1 206 Custom\r\nContent-Range: bytes 3-5/6\r\n\r\ndef", prefix=b"ab")
         self.assertEqual(result, (None, b"ab", "transfer_resume_offset_unverified"))
 
+class PartialQueueIdentityTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.card = self.registry.save_card(market.ModelCard(
+            model_id="fixture-model", display_name="Fixture", category="stt",
+            state="CANCELLED", source_ref="catalog:fixture",
+            source_checksum=hashlib.sha256(NEW).hexdigest(), source_size=len(NEW),
+            source_version="2.0", license_id="MIT", network_approval="fixture",
+            approval_expires_at=1e12))
+        self.transfer = market.Transfer(self.registry, self.card,
+                                        market.source_of(self.card), None)
+        self.payload, self.metadata = self.transfer._partial_paths()
+
+    def bound_partial(self):
+        self.transfer.temp = self.transfer.root / "fixture-temp"
+        self.transfer.temp.write_bytes(NEW[:3])
+        self.transfer._finish_temp(keep=True)
+        self.assertTrue(self.payload.exists())
+        self.assertTrue(self.metadata.exists())
+        return self.registry.partial_status(self.card.model_id)
+
+    def test_bound_candidate_is_resumable_and_discard_removes_pair(self):
+        status = self.bound_partial()
+        self.assertEqual(status["state"], "RESUMABLE")
+        self.registry.discard_partial(self.card.model_id, status["identity"])
+        self.assertFalse(self.payload.exists())
+        self.assertFalse(self.metadata.exists())
+        self.assertIsNone(self.registry.partial_status(self.card.model_id))
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    def test_legacy_partial_is_not_resumable_but_explicitly_discardable(self):
+        self.payload.write_bytes(NEW[:3])
+        status = self.registry.partial_status(self.card.model_id)
+        self.assertEqual(status["state"], "UNVERIFIED")
+        self.registry.discard_partial(self.card.model_id, status["identity"])
+        self.assertFalse(self.payload.exists())
+
+    def test_changed_payload_blocks_stale_discard(self):
+        status = self.bound_partial()
+        replacement = self.transfer.root / "replacement"
+        replacement.write_bytes(b"new")
+        replacement.replace(self.payload)
+        with self.assertRaisesRegex(Hold, "partial_changed"):
+            self.registry.discard_partial(self.card.model_id, status["identity"])
+        self.assertEqual(self.payload.read_bytes(), b"new")
+        self.assertTrue(self.metadata.exists())
+
+    def test_changed_metadata_blocks_stale_discard(self):
+        status = self.bound_partial()
+        self.metadata.write_text("{}")
+        with self.assertRaisesRegex(Hold, "partial_changed"):
+            self.registry.discard_partial(self.card.model_id, status["identity"])
+        self.assertTrue(self.payload.exists())
+        self.assertEqual(self.metadata.read_text(), "{}")
+
+    def test_metadata_only_is_discardable(self):
+        self.bound_partial()
+        self.payload.unlink()
+        status = self.registry.partial_status(self.card.model_id)
+        self.assertEqual(status["state"], "UNVERIFIED")
+        self.registry.discard_partial(self.card.model_id, status["identity"])
+        self.assertFalse(self.metadata.exists())
+
+    def test_symlink_and_hardlink_are_not_discardable(self):
+        outside = self.root / "outside"
+        outside.write_bytes(NEW[:3])
+        self.payload.symlink_to(outside)
+        with self.assertRaisesRegex(Hold, "partial_file_untrusted"):
+            self.registry.partial_status(self.card.model_id)
+        self.payload.unlink()
+        import os
+        os.link(outside, self.payload)
+        with self.assertRaisesRegex(Hold, "partial_file_untrusted"):
+            self.registry.partial_status(self.card.model_id)
+        self.assertEqual(outside.read_bytes(), NEW[:3])
+
+    def test_changed_card_marks_bound_candidate_unverified(self):
+        from dataclasses import replace
+        self.bound_partial()
+        self.registry.save_card(replace(self.card, display_name="Changed"))
+        status = self.registry.partial_status(self.card.model_id)
+        self.assertEqual(status["state"], "UNVERIFIED")
+        self.assertTrue(self.payload.exists())
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
