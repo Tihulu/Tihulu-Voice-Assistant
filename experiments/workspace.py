@@ -74,6 +74,7 @@ class Workspace:
         req=Request(context,"engine",workspace_target(identity,candidate,url),"local")
         gateway.claim(grant,req)
         self._root=(grant,req)
+        self.scope=key("workspace-instance",self._id,grant.identity)
         chat,room=identities(identity)
         try:
             gateway.checkpoint(*self._root)
@@ -232,7 +233,7 @@ class Workspace:
             self._ready()
             if self._counter>=32:
                 raise Refused("voice_limit")
-            return key("voice",self._id,self._counter+1)
+            return key("voice",self.scope,self._counter+1)
 
     def voice_draft(self,candidate,pcm,grant,events):
         with self._lock:
@@ -282,7 +283,7 @@ class Workspace:
             if confirmed is not True:
                 raise Refused("explicit_attachment_required")
             card=self._rich.read(identity)
-            target=attachment_target(self._id,card,name,question)
+            target=attachment_target(self.scope,card,name,question)
             req=Request(self._ctx,"engine",target,"local","private")
             self._g.claim(grant,req)
             try:
@@ -344,6 +345,9 @@ class Workspace:
                     else:
                         self._clear("held")
             raise
+
+    def result_scope(self):
+        return self._rich.scope
 
     def prepare_card(self,identity,kind,data,grant,**options):
         with self._lock:

@@ -27,6 +27,9 @@ def key(*parts):
 def room_target(identity):
     return key("rich-chat",token(identity))
 
+def room_scope(identity,grant_identity):
+    return key("rich-instance",token(identity),token(grant_identity))
+
 def query_value(kind,query):
     if kind=="search":
         if type(query) is not str:
@@ -152,6 +155,7 @@ class RichChat:
             gateway.revoke(grant.identity)
             raise
         self._room=(grant,req)
+        self.scope=room_scope(self._id,grant.identity)
 
     def _live(self):
         if self._closed:
@@ -175,7 +179,9 @@ class RichChat:
             if self._closed or self._cards.get(identity) is not record:
                 raise Refused("stale_card")
         except Refused:
-            self._cards.pop(identity,None)
+            if self._cards.pop(identity,None) is record:
+                for grant,_ in checks:
+                    self._g.revoke(grant.identity)
             raise
         return card
 
@@ -190,11 +196,12 @@ class RichChat:
         with self._lock:
             self._live()
             token(identity)
+            self.poll()
             if self._pending is not None:
                 raise Refused("draft_pending")
             if identity in self._seen or len(self._seen)>=64 or len(self._cards)>=MAX_CARDS:
                 raise Refused("card_limit_or_duplicate")
-            req=Request(self._ctx,"engine",source_target(identity,kind,data,room=self._id,query=query),"local","private")
+            req=Request(self._ctx,"engine",source_target(identity,kind,data,room=self.scope,query=query),"local","private")
             self._g.claim(source_grant,req)
             self._seen.add(identity)
             try:
@@ -221,7 +228,7 @@ class RichChat:
                 raise Refused("explicit_current_card_required")
             record=self._pending
             _,source_grant,req=record
-            pub=Request(self._ctx,"publish",publish_target(self._id,card),"local","private")
+            pub=Request(self._ctx,"publish",publish_target(self.scope,card),"local","private")
             claimed=False
             try:
                 self._g.checkpoint(source_grant,req)
@@ -285,15 +292,20 @@ class RichChat:
             if confirmed is not True:
                 raise Refused("explicit_export_required")
             card=self._check_card(identity)
-            target=export_target(self._id,card,name,destination)
+            target=export_target(self.scope,card,name,destination)
             req=Request(self._ctx,"publish",target,"local","private")
             self._g.claim(grant,req)
-            if self._check_card(identity) is not card:
-                raise Refused("stale_card")
-            self._g.checkpoint(grant,req)
-            if self._check_card(identity) is not card:
-                raise Refused("stale_card")
-            return next(p.data for p in card.parts if p.name==name)
+            try:
+                if self._check_card(identity) is not card:
+                    raise Refused("stale_card")
+                self._g.checkpoint(grant,req)
+                if self._check_card(identity) is not card:
+                    raise Refused("stale_card")
+                self._g.checkpoint(grant,req)
+                return next(p.data for p in card.parts if p.name==name)
+            except BaseException:
+                self._g.revoke(grant.identity)
+                raise
 
     def clear(self,identity):
         with self._lock:

@@ -26,6 +26,7 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
         self.rg=self.grant("publish",room_target(self.room))
         self.s=Workspace(self.g,self.ctx,"workspace",self.c,self.url,self.root,self.cg,self.rg)
         self.addCleanup(self.s.close)
+        self.room=self.s.result_scope()
     def grant(self,action,target,classification="none"):
         self.n+=1
         return self.g.fixture_grant("g"+str(self.n),Request(self.ctx,action,target,"local",classification),60)
@@ -138,7 +139,7 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_explicit_local_attachment_exact_part_and_question(self):
         c,_=self.card("file","text",b"PRIVATE-CANARY")
-        req=attachment_target("workspace",c,"preview","Summarize")
+        req=attachment_target(self.s.scope,c,"preview","Summarize")
         g=self.grant("engine",req,"private")
         with self.assertRaises(Refused):
             self.s.attach(c.identity,"preview","Summarize",g)
@@ -154,7 +155,7 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_attachment_revocation_before_send_clears_draft(self):
         c,sg=self.card("file","text",b"private")
-        g=self.grant("engine",attachment_target("workspace",c,"preview","Read"),"private")
+        g=self.grant("engine",attachment_target(self.s.scope,c,"preview","Read"),"private")
         d=self.s.attach(c.identity,"preview","Read",g,confirmed=True)
         self.g.revoke(sg.identity)
         self.assertEqual(self.s.poll(),"held")
@@ -164,7 +165,7 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_used_attachment_clear_invalidates_derived_history(self):
         c,_=self.card("file","text",b"private")
-        g=self.grant("engine",attachment_target("workspace",c,"preview","Read"),"private")
+        g=self.grant("engine",attachment_target(self.s.scope,c,"preview","Read"),"private")
         await self.send(self.s.attach(c.identity,"preview","Read",g,confirmed=True),"derived")
         with self.assertRaises(Refused):
             self.s.clear_card(c.identity)
@@ -175,14 +176,14 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
     async def test_attachment_cannot_include_svg_or_oversized_file(self):
         c,_=self.card()
         with self.assertRaises(Refused):
-            attachment_target("workspace",c,"chart","Read")
+            attachment_target(self.s.scope,c,"chart","Read")
         f,_=self.card("big","text",b"x"*4097)
         with self.assertRaises(Refused):
-            attachment_target("workspace",f,"preview","Read")
+            attachment_target(self.s.scope,f,"preview","Read")
 
     async def test_discarded_attachment_is_not_in_next_request(self):
         c,_=self.card("file","text",b"PRIVATE-CANARY")
-        g=self.grant("engine",attachment_target("workspace",c,"preview","Read"),"private")
+        g=self.grant("engine",attachment_target(self.s.scope,c,"preview","Read"),"private")
         self.s.attach(c.identity,"preview","Read",g,confirmed=True)
         self.s.discard_draft()
         with self.assertRaises(Refused):
@@ -409,3 +410,16 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
         with patch("conversation.replay",wraps=__import__("conversation").replay) as replay:
             await self.send(d,"ok")
             self.assertNotIn("PUBLIC-CANARY",repr(replay.call_args.args[6]))
+
+    async def test_same_named_workspace_voice_and_attachment_targets_differ(self):
+        chat,room=identities("workspace")
+        root=self.grant("engine",workspace_target("workspace",self.c,self.url))
+        cg=self.grant("engine",session_target(self.c,self.url,chat))
+        rg=self.grant("publish",room_target(room))
+        other=Workspace(self.g,self.ctx,"workspace",self.c,self.url,root,cg,rg)
+        self.addCleanup(other.close)
+        self.assertNotEqual(self.s.voice_identity(),other.voice_identity())
+        self.assertNotEqual(self.s.result_scope(),other.result_scope())
+        card,_=self.card("file","text",b"private")
+        self.assertNotEqual(attachment_target(self.s.scope,card,"preview","Read"),
+                            attachment_target(other.scope,card,"preview","Read"))
