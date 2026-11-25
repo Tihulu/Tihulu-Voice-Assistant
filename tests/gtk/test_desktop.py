@@ -1019,6 +1019,31 @@ class MarketInventoryTests(MarketFixture):
         self.assertEqual(self.ui.models.get_active_text(), "fixture-qwen")
         self.assertTrue(self.ui.send.get_sensitive())
 
+    def test_registered_jan_model_can_be_selected_again(self):
+        self.backend.inventory = ("fixture-qwen", "fixture-llama")
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy and len(self.ui.market.cards()) == 2)
+        self.ui.market_filter.set_active(1)
+        for model_id in ("fixture-qwen", "fixture-llama", "fixture-qwen"):
+            self.pick_card(model_id)
+            self.click(self.ui.market_use)
+            self.until(lambda: not self.ui.busy and self.ui.cfg["llm"] == model_id)
+            self.assertEqual(self.ui.status.get_text(), "Model selected.")
+        self.assertEqual(self.ui.market.card("fixture-qwen").state, "REGISTERED")
+        self.assertEqual(self.ui.store.load(self.ui.cfg["profile"]).llm_model_id, "fixture-qwen")
+
+    def test_jan_discovery_cannot_overwrite_foreign_registry_card(self):
+        foreign = self.ui.market.save_card(market.ModelCard(
+            model_id="fixture-qwen", display_name="Other source", category="stt"))
+        self.backend.inventory = ("fixture-new", "fixture-qwen")
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "registry_discovery_conflict")
+        self.assertEqual(self.ui.market.cards(), (foreign,))
+        self.assertEqual(self.ui.inventory, ())
+
     def test_a_model_the_endpoint_does_not_serve_is_refused(self):
         self.backend.inventory = ("fixture-qwen",)
         self.ui.url.set_text("http://127.0.0.1:9876")
