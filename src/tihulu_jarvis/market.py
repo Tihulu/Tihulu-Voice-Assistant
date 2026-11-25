@@ -772,13 +772,6 @@ class Transfer:
         except (Hold, OSError):
             self.state = state
 
-    def _current_for_partial(self):
-        try:
-            self._assert_current()
-            return True
-        except (Hold, OSError):
-            return False
-
     def _finish_temp(self, *, keep):
         """Never overwrite another operation's partial or mask a cancellation."""
         if self.temp is None:
@@ -802,6 +795,22 @@ class Transfer:
                 pass
             self.temp = None
 
+    def _consume_partial(self, identity):
+        """Remove only the exact partial consumed by this committed resume."""
+        if identity is None:
+            return
+        try:
+            with self.registry._write_guard():
+                self._assert_current()
+                partial = self.root / ("partial-" + self.card.model_id)
+                info = partial.lstat()
+                actual = (info.st_dev, info.st_ino, info.st_size,
+                          info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
+                if actual == identity:
+                    partial.unlink()
+        except (Hold, OSError):
+            pass
+
     async def resume(self, progress=None, start=0, allow_installed=False):
         """Continue an interrupted transfer from a verified byte offset.
 
@@ -818,6 +827,7 @@ class Transfer:
         fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
         os.close(fd)
         self.temp = Path(name)
+        identity = None
         try:
             os.chmod(self.temp, 0o600)
             if start:
@@ -849,10 +859,7 @@ class Transfer:
                                  license_id=self.source.license_id)
             result = self._publish(registered, replacing=allow_installed)
             # A cleanup failure must not turn a committed result into a failed update.
-            try:
-                (self.root / ("partial-" + self.card.model_id)).unlink(missing_ok=True)
-            except OSError:
-                pass
+            self._consume_partial(identity)
             return result
         except asyncio.CancelledError:
             self.state = "CANCELLED"
