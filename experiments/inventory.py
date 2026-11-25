@@ -48,6 +48,18 @@ class Inventory:
         h=object()
         self._leases[h]=identity
         return h
+    def lease_candidate(self, candidate):
+        # Match the trusted selection metadata to the inventory record before
+        # issuing a fixture lease. This does not open or verify real weights.
+        from inference import Candidate
+        if type(candidate) is not Candidate:
+            raise Refused("invalid_candidate")
+        candidate.checked()
+        entry=self._entries.get(candidate.identity)
+        if (candidate.locality!="local" or not candidate.compatible or not candidate.healthy
+                or entry is None or entry.kind!=candidate.task or entry.runtime!=candidate.provider):
+            raise Refused("candidate_inventory_mismatch")
+        return self.lease(candidate.identity)
     def release(self, handle):
         if handle not in self._leases:
             raise Refused("not_owned")

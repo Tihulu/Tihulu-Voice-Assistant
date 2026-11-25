@@ -12,7 +12,9 @@ from research import canonical
 from research_session import ResearchSession
 from inference import choose, envelope
 from scheduler import Scheduler, Job
-from inventory import Inventory
+from task_chain import Chain, Step, Artifact, step_target
+
+REPORT_STEP = Step("temperature-report", "temperature", "csv", "report")
 from tihulu_jarvis.temperature_engine import analyze_temperature, render_svg
 from tihulu_jarvis.voice.m1 import Hold
 
@@ -27,6 +29,7 @@ class Report:
     disclosure: bytes
     table_digest: str
     chart_digest: str
+    report_digest: str
 
 
 class FixtureWorkflow:
@@ -67,11 +70,18 @@ class FixtureWorkflow:
         session = None
         scheduler = None
         lease = None
+        chain = None
         try:
+            if type(body) is not bytes or not 0 < len(body) <= 65536:
+                raise Refused("invalid_workflow_body")
+            if type(budget) is not int or budget < 1:
+                raise Refused("invalid_workflow_budget")
             target = canonical(url).identity
+            digest = sha256(body).hexdigest()
+            engine_target = step_target(REPORT_STEP, Artifact("csv", digest, ""))
             checks = (
                 (grants["research"], Request(self._ctx,"research",target,"local","public")),
-                (grants["engine"], Request(self._ctx,"engine","temperature","local")),
+                (grants["engine"], Request(self._ctx,"engine",engine_target,"local")),
                 (grants["agent"], Request(self._ctx,"agent","analysis-fixture","local")),
                 (grants["disclose"], Request(self._ctx,"disclose",destination,"local","minimized")),
                 (grants["publish"], Request(self._ctx,"publish","temperature-report","local")),
@@ -86,13 +96,15 @@ class FixtureWorkflow:
 
             checkpoint()
             candidate = choose(self._ctx,self._candidates,"llm",budget,"local")
-            lease = self._inventory.lease(candidate.identity)
+            lease = self._inventory.lease_candidate(candidate)
             scheduler = Scheduler(self._g,self._ctx,1,max(1,budget))
             scheduler.queue(Job("analysis","analysis-fixture",max(1,candidate.memory_mib),50),grants["agent"])
-            [(handle,job)] = scheduler.dispatch()
+            selected = scheduler.dispatch()
+            if len(selected) != 1 or selected[0][1] != "analysis":
+                raise Refused("dispatch_refused")
+            handle, _ = selected[0]
             session = ResearchSession(self._g,self._ctx,root)
             identity = session.collect(grants["research"],url,addresses,peer,headers,body)
-            digest = sha256(body).hexdigest()
             # Evidence span API is bounded to 1000 Unicode code points. The
             # first integrated slice refuses larger documents, never truncates.
             try:
@@ -105,7 +117,9 @@ class FixtureWorkflow:
             data = source.quote.encode("utf-8")
             if sha256(data).hexdigest() != digest:
                 raise Refused("source_digest_mismatch")
-            series = analyze_temperature(data,cancelled=checkpoint)
+            chain = Chain(self._g, self._ctx, (REPORT_STEP,), "csv", data)
+            step_handle = chain.begin(grants["engine"], chain.current)
+            series = analyze_temperature(chain.input_bytes(step_handle),cancelled=checkpoint)
             if not series.minimum_c.is_integer() or not series.maximum_c.is_integer():
                 raise Refused("fixture_disclosure_integer_required")
             values = {"count":series.count,"min":int(series.minimum_c),"max":int(series.maximum_c)}
@@ -114,19 +128,23 @@ class FixtureWorkflow:
                                 "delta_c":series.delta_c,"duration_s":series.duration_s},
                                 sort_keys=True,separators=(",",":")).encode("ascii")
             svg = render_svg(series,cancelled=checkpoint)
+            receipt = chain.complete(step_handle, "report", table + b"\n" + svg)
+            checkpoint()
             disclosure = envelope(self._g,grants["disclose"],self._ctx,destination,values,("count",))
             scheduler.finish(handle)
             checkpoint()
             self._checks = checks
             self._report = Report(source.url,digest,candidate.identity,table,svg,disclosure.payload,
-                                  sha256(table).hexdigest(),sha256(svg).hexdigest())
+                                  sha256(table).hexdigest(),sha256(svg).hexdigest(),receipt.digest)
             self._state = "completed"
             return self._report
-        except (Refused,Hold):
+        except Exception:
             self._report = None
             self._state = "held"
             raise
         finally:
+            if chain is not None:
+                chain.cancel()
             if session is not None:
                 session.close()
             if scheduler is not None:

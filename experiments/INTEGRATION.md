@@ -14,3 +14,5 @@ Still no trusted actor binding/OS isolation or atomic real effect broker.
 Returned bytes cannot be recalled; result() only controls retained fixture state.
 Single-threaded controller; future async worker drain/revocation remains required.
 Do not merge, activate, install or release. #118 remains frozen.
+
+Hardening: exact R4 chain 7138702eef609442ea9b08bac61545210ff9053a and R5 inventory c30559eca624b21c1424b25d1e2808e3cb29af67 synchronized. Per-step grant binds operation plus exact input digest; copied artifact identity is refused within a chain. Inventory lease matches local candidate kind/runtime/health. Dispatcher refusal leaves no result and releases synthetic lease. Final report digest binds generated table and chart. Fixture grants and bytes returned are not OS-level security.

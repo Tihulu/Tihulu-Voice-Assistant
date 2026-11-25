@@ -8,7 +8,8 @@ from gateway import Context, Request, FixtureGateway, Refused
 from inference import Candidate
 from inventory import Inventory, Entry
 from research import canonical
-from integrated_workflow import FixtureWorkflow
+from integrated_workflow import FixtureWorkflow, REPORT_STEP
+from task_chain import Artifact, step_target
 
 class IntegratedTests(unittest.TestCase):
     def setUp(self):
@@ -25,7 +26,7 @@ class IntegratedTests(unittest.TestCase):
         self.grants={}
         for name,action,target,classification in (
             ("research","research",canonical(self.url).identity,"public"),
-            ("engine","engine","temperature","none"),
+            ("engine","engine",step_target(REPORT_STEP,Artifact("csv",sha256(self.body).hexdigest(),"")),"none"),
             ("agent","agent","analysis-fixture","none"),
             ("disclose","disclose",self.destination,"minimized"),
             ("publish","publish","temperature-report","none")):
@@ -49,6 +50,7 @@ class IntegratedTests(unittest.TestCase):
         self.assertEqual(result.table_digest,sha256(result.table).hexdigest())
         self.assertEqual(result.chart_digest,sha256(result.svg).hexdigest())
         self.assertIn(b"<polyline",result.svg)
+        self.assertEqual(result.report_digest,sha256(result.table+b"\n"+result.svg).hexdigest())
         self.assertEqual(self.w.result(),result)
         self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
 
@@ -98,5 +100,30 @@ class IntegratedTests(unittest.TestCase):
         with self.assertRaises(Refused):
             self.run_fixture(budget=1)
         self.assertEqual(self.w.state,"held")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_same_source_url_changed_bytes_requires_new_grant(self):
+        changed=self.body.replace(b"0,20",b"0,21")
+        with self.assertRaises(Refused):
+            self.run_fixture(body=changed)
+        self.assertEqual(self.w.state,"held")
+
+    def test_candidate_inventory_mismatch_and_zero_budget(self):
+        self.w=FixtureWorkflow(self.g,self.ctx,self.i,(replace(self.candidates[0],provider="native"),))
+        with self.assertRaises(Refused):
+            self.run_fixture()
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        self.w=FixtureWorkflow(self.g,self.ctx,self.i,self.candidates)
+        with self.assertRaises(Refused):
+            self.run_fixture(budget=0)
+        self.assertEqual(self.w.state,"held")
+
+    def test_dispatch_refusal_drains_lease_and_retains_no_result(self):
+        with patch("integrated_workflow.Scheduler.dispatch",return_value=()):
+            with self.assertRaisesRegex(Refused,"dispatch_refused"):
+                self.run_fixture()
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
         with self.assertRaises(Refused):
             self.w.result()
