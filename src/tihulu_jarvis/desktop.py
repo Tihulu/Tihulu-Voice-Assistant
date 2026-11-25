@@ -439,6 +439,7 @@ def create_window(app, loop, bridge=None):
             self.catalog_rows = {}
             self.downloads = []
             self.download_entries = {}
+            self.download_queue_error = ""
             self.restore_download_queue()
             self.build_downloads_page()
             self.build_profiles_page()
@@ -1912,6 +1913,9 @@ def create_window(app, loop, bridge=None):
                 self.market_find = self.button(row, tr("Discover installed Jan models","Kurulu Jan modellerini bul","Installierte Jan-Modelle suchen"), self.discover_market)
                 self.market_rollback = self.button(row, tr("Roll back","Geri al","Zurücksetzen"), self.rollback_selected_card)
                 self.market_update = self.button(row, tr("Update","Güncelle","Aktualisieren"), self.update_selected_card)
+                self.market_retry = self.button(row, tr("Reset interrupted download",
+                    "Kesilen indirmeyi sıfırla", "Unterbrochenen Download zurücksetzen"),
+                    self.retry_selected_transfer)
                 cleanup = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
                 page.append(cleanup)
                 self.staging_note = Gtk.Label(xalign=0, wrap=True)
@@ -1951,6 +1955,7 @@ def create_window(app, loop, bridge=None):
                 # The row carries its card's id, so a keyboard activation and a
                 # test both reach the same model rather than the label text.
                 item.card_id = card.model_id
+                item.card_snapshot = card
             self.market_note.set_text(tr(
                 "Installed models and voices known to this computer. Unknown values stay unknown/not tested. Import happens in Installed models.",
                 "Bu bilgisayarda bilinen kurulu modeller ve sesler. Bilinmeyen değerler bilinmiyor/denenmedi olarak kalır. İçe alma Kurulu modeller bölümünde yapılır.",
@@ -3036,6 +3041,14 @@ def create_window(app, loop, bridge=None):
 
         def refresh_market_buttons(self):
             chosen = self.selected_card()
+            row = self.market_list.get_selected_row()
+            snapshot = getattr(row, "card_snapshot", None)
+            self.market_retry.set_sensitive(not self.busy and chosen is not None
+                and snapshot is not None and snapshot.state in market.RETRYABLE_TRANSFER
+                and not snapshot.registered and not snapshot.loaded and not snapshot.owned_by_jarvis
+                and not snapshot.shared_storage_owner and not snapshot.storage_ref
+                and not snapshot.artifact_digest and snapshot.local_or_cloud == "local"
+                and bool(snapshot.source_ref and snapshot.source_checksum))
             if getattr(self, "staging_scan", None) is not None:
                 if self.staging_model != chosen:
                     self.clear_staging_review()
@@ -3132,6 +3145,27 @@ def create_window(app, loop, bridge=None):
             except (Hold, OSError) as exc:
                 self.set_state("ready", str(exc))
             self.refresh_staging_buttons()
+
+        def retry_selected_transfer(self):
+            model_id = self.selected_card()
+            row = self.market_list.get_selected_row()
+            expected = getattr(row, "card_snapshot", None)
+            if self.busy or model_id is None or expected is None:
+                return
+            try:
+                self.market.retry_transfer(model_id, expected)
+            except (Hold, OSError) as exc:
+                self.set_state("ready", str(exc))
+            else:
+                for entry in self.downloads:
+                    if entry["id"] == model_id:
+                        self.refresh_partial_entry(entry)
+                self.build_downloads_page()
+                self.build_market_page()
+                self.set_state("ready", tr(
+                    "Reset to discovered. Existing temporary files preserved; start a new download explicitly.",
+                    "Keşfedildi durumuna sıfırlandı. Geçici dosyalar korundu; yeni indirmeyi açıkça başlatın.",
+                    "Auf entdeckt zurückgesetzt. Temporäre Dateien bleiben erhalten; neuen Download ausdrücklich starten."))
 
         def use_selected_card(self):
             model_id = self.selected_card()
@@ -3290,10 +3324,14 @@ def create_window(app, loop, bridge=None):
                 self.download_entries[item] = entry
                 if entry is selected:
                     self.download_list.select_row(item)
-            self.download_note.set_text(tr(
+            note = tr(
                 "Only approved, verified transfers. Nothing is downloaded without an approved source and checksum.",
                 "Yalnızca onaylı ve doğrulanmış aktarımlar. Onaylı kaynak ve sağlama toplamı olmadan hiçbir şey indirilmez.",
-                "Nur genehmigte, geprüfte Übertragungen. Ohne genehmigte Quelle und Prüfsumme wird nichts geladen."))
+                "Nur genehmigte, geprüfte Übertragungen. Ohne genehmigte Quelle und Prüfsumme wird nichts geladen.")
+            if self.download_queue_error:
+                note += "\n" + tr("Queue inspection unavailable: ", "Kuyruk incelemesi yapılamadı: ",
+                                  "Warteschlangenprüfung nicht verfügbar: ") + self.download_queue_error
+            self.download_note.set_text(note)
             self.refresh_download_buttons()
 
         def download_line(self, entry):
@@ -3387,22 +3425,25 @@ def create_window(app, loop, bridge=None):
                                  "Modelldownload fortsetzen"))
 
         def restore_download_queue(self):
-            """Rebuild pending rows without claiming unbound bytes are resumable."""
-            folder = Path(self.market.root, "transfers")
-            ids = {model_id for model_id, _ in market.resumable_partials(self.market.root)}
-            if folder.is_dir() and not folder.is_symlink():
-                ids.update(path.name[len(".partial-meta-"):] for path in folder.glob(".partial-meta-*"))
-            for model_id in sorted(ids):
-                try:
-                    card = self.market.card(model_id)
-                except Hold:
-                    continue  # an orphan partial is not this client's business
-                if card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
-                    continue  # an installed item has no pending transfer
-                entry = {"id": model_id, "state": "UNVERIFIED", "received": 0,
-                         "total": card.source_size, "note": "", "resume": 0}
-                self.refresh_partial_entry(entry)
-                self.downloads.append(entry)
+            """Rebuild pending rows from one bounded registry snapshot."""
+            try:
+                rows = self.market.pending_partials()
+            except (Hold, OSError) as exc:
+                self.download_queue_error = str(exc)
+                return
+            self.download_queue_error = ""
+            for model_id, total, status in rows:
+                verified = status["state"] == "RESUMABLE"
+                note = (tr("Prefix will be verified before resuming.",
+                           "Devam etmeden önce kısmi içerik doğrulanacak.",
+                           "Teilinhalt wird vor der Fortsetzung geprüft.") if verified else
+                        tr("Unverified partial; resume blocked.",
+                           "Doğrulanmamış kısmi dosya; sürdürme engellendi.",
+                           "Ungeprüfte Teildatei; Fortsetzung gesperrt."))
+                self.downloads.append({"id": model_id, "state": status["state"],
+                                       "received": status["size"], "total": total,
+                                       "note": note, "resume": status["size"] if verified else 0,
+                                       "partial_identity": status["identity"]})
 
         def note_transfer_bytes(self, count, total, epoch, task_id, *, redraw=True):
             # Ignore callbacks from old work, not merely from another model.
