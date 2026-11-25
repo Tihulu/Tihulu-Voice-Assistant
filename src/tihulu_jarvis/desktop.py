@@ -1885,7 +1885,7 @@ def create_window(app, loop, bridge=None):
             with self.market.transfer_lease(model_id), self.market._write_guard():
                 if self.market.card(model_id) != expected:
                     raise Hold("registry_card_changed")
-                with settings.choice_transaction(proposed):
+                with settings.choice_transaction(proposed, expected=self.cfg):
                     card = self.market.save_card(card, expected=expected)
             self.cfg = proposed
             self.update_labels()
