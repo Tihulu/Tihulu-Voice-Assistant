@@ -80,10 +80,12 @@ class FixtureWorkflow:
             target = canonical(url).identity
             digest = sha256(body).hexdigest()
             engine_target = step_target(REPORT_STEP, Artifact("csv", digest, ""))
+            candidate = choose(self._ctx,self._candidates,"llm",budget,"local")
+            job = Job("analysis","analysis-fixture",max(1,candidate.memory_mib),50)
             checks = (
                 (grants["research"], Request(self._ctx,"research",target,"local","public")),
                 (grants["engine"], Request(self._ctx,"engine",engine_target,"local")),
-                (grants["agent"], Request(self._ctx,"agent","analysis-fixture","local")),
+                (grants["agent"], Request(self._ctx,"agent",job.target(),"local")),
                 (grants["disclose"], Request(self._ctx,"disclose",destination,"local","minimized")),
                 (grants["publish"], Request(self._ctx,"publish","temperature-report","local")),
             )
@@ -100,10 +102,9 @@ class FixtureWorkflow:
                 return False
 
             checkpoint()
-            candidate = choose(self._ctx,self._candidates,"llm",budget,"local")
             lease = self._inventory.lease_candidate(candidate)
             scheduler = Scheduler(self._g,self._ctx,1,max(1,budget))
-            scheduler.queue(Job("analysis","analysis-fixture",max(1,candidate.memory_mib),50),grants["agent"])
+            scheduler.queue(job,grants["agent"])
             selected = scheduler.dispatch()
             if len(selected) != 1 or selected[0][1] != "analysis":
                 raise Refused("dispatch_refused")

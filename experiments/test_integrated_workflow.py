@@ -11,6 +11,7 @@ from inventory import Inventory, Entry
 from research import canonical
 from integrated_workflow import FixtureWorkflow, REPORT_STEP
 from task_chain import Artifact, step_target
+from scheduler import Job
 
 class IntegratedTests(unittest.TestCase):
     def setUp(self):
@@ -28,7 +29,7 @@ class IntegratedTests(unittest.TestCase):
         for name,action,target,classification in (
             ("research","research",canonical(self.url).identity,"public"),
             ("engine","engine",step_target(REPORT_STEP,Artifact("csv",sha256(self.body).hexdigest(),"")),"none"),
-            ("agent","agent","analysis-fixture","none"),
+            ("agent","agent",Job("analysis","analysis-fixture",4,50).target(),"none"),
             ("disclose","disclose",self.destination,"minimized"),
             ("publish","publish","temperature-report","none")):
             req=Request(self.ctx,action,target,"local",classification)
@@ -184,3 +185,13 @@ class IntegratedTests(unittest.TestCase):
             LocalAdapter(self.g,self.ctx,candidate,"call","llm",data,eg)
         with self.assertRaises(Refused):
             c.event(h,"s","j",1,"completed")
+
+    def test_scheduler_budget_change_requires_new_job_grant(self):
+        candidate=replace(self.candidates[0],memory_mib=5)
+        self.w=FixtureWorkflow(self.g,self.ctx,self.i,(candidate,))
+        with self.assertRaises(Refused):
+            self.run_fixture()
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()

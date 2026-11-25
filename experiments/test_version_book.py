@@ -45,3 +45,27 @@ class VersionBookTests(unittest.TestCase):
         with self.assertRaises(Refused):
             self.v.apply(a,g)
         self.assertIsNone(self.v.current("model"))
+
+    def test_revision_name_cannot_be_rebound_to_different_digest(self):
+        altered=replace(self.a,sha256=sha256(b"x").hexdigest())
+        with self.assertRaisesRegex(Refused,"revision_identity_conflict"):
+            self.v.record(altered,b"x")
+        self.assertEqual(self.v.record(self.a,b"a"),self.a.identity)
+
+    def test_concurrent_stale_generation_has_one_winner(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        changes=(self.v.plan("model",self.a.identity),self.v.plan("model",self.b.identity))
+        grants=tuple(self.grant(c,str(i)) for i,c in enumerate(changes))
+        barrier=Barrier(2)
+        def apply(i):
+            barrier.wait(timeout=5)
+            try:
+                self.v.apply(changes[i],grants[i])
+                return changes[i].next
+            except Refused:
+                return None
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            winners=[x for x in pool.map(apply,range(2)) if x is not None]
+        self.assertEqual(len(winners),1)
+        self.assertEqual(self.v.current("model"),winners[0])

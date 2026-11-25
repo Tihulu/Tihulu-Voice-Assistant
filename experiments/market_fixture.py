@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 import hashlib
 import re
+from threading import Lock
 from gateway import Request, Refused, token
 
 MAX_BYTES = 65536
@@ -62,23 +63,36 @@ class FixtureTransfer:
         self.manifest = manifest.checked()
         self._g, self._grant, self._ctx = gateway, grant, context
         self._req = Request(context, "transfer", manifest.identity, "local", "public")
+        self._g.claim(grant,self._req)
+        self._lock = Lock()
         self._data = bytearray()
         self._done = False
 
     def append(self, manifest_id, offset, chunk):
-        self._g.checkpoint(self._grant, self._req)
-        if (self._done or manifest_id != self.manifest.identity
-                or type(offset) is not int or offset != len(self._data)
-                or type(chunk) is not bytes or not 0 < len(chunk) <= MAX_CHUNK
-                or len(self._data) + len(chunk) > self.manifest.size):
-            raise Refused("invalid_chunk")
-        self._data.extend(chunk)
-        return len(self._data)
+        with self._lock:
+            self._g.checkpoint(self._grant,self._req)
+            if (self._done or manifest_id!=self.manifest.identity
+                    or type(offset) is not int or offset!=len(self._data)
+                    or type(chunk) is not bytes or not 0<len(chunk)<=MAX_CHUNK
+                    or len(self._data)+len(chunk)>self.manifest.size):
+                raise Refused("invalid_chunk")
+            self._g.checkpoint(self._grant,self._req)
+            self._data.extend(chunk)
+            return len(self._data)
 
     def finish(self, registry):
-        if self._done:
-            raise Refused("already_finished")
-        result = registry.commit(self._g, self._grant, self._ctx, self.manifest, bytes(self._data))
-        self._done = True
-        self._data.clear()
-        return result
+        with self._lock:
+            if self._done:
+                raise Refused("already_finished")
+            if type(registry) is not FixtureRegistry:
+                raise Refused("invalid_registry")
+            result=registry.commit(self._g,self._grant,self._ctx,self.manifest,bytes(self._data))
+            self._done=True
+            self._data.clear()
+            return result
+
+    def cancel(self):
+        with self._lock:
+            self._done=True
+            self._data.clear()
+            self._g.revoke(self._grant.identity)

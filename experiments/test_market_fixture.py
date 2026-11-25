@@ -62,3 +62,23 @@ class MarketTests(unittest.TestCase):
                   replace(self.m, sha256="bad"), replace(self.m, file="../outside")):
             with self.assertRaises(Refused):
                 m.checked()
+
+    def test_transfer_grant_cannot_start_two_objects(self):
+        transfer=self.transfer(self.m,"once")
+        with self.assertRaisesRegex(Refused,"grant_already_claimed"):
+            FixtureTransfer(self.g,transfer._grant,self.ctx,self.m)
+        transfer.cancel()
+        with self.assertRaises(Refused):
+            FixtureTransfer(self.g,transfer._grant,self.ctx,self.m)
+        self.assertEqual(bytes(transfer._data),b"")
+
+    def test_cancel_clears_partial_and_blocks_finish(self):
+        transfer=self.transfer(self.m,"cancel")
+        transfer.append(self.m.identity,0,self.data[:3])
+        transfer.cancel()
+        self.assertEqual(bytes(transfer._data),b"")
+        with self.assertRaises(Refused):
+            transfer.append(self.m.identity,3,self.data[3:])
+        with self.assertRaises(Refused):
+            transfer.finish(self.r)
+        self.assertIsNone(self.r.current("model"))

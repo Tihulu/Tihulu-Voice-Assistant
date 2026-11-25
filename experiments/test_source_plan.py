@@ -40,3 +40,11 @@ class SourcePlanTests(unittest.TestCase):
         self.p.close()
         with self.assertRaises(Refused):
             self.p.final_target()
+
+    def test_same_hop_grant_cannot_start_another_plan(self):
+        self.p.hop(self.urls[0],self.grants[0])
+        other=RedirectPlan(self.g,self.ctx,SourcePlan(self.root,self.urls))
+        with self.assertRaisesRegex(Refused,"grant_already_claimed"):
+            other.hop(self.urls[0],self.grants[0])
+        self.p.hop(self.urls[1],self.grants[1])
+        self.assertEqual(self.p.final_target(),self.urls[-1])

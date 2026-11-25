@@ -87,3 +87,29 @@ class AdapterTests(unittest.TestCase):
                 return False
         with ThreadPoolExecutor(max_workers=2) as pool:
             self.assertEqual(sorted(pool.map(start,range(2))),[False,True])
+
+    def test_concurrent_cancel_and_completion_leave_no_result(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        a=self.adapter()
+        a.event("job",1,"text","mavi")
+        barrier=Barrier(2)
+        def complete():
+            barrier.wait(timeout=5)
+            try:
+                a.event("job",2,"completed",None)
+            except Refused:
+                pass
+        def cancel():
+            barrier.wait(timeout=5)
+            a.cancel()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            one=pool.submit(complete)
+            two=pool.submit(cancel)
+            one.result(timeout=5)
+            two.result(timeout=5)
+        self.assertEqual(a.state,"cancelled")
+        with self.assertRaises(Refused):
+            a.result()
+        with self.assertRaises(Refused):
+            self.g.checkpoint(self.grant,Request(self.ctx,"engine",self.call.target,"local"))

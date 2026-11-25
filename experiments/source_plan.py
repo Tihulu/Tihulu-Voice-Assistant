@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Explicit owner-reviewed source transitions. No DNS or network effect."""
 from dataclasses import dataclass
+from threading import Lock
 from gateway import Request, Refused
 from research import canonical, scoped
 
@@ -22,12 +23,18 @@ class RedirectPlan:
         self._index=0
         self._visited=[]
         self._state="ready"
+        self._lock=Lock()
 
     @property
     def state(self):
-        return self._state
+        with self._lock:
+            return self._state
 
     def hop(self,url,grant):
+        with self._lock:
+            return self._hop(url,grant)
+
+    def _hop(self,url,grant):
         if self._state!="ready":
             raise Refused("plan_not_ready")
         try:
@@ -39,7 +46,7 @@ class RedirectPlan:
                 raise Refused("grant_reuse")
             for g,r in self._visited:
                 self._g.checkpoint(g,r)
-            self._g.checkpoint(grant,req)
+            self._g.claim(grant,req)
         except Refused:
             self._state="held"
             raise
@@ -50,6 +57,10 @@ class RedirectPlan:
         return target.url
 
     def final_target(self):
+        with self._lock:
+            return self._final_target()
+
+    def _final_target(self):
         if self._state!="completed":
             raise Refused("plan_not_completed")
         try:
@@ -61,5 +72,6 @@ class RedirectPlan:
         return self._targets[-1].url
 
     def close(self):
-        self._visited.clear()
-        self._state="closed"
+        with self._lock:
+            self._visited.clear()
+            self._state="closed"
