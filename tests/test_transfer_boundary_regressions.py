@@ -303,5 +303,69 @@ class TransferBoundaryTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Hold):
             self.store.history(card.model_id)
 
+class RegistryDecodeTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.card = market.ModelCard(model_id="fixture-model", display_name="Fixture", category="stt")
+
+    def test_oversize_registry_rejected_before_full_read(self):
+        with self.registry.path.open("wb") as stream:
+            stream.truncate(self.registry.LIMIT + 1)
+        with self.assertRaisesRegex(Hold, "registry_too_large"):
+            self.registry.load()
+
+    def test_utf8_byte_limit_consistent_on_read_and_write(self):
+        import json
+        text = json.dumps({"cards": [], "selection": {}, "padding": "é" * self.registry.LIMIT},
+                          ensure_ascii=False)
+        self.registry.path.write_text(text, encoding="utf-8")
+        with self.assertRaisesRegex(Hold, "registry_too_large"):
+            self.registry.load()
+        from dataclasses import replace
+        card = replace(self.card, display_name="é" * 100)
+        with patch.object(self.registry, "LIMIT", 1200):
+            self.registry.path.unlink()
+            with self.assertRaisesRegex(Hold, "registry_too_large"):
+                self.registry.store((card,), {}, history={card.model_id: [card.__dict__]})
+        self.assertFalse(self.registry.path.exists())
+
+    def test_symlink_registry_refused(self):
+        outside = self.root / "outside.json"
+        outside.write_text('{"cards":[]}')
+        self.registry.path.symlink_to(outside)
+        with self.assertRaises(Hold):
+            self.registry.load()
+        self.assertEqual(outside.read_text(), '{"cards":[]}')
+
+    def test_duplicate_json_keys_rejected(self):
+        self.registry.path.write_text('{"cards":[],"cards":[]}')
+        with self.assertRaises(Hold):
+            self.registry.load()
+
+    def test_malformed_shapes_and_duplicate_models_hold(self):
+        import json
+        for data in ([], {"cards": {}}, {"cards": [42]}, {"selection": []},
+                     {"cards": [self.card.__dict__, self.card.__dict__]},
+                     {"cards": [{**self.card.__dict__, "revision": True}]},
+                     {"history": {self.card.model_id: [42]}}):
+            with self.subTest(data=data):
+                self.registry.path.write_text(json.dumps(data))
+                with self.assertRaises(Hold):
+                    self.registry.load()
+
+    def test_legacy_history_dangling_symlink_rejected(self):
+        path = self.registry.revisions / (self.card.model_id + ".jsonl")
+        path.symlink_to(self.root / "missing")
+        with self.assertRaises(Hold):
+            self.registry.history(self.card.model_id)
+
+    def test_nonfinite_json_rejected(self):
+        self.registry.path.write_text('{"cards":[],"padding":NaN}')
+        with self.assertRaises(Hold):
+            self.registry.load()
+
 if __name__=="__main__":
     unittest.main(verbosity=2)

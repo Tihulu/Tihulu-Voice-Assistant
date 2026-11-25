@@ -963,6 +963,40 @@ def _normalized(items):
     return out
 
 
+def _bounded_registry_text(path, limit):
+    """Read only a bounded regular file, never a symlink or blocking FIFO."""
+    fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+                 | getattr(os, "O_NONBLOCK", 0))
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise Hold("registry_unreadable")
+        if info.st_size > limit:
+            raise Hold("registry_too_large")
+        with os.fdopen(fd, "rb", closefd=False) as stream:
+            raw = stream.read(limit + 1)
+        if len(raw) > limit:
+            raise Hold("registry_too_large")
+        return raw.decode("utf-8")
+    finally:
+        os.close(fd)
+
+
+def _strict_registry_json(text):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise Hold("registry_unreadable")
+            result[key] = value
+        return result
+
+    def nonfinite(value):
+        raise Hold("registry_unreadable")
+
+    return json.loads(text, object_pairs_hook=pairs, parse_constant=nonfinite)
+
+
 class Registry:
     """Local registry with per-profile independent STT/LLM/TTS selection."""
 
@@ -980,70 +1014,95 @@ class Registry:
         self.revisions.mkdir(mode=0o700, parents=True, exist_ok=True)
 
     @staticmethod
-    def _parse(text):
-        if len(text) > Registry.LIMIT:
+    def _document(text):
+        if len(text.encode("utf-8")) > Registry.LIMIT:
             raise Hold("registry_too_large")
-        data = json.loads(text)
-        cards = tuple(ModelCard(**item).checked() for item in _normalized(data.get("cards", [])))
-        selection = {}
-        for profile, choices in (data.get("selection", {}) or {}).items():
-            if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", profile) or not isinstance(choices, dict):
+        data = _strict_registry_json(text)
+        if not isinstance(data, dict):
+            raise Hold("registry_unreadable")
+        return data
+
+    @staticmethod
+    def _parse(text):
+        try:
+            data = Registry._document(text)
+            rows = data.get("cards", [])
+            if not isinstance(rows, list) or any(not isinstance(row, dict) for row in rows):
+                raise Hold("registry_unreadable")
+            cards = tuple(ModelCard(**item).checked() for item in _normalized(rows))
+            if (len({card.model_id for card in cards}) != len(cards)
+                    or any(type(card.revision) is not int or card.revision < 0 for card in cards)):
+                raise Hold("registry_unreadable")
+            choices_by_profile = data.get("selection", {})
+            if not isinstance(choices_by_profile, dict):
                 raise Hold("invalid_selection")
-            clean = {}
-            for category, model_id in choices.items():
-                if category not in CATEGORIES or not isinstance(model_id, str):
+            if len(choices_by_profile) > Registry.SELECTION_LIMIT:
+                raise Hold("selection_profile_limit")
+            selection = {}
+            for profile, choices in choices_by_profile.items():
+                if not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", profile) or not isinstance(choices, dict):
                     raise Hold("invalid_selection")
-                clean[category] = model_id
-            selection[profile] = clean
-        return cards, selection
+                clean = {}
+                for category, model_id in choices.items():
+                    if category not in CATEGORIES or not isinstance(model_id, str):
+                        raise Hold("invalid_selection")
+                    clean[category] = model_id
+                selection[profile] = clean
+            Registry._validate_history(data.get("history", {}))
+            return cards, selection
+        except (ValueError, TypeError, AttributeError, RecursionError, OverflowError):
+            raise Hold("registry_unreadable") from None
 
     @staticmethod
     def _dump(cards, selection):
         return json.dumps({"cards": [card.__dict__ for card in cards],
                            "selection": selection}, ensure_ascii=False, sort_keys=True)
 
+    def _read_document(self):
+        return _bounded_registry_text(self.path, self.LIMIT)
+
     def load(self):
         try:
-            return self._parse(self.path.read_text(encoding="utf-8"))
+            return self._parse(self._read_document())
         except FileNotFoundError:
             return (), {}
         except (ValueError, OSError):
             raise Hold("registry_unreadable") from None
 
+    @staticmethod
+    def _validate_history(history):
+        if not isinstance(history, dict):
+            raise Hold("registry_unreadable")
+        for model, rows in history.items():
+            if (not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model)
+                    or not isinstance(rows, list) or len(rows) > Registry.HISTORY_LIMIT):
+                raise Hold("registry_unreadable")
+            previous = -1
+            for row in rows:
+                if not isinstance(row, dict):
+                    raise Hold("registry_unreadable")
+                card = ModelCard(**_normalized([row])[0]).checked()
+                if card.model_id != model or type(card.revision) is not int or card.revision <= previous:
+                    raise Hold("registry_unreadable")
+                previous = card.revision
+        return history
+
     def _inline_history(self):
         try:
-            raw = self.path.read_text(encoding="utf-8")
+            raw = self._read_document()
+            return self._validate_history(self._document(raw).get("history", {}))
         except FileNotFoundError:
             return {}
-        except OSError:
-            raise Hold("registry_unreadable") from None
-        try:
-            if len(raw) > self.LIMIT:
-                raise Hold("registry_too_large")
-            data = json.loads(raw)
-            history = data.get("history", {})
-            if not isinstance(history, dict):
-                raise Hold("registry_unreadable")
-            for model, rows in history.items():
-                if (not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model)
-                        or not isinstance(rows, list) or len(rows) > self.HISTORY_LIMIT):
-                    raise Hold("registry_unreadable")
-                previous = -1
-                for row in rows:
-                    card = ModelCard(**_normalized([row])[0]).checked()
-                    if card.model_id != model or type(card.revision) is not int or card.revision <= previous:
-                        raise Hold("registry_unreadable")
-                    previous = card.revision
-            return history
-        except (ValueError, TypeError, AttributeError):
+        except (ValueError, OSError, TypeError, AttributeError, RecursionError, OverflowError):
             raise Hold("registry_unreadable") from None
 
     def store(self, cards, selection, *, history=None):
         document = json.loads(self._dump(cards, selection))
         document["history"] = self._inline_history() if history is None else history
         text = json.dumps(document, ensure_ascii=False, sort_keys=True)
-        if len(text) > self.LIMIT:
+        if len(text.encode("utf-8")) > self.LIMIT:
             raise Hold("registry_too_large")
+        self._parse(text)
         if len(selection) > self.SELECTION_LIMIT:
             raise Hold("selection_profile_limit")
         tmp = None
@@ -1102,21 +1161,22 @@ class Registry:
         if model_id in inline:
             return tuple(ModelCard(**row).checked() for row in _normalized(inline[model_id]))
         path = self.revisions / (model_id + ".jsonl")
-        if not path.is_file():
-            return ()
         out = []
         try:
-            if path.is_symlink() or path.stat().st_size > self.HISTORY_BYTES:
-                raise Hold("registry_unreadable")
-            for line in path.read_text(encoding="utf-8").splitlines():
+            for line in _bounded_registry_text(path, self.HISTORY_BYTES).splitlines():
                 if line:
-                    row = ModelCard(**_normalized([json.loads(line)])[0]).checked()
+                    item = _strict_registry_json(line)
+                    if not isinstance(item, dict):
+                        raise Hold("registry_unreadable")
+                    row = ModelCard(**_normalized([item])[0]).checked()
                     if (row.model_id != model_id or type(row.revision) is not int or row.revision < 0
                             or (out and out[-1].revision >= row.revision)
                             or len(out) >= self.HISTORY_LIMIT):
                         raise Hold("registry_history_conflict")
                     out.append(row)
-        except (ValueError, OSError, TypeError, AttributeError):
+        except FileNotFoundError:
+            return ()
+        except (ValueError, OSError, TypeError, AttributeError, RecursionError, OverflowError):
             raise Hold("registry_unreadable") from None
         return tuple(out)
 
