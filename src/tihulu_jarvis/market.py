@@ -17,6 +17,9 @@ import time
 import re
 import tempfile
 import stat
+import threading
+from contextlib import contextmanager
+from functools import wraps
 from .owned_wait import await_authorized
 from dataclasses import dataclass, field, replace
 from pathlib import Path
@@ -619,6 +622,23 @@ def transport_for(reference):
         return None
 
 
+def _registry_locked(method):
+    """Serialize synchronous registry operations; never hold across an await."""
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self._write_guard():
+            return method(self, *args, **kwargs)
+    return locked
+
+
+def _transfer_locked(method):
+    @wraps(method)
+    def locked(self, *args, **kwargs):
+        with self.registry._write_guard():
+            return method(self, *args, **kwargs)
+    return locked
+
+
 class Transfer:
     """Cancellable, verified transfer into an isolated temporary directory.
 
@@ -679,6 +699,7 @@ class Transfer:
         self._check()
         return checksum
 
+    @_transfer_locked
     def _publish(self, registered, *, replacing):
         self._check()
         if self.registry.card(self.card.model_id) != self.card:
@@ -732,6 +753,7 @@ class Transfer:
                     # old backup could not be removed.
                     pass
 
+    @_transfer_locked
     def _persist(self, state):
         self._assert_current()
         saved = self.registry.save_card(advance(self.card, state))
@@ -1009,9 +1031,52 @@ class Registry:
         self.root = Path(root)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = self.root / "registry.json"
+        self._guard_state = threading.local()
         # A directory of append-only revision logs; not the history() method.
         self.revisions = self.root / "revisions"
         self.revisions.mkdir(mode=0o700, parents=True, exist_ok=True)
+
+    @contextmanager
+    def _write_guard(self):
+        """Cooperative nonblocking lock on a stable private inode.
+
+        Never remove the lock file. This protects cooperating instances only,
+        not an attacker with write access to the registry directory.
+        """
+        pid = os.getpid()
+        if getattr(self._guard_state, "pid", None) == pid:
+            yield
+            return
+        try:
+            import fcntl
+        except ImportError:
+            raise Hold("registry_lock_unsupported") from None
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise Hold("registry_lock_unsupported")
+        fd = None
+        try:
+            fd = os.open(self.root / ".registry.lock",
+                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600)
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+                raise Hold("registry_lock_unavailable")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if fd is not None:
+                os.close(fd)
+            raise Hold("registry_busy") from None
+        except (OSError, Hold):
+            if fd is not None:
+                os.close(fd)
+            raise Hold("registry_lock_unavailable") from None
+        self._guard_state.pid = pid
+        try:
+            yield
+        finally:
+            self._guard_state.pid = None
+            os.close(fd)
 
     @staticmethod
     def _document(text):
@@ -1061,6 +1126,7 @@ class Registry:
     def _read_document(self):
         return _bounded_registry_text(self.path, self.LIMIT)
 
+    @_registry_locked
     def load(self):
         try:
             return self._parse(self._read_document())
@@ -1096,6 +1162,7 @@ class Registry:
         except (ValueError, OSError, TypeError, AttributeError, RecursionError, OverflowError):
             raise Hold("registry_unreadable") from None
 
+    @_registry_locked
     def store(self, cards, selection, *, history=None):
         document = json.loads(self._dump(cards, selection))
         document["history"] = self._inline_history() if history is None else history
@@ -1127,6 +1194,7 @@ class Registry:
                 return card
         raise Hold("model_not_registered")
 
+    @_registry_locked
     def save_card(self, card):
         """Persist a card, keeping the previous entry as a revision."""
         card = card.checked()
@@ -1153,6 +1221,7 @@ class Registry:
         self.store(kept + (card,), selection, history=history)
         return card
 
+    @_registry_locked
     def history(self, model_id):
         """Previous revisions of one item, oldest first. Never invented."""
         if not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model_id):
@@ -1192,6 +1261,7 @@ class Registry:
                 raise Hold("artifact_archive_unavailable")
         return folder / card.artifact_digest
 
+    @_registry_locked
     def retain_artifact(self, card, source, *, checkpoint=lambda: None):
         if card.shared_storage_owner or card.loaded:
             raise Hold("artifact_not_replaceable")
@@ -1278,6 +1348,7 @@ class Registry:
                 except OSError:
                     pass
 
+    @_registry_locked
     def rollback(self, model_id, revision):
         """Restore a previous revision as current, as a new revision."""
         current = self.card(model_id)
@@ -1296,6 +1367,7 @@ class Registry:
                 return self.save_card(restored)
         raise Hold("revision_not_found")
 
+    @_registry_locked
     def select(self, profile, category, model_id):
         """Independent STT/LLM/TTS choice per profile, applied only when ACTIVE."""
         if category not in CATEGORIES or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,62}", profile):
@@ -1312,6 +1384,7 @@ class Registry:
     def selection(self, profile):
         return dict(self.load()[1].get(profile, {}))
 
+    @_registry_locked
     def unregister(self, model_id):
         """Remove a registry entry. This never deletes a file by itself."""
         cards, selection = self.load()
@@ -1323,6 +1396,7 @@ class Registry:
         cleaned = {p: v for p, v in cleaned.items() if v}
         self.store(kept, cleaned)
 
+    @_registry_locked
     def uninstall(self, model_id, approval=""):
         """Delete JARVIS-owned files only. Shared weights are never removed."""
         card = self.card(model_id)
