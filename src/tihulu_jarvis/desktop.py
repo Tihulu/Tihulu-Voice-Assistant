@@ -2226,6 +2226,8 @@ def create_window(app, loop, bridge=None):
                 pass
 
         def refresh_activity(self):
+            selected = self.activity_list.get_selected_row()
+            selected_id = selected.task.id if selected is not None else None
             rows, item = [], self.activity_list.get_first_child()
             while item is not None:
                 nxt = item.get_next_sibling()
@@ -2247,10 +2249,15 @@ def create_window(app, loop, bridge=None):
                     detail += " · " + ",".join(row.locks)
                 if row.counted_total:
                     detail += " · %d/%d bytes" % (row.counted, row.counted_total)
+                elif row.kind in ("download", "update"):
+                    detail += " · %d bytes · " % row.counted + tr(
+                        "total unknown", "toplam bilinmiyor", "Gesamtgröße unbekannt")
                 label = Gtk.Label(label=detail, xalign=0, wrap=True)
                 line.set_child(label)
                 line.set_activatable(True)
                 self.activity_list.append(line)
+                if row.id == selected_id:
+                    self.activity_list.select_row(line)
             self.activity_stop.set_sensitive(bool(self.board.busy()))
             self.refresh_queue_note()
             self.activity_note.set_text(tr(
@@ -2961,14 +2968,12 @@ def create_window(app, loop, bridge=None):
                 entry["state"] = "DOWNLOADING"
                 self.build_downloads_page()
 
-            def progress(count):
-                entry["received"] = count
-                entry["state"] = "DOWNLOADING"
-                self.build_downloads_page()
+            progress = self.download_progress(entry, 0)
             try:
                 self.session.check(epoch)
                 started()
                 result = await transfer.run(progress)
+                self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
                 entry["state"] = result.state
                 entry["note"] = tr("Registered.","Kaydedildi.","Registriert.")
             finally:
@@ -3090,6 +3095,7 @@ def create_window(app, loop, bridge=None):
                 transfer = market.Transfer(self.market, card, source, transport)
                 try:
                     result = await transfer.resume(self.download_progress(entry, start), start)
+                    self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
                     entry["state"], entry["note"] = result.state, tr(
                         "Registered.", "Kaydedildi.", "Registriert.")
                 finally:
@@ -3098,7 +3104,6 @@ def create_window(app, loop, bridge=None):
                                        "partial-" + entry["id"])
                         if partial.is_file():
                             entry["state"], entry["resume"] = "RESUMABLE", partial.stat().st_size
-                    self.session.check(epoch)
                     self.build_downloads_page()
                     self.build_market_page()
             self.submit(run, kind="download",
@@ -3121,11 +3126,38 @@ def create_window(app, loop, bridge=None):
                                "Von der Festplatte wiederhergestellt."),
                     "resume": size})
 
+        def note_transfer_bytes(self, count, total, epoch, task_id, *, redraw=True):
+            # Ignore callbacks from old work, not merely from another model.
+            if epoch != self.session.epoch or task_id is None or task_id != self.active_task:
+                return
+            row = self.board.get(task_id)
+            if not row.busy or row.kind not in ("download", "update"):
+                return
+            if (type(count) is not int or type(total) is not int
+                    or not 0 <= count <= market.DIGEST_LIMIT
+                    or not 0 <= total <= market.DIGEST_LIMIT):
+                raise Hold("invalid_task_count")
+            self.board.update(task_id, counted=count, counted_total=total)
+            if redraw:
+                self.refresh_activity()
+
         def download_progress(self, entry, offset):
+            epoch, task_id = self.session.epoch, self.active_task
+            total = entry["total"]
+            self.note_transfer_bytes(offset, total, epoch, task_id)
+            last_draw = 0.0
             def progress(count):
+                nonlocal last_draw
+                if epoch != self.session.epoch or task_id != self.active_task:
+                    return
+                now = time.monotonic()
+                redraw = now - last_draw >= .25
+                self.note_transfer_bytes(count, total, epoch, task_id, redraw=redraw)
                 entry["received"] = count
                 entry["state"] = "DOWNLOADING"
-                self.build_downloads_page()
+                if redraw:
+                    last_draw = now
+                    self.build_downloads_page()
             return progress
 
         def rollback_selected_card(self):
@@ -3163,6 +3195,7 @@ def create_window(app, loop, bridge=None):
                 transfer = market.Transfer(self.market, card, source, transport)
                 try:
                     result = await transfer.update(self.download_progress(entry, 0))
+                    self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
                     entry["state"], entry["note"] = result.state, tr(
                         "Updated.", "Güncellendi.", "Aktualisiert.")
                 finally:

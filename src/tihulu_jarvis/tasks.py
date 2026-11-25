@@ -39,7 +39,8 @@ class Task:
             raise Hold("invalid_task_state")
         if not isinstance(self.label, str) or len(self.label) > 120:
             raise Hold("invalid_task_label")
-        if self.counted < 0 or self.counted_total < 0:
+        if (type(self.counted) is not int or type(self.counted_total) is not int
+                or self.counted < 0 or self.counted_total < 0):
             raise Hold("invalid_task_count")
         return self
 

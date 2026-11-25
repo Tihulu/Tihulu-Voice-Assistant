@@ -51,3 +51,6 @@ The same hardened files engine is now accessible from explicit TR/EN/DE composer
 
 ## Local selected-file search
 Explicit literal case-insensitive search of one selected file uses the same pinned root and entry identity, 256 KiB UTF-8 read limit and live folder/file grants as preview. Count matching lines across the entire bounded file; show at most 30 snippets of at most 240 source characters with line numbers, no regex input, no automatic folder-wide file-content access, no model/history or persistence. Clear stale search output on query/selection/grant change, Hard Stop or profile change. Existing blocked-I/O cancellation limitations apply.
+
+## Transfer task telemetry
+Connect existing authorized transfer progress to its owned Activity row, including resume offsets, unknown totals and verified final artifact size. Preserve selected Activity row across redraw, throttle progress redraw to four per second, ignore obsolete epoch/task callbacks and refresh download rows after resume cancellation. Counts represent transport-reported bytes until verified completion, not elapsed-time estimates or a new download authority. No change to network scope or transfer registration.

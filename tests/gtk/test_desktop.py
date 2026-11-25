@@ -1579,6 +1579,9 @@ class DownloadQueueTests(DownloadTransportTests):
         self.assertIn("%d of %s bytes" % (len(payload), market.human_size(len(payload))), line)
         entry = self.pick_download("fixture-download")
         self.assertEqual((entry["state"], entry["received"]), ("REGISTERED", len(payload)))
+        task = self.ui.board.rows[-1]
+        self.assertEqual((task.kind, task.state, task.counted, task.counted_total),
+                         ("download", "done", len(payload), len(payload)))
         self.assertFalse(self.ui.download_cancel.get_sensitive())
 
     def test_unknown_size_is_reported_as_unknown(self):
@@ -1590,6 +1593,8 @@ class DownloadQueueTests(DownloadTransportTests):
         self.until(lambda: not self.ui.busy)
         self.assertEqual(self.ui.market.card("fixture-download").state, "REGISTERED")
         self.assertIn("0 of unknown/not tested bytes", self.download_rows()[0])
+        task = self.ui.board.rows[-1]
+        self.assertEqual((task.counted, task.counted_total), (len(payload), 0))
 
     def test_cancellation_removes_the_partial_and_marks_the_entry(self):
         url, payload = self.loopback_server()
