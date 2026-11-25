@@ -284,15 +284,24 @@ class TransferBoundaryTests(unittest.IsolatedAsyncioTestCase):
         previous=replace(card,display_name="Older",revision=0)
         current=replace(card,display_name="Current",revision=1)
         legacy=self.store.revisions/(card.model_id+".jsonl")
-        legacy.write_text(json.dumps(previous.__dict__)+"\\n")
+        legacy.write_text(json.dumps(previous.__dict__)+"\n")
         self.store.store((current,),{})
         self.assertEqual(self.store.history(card.model_id),(previous,))
         saved=self.store.save_card(replace(current,display_name="Next"))
         self.assertEqual(saved.revision,2)
         self.assertEqual(self.store.history(card.model_id),(previous,current))
-        self.assertEqual(legacy.read_text(),json.dumps(previous.__dict__)+"\\n")
+        self.assertEqual(legacy.read_text(),json.dumps(previous.__dict__)+"\n")
         reopened=market.Registry(self.root)
         self.assertEqual(reopened.history(card.model_id),(previous,current))
+
+    async def test_history_with_foreign_model_refused(self):
+        import json
+        from dataclasses import replace
+        card=self.card()
+        legacy=self.store.revisions/(card.model_id+".jsonl")
+        legacy.write_text(json.dumps(replace(card,model_id="different").__dict__)+"\n")
+        with self.assertRaises(Hold):
+            self.store.history(card.model_id)
 
 if __name__=="__main__":
     unittest.main(verbosity=2)

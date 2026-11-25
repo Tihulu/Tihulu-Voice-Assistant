@@ -1025,7 +1025,7 @@ class Registry:
             if not isinstance(history, dict):
                 raise Hold("registry_unreadable")
             for model, rows in history.items():
-                if (not re.fullmatch(r"[A-Za-z0-9][\\w.:-]{0,127}", model)
+                if (not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model)
                         or not isinstance(rows, list) or len(rows) > self.HISTORY_LIMIT):
                     raise Hold("registry_unreadable")
                 previous = -1
@@ -1106,10 +1106,17 @@ class Registry:
             return ()
         out = []
         try:
+            if path.is_symlink() or path.stat().st_size > self.HISTORY_BYTES:
+                raise Hold("registry_unreadable")
             for line in path.read_text(encoding="utf-8").splitlines():
                 if line:
-                    out.append(ModelCard(**_normalized([json.loads(line)])[0]).checked())
-        except (ValueError, OSError):
+                    row = ModelCard(**_normalized([json.loads(line)])[0]).checked()
+                    if (row.model_id != model_id or type(row.revision) is not int or row.revision < 0
+                            or (out and out[-1].revision >= row.revision)
+                            or len(out) >= self.HISTORY_LIMIT):
+                        raise Hold("registry_history_conflict")
+                    out.append(row)
+        except (ValueError, OSError, TypeError, AttributeError):
             raise Hold("registry_unreadable") from None
         return tuple(out)
 
