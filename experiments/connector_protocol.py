@@ -2,6 +2,7 @@
 """Normalized agent connector fixture; not OpenCode/ACP wire compatibility."""
 from dataclasses import dataclass
 from hashlib import sha256
+from threading import Lock
 from gateway import Request, Refused, token
 
 @dataclass(frozen=True)
@@ -32,19 +33,28 @@ class Connector:
         self._seen=set()
         self._closed=False
         self._status="idle"
+        self._lock=Lock()
 
     @property
     def status(self):
-        return self._status
+        with self._lock:
+            return self._status
 
     def begin(self,spec,grant,payload):
+        with self._lock:
+            return self._begin(spec,grant,payload)
+
+    def _begin(self,spec,grant,payload):
+        if type(spec) is not JobSpec:
+            raise Refused("invalid_job")
+        target=spec.target()
         if (self._closed or self._active is not None or type(spec) is not JobSpec
                 or spec.adapter!=self._adapter or spec.session!=self._session
                 or type(payload) is not bytes or not 0<len(payload)<=16384
                 or sha256(payload).hexdigest()!=spec.payload_digest
                 or spec.job in self._seen or len(self._seen)>=64):
             raise Refused("invalid_job")
-        req=Request(self._ctx,"agent",spec.target(),"local")
+        req=Request(self._ctx,"agent",target,"local")
         self._g.claim(grant,req)
         handle=object()
         self._seen.add(spec.job)
@@ -53,6 +63,10 @@ class Connector:
         return handle
 
     def event(self,handle,session,job,sequence,kind):
+        with self._lock:
+            return self._event(handle,session,job,sequence,kind)
+
+    def _event(self,handle,session,job,sequence,kind):
         if self._closed or self._active is None or handle is not self._active[0]:
             raise Refused("not_owned")
         _,spec,grant,req,previous=self._active
@@ -64,6 +78,7 @@ class Connector:
                 raise Refused("invalid_event")
             self._g.checkpoint(grant,req)
         except Refused:
+            self._g.revoke(grant.identity)
             self._active=None
             self._status="held"
             raise
@@ -75,12 +90,17 @@ class Connector:
         return self._status
 
     def cancel(self,handle):
-        if self._active is None or handle is not self._active[0]:
-            raise Refused("not_owned")
-        self._active=None
-        self._status="cancelled"
+        with self._lock:
+            if self._active is None or handle is not self._active[0]:
+                raise Refused("not_owned")
+            self._g.revoke(self._active[2].identity)
+            self._active=None
+            self._status="cancelled"
 
     def close(self):
-        self._closed=True
-        self._active=None
-        self._status="closed"
+        with self._lock:
+            if self._active is not None:
+                self._g.revoke(self._active[2].identity)
+            self._closed=True
+            self._active=None
+            self._status="closed"

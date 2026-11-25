@@ -156,5 +156,38 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaises(Refused):
             g.checkpoint(grant, req)
 
+    def test_context_cannot_be_rebound_through_public_attribute(self):
+        g=self.gateway()
+        with self.assertRaises(AttributeError):
+            g.context=replace(self.ctx,mode="CLOUD_CHAT")
+        self.assertEqual(g.context,self.ctx)
+
+    def test_broad_explicit_deny_is_not_overridden_by_narrow_allow(self):
+        g=self.gateway(rules=(profiles.Rule("filesystem_read",(),"deny"),
+                              profiles.Rule("filesystem_read",("target",),"allow")))
+        with self.assertRaisesRegex(Refused,"explicit_deny"):
+            g.fixture_grant("x",Request(self.ctx,"engine","target","local"),10)
+
+    def test_capture_requires_audio_specific_permission(self):
+        req=Request(self.ctx,"capture","target","local","private")
+        with self.assertRaises(Refused):
+            self.gateway(rules=(profiles.Rule("filesystem_read",("target",),"allow"),)).fixture_grant("x",req,10)
+        g=self.gateway(rules=(profiles.Rule("local_audio_device",("target",),"allow"),))
+        self.assertEqual(g.checkpoint(g.fixture_grant("x",req,10),req),"SIMULATED_ALLOW")
+        with self.assertRaises(Refused):
+            g.fixture_grant("y",replace(req,classification="public"),10)
+
+    def test_browser_requires_both_policy_ceilings(self):
+        req=Request(self.ctx,"browser","target","local","public")
+        net=profiles.Rule("external_network",("target",),"allow")
+        browser=profiles.Rule("browser_navigate",("target",),"allow")
+        for rules in ((net,),(browser,)):
+            with self.assertRaises(Refused):
+                self.gateway(rules=rules).fixture_grant("x",req,10)
+        g=self.gateway(rules=(net,browser))
+        self.assertEqual(g.checkpoint(g.fixture_grant("x",req,10),req),"SIMULATED_ALLOW")
+        with self.assertRaises(Refused):
+            g.fixture_grant("y",replace(req,actor="cloud"),10)
+
 if __name__ == "__main__":
     unittest.main()

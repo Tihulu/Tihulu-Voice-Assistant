@@ -14,9 +14,10 @@ ACTIONS = {
     "engine": "filesystem_read", "agent": "host_shell",
     "catalog": "external_network", "transfer": "external_network",
     "publish": "publish_artifact",
+    "capture": "local_audio_device", "browser": "browser_navigate",
 }
-HOST = frozenset(("engine", "agent", "local_plan", "publish"))
-EXTERNAL = frozenset(("research", "provider", "disclose", "catalog", "transfer"))
+HOST = frozenset(("engine", "agent", "local_plan", "publish", "capture"))
+EXTERNAL = frozenset(("research", "provider", "disclose", "catalog", "transfer", "browser"))
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 MAX_GRANTS = 64
 
@@ -88,7 +89,7 @@ class FixtureGateway:
     def __init__(self, context, rules, *, clock):
         if type(context) is not Context or type(clock) is not profiles.PolicyClock:
             raise Refused("invalid_fixture")
-        self.context = context.checked()
+        self._context = context.checked()
         if type(rules) not in (tuple, list) or len(rules) > MAX_GRANTS:
             raise Refused("invalid_rules")
         self._rules = tuple(rules)
@@ -111,6 +112,10 @@ class FixtureGateway:
         self._closed = False
         self._lock = Lock()
 
+    @property
+    def context(self):
+        return self._context
+
     def _check(self, req, now):
         if type(req) is not Request:
             raise Refused("invalid_request")
@@ -130,19 +135,26 @@ class FixtureGateway:
             raise Refused("host_boundary")
         if req.action in ("provider", "disclose") and mode == "LOCAL_ONLY":
             raise Refused("local_only")
-        if req.action in ("research", "catalog", "transfer") and mode == "LOCAL_ONLY" and not self.context.public_opt_in:
+        if req.action in ("research", "catalog", "transfer", "browser") and mode == "LOCAL_ONLY" and not self.context.public_opt_in:
             raise Refused("public_opt_in_required")
         if req.action in EXTERNAL and req.classification == "private":
             raise Refused("private_egress_denied")
         if req.action in ("disclose", "provider") and req.classification not in (
                 ("public", "minimized") if mode == "SECURE_HYBRID" else ("public",)):
             raise Refused("disclosure_classification_denied")
-        if req.action in ("research", "catalog", "transfer") and req.classification != "public":
+        if req.action in ("research", "catalog", "transfer", "browser") and req.classification != "public":
             raise Refused("public_data_required")
-        # No silent selection override or grant inheritance.
-        decision, reason = profiles.decide(self._rules, ACTIONS[req.action], (req.target,), now)
-        if decision != profiles.ALLOW:
-            raise Refused(reason)
+        if req.action == "capture" and req.classification != "private":
+            raise Refused("private_capture_required")
+        # A browser operation requires both the browser-specific and the
+        # external-network policy ceiling. No inherited research grant.
+        actions = (ACTIONS[req.action], "external_network") if req.action == "browser" else (ACTIONS[req.action],)
+        for action in actions:
+            if any(r.decision == profiles.DENY and r.matches(action, (req.target,)) for r in self._rules):
+                raise Refused("explicit_deny")
+            decision, reason = profiles.decide(self._rules, action, (req.target,), now)
+            if decision != profiles.ALLOW:
+                raise Refused(reason)
 
     def fixture_grant(self, identity, req, seconds):
         """Trusted fixture setup only. Not callable from model output in runtime."""
