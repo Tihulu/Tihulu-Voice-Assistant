@@ -2421,6 +2421,63 @@ class TranscribeFileUITests(DownloadFixture):
         self.assertFalse(Path(reached[0]).exists())
         self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
 
+    def exercise_validation_drain(self, close=False):
+        from threading import Event
+        entered, release, drained = Event(), Event(), Event()
+        paths = []
+        original = desktop.audio.has_signal
+        runner, calls = self.runner()
+        self.ui.transcribe_runner = runner
+        def delayed(path, *, checkpoint):
+            paths.append(path)
+            entered.set()
+            try:
+                if not release.wait(20):
+                    raise AssertionError("validation worker timeout")
+                self.assertTrue(path.is_file())
+                return original(path, checkpoint=checkpoint)
+            finally:
+                drained.set()
+        with patch.object(desktop.audio, "has_signal", side_effect=delayed):
+            self.ui.run_transcribe(str(self.clip()))
+            try:
+                self.until(entered.is_set)
+                if close:
+                    self.ui.win.close()
+                else:
+                    self.ui.hard_stop()
+                # Pump GTK/asyncio past the first cancellation while the
+                # actual worker is deliberately still held.
+                tick = []
+                GLib.timeout_add(100, lambda: (tick.append(True), False)[1])
+                self.until(lambda: bool(tick))
+                self.assertTrue(self.ui.busy)
+                self.assertTrue(self.ui.board.busy())
+                self.assertTrue(paths[0].is_file())
+                self.assertFalse(drained.is_set())
+                self.assertFalse(calls)
+                if close:
+                    self.assertTrue(self.ui.win.get_visible())
+                    self.ui.win.close()
+                else:
+                    self.ui.hard_stop()
+            finally:
+                release.set()
+            self.until(lambda: not self.ui.busy)
+            if close:
+                self.until(lambda: not self.app.get_windows())
+        self.assertTrue(drained.is_set())
+        self.assertFalse(paths[0].exists())
+        self.assertFalse(calls)
+        if not close:
+            self.assertFalse(any(b.startswith("Recording") for b in self.bubbles()))
+
+    def test_hard_stop_drains_signal_validation_before_idle(self):
+        self.exercise_validation_drain()
+
+    def test_close_drains_signal_validation_before_window_destroy(self):
+        self.exercise_validation_drain(close=True)
+
     def test_recording_generation_change_during_task_binding_refused(self):
         clip = self.clip()
         runner, calls = self.runner()

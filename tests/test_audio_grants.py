@@ -215,3 +215,99 @@ class AudioGrantTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(asyncio.CancelledError):
             await task
         self.assertTrue(drained.is_set())
+
+    async def exercise_signal_drain(self, mode, revoke=False):
+        from threading import Event
+        entered, release, drained = Event(), Event(), Event()
+        paths, calls = [], []
+        original = audio.has_signal
+        recording = self.root / "fixture.wav"
+        self.wav(recording)
+        def delayed(path, *, checkpoint):
+            paths.append(path)
+            entered.set()
+            try:
+                if not release.wait(5):
+                    raise AssertionError("validation worker timeout")
+                self.assertTrue(path.is_file())
+                return original(path, checkpoint=checkpoint)
+            finally:
+                drained.set()
+        async def capture(path, *args, **kwargs):
+            self.wav(path)
+        async def runner(*args, **kwargs):
+            calls.append("whisper")
+            raise AssertionError("unexpected engine")
+        with patch.object(audio, "has_signal", side_effect=delayed), \
+             patch.object(audio, "_capture", side_effect=capture), \
+             patch.object(audio, "_whisper", side_effect=runner), \
+             patch.object(audio, "tools_ready", return_value=True), \
+             patch.object(audio, "AUTH_POLL", .01):
+            if mode == "recording":
+                task = asyncio.create_task(audio.transcribe(str(self.model), str(recording),
+                                                            runner, checkpoint=self.check))
+            else:
+                task = asyncio.create_task(audio.listen(str(self.model), asyncio.Event(),
+                                                         lambda _: None, checkpoint=self.check))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait, 2))
+                if revoke:
+                    self.allowed = False
+                else:
+                    task.cancel()
+                await asyncio.sleep(.05)
+                if not revoke:
+                    task.cancel()
+                    await asyncio.sleep(.02)
+                self.assertFalse(task.done())
+                self.assertTrue(paths[0].is_file())
+                self.assertFalse(drained.is_set())
+                self.assertFalse(calls)
+            finally:
+                release.set()
+                result = await asyncio.gather(task, return_exceptions=True)
+            self.assertIsInstance(result[0], Hold if revoke else asyncio.CancelledError)
+            if revoke:
+                self.assertEqual(str(result[0]), "approval_expired")
+        self.assertTrue(drained.is_set())
+        self.assertFalse(paths[0].exists())
+        self.assertFalse(calls)
+
+    async def test_selected_signal_worker_drains_on_repeated_cancel(self):
+        await self.exercise_signal_drain("recording")
+
+    async def test_capture_signal_worker_drains_on_repeated_cancel(self):
+        await self.exercise_signal_drain("capture")
+
+    async def test_selected_signal_worker_drains_on_revocation(self):
+        await self.exercise_signal_drain("recording", revoke=True)
+
+    async def test_capture_signal_worker_drains_on_revocation(self):
+        await self.exercise_signal_drain("capture", revoke=True)
+
+    async def test_worker_checkpoint_refuses_before_next_read(self):
+        from threading import Event
+        entered, release = Event(), Event()
+        original = wave.Wave_read.readframes
+        calls = []
+        def delayed(wav, count):
+            calls.append(count)
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("frame fixture timeout")
+            return original(wav, count)
+        recording = self.root / "fixture.wav"
+        self.wav(recording)
+        with patch.object(wave.Wave_read,"readframes",side_effect=None,autospec=True) as read:
+            read.side_effect = delayed
+            task = asyncio.create_task(audio.validate_signal(recording,checkpoint=self.check))
+            try:
+                self.assertTrue(await asyncio.to_thread(entered.wait,2))
+                task.cancel()
+                await asyncio.sleep(.02)
+                self.assertFalse(task.done())
+            finally:
+                release.set()
+                result=await asyncio.gather(task,return_exceptions=True)
+            self.assertIsInstance(result[0],asyncio.CancelledError)
+        self.assertEqual(len(calls),1)
