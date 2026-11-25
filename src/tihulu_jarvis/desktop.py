@@ -1702,6 +1702,7 @@ def create_window(app, loop, bridge=None):
                 card = self.market.save_card(market.register_installed(card))
                 self.cfg["llm"] = model_id
                 self.remember("llm", model_id)
+                self.models.set_active(self.inventory.index(model_id))
                 self.save()
                 self.refresh()
                 return
@@ -2799,12 +2800,6 @@ def create_window(app, loop, bridge=None):
                 client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 cards = await market.from_models(client, languages=(), now=0.0)
                 checkpoint()
-                raw = route[3]
-                self.cfg["endpoint"] = raw
-                self.inventory = tuple(card.model_id for card in cards)
-                self.models.remove_all()
-                for model_id in self.inventory:
-                    self.models.append_text(model_id)
                 for card in cards:
                     known = None
                     try:
@@ -2814,6 +2809,14 @@ def create_window(app, loop, bridge=None):
                     if known is None or known.state == "DISCOVERED":
                         # Re-discovery refreshes a card, never silently upgrades it.
                         self.market.save_card(card)
+                checkpoint()
+                self.cfg["endpoint"] = route[3]
+                self.inventory = tuple(card.model_id for card in cards)
+                self.models.remove_all()
+                for model_id in self.inventory:
+                    self.models.append_text(model_id)
+                if self.cfg["llm"] in self.inventory:
+                    self.models.set_active(self.inventory.index(self.cfg["llm"]))
                 self.save()
                 self.build_market_page()
                 self.refresh()

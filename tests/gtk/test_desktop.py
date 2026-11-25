@@ -982,6 +982,7 @@ class MarketInventoryTests(MarketFixture):
         self.assertEqual(self.ui.profile_note.get_text().count("LOCAL_ONLY"), 1)
         # An active model is one the endpoint actually serves.
         self.assertEqual(self.ui.inventory, ("fixture-qwen", "fixture-llama"))
+        self.assertEqual(self.ui.models.get_active_text(), "fixture-qwen")
         self.assertTrue(self.ui.send.get_sensitive())
 
     def test_a_model_the_endpoint_does_not_serve_is_refused(self):
@@ -999,6 +1000,20 @@ class MarketInventoryTests(MarketFixture):
         self.until(lambda: self.ui.status.get_text() == "model_not_in_inventory")
         self.assertEqual(self.ui.cfg["llm"], "fixture-chat")
         self.assertEqual(self.ui.market.card("fixture-qwen").state, "DISCOVERED")
+
+    def test_market_discovery_preserves_selected_model_and_clears_stale_inventory(self):
+        self.connect_model()
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.models.get_active_text(), "fixture-chat")
+        self.assertTrue(self.ui.send.get_sensitive())
+        with patch.object(self.backend, "models", side_effect=Hold("jan_unavailable")):
+            self.click(self.ui.market_find)
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.inventory, ())
+        self.assertIsNone(self.ui.models.get_active_text())
+        self.assertFalse(self.ui.send.get_sensitive())
+        self.assertEqual(self.ui.cfg["llm"], "fixture-chat")
 
     def test_rediscovery_never_upgrades_a_registered_card(self):
         self.backend.inventory = ("fixture-qwen",)
