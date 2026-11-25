@@ -1,0 +1,25 @@
+name: Owner complaint sweep (maintainer evidence)
+on:
+  pull_request:
+    branches: ['fix/chat-first-result-lifetime']
+permissions:
+  contents: read
+jobs:
+  complaint-sweep:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - run: git diff --exit-code d4b756351b1552aa5806c89e39eda3b5b82aa337 HEAD -- src packaging tools tests pyproject.toml
+      - run: sudo apt-get update -qq && sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+      - env:
+          PYTHONPATH: src:tests/gtk
+          PYTHONDONTWRITEBYTECODE: '1'
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          GTK_A11Y: none
+          G_DEBUG: fatal-criticals
+        run: dbus-run-session -- xvfb-run -a /usr/bin/python3 qa/owner_complaint_sweep.py
