@@ -2139,5 +2139,68 @@ class PendingPartialInventoryTests(unittest.TestCase):
         self.card("known")
         self.assertEqual(self.registry.pending_partials(), ())
 
+class DisplayedOperationBindingTests(unittest.TestCase):
+    def setUp(self):
+        from dataclasses import replace
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        digest = hashlib.sha256(OLD).hexdigest()
+        self.card = self.registry.save_card(replace(market.ModelCard(
+            model_id="fixture-model", display_name="Fixture", category="stt"),
+            state="REGISTERED", installed=True, registered=True, owned_by_jarvis=True,
+            artifact_digest=digest, storage_ref="sha256-" + digest[:32],
+            disk_size_bytes=len(OLD), source_ref="catalog:fixture",
+            source_checksum=hashlib.sha256(NEW).hexdigest(),
+            source_size=len(NEW), network_approval="fixture", approval_expires_at=1e12))
+        self.target = self.root / "artifacts" / self.card.model_id
+        self.target.parent.mkdir(mode=0o700)
+        self.target.write_bytes(OLD)
+
+    def test_stale_unregistration_cannot_remove_new_card(self):
+        newer = self.registry.save_card(market.replace(self.card, display_name="New"))
+        with self.assertRaisesRegex(Hold, "registry_card_changed"):
+            self.registry.unregister(self.card.model_id, expected=self.card)
+        self.assertEqual(self.registry.card(self.card.model_id), newer)
+        self.assertEqual(self.target.read_bytes(), OLD)
+
+    def test_stale_rollback_cannot_change_new_card(self):
+        newer = self.registry.save_card(market.replace(self.card, display_name="New"))
+        with self.assertRaisesRegex(Hold, "registry_card_changed"):
+            self.registry.rollback(self.card.model_id, 0, expected=self.card)
+        self.assertEqual(self.registry.card(self.card.model_id), newer)
+        self.assertEqual(self.target.read_bytes(), OLD)
+
+    def test_stale_uninstall_cannot_delete_new_card(self):
+        newer = self.registry.save_card(market.replace(self.card, display_name="New"))
+        with self.assertRaisesRegex(Hold, "registry_card_changed"):
+            self.registry.uninstall(self.card.model_id, approval="fixture", expected=self.card)
+        self.assertEqual(self.registry.card(self.card.model_id), newer)
+        self.assertEqual(self.target.read_bytes(), OLD)
+
+    def test_loaded_model_refuses_lifecycle_removal_and_rollback(self):
+        loaded = self.registry.save_card(market.replace(self.card, loaded=True))
+        for operation in (lambda: self.registry.unregister(loaded.model_id),
+                          lambda: self.registry.uninstall(loaded.model_id, approval="fixture"),
+                          lambda: self.registry.rollback(loaded.model_id, 0)):
+            with self.assertRaisesRegex(Hold, "model_loaded"):
+                operation()
+        self.assertEqual(self.registry.card(loaded.model_id), loaded)
+        self.assertEqual(self.target.read_bytes(), OLD)
+
+    def test_stale_display_refuses_transport_selection(self):
+        newer = self.registry.save_card(market.replace(self.card, source_ref="catalog:new"))
+        with patch.object(market, "transport_for") as factory:
+            with self.assertRaisesRegex(Hold, "registry_card_changed"):
+                market.Transfer.from_registry(self.registry, self.card.model_id, expected=self.card)
+            factory.assert_not_called()
+        self.assertEqual(self.registry.card(self.card.model_id), newer)
+
+    def test_current_display_allows_explicit_unregister(self):
+        self.registry.unregister(self.card.model_id, expected=self.card)
+        self.assertEqual(self.registry.cards(), ())
+        self.assertEqual(self.target.read_bytes(), OLD)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)

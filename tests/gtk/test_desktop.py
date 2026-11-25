@@ -1781,7 +1781,8 @@ class RevisionHistoryUITests(MarketFixture):
         self.revise(card.model_id, "Renamed once")
         self.revise(card.model_id, "Renamed twice")
         self.assertEqual(self.ui.market.card(card.model_id).display_name, "Renamed twice")
-        self.ui.refresh_market_buttons()
+        self.ui.build_market_page()
+        self.pick_card(card.model_id)
         self.assertTrue(self.ui.market_rollback.get_sensitive())
         self.click(self.ui.market_rollback)
         self.until(lambda: self.ui.market.card(card.model_id).display_name == "Renamed once")
@@ -1861,6 +1862,35 @@ class UpdateUITests(DownloadFixture):
         self.assertEqual(self.ui.market.card("fixture-update").state, "ACTIVE")
         # The failed update replaced nothing; only the explicit rename revision exists.
         self.assertEqual(len(self.ui.market.history("fixture-update")), 1)
+class StaleMarketActionUITests(MarketFixture):
+    def setUp(self):
+        super().setUp()
+        self.card = self.ui.market.save_card(market.ModelCard(
+            model_id="fixture-stale", display_name="Displayed", category="stt",
+            source_ref="catalog:fixture", source_checksum=hashlib.sha256(b"weights").hexdigest(),
+            source_size=7, network_approval="fixture", approval_expires_at=1e12))
+        self.ui.market_filter.set_active(0)
+        self.ui.build_market_page()
+        self.pick_card(self.card.model_id)
+        self.newer = self.ui.market.save_card(market.replace(self.card, display_name="Changed"))
+
+    def test_stale_row_cannot_unregister_newer_record(self):
+        self.ui.forget_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "registry_card_changed")
+        self.assertEqual(self.ui.market.card(self.card.model_id), self.newer)
+
+    def test_stale_row_cannot_rollback_newer_record(self):
+        self.ui.rollback_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "registry_card_changed")
+        self.assertEqual(self.ui.market.card(self.card.model_id), self.newer)
+
+    def test_stale_row_cannot_start_download(self):
+        self.ui.download_selected_card()
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "registry_card_changed")
+        self.assertEqual(self.ui.market.card(self.card.model_id), self.newer)
+        self.assertEqual(self.ui.downloads, [])
+
 class InterruptedRetryUITests(MarketFixture):
     def setUp(self):
         super().setUp()
