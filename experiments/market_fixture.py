@@ -32,31 +32,103 @@ class Manifest:
         return hashlib.sha256(repr((self.model, self.revision, self.file,
                                     self.size, self.sha256, self.license_id)).encode("ascii")).hexdigest()
 
+def registry_target(context):
+    return hashlib.sha256(repr(("registry-root",context.checked())).encode("ascii")).hexdigest()
+
+@dataclass(frozen=True)
+class Publication:
+    scope: str
+    model: str
+    manifest: str
+    previous: str
+    generation: int
+
+    def target(self):
+        return hashlib.sha256(repr(("registry-publication",self.scope,self.model,
+                                    self.manifest,self.previous,self.generation)).encode("ascii")).hexdigest()
+
 class FixtureRegistry:
-    """Immutable bytes by manifest; no filesystem operations, actual weights or downloads."""
-    def __init__(self):
-        self._objects = {}
-        self._current = {}
+    """Private immutable synthetic bytes; publication is a distinct owner decision."""
+    def __init__(self, gateway, context, root):
+        self._g,self._ctx=gateway,context.checked()
+        self._req=Request(self._ctx,"publish",registry_target(self._ctx),"local")
+        gateway.claim(root,self._req)
+        self._root=root
+        self._scope=hashlib.sha256(repr(("registry-instance",root.identity)).encode("ascii")).hexdigest()
+        self._objects={}
+        self._current={}
+        self._generation={}
+        self._lock=Lock()
 
-    def current(self, model):
-        return self._current.get(model)
+    def _live(self):
+        self._g.checkpoint(self._root,self._req)
 
-    def commit(self, gateway, grant, context, manifest, data):
+    def current(self,model):
+        with self._lock:
+            self._live()
+            return self._current.get(model)
+
+    def current_bytes(self,model):
+        with self._lock:
+            self._live()
+            record=self._objects.get(self._current.get(model))
+            return None if record is None else record[1]
+
+    def _plan(self,manifest):
         manifest.checked()
-        req = Request(context, "transfer", manifest.identity, "local", "public")
-        gateway.checkpoint(grant, req)
-        if (type(data) is not bytes or len(data) != manifest.size
-                or hashlib.sha256(data).hexdigest() != manifest.sha256):
+        return Publication(self._scope,manifest.model,manifest.identity,
+                           self._current.get(manifest.model,""),self._generation.get(manifest.model,0))
+
+    def plan(self,manifest):
+        with self._lock:
+            self._live()
+            return self._plan(manifest)
+
+    def _commit(self,transfer,plan,grant):
+        """Only called by the owning transfer while its lock is held."""
+        if transfer._g is not self._g or transfer._ctx!=self._ctx or type(plan) is not Publication:
+            raise Refused("registry_context_mismatch")
+        manifest=transfer.manifest
+        data=bytes(transfer._data)
+        if len(data)!=manifest.size or hashlib.sha256(data).hexdigest()!=manifest.sha256:
             raise Refused("integrity_mismatch")
-        old = self._objects.get(manifest.identity)
-        if old is not None and old != data:
-            raise Refused("immutable_conflict")
-        if old is None and len(self._objects) >= 64:
-            raise Refused("registry_limit")
-        gateway.checkpoint(grant, req)
-        self._objects[manifest.identity] = data
-        self._current[manifest.model] = manifest.identity
-        return "INTEGRITY_ONLY_NOT_TRUST"
+        request=Request(self._ctx,"publish",plan.target(),"local")
+        with self._lock:
+            self._live()
+            self._g.checkpoint(transfer._grant,transfer._req)
+            if plan!=self._plan(manifest):
+                raise Refused("stale_publication")
+            old=self._objects.get(manifest.identity)
+            if old is not None and old!=(manifest,data):
+                raise Refused("immutable_conflict")
+            for previous,_ in self._objects.values():
+                if ((previous.model,previous.revision,previous.file)==(manifest.model,manifest.revision,manifest.file)
+                        and previous.identity!=manifest.identity):
+                    raise Refused("revision_identity_conflict")
+            if old is None and len(self._objects)>=64:
+                raise Refused("registry_limit")
+            self._g.claim(grant,request)
+            try:
+                objects=dict(self._objects)
+                current=dict(self._current)
+                generation=dict(self._generation)
+                objects[manifest.identity]=(manifest,data)
+                current[manifest.model]=manifest.identity
+                generation[manifest.model]=plan.generation+1
+                self._live()
+                self._g.checkpoint(transfer._grant,transfer._req)
+                self._g.checkpoint(grant,request)
+                self._objects,self._current,self._generation=objects,current,generation
+                return "INTEGRITY_ONLY_NOT_TRUST"
+            finally:
+                self._g.revoke(grant.identity)
+
+    def close(self):
+        with self._lock:
+            self._g.revoke(self._root.identity)
+            self._objects.clear()
+            self._current.clear()
+            self._generation.clear()
 
 class FixtureTransfer:
     def __init__(self, gateway, grant, context, manifest):
@@ -80,16 +152,18 @@ class FixtureTransfer:
             self._data.extend(chunk)
             return len(self._data)
 
-    def finish(self, registry):
+    def finish(self, registry, plan, grant):
         with self._lock:
             if self._done:
                 raise Refused("already_finished")
             if type(registry) is not FixtureRegistry:
                 raise Refused("invalid_registry")
-            result=registry.commit(self._g,self._grant,self._ctx,self.manifest,bytes(self._data))
-            self._done=True
-            self._data.clear()
-            return result
+            try:
+                return registry._commit(self,plan,grant)
+            finally:
+                self._done=True
+                self._data.clear()
+                self._g.revoke(self._grant.identity)
 
     def cancel(self):
         with self._lock:

@@ -3,7 +3,7 @@ import unittest
 from dataclasses import replace
 from tihulu_jarvis import profiles
 from gateway import Context, Request, FixtureGateway, Refused
-from market_fixture import Manifest, FixtureRegistry, FixtureTransfer
+from market_fixture import Manifest, FixtureRegistry, FixtureTransfer, registry_target
 from transfer_resume import ResumeBook
 
 class ResumeTests(unittest.TestCase):
@@ -11,7 +11,7 @@ class ResumeTests(unittest.TestCase):
         self.ctx = Context("r5", "session", "profile", 1, "route", "LOCAL_ONLY", False, True)
         self.data = b"synthetic-model-fixture"
         self.m = Manifest("model", "r1", "weights.bin", len(self.data), hashlib.sha256(self.data).hexdigest(), "fixture-license")
-        self.g = FixtureGateway(self.ctx, (profiles.Rule("external_network", (), "allow"),), clock=profiles.PolicyClock())
+        self.g = FixtureGateway(self.ctx, (profiles.Rule("external_network", (), "allow"), profiles.Rule("publish_artifact", (), "allow"),), clock=profiles.PolicyClock())
         self.req = Request(self.ctx, "transfer", self.m.identity, "local", "public")
         self.old = self.g.fixture_grant("old", self.req, 60)
         self.new = self.g.fixture_grant("new", self.req, 60)
@@ -20,11 +20,20 @@ class ResumeTests(unittest.TestCase):
         self.book = ResumeBook(self.g,self.ctx)
         self.receipt, self.prefix = self.book.pause(self.t)
 
+    def registry(self):
+        root=self.g.fixture_grant("registry",Request(self.ctx,"publish",registry_target(self.ctx),"local"),60)
+        return FixtureRegistry(self.g,self.ctx,root)
+
+    def finish(self,t,r):
+        plan=r.plan(t.manifest)
+        grant=self.g.fixture_grant("publication",Request(self.ctx,"publish",plan.target(),"local"),60)
+        return t.finish(r,plan,grant)
+
     def test_resume_fresh_grant_and_exact_prefix(self):
         t = self.book.resume(self.new, self.m, self.receipt, self.prefix)
         t.append(self.m.identity, 5, self.data[5:])
-        r = FixtureRegistry()
-        t.finish(r)
+        r = self.registry()
+        self.finish(t,r)
         self.assertEqual(r.current("model"), self.m.identity)
         with self.assertRaises(Refused):
             self.t.append(self.m.identity, 5, self.data[5:])
@@ -45,7 +54,7 @@ class ResumeTests(unittest.TestCase):
         t.append(self.m.identity, 5, self.data[5:])
         self.g.revoke("new")
         with self.assertRaises(Refused):
-            t.finish(FixtureRegistry())
+            self.finish(t,self.registry())
         with self.assertRaises(Refused):
             self.book.resume(self.new, self.m, self.receipt, self.prefix)
 
@@ -71,3 +80,21 @@ class ResumeTests(unittest.TestCase):
         self.book.close()
         with self.assertRaises(Refused):
             self.book.resume(self.new,self.m,self.receipt,self.prefix)
+
+    def test_failed_resume_retires_claimed_grant_and_keeps_receipt(self):
+        from unittest.mock import patch
+        original=FixtureTransfer.append
+        def fail(t,*args):
+            original(t,*args)
+            raise Refused("fixture_interrupted")
+        with patch.object(FixtureTransfer,"append",fail):
+            with self.assertRaises(Refused):
+                self.book.resume(self.new,self.m,self.receipt,self.prefix)
+        with self.assertRaises(Refused):
+            self.g.checkpoint(self.new,self.req)
+        fresh=self.g.fixture_grant("fresh",self.req,60)
+        t=self.book.resume(fresh,self.m,self.receipt,self.prefix)
+        t.append(self.m.identity,len(self.prefix),self.data[len(self.prefix):])
+        r=self.registry()
+        self.finish(t,r)
+        self.assertEqual(r.current_bytes("model"),self.data)
