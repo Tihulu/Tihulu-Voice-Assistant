@@ -32,8 +32,10 @@ jobs:
           python - <<'CHECK'
           import json
           from pathlib import Path
-          reports = list(Path("/tmp").glob("jarvis-owner-preview-*/acceptance.json"))
+          reports = list(Path("/tmp").glob("jarvis-owner-build-*/jarvis-owner-preview-*/acceptance.json"))
           assert len(reports) == 1
+          assert reports[0].parent.parent.stat().st_mode & 0o777 == 0o700
+          assert reports[0].parent.stat().st_mode & 0o777 == 0o700
           report = json.loads(reports[0].read_text())
           assert report["commit"] == "d4b756351b1552aa5806c89e39eda3b5b82aa337"
           assert report["source_content"] == "PASS"

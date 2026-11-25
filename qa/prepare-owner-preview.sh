@@ -27,6 +27,7 @@ export PYTHONDONTWRITEBYTECODE=1
 python3 -m build --version >/dev/null || { echo "HOLD: build module missing" >&2; exit 2; }
 python3 -m pip --version >/dev/null || { echo "HOLD: pip missing" >&2; exit 2; }
 work=$(mktemp -d /tmp/jarvis-owner-build-XXXXXXXX)
+chmod 0700 "$work"
 printf 'Private build directory: %s\n' "$work"
 # Local clone leaves the owner's original checkout and Git refs unchanged.
 git clone --local --no-hardlinks --no-checkout -- "$source" "$work/source"
@@ -37,9 +38,11 @@ test -z "$(git status --porcelain --untracked-files=all)"
 python3 -m build --wheel --no-isolation --outdir "$work/wheels"
 set -- "$work/wheels/"*.whl
 test "$#" -eq 1 && test -f "$1"
-sh packaging/deb/build.sh .release-work/deb "$work/wheels"
+# Debian control directory requires mode 0755; all staged files remain
+# inside the enclosing owner-only 0700 mktemp directory.
+(umask 022; sh packaging/deb/build.sh .release-work/deb "$work/wheels")
 mkdir -m 0700 "$work/extracted"
 dpkg-deb -x .release-work/tihulu-jarvis.deb "$work/extracted"
 # Compare with the exact Git objects before any runtime import or launch.
-python3 tools/owner_preview.py --root "$work/extracted" --commit "$commit" --prepare
+TMPDIR="$work" python3 tools/owner_preview.py --root "$work/extracted" --commit "$commit" --prepare
 printf '%s\n' 'Preparation complete. No app launch, system installation or physical PASS claimed.'
