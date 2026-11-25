@@ -1848,8 +1848,13 @@ def create_window(app, loop, bridge=None):
                 # A cloud-visible model must be one the endpoint actually serves.
                 if model_id not in self.inventory:
                     raise Hold("model_not_in_inventory")
-                # The endpoint itself verifies that this model is installed.
-                card = self.market.save_card(market.register_installed(card), expected=expected)
+                if not self.market._jan_inventory_card(card):
+                    raise Hold("registry_discovery_conflict")
+                # Existing Jan registrations remain valid for repeat selection.
+                if card.state == "DISCOVERED":
+                    card = self.market.save_card(market.register_installed(card), expected=expected)
+                elif not card.registered:
+                    raise Hold("model_not_selectable")
                 self.cfg["llm"] = model_id
                 self.remember("llm", model_id)
                 self.models.set_active(self.inventory.index(model_id))
@@ -3206,16 +3211,10 @@ def create_window(app, loop, bridge=None):
                 client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 cards = await market.from_models(client, languages=(), now=0.0)
                 checkpoint()
-                for card in cards:
-                    known = self.market.lookup_card(card.model_id)
-                    if known is None or (known.state == "DISCOVERED"
-                            and not known.registered and not known.owned_by_jarvis
-                            and not known.network_approval and not known.source_ref):
-                        # Re-discovery refreshes a card, never silently upgrades it.
-                        self.market.save_card(card, expected=known)
+                inventory = self.market.record_jan_inventory(cards)
                 checkpoint()
                 self.cfg["endpoint"] = route[3]
-                self.inventory = tuple(card.model_id for card in cards)
+                self.inventory = inventory
                 self.models.remove_all()
                 for model_id in self.inventory:
                     self.models.append_text(model_id)

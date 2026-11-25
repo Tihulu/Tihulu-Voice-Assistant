@@ -2258,5 +2258,49 @@ class DisplayedOperationBindingTests(unittest.TestCase):
         self.assertEqual(self.registry.cards(), ())
         self.assertEqual(self.target.read_bytes(), OLD)
 
+class JanInventoryIdentityTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.registry = market.Registry(Path(tmp.name))
+
+    def jan(self, model_id="fixture"):
+        return market.ModelCard(model_id=model_id, display_name=model_id,
+            category="llm", provider="jan", engine="jan", installed=True,
+            trust_level="curated").checked()
+
+    def test_new_inventory_records_preserve_order(self):
+        self.assertEqual(self.registry.record_jan_inventory(
+            (self.jan("second"), self.jan("first"))), ("second", "first"))
+        self.assertEqual({c.model_id for c in self.registry.cards()}, {"first", "second"})
+
+    def test_collision_refuses_entire_inventory_before_new_registration(self):
+        foreign = self.registry.save_card(market.ModelCard(
+            model_id="fixture", display_name="Other", category="stt"))
+        with self.assertRaisesRegex(Hold, "registry_discovery_conflict"):
+            self.registry.record_jan_inventory((self.jan("new"), self.jan()))
+        self.assertEqual(self.registry.cards(), (foreign,))
+
+    def test_existing_jan_registration_keeps_history_and_metadata(self):
+        card = self.registry.save_card(self.jan())
+        registered = self.registry.save_card(market.register_installed(card))
+        before = self.registry.history(card.model_id)
+        self.assertEqual(self.registry.record_jan_inventory((self.jan(),)), ("fixture",))
+        self.assertEqual(self.registry.card(card.model_id), registered)
+        self.assertEqual(self.registry.history(card.model_id), before)
+
+    def test_duplicate_inventory_is_rejected(self):
+        with self.assertRaisesRegex(Hold, "registry_discovery_conflict"):
+            self.registry.record_jan_inventory((self.jan(), self.jan()))
+        self.assertEqual(self.registry.cards(), ())
+
+    def test_approved_source_cannot_become_jan_inventory(self):
+        foreign = self.registry.save_card(market.replace(self.jan(),
+            source_ref="catalog:fixture", source_checksum="a"*64,
+            network_approval="fixture", approval_expires_at=1e12))
+        with self.assertRaisesRegex(Hold, "registry_discovery_conflict"):
+            self.registry.record_jan_inventory((self.jan(),))
+        self.assertEqual(self.registry.card(foreign.model_id), foreign)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
