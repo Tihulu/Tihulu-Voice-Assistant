@@ -85,10 +85,14 @@ async def checked_lines(lines,model):
                     raise Refused("invalid_model_event") from None
         yield field
 
-async def replay(gateway,grant,context,candidate,identity,url,turns,response):
+async def replay(gateway,grant,context,candidate,identity,url,turns,response,guard=None):
     raw=request_bytes(candidate,url,turns)
     if type(response) is not bytes or not 0<len(response)<=jan.LIMIT+16384:
         raise Refused("response_limit")
+    def check():
+        if guard is not None:
+            guard()
+    check()
     adapter=LocalAdapter(gateway,context,candidate,identity,"llm",raw,grant)
     r=asyncio.StreamReader(limit=16384)
     r.feed_data(response)
@@ -96,10 +100,14 @@ async def replay(gateway,grant,context,candidate,identity,url,turns,response):
     sequence=0
     def delta(piece):
         nonlocal sequence
+        check()
         sequence+=1
         adapter.event(identity,sequence,"text",piece)
+        check()
     try:
+        check()
         length,chunked=await jan.response_head(r)
+        check()
         # Refuse unframed replays, so trailing data cannot be ignored at DONE.
         if length is None and not chunked:
             raise Refused("explicit_frame_required")
@@ -114,8 +122,11 @@ async def replay(gateway,grant,context,candidate,identity,url,turns,response):
             await parts.aclose()
         if not r.at_eof() or not result.strip():
             raise Refused("invalid_final_response")
+        check()
         adapter.event(identity,sequence+1,"completed",None)
+        check()
         data=adapter.result()
+        check()
         if data!=result.encode("utf-8"):
             raise Refused("result_mismatch")
         return data
