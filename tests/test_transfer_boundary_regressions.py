@@ -1934,5 +1934,70 @@ class InterruptedRetryTests(unittest.TestCase):
         self.assertEqual(len(list(folder.iterdir())), 3)
         self.assertTrue(all(path.read_bytes() == OLD for path in folder.iterdir()))
 
+class PendingPartialInventoryTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.folder = self.root / "transfers"
+        self.folder.mkdir(mode=0o700)
+
+    def card(self, model_id, state="DISCOVERED"):
+        return self.registry.save_card(market.ModelCard(
+            model_id=model_id, display_name=model_id, category="stt", state=state,
+            source_ref="catalog:fixture", source_checksum=hashlib.sha256(NEW).hexdigest(),
+            source_size=len(NEW), network_approval="fixture", approval_expires_at=1e12))
+
+    def test_known_ids_only_without_directory_enumeration(self):
+        self.card("known")
+        self.card("installed", "ACTIVE")
+        for name in ("known", "installed", "orphan"):
+            (self.folder / ("partial-" + name)).write_bytes(OLD[:3])
+        with patch.object(market.os, "scandir", side_effect=AssertionError("enumerated")):
+            rows = self.registry.pending_partials()
+        self.assertEqual([row[0] for row in rows], ["known"])
+        self.assertEqual(rows[0][2]["state"], "UNVERIFIED")
+
+    def test_uses_single_card_snapshot(self):
+        for name in ("first", "second", "third"):
+            self.card(name)
+            (self.folder / ("partial-" + name)).write_bytes(b"x")
+        with patch.object(self.registry, "cards", wraps=self.registry.cards) as cards:
+            self.assertEqual(len(self.registry.pending_partials()), 3)
+            cards.assert_called_once()
+
+    def test_metadata_only_is_visible_but_not_resumable(self):
+        self.card("known")
+        (self.folder / ".partial-meta-known").write_text("{}")
+        rows = self.registry.pending_partials()
+        self.assertEqual(rows[0][2]["state"], "UNVERIFIED")
+        self.assertEqual(rows[0][2]["size"], 0)
+        self.assertIsNotNone(rows[0][2]["identity"])
+
+    def test_symlink_partial_is_visible_without_delete_identity(self):
+        self.card("known")
+        outside = self.root / "outside"
+        outside.write_bytes(OLD)
+        (self.folder / "partial-known").symlink_to(outside)
+        rows = self.registry.pending_partials()
+        self.assertEqual(rows[0][2]["state"], "UNVERIFIED")
+        self.assertIsNone(rows[0][2]["identity"])
+        self.assertEqual(outside.read_bytes(), OLD)
+
+    def test_missing_or_unsafe_transfer_directory(self):
+        self.card("known")
+        self.folder.rmdir()
+        self.assertEqual(self.registry.pending_partials(), ())
+        outside = self.root / "outside"
+        outside.mkdir()
+        self.folder.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(Hold, "transfer_directory_untrusted"):
+            self.registry.pending_partials()
+
+    def test_no_partial_returns_no_queue_entry(self):
+        self.card("known")
+        self.assertEqual(self.registry.pending_partials(), ())
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
