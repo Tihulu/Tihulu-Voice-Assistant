@@ -1,0 +1,30 @@
+name: Exact successor transfer boundary replay
+on:
+  pull_request:
+    branches: ['fix/resume-displayed-pair-binding']
+permissions:
+  contents: read
+jobs:
+  replay:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify evidence-only paths and replay original probes against exact candidate
+        env:
+          CANDIDATE: '232784d2eaa6919708748f4e51f336340d142878'
+          PROBE_BLOB: 'd7924cb16d7224835a8a03ac937b4b97fdb532b5'
+        run: |
+          git diff --exit-code "$CANDIDATE" HEAD -- src packaging tools tests pyproject.toml data
+          git diff --name-only "$CANDIDATE" HEAD | sort > "$RUNNER_TEMP/paths"
+          printf '%s\n' '.github/workflows/transfer-boundary-replay-169.yml' 'qa/transfer-boundary-probes.py' | sort | diff -u - "$RUNNER_TEMP/paths"
+          test "$(git hash-object qa/transfer-boundary-probes.py)" = "$PROBE_BLOB"
+          cp qa/transfer-boundary-probes.py "$RUNNER_TEMP/transfer-boundary-probes.py"
+          git checkout --detach "$CANDIDATE"
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          git rev-parse HEAD HEAD^{tree}
+          test "$(git status --porcelain)" = ""
+          PYTHONPATH="$PWD/src" python3 "$RUNNER_TEMP/transfer-boundary-probes.py"
