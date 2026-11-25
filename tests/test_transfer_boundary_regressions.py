@@ -998,5 +998,63 @@ class PersistentPartialTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn('"network_approval"', raw)
         self.assertNotIn('"approval_expires_at"', raw)
 
+class StrictRangeTests(unittest.IsolatedAsyncioTestCase):
+    async def request(self, response, start=3, prefix=b"abc", limit=32):
+        from tihulu_jarvis.transfer_http import loopback_fetch
+        with tempfile.TemporaryDirectory() as tmp:
+            target = Path(tmp) / "payload"
+            target.write_bytes(prefix)
+            async def serve(reader, writer):
+                try:
+                    await reader.readuntil(b"\r\n\r\n")
+                    writer.write(response)
+                    await writer.drain()
+                finally:
+                    writer.close()
+                    await writer.wait_closed()
+            server = await asyncio.start_server(serve, "127.0.0.1", 0)
+            async with server:
+                url = "http://127.0.0.1:%d/weights" % server.sockets[0].getsockname()[1]
+                try:
+                    size = await asyncio.wait_for(loopback_fetch(url, limit)(str(target), lambda n: None, start), 3)
+                    return size, target.read_bytes(), None
+                except Hold as exc:
+                    return None, target.read_bytes(), str(exc)
+
+    async def test_status_code_not_reason_phrase_controls_range(self):
+        result = await self.request(b"HTTP/1.1 206 Custom\r\nContent-Range: bytes 3-5/6\r\nContent-Length: 3\r\n\r\ndef")
+        self.assertEqual(result, (6, b"abcdef", None))
+
+    async def test_200_with_custom_reason_restarts_from_zero(self):
+        result = await self.request(b"HTTP/1.1 200 Custom\r\nContent-Length: 6\r\n\r\nabcdef")
+        self.assertEqual(result, (6, b"abcdef", None))
+
+    async def test_duplicate_length_rejected_before_write(self):
+        result = await self.request(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 3-5/6\r\nContent-Length: 3\r\ncontent-length: 4\r\n\r\ndef")
+        self.assertEqual(result, (None, b"abc", "transfer_invalid_response"))
+
+    async def test_inconsistent_range_rejected_before_write(self):
+        for bounds in (b"bytes 2-5/6", b"bytes 3-4/6", b"bytes 3-6/6", b"bytes 3-2/3"):
+            with self.subTest(bounds=bounds):
+                result = await self.request(b"HTTP/1.1 206 Partial Content\r\nContent-Range: " + bounds + b"\r\n\r\ndef")
+                self.assertEqual(result, (None, b"abc", "transfer_range_not_honoured"))
+
+    async def test_conflicting_range_length_rejected_before_write(self):
+        result = await self.request(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 3-5/6\r\nContent-Length: 4\r\n\r\ndefg")
+        self.assertEqual(result, (None, b"abc", "transfer_invalid_response"))
+
+    async def test_truncated_range_rejected(self):
+        result = await self.request(b"HTTP/1.1 206 Partial Content\r\nContent-Range: bytes 3-5/6\r\n\r\nd")
+        self.assertEqual(result[0], None)
+        self.assertEqual(result[2], "transfer_truncated")
+
+    async def test_unsolicited_range_rejected(self):
+        result = await self.request(b"HTTP/1.1 206 Custom\r\nContent-Range: bytes 0-2/3\r\n\r\nabc", start=0, prefix=b"")
+        self.assertEqual(result, (None, b"", "transfer_range_not_honoured"))
+
+    async def test_range_prefix_offset_mismatch_rejected(self):
+        result = await self.request(b"HTTP/1.1 206 Custom\r\nContent-Range: bytes 3-5/6\r\n\r\ndef", prefix=b"ab")
+        self.assertEqual(result, (None, b"ab", "transfer_resume_offset_unverified"))
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
