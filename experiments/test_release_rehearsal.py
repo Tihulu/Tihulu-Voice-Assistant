@@ -101,3 +101,19 @@ class RehearsalTests(unittest.TestCase):
         self.r.close()
         with self.assertRaises(Refused):
             self.r.snapshot()
+
+    def test_root_revocation_discards_owned_rehearsal_state(self):
+        self.change("install",self.a)
+        self.g.revoke(self.root.identity)
+        with self.assertRaises(Refused):
+            self.r.snapshot()
+        self.assertTrue(self.r._closed)
+        self.assertEqual(self.r._packages,{})
+        self.assertEqual(self.r._retained,())
+
+    def test_commit_does_not_call_fallible_postcommit_snapshot(self):
+        c=self.r.plan("install",self.a.identity)
+        g=self.grant(c.target)
+        with patch.object(self.r,"snapshot",side_effect=Refused("late_read")):
+            result=self.r.apply(c,g,confirmed=True,fixture_runtime_ok=True)
+        self.assertEqual(result,self.r.snapshot())

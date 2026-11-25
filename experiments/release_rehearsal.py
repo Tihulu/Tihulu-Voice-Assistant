@@ -115,9 +115,13 @@ class Rehearsal:
     def _live(self):
         if self._closed:
             raise Refused("rehearsal_closed")
-        self._g.checkpoint(*self._root)
-        if retained_digest(self._retained)!=self._retained_digest:
-            raise Refused("retained_data_changed")
+        try:
+            self._g.checkpoint(*self._root)
+            if retained_digest(self._retained)!=self._retained_digest:
+                raise Refused("retained_data_changed")
+        except Refused:
+            self.close()
+            raise
 
     def register(self,package,expected_identity):
         with self._lock:
@@ -173,10 +177,18 @@ class Rehearsal:
                 self._g.checkpoint(grant,req)
                 if self.plan(change.operation,change.next)!=change:
                     raise Refused("stale_change")
-                self._rollback=self._current if change.operation in ("upgrade","rollback") else ""
+                rollback=self._current if change.operation in ("upgrade","rollback") else ""
+                package=self._packages.get(change.next)
+                result=(self._generation+1,change.next,rollback,
+                        package.files if package is not None else (),self._retained)
+                # Last validation precedes the in-memory commit. Do not call
+                # a fallible reader after mutation and report a false rollback.
+                self._g.checkpoint(grant,req)
+                self._live()
+                self._rollback=rollback
                 self._current=change.next
                 self._generation+=1
-                return self.snapshot()
+                return result
             except BaseException:
                 self._g.revoke(grant.identity)
                 raise
