@@ -127,3 +127,18 @@ class IntegratedTests(unittest.TestCase):
         self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
         with self.assertRaises(Refused):
             self.w.result()
+
+    def test_close_during_compute_prevents_disclosure_and_publication(self):
+        from tihulu_jarvis.temperature_engine import analyze_temperature as actual
+        def closing(*args,**kwargs):
+            result=actual(*args,**kwargs)
+            self.w.close()
+            return result
+        with patch("integrated_workflow.analyze_temperature",side_effect=closing), patch("integrated_workflow.envelope") as disclose:
+            with self.assertRaises(Refused):
+                self.run_fixture()
+            disclose.assert_not_called()
+        self.assertEqual(self.w.state,"closed")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()

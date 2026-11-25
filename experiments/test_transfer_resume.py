@@ -4,7 +4,7 @@ from dataclasses import replace
 from tihulu_jarvis import profiles
 from gateway import Context, Request, FixtureGateway, Refused
 from market_fixture import Manifest, FixtureRegistry, FixtureTransfer
-from transfer_resume import pause, resume
+from transfer_resume import ResumeBook
 
 class ResumeTests(unittest.TestCase):
     def setUp(self):
@@ -17,10 +17,11 @@ class ResumeTests(unittest.TestCase):
         self.new = self.g.fixture_grant("new", self.req, 60)
         self.t = FixtureTransfer(self.g, self.old, self.ctx, self.m)
         self.t.append(self.m.identity, 0, self.data[:5])
-        self.receipt, self.prefix = pause(self.t)
+        self.book = ResumeBook(self.g,self.ctx)
+        self.receipt, self.prefix = self.book.pause(self.t)
 
     def test_resume_fresh_grant_and_exact_prefix(self):
-        t = resume(self.g, self.new, self.ctx, self.m, self.receipt, self.prefix)
+        t = self.book.resume(self.new, self.m, self.receipt, self.prefix)
         t.append(self.m.identity, 5, self.data[5:])
         r = FixtureRegistry()
         t.finish(r)
@@ -31,19 +32,42 @@ class ResumeTests(unittest.TestCase):
     def test_old_grant_and_mutation_rejected(self):
         for grant, prefix in ((self.old, self.prefix), (self.new, b"x"*5)):
             with self.assertRaises(Refused):
-                resume(self.g, grant, self.ctx, self.m, self.receipt, prefix)
+                self.book.resume(grant, self.m, self.receipt, prefix)
 
     def test_wrong_revision_or_offset_rejected(self):
         with self.assertRaises(Refused):
-            resume(self.g, self.new, self.ctx, replace(self.m, revision="r2"), self.receipt, self.prefix)
+            self.book.resume(self.new, replace(self.m, revision="r2"), self.receipt, self.prefix)
         with self.assertRaises(Refused):
-            resume(self.g, self.new, self.ctx, self.m, replace(self.receipt, offset=True), self.prefix)
+            self.book.resume(self.new, self.m, replace(self.receipt, offset=True), self.prefix)
 
     def test_revoked_resume_and_commit(self):
-        t = resume(self.g, self.new, self.ctx, self.m, self.receipt, self.prefix)
+        t = self.book.resume(self.new, self.m, self.receipt, self.prefix)
         t.append(self.m.identity, 5, self.data[5:])
         self.g.revoke("new")
         with self.assertRaises(Refused):
             t.finish(FixtureRegistry())
         with self.assertRaises(Refused):
-            resume(self.g, self.new, self.ctx, self.m, self.receipt, self.prefix)
+            self.book.resume(self.new, self.m, self.receipt, self.prefix)
+
+    def test_forged_old_grant_and_prefix_refused(self):
+        forged=replace(self.receipt,old_grant="fabricated")
+        with self.assertRaises(Refused):
+            self.book.resume(self.old,self.m,forged,self.prefix)
+        forged=replace(self.receipt,prefix_digest=hashlib.sha256(b"x"*5).hexdigest())
+        with self.assertRaises(Refused):
+            self.book.resume(self.new,self.m,forged,b"x"*5)
+        with self.assertRaises(Refused):
+            self.book.resume(self.new,self.m,replace(self.receipt),self.prefix)
+
+    def test_receipt_consumed_once_and_cross_book_refused(self):
+        other=ResumeBook(self.g,self.ctx)
+        with self.assertRaises(Refused):
+            other.resume(self.new,self.m,self.receipt,self.prefix)
+        self.book.resume(self.new,self.m,self.receipt,self.prefix)
+        with self.assertRaises(Refused):
+            self.book.resume(self.new,self.m,self.receipt,self.prefix)
+
+    def test_closed_book_rejects_receipt(self):
+        self.book.close()
+        with self.assertRaises(Refused):
+            self.book.resume(self.new,self.m,self.receipt,self.prefix)

@@ -90,8 +90,12 @@ class FixtureWorkflow:
                 raise Refused("secure_hybrid_required")
 
             def checkpoint():
+                if self._state != "running":
+                    raise Refused("workflow_closed_or_cancelled")
                 for grant, req in checks:
                     self._g.checkpoint(grant, req)
+                if self._state != "running":
+                    raise Refused("workflow_closed_or_cancelled")
                 return False
 
             checkpoint()
@@ -140,7 +144,8 @@ class FixtureWorkflow:
             return self._report
         except Exception:
             self._report = None
-            self._state = "held"
+            if self._state != "closed":
+                self._state = "held"
             raise
         finally:
             if chain is not None:
