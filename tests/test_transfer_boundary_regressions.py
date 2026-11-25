@@ -209,5 +209,99 @@ class TransferBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.card(card.model_id),newer)
         self.assertFalse((self.root/"transfers"/"partial-fixture-model").exists())
 
+    async def install_verified(self):
+        card=self.card()
+        async def old_fetch(path,note,start=0):
+            Path(path).write_bytes(OLD)
+            note(len(OLD))
+            return len(OLD)
+        return await self.transfer(card,self.source(checksum=hashlib.sha256(OLD).hexdigest(),
+                                                    version="1.0"),old_fetch).run()
+
+    async def test_reopened_registry_restores_verified_old_bytes_and_redoes(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        self.assertEqual(new.artifact_digest,hashlib.sha256(NEW).hexdigest())
+        registry=market.Registry(self.root)
+        restored=registry.rollback(old.model_id,old.revision)
+        self.assertEqual(self.target.read_bytes(),OLD)
+        self.assertEqual(restored.artifact_digest,old.artifact_digest)
+        self.assertEqual(restored.network_approval,"")
+        self.assertEqual(restored.approval_expires_at,0)
+        registry.rollback(new.model_id,new.revision)
+        self.assertEqual(self.target.read_bytes(),NEW)
+
+    async def test_corrupt_archive_refuses_without_changing_current(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        archive=self.root/"artifact-revisions"/old.model_id/old.artifact_digest
+        archive.write_bytes(b"x"*len(OLD))
+        with self.assertRaises(Hold):
+            self.store.rollback(old.model_id,old.revision)
+        self.assertEqual(self.target.read_bytes(),NEW)
+        self.assertEqual(self.store.card(old.model_id),new)
+
+    async def test_archive_is_not_hardlinked_to_active_bytes(self):
+        old=await self.install_verified()
+        await self.transfer(old,self.source()).update()
+        archive=self.root/"artifact-revisions"/old.model_id/old.artifact_digest
+        self.store.rollback(old.model_id,old.revision)
+        self.assertNotEqual(archive.stat().st_ino,self.target.stat().st_ino)
+        self.target.write_bytes(b"x"*len(OLD))
+        self.assertEqual(archive.read_bytes(),OLD)
+
+    async def test_rollback_save_failure_preserves_current_bytes(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        with patch.object(self.store,"save_card",side_effect=OSError("fixture write failure")):
+            with self.assertRaises(OSError):
+                self.store.rollback(old.model_id,old.revision)
+        self.assertEqual(self.target.read_bytes(),NEW)
+        self.assertEqual(self.store.card(old.model_id),new)
+
+    async def test_mutated_owned_artifact_refuses_update(self):
+        old=await self.install_verified()
+        self.target.write_bytes(b"x"*len(OLD))
+        with self.assertRaises(Hold):
+            await self.transfer(old,self.source()).update()
+        self.assertEqual(self.target.read_bytes(),b"x"*len(OLD))
+        self.assertEqual(self.store.card(old.model_id),old)
+
+    async def test_registry_store_failure_keeps_history_and_active_bytes(self):
+        old=await self.install_verified()
+        history=self.store.history(old.model_id)
+        with patch.object(self.store,"store",side_effect=OSError("fixture commit failure")):
+            with self.assertRaises(OSError):
+                await self.transfer(old,self.source()).update()
+        self.assertEqual(self.store.history(old.model_id),history)
+        self.assertEqual(self.store.card(old.model_id),old)
+        self.assertEqual(self.target.read_bytes(),OLD)
+
+    async def test_legacy_history_read_only_migration(self):
+        import json
+        from dataclasses import replace
+        card=self.card()
+        previous=replace(card,display_name="Older",revision=0)
+        current=replace(card,display_name="Current",revision=1)
+        legacy=self.store.revisions/(card.model_id+".jsonl")
+        legacy.write_text(json.dumps(previous.__dict__)+"\n")
+        self.store.store((current,),{})
+        self.assertEqual(self.store.history(card.model_id),(previous,))
+        saved=self.store.save_card(replace(current,display_name="Next"))
+        self.assertEqual(saved.revision,2)
+        self.assertEqual(self.store.history(card.model_id),(previous,current))
+        self.assertEqual(legacy.read_text(),json.dumps(previous.__dict__)+"\n")
+        reopened=market.Registry(self.root)
+        self.assertEqual(reopened.history(card.model_id),(previous,current))
+
+    async def test_history_with_foreign_model_refused(self):
+        import json
+        from dataclasses import replace
+        card=self.card()
+        legacy=self.store.revisions/(card.model_id+".jsonl")
+        legacy.write_text(json.dumps(replace(card,model_id="different").__dict__)+"\n")
+        with self.assertRaises(Hold):
+            self.store.history(card.model_id)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
