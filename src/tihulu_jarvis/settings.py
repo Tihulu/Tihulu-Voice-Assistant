@@ -131,9 +131,13 @@ def _read_text(p):
         def identity(info):
             return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
                     info.st_ctime_ns, info.st_mode)
+        try:
+            current = p.lstat()
+        except OSError:
+            raise Hold("settings_changed") from None
         if (len(chunks) > 32768 or len(chunks) != before.st_size
                 or identity(before) != identity(os.fstat(fd))
-                or identity(before) != identity(p.lstat())):
+                or identity(before) != identity(current)):
             raise Hold("settings_changed")
         return chunks.decode("utf-8")
     finally:
