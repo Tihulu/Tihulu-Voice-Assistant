@@ -34,6 +34,20 @@ jobs:
           git show -s --format='%H %T' "$BASELINE" "$CANDIDATE"
           git diff --stat "$BASELINE" "$CANDIDATE"
           git ls-tree -r HEAD | sha256sum
+          test "$(git rev-parse HEAD^{tree})" = b0f93490a8f1579d911302565b7d5ce3ab7be14b
+          while read -r name sha; do
+            git cat-file -e "$sha^{commit}"
+            git branch "$name" "$sha"
+            test "$(git rev-parse "refs/heads/$name")" = "$sha"
+            printf 'Historical pin %s %s\n' "$name" "$sha"
+          done <<'PINS'
+          feat/usage-report 60f237df43631a1c4ec3619ac3e6f409935a251a
+          feat/approved-sources 36cc9fdf9d0103cb6a6101d3a37cdb7d6456d3a2
+          feat/profile-ui 627309491c568cef3d799fcbd1853ebc8c106f96
+          feat/modes-and-profiles 6a21bf7003039d8d63684c9e5572859ad22ec5a2
+          feat/market-ui c9e8c87bb52505f21532f94025307962feaeb220
+          feat/market-consolidated 29cc369acd052efb526d9c3c51320a9323f5a0bb
+          PINS
           test -z "$(git status --porcelain)"
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         if: matrix.layer != 'gtk'
@@ -44,13 +58,17 @@ jobs:
         shell: bash
         run: |
           python -VV
-          PYTHONPATH=src python -m unittest discover -s tests -v
-          echo "core exit=0"
+          python -m pip install PyYAML
+          set -o pipefail
+          PYTHONPATH=src python -m unittest discover -s tests -v 2>&1 | tee "$RUNNER_TEMP/core.log"
+          grep -Fx "OK" "$RUNNER_TEMP/core.log"
+          python tools/trace_check.py
+          echo "core exit=0; zero skips"
       - name: Native dependency provisioning in disposable runner
         if: matrix.layer == 'gtk' || matrix.layer == 'packages'
         run: |
           sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+          sudo apt-get install --no-install-recommends -y python3-gi python3-yaml gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
       - name: Native GTK independent execution
         if: matrix.layer == 'gtk'
         env:
@@ -61,8 +79,10 @@ jobs:
           PYTHONPATH: src
         run: |
           /usr/bin/python3 -VV
-          dbus-run-session -- xvfb-run -a /usr/bin/python3 -m unittest discover -s tests/gtk -v
-          echo "GTK exit=0; synthetic backends, not owner acceptance"
+          set -o pipefail
+          dbus-run-session -- xvfb-run -a /usr/bin/python3 -m unittest discover -s tests/gtk -v 2>&1 | tee "$RUNNER_TEMP/gtk.log"
+          grep -Fx "OK" "$RUNNER_TEMP/gtk.log"
+          echo "GTK exit=0; zero skips; synthetic backends, not owner acceptance"
       - name: Independent package build and byte inventory
         if: matrix.layer == 'packages'
         shell: bash
@@ -96,6 +116,7 @@ jobs:
           print('wheel/sdist exact application modules:',len(expected))
           PY
           python -m venv "$RUNNER_TEMP/installed"
+          "$RUNNER_TEMP/installed/bin/pip" install PyYAML
           "$RUNNER_TEMP/installed/bin/pip" install --no-index --no-deps dist/*.whl
           "$RUNNER_TEMP/installed/bin/pip" check
           mkdir -p .release-work
@@ -122,12 +143,23 @@ jobs:
           PY
           python tools/owner_preview.py --root "$RUNNER_TEMP/extracted" --commit "$CANDIDATE"
           runtime="$RUNNER_TEMP/extracted/usr/share/tihulu-jarvis/python"
+          "$RUNNER_TEMP/installed/bin/python" - <<'PY'
+          import pathlib, subprocess, tihulu_jarvis
+          root=pathlib.Path(tihulu_jarvis.__file__).parent
+          paths=subprocess.check_output(['git','ls-tree','-r','--name-only','HEAD','--','src/tihulu_jarvis/']).decode().splitlines()
+          expected={p.removeprefix('src/tihulu_jarvis/'):subprocess.check_output(['git','show','HEAD:'+p]) for p in paths}
+          assert {str(p.relative_to(root)) for p in root.rglob('*.py')}==set(expected)
+          for n,b in expected.items(): assert (root/n).read_bytes()==b,n
+          print('Installed wheel byte-identical modules:',len(expected))
+          PY
           cd "$RUNNER_TEMP"
           PYTHONPATH="$GITHUB_WORKSPACE" installed/bin/python -c 'import pathlib,sys,tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).is_relative_to(pathlib.Path(sys.prefix))'
-          PYTHONPATH="$GITHUB_WORKSPACE" installed/bin/python -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests"
+          PYTHONPATH="$GITHUB_WORKSPACE" installed/bin/python -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests" 2>&1 | tee "$RUNNER_TEMP/wheel.log"
+          grep -Fx "OK" "$RUNNER_TEMP/wheel.log"
           installed/bin/python "$GITHUB_WORKSPACE/tools/smoke.py"
           PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -c 'import pathlib,os,tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).is_relative_to(pathlib.Path(os.environ["PYTHONPATH"].split(":")[0]))'
-          PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests"
+          PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests" 2>&1 | tee "$RUNNER_TEMP/deb.log"
+          grep -Fx "OK" "$RUNNER_TEMP/deb.log"
           PYTHONPATH="$runtime" /usr/bin/python3 "$GITHUB_WORKSPACE/tools/smoke.py"
           GDK_BACKEND=x11 GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a extracted/usr/bin/tihulu-jarvis --check-runtime
           echo "package and smoke exit=0"
