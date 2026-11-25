@@ -33,7 +33,7 @@ class IntegratedTests(unittest.TestCase):
             ("publish","publish","temperature-report","none")):
             req=Request(self.ctx,action,target,"local",classification)
             self.grants[name]=self.g.fixture_grant(name,req,60)
-        data=b\'{"count":5}\'
+        data=b'{"count":5}'
         consent=Envelope(self.destination,data,sha256(data).hexdigest())
         self.grants["payload"]=self.g.fixture_grant("payload",Request(self.ctx,"disclose",disclosure_target(consent),"local","minimized"),60)
         self.w=FixtureWorkflow(self.g,self.ctx,self.i,self.candidates)
