@@ -98,9 +98,9 @@ jobs:
           python -m venv "$RUNNER_TEMP/installed"
           "$RUNNER_TEMP/installed/bin/pip" install --no-index --no-deps dist/*.whl
           "$RUNNER_TEMP/installed/bin/pip" check
+          mkdir -p .release-work
           sh packaging/deb/build.sh "$RUNNER_TEMP/deb-stage" dist
-          # build.sh writes tihulu-jarvis.deb beside the staging directory
-          deb="$RUNNER_TEMP/tihulu-jarvis.deb"
+          deb="$GITHUB_WORKSPACE/.release-work/tihulu-jarvis.deb"
           test -f "$deb"
           sha256sum "$deb"
           dpkg-deb -I "$deb"
