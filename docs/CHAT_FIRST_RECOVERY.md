@@ -54,3 +54,12 @@ Explicit literal case-insensitive search of one selected file uses the same pinn
 
 ## Transfer task telemetry
 Connect existing authorized transfer progress to its owned Activity row, including resume offsets, unknown totals and verified final artifact size. Preserve selected Activity row across redraw, throttle progress redraw to four per second, ignore obsolete epoch/task callbacks and refresh download rows after resume cancellation. Counts represent transport-reported bytes until verified completion, not elapsed-time estimates or a new download authority. No change to network scope or transfer registration.
+
+## Owner acceptance handoff (no install)
+After building and extracting the Debian package from a fresh checkout using RELEASE.md, run:
+
+```sh
+python3 tools/owner_preview.py --root .release-work/preview-root --commit "$(git rev-parse HEAD)" --prepare
+```
+
+The verifier compares all packaged application Python modules, launcher and desktop metadata with the exact committed Git objects, refuses unexpected package modules and symlinks, then creates fresh disposable XDG state, synthetic CSV and research inputs, and an UNKNOWN-only acceptance.json. It prints the runtime-check and launch commands; it never starts Jarvis, installs anything or changes the stable app. Close stable Jarvis normally before launching. Record only sanitized owner observations and the exact commit. No archive authenticity or hostile filesystem sandbox claim; use a trusted fresh extraction. CI verifies the actual checked-out commit (a PR merge checkout may differ from the PR head). This tool does not replace independent review or physical gates.
