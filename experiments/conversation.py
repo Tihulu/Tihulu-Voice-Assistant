@@ -2,6 +2,7 @@
 """Bounded, route-bound local conversation replay. No network or runtime UI."""
 from dataclasses import dataclass
 from hashlib import sha256
+import json
 from threading import RLock
 from gateway import Context, FixtureGateway, Request, Refused, token
 from adapter_protocol import prepare, text_bytes
@@ -35,7 +36,7 @@ class Conversation:
             gateway.revoke(session_grant.identity)
             raise
         self._g,self._ctx,self._candidate,self._url=gateway,context,candidate,url
-        self._identity=identity
+        self._identity=sha256(json.dumps(("conversation-instance",identity,session_grant.identity),separators=(",",":")).encode("ascii")).hexdigest()
         self._history=()
         self._checks=[(session_grant,req)]
         self._draft=None
