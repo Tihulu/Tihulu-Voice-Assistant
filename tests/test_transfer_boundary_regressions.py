@@ -1858,5 +1858,81 @@ class TransferDirectoryBoundaryTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(Hold, "staging_scan_limit"):
                 self.registry.staging_candidates(self.card.model_id)
 
+class InterruptedRetryTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.other = market.Registry(self.root)
+
+    def card(self, state="DOWNLOADING", **kw):
+        fields = dict(model_id="fixture-model", display_name="Fixture", category="stt",
+                      state=state, installed=True, source_ref="catalog:fixture",
+                      source_checksum=hashlib.sha256(NEW).hexdigest(), source_size=len(NEW),
+                      network_approval="fixture", approval_expires_at=1.0)
+        fields.update(kw)
+        return self.registry.save_card(market.ModelCard(**fields))
+
+    def test_all_interrupted_states_reset_without_renewing_grant(self):
+        for state in market.RETRYABLE_TRANSFER:
+            with self.subTest(state=state):
+                original = self.card(state)
+                reset = self.registry.retry_transfer(original.model_id, original)
+                self.assertEqual(reset.state, "DISCOVERED")
+                self.assertFalse(reset.installed)
+                self.assertFalse(reset.registered)
+                self.assertEqual(reset.network_approval, original.network_approval)
+                self.assertEqual(reset.approval_expires_at, 1.0)
+                self.assertEqual(reset.source_checksum, original.source_checksum)
+                self.assertGreater(reset.revision, original.revision)
+
+    def test_active_lease_blocks_retry(self):
+        card = self.card()
+        with self.registry.transfer_lease(card.model_id):
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                self.other.retry_transfer(card.model_id, card)
+        self.assertEqual(self.registry.card(card.model_id), card)
+
+    def test_changed_card_blocks_stale_retry(self):
+        from dataclasses import replace
+        card = self.card()
+        changed = self.other.save_card(replace(card, display_name="Changed"))
+        with self.assertRaisesRegex(Hold, "registry_card_changed"):
+            self.registry.retry_transfer(card.model_id, card)
+        self.assertEqual(self.registry.card(card.model_id), changed)
+
+    def test_installed_shared_and_loaded_cards_are_refused(self):
+        for changes in ({"state": "ACTIVE"}, {"registered": True},
+                        {"loaded": True}, {"shared_storage_owner": "jan"},
+                        {"owned_by_jarvis": True}, {"storage_ref": "existing"},
+                        {"local_or_cloud": "cloud"}, {"source_ref": ""}):
+            with self.subTest(changes=changes):
+                card = self.card(**changes)
+                with self.assertRaisesRegex(Hold, "transfer_retry_not_available"):
+                    self.registry.retry_transfer(card.model_id, card)
+                self.assertEqual(self.registry.card(card.model_id), card)
+
+    def test_existing_artifact_refuses_retry(self):
+        card = self.card()
+        target = self.root / "artifacts" / card.model_id
+        target.parent.mkdir()
+        target.write_bytes(OLD)
+        with self.assertRaisesRegex(Hold, "transfer_retry_artifact_exists"):
+            self.registry.retry_transfer(card.model_id, card)
+        self.assertEqual(target.read_bytes(), OLD)
+        self.assertEqual(self.registry.card(card.model_id), card)
+
+    def test_temporary_and_partial_files_are_preserved(self):
+        card = self.card()
+        folder = self.root / "transfers"
+        folder.mkdir(mode=0o700)
+        for name in (market._staging_prefix(card.model_id) + "abcdefgh",
+                     "partial-" + card.model_id, ".partial-meta-" + card.model_id):
+            (folder / name).write_bytes(OLD)
+        self.registry.retry_transfer(card.model_id, card)
+        self.assertEqual(len(list(folder.iterdir())), 3)
+        self.assertTrue(all(path.read_bytes() == OLD for path in folder.iterdir()))
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
