@@ -1409,5 +1409,120 @@ class LifecycleLeaseTests(unittest.TestCase):
         with self.registry.transfer_lease(self.card.model_id):
             self.assertFalse(self.target.exists())
 
+class CooperativeVerificationTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.payload = self.root / "weights"
+        self.data = b"x" * (3 * 1024 * 1024 + 17)
+        self.payload.write_bytes(self.data)
+
+    async def test_hash_matches_sync_and_yields_to_loop(self):
+        ticks = []
+        async def heartbeat():
+            for i in range(3):
+                ticks.append(i)
+                await asyncio.sleep(0)
+        ticker = asyncio.create_task(heartbeat())
+        result = await market._verified_artifact_async(self.payload, len(self.data))
+        await ticker
+        self.assertEqual(result, hashlib.sha256(self.data).hexdigest())
+        self.assertEqual(result, market._verified_artifact(self.payload, len(self.data)))
+        # Verify callbacks execute between reads, not only after verification.
+        observed = []
+        ticks.clear()
+        ticker = asyncio.create_task(heartbeat())
+        await market._verified_artifact_async(
+            self.payload, len(self.data), checkpoint=lambda: observed.append(len(ticks)))
+        await ticker
+        self.assertEqual(observed[0], 0)
+        self.assertIn(1, observed)
+        self.assertIn(3, observed)
+
+    async def test_revoked_permission_aborts_between_reads(self):
+        allowed = True
+        def checkpoint():
+            if not allowed:
+                raise Hold("profile_changed")
+        async def revoke():
+            nonlocal allowed
+            allowed = False
+        task = asyncio.create_task(revoke())
+        with self.assertRaisesRegex(Hold, "profile_changed"):
+            await market._verified_artifact_async(self.payload, len(self.data), checkpoint=checkpoint)
+        await task
+
+    async def test_cancel_closes_actual_descriptor(self):
+        import os
+        real_open, real_close = os.open, os.close
+        opened, closed = [], []
+        def track_open(path, *args, **kwargs):
+            fd = real_open(path, *args, **kwargs)
+            if Path(path) == self.payload:
+                opened.append(fd)
+            return fd
+        def track_close(fd):
+            closed.append(fd)
+            return real_close(fd)
+        with patch.object(market.os, "open", side_effect=track_open), patch.object(
+                market.os, "close", side_effect=track_close):
+            task = asyncio.create_task(market._verified_artifact_async(self.payload, len(self.data)))
+            await asyncio.sleep(0)
+            self.assertEqual(len(opened), 1)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertIn(opened[0], closed)
+        self.assertTrue(task.done())
+
+    async def test_path_replacement_during_yield_is_refused(self):
+        async def replace_path():
+            other = self.root / "replacement"
+            other.write_bytes(self.data)
+            other.replace(self.payload)
+        task = asyncio.create_task(replace_path())
+        with self.assertRaisesRegex(Hold, "transfer_artifact_changed"):
+            await market._verified_artifact_async(self.payload, len(self.data))
+        await task
+
+    async def test_symlink_and_wrong_size_still_refused(self):
+        alias = self.root / "alias"
+        alias.symlink_to(self.payload)
+        with self.assertRaises(Hold):
+            await market._verified_artifact_async(alias, len(self.data))
+        with self.assertRaisesRegex(Hold, "transfer_length_mismatch"):
+            await market._verified_artifact_async(self.payload, len(self.data)-1)
+
+    async def test_transfer_cancel_during_verification_does_not_publish(self):
+        registry = market.Registry(self.root)
+        card = registry.save_card(market.ModelCard(
+            model_id="fixture-model", display_name="Fixture", category="stt"))
+        source = market.Source(reference="catalog:fixture",
+                               checksum=hashlib.sha256(self.data).hexdigest(),
+                               size=len(self.data), network_approval="fixture",
+                               approval_expires_at=1e12)
+        async def fetch(path, note):
+            Path(path).write_bytes(self.data)
+            note(len(self.data))
+            return len(self.data)
+        transfer = market.Transfer(registry, card, source, fetch, now=1)
+        original = market._verified_artifact_async
+        entered = asyncio.Event()
+        async def observed(*args, **kwargs):
+            entered.set()
+            return await original(*args, **kwargs)
+        with patch.object(market, "_verified_artifact_async", side_effect=observed):
+            task = asyncio.create_task(transfer.run())
+            await asyncio.wait_for(entered.wait(), 3)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertFalse((self.root / "artifacts" / card.model_id).exists())
+        self.assertEqual(registry.card(card.model_id).state, "CANCELLED")
+        self.assertFalse(registry.publication_journal.exists())
+        with registry.transfer_lease(card.model_id):
+            self.assertIsNone(transfer.temp)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
