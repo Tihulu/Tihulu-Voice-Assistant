@@ -163,6 +163,7 @@ class ModelCard:
     network_approval: str = ""
     approval_expires_at: float = 0.0
     revision: int = 0          # registry-local sequence; 0 means never revised
+    artifact_digest: str = ""  # full verified digest of owned bytes, not source terms
 
     def compatibility(self):
         if self.engine in ENGINE_FORMATS:
@@ -198,6 +199,10 @@ class ModelCard:
             raise Hold("invalid_size")
         if not 0 <= self.memory_estimate <= DIGEST_LIMIT:
             raise Hold("invalid_size")
+        if self.artifact_digest and (not isinstance(self.artifact_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", self.artifact_digest)
+                or not self.owned_by_jarvis or self.storage_ref != "sha256-" + self.artifact_digest[:32]):
+            raise Hold("invalid_artifact_digest")
         if self.storage_ref and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", self.storage_ref):
             raise Hold("invalid_storage_reference")
         if len(self.display_name) > 120 or len(self.provider) > 64 or len(self.version) > 64:
@@ -690,6 +695,8 @@ class Transfer:
                         or self.card.shared_storage_owner or self.card.loaded
                         or not stat.S_ISREG(target.lstat().st_mode)):
                     raise Hold("artifact_not_replaceable")
+                if self.card.artifact_digest:
+                    self.registry.retain_artifact(self.card, target, checkpoint=self._check)
                 fd, name = tempfile.mkstemp(prefix=".previous-", dir=target.parent)
                 os.close(fd)
                 backup = Path(name)
@@ -787,6 +794,7 @@ class Transfer:
             registered = replace(self.card, state=stays, registered=True, installed=True,
                                  owned_by_jarvis=True, disk_size_bytes=written,
                                  storage_ref="sha256-" + checksum[:32],
+                                 artifact_digest=checksum,
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
                                  source_version=self.source.version,
                                  license_id=self.source.license_id)
@@ -846,6 +854,7 @@ class Transfer:
             registered = replace(self.card, state="REGISTERED", registered=True, installed=True,
                                  owned_by_jarvis=True, disk_size_bytes=written,
                                  storage_ref="sha256-" + checksum[:32],
+                                 artifact_digest=checksum,
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
                                  source_version=self.source.version,
                                   license_id=self.source.license_id)
@@ -898,6 +907,47 @@ def _verified_artifact(path, size, *, checkpoint=lambda: None):
         return h.hexdigest()
     except OSError:
         raise Hold("transfer_artifact_unreadable") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
+
+
+def _copy_verified_artifact(source, target, card, *, checkpoint=lambda: None):
+    """Create an independent verified copy, never alias an active inode."""
+    if not card.artifact_digest or not card.owned_by_jarvis:
+        raise Hold("rollback_artifact_unverified")
+    fd = None
+    try:
+        checkpoint()
+        fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != card.disk_size_bytes:
+            raise Hold("rollback_artifact_unverified")
+        if not 0 < before.st_size <= DIGEST_LIMIT:
+            raise Hold("rollback_artifact_unverified")
+        h = hashlib.sha256()
+        remaining = before.st_size
+        with open(target, "xb") as out:
+            os.fchmod(out.fileno(), 0o600)
+            while remaining:
+                checkpoint()
+                block = os.read(fd, min(262144, remaining))
+                if not block:
+                    raise Hold("rollback_artifact_unverified")
+                out.write(block)
+                h.update(block)
+                remaining -= len(block)
+            out.flush()
+            os.fsync(out.fileno())
+        after = os.fstat(fd)
+        identity = lambda x: (x.st_dev,x.st_ino,x.st_size,x.st_mtime_ns,x.st_ctime_ns,x.st_mode)
+        if (identity(before) != identity(after)
+                or identity(before) != identity(os.stat(source, follow_symlinks=False))
+                or h.hexdigest() != card.artifact_digest):
+            raise Hold("rollback_artifact_unverified")
+        checkpoint()
+    except OSError:
+        raise Hold("rollback_artifact_unverified") from None
     finally:
         if fd is not None:
             os.close(fd)
@@ -1044,24 +1094,118 @@ class Registry:
             raise Hold("registry_unreadable") from None
         return tuple(out)
 
+    def _archive_path(self, card):
+        card.checked()
+        if not card.artifact_digest or not card.owned_by_jarvis:
+            raise Hold("rollback_artifact_unverified")
+        base = self.root / "artifact-revisions"
+        folder = base / card.model_id
+        for path in (base, folder):
+            path.mkdir(mode=0o700, exist_ok=True)
+            if path.is_symlink() or not path.is_dir():
+                raise Hold("artifact_archive_unavailable")
+        return folder / card.artifact_digest
+
+    def retain_artifact(self, card, source, *, checkpoint=lambda: None):
+        if card.shared_storage_owner or card.loaded:
+            raise Hold("artifact_not_replaceable")
+        target = self._archive_path(card)
+        if target.exists() or target.is_symlink():
+            if _verified_artifact(target, card.disk_size_bytes, checkpoint=checkpoint) != card.artifact_digest:
+                raise Hold("rollback_artifact_unverified")
+            if _verified_artifact(source, card.disk_size_bytes, checkpoint=checkpoint) != card.artifact_digest:
+                raise Hold("rollback_artifact_unverified")
+            return target
+        # Bounded retention, no automatic deletion or eviction of older bytes.
+        count = 0
+        total = 0
+        for entry in target.parent.iterdir():
+            checkpoint()
+            info = entry.lstat()
+            if not stat.S_ISREG(info.st_mode) or not re.fullmatch(r"[0-9a-f]{64}", entry.name):
+                raise Hold("artifact_archive_unavailable")
+            count += 1
+            total += info.st_size
+            if count >= self.HISTORY_LIMIT or total + card.disk_size_bytes > 2 * DIGEST_LIMIT:
+                raise Hold("artifact_archive_limit")
+        fd, name = tempfile.mkstemp(prefix=".archive-", dir=target.parent)
+        os.close(fd)
+        temp = Path(name)
+        temp.unlink()
+        try:
+            _copy_verified_artifact(source, temp, card, checkpoint=checkpoint)
+            checkpoint()
+            # No overwrite, even if another operation published the same digest.
+            os.link(temp, target, follow_symlinks=False)
+            return target
+        except FileExistsError:
+            raise Hold("artifact_archive_changed") from None
+        finally:
+            temp.unlink(missing_ok=True)
+
+    def _restore_owned(self, current, candidate, restored):
+        if (not current.owned_by_jarvis or not candidate.owned_by_jarvis
+                or current.shared_storage_owner or candidate.shared_storage_owner
+                or current.loaded or candidate.loaded or not current.artifact_digest
+                or not candidate.artifact_digest):
+            raise Hold("rollback_artifact_unverified")
+        target = self.root / "artifacts" / current.model_id
+        if current.artifact_digest == candidate.artifact_digest:
+            if _verified_artifact(target, candidate.disk_size_bytes) != candidate.artifact_digest:
+                raise Hold("rollback_artifact_unverified")
+            return self.save_card(restored)
+        archive = self._archive_path(candidate)
+        if _verified_artifact(archive, candidate.disk_size_bytes) != candidate.artifact_digest:
+            raise Hold("rollback_artifact_unverified")
+        self.retain_artifact(current, target)
+        fd, name = tempfile.mkstemp(prefix=".rollback-", dir=target.parent)
+        os.close(fd)
+        temp = Path(name)
+        temp.unlink()
+        fd, name = tempfile.mkstemp(prefix=".previous-", dir=target.parent)
+        os.close(fd)
+        backup = Path(name)
+        backup.unlink()
+        replaced = False
+        try:
+            _copy_verified_artifact(archive, temp, candidate)
+            if self.card(current.model_id) != current:
+                raise Hold("transfer_card_changed")
+            if _verified_artifact(target, current.disk_size_bytes) != current.artifact_digest:
+                raise Hold("rollback_artifact_unverified")
+            os.link(target, backup, follow_symlinks=False)
+            os.replace(temp, target)
+            replaced = True
+            try:
+                saved = self.save_card(restored)
+            except BaseException:
+                os.replace(backup, target)
+                replaced = False
+                raise
+            replaced = False
+            return saved
+        finally:
+            temp.unlink(missing_ok=True)
+            if not replaced:
+                try:
+                    backup.unlink(missing_ok=True)
+                except OSError:
+                    pass
+
     def rollback(self, model_id, revision):
         """Restore a previous revision as current, as a new revision."""
         current = self.card(model_id)
         for candidate in self.history(model_id):
             if candidate.revision == revision:
-                # Metadata history cannot restore bytes that no longer exist.
-                if current.owned_by_jarvis or candidate.owned_by_jarvis:
-                    if not candidate.owned_by_jarvis or not candidate.storage_ref.startswith("sha256-"):
-                        raise Hold("rollback_artifact_unverified")
-                    try:
-                        checksum = _verified_artifact(self.root / "artifacts" / model_id,
-                                                      candidate.disk_size_bytes)
-                    except Hold:
-                        raise Hold("rollback_artifact_unverified") from None
-                    if candidate.storage_ref != "sha256-" + checksum[:32]:
-                        raise Hold("rollback_artifact_unverified")
+                if candidate.model_id != model_id:
+                    raise Hold("rollback_artifact_unverified")
                 restored = replace(current, **{k: v for k, v in candidate.__dict__.items()
                                               if k not in ("revision", "state")})
+                if current.owned_by_jarvis or candidate.owned_by_jarvis:
+                    # Historical approvals are never restored with a revision.
+                    restored = replace(restored, network_approval="", approval_expires_at=0.0,
+                                       loaded=False, health_status=UNKNOWN, last_tested_at=0.0)
+                    return self._restore_owned(current, candidate, restored)
                 return self.save_card(restored)
         raise Hold("revision_not_found")
 

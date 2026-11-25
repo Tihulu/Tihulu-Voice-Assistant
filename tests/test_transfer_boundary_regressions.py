@@ -209,5 +209,63 @@ class TransferBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.card(card.model_id),newer)
         self.assertFalse((self.root/"transfers"/"partial-fixture-model").exists())
 
+    async def install_verified(self):
+        card=self.card()
+        async def old_fetch(path,note,start=0):
+            Path(path).write_bytes(OLD)
+            note(len(OLD))
+            return len(OLD)
+        return await self.transfer(card,self.source(checksum=hashlib.sha256(OLD).hexdigest(),
+                                                    version="1.0"),old_fetch).run()
+
+    async def test_reopened_registry_restores_verified_old_bytes_and_redoes(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        self.assertEqual(new.artifact_digest,hashlib.sha256(NEW).hexdigest())
+        registry=market.Registry(self.root)
+        restored=registry.rollback(old.model_id,old.revision)
+        self.assertEqual(self.target.read_bytes(),OLD)
+        self.assertEqual(restored.artifact_digest,old.artifact_digest)
+        self.assertEqual(restored.network_approval,"")
+        self.assertEqual(restored.approval_expires_at,0)
+        registry.rollback(new.model_id,new.revision)
+        self.assertEqual(self.target.read_bytes(),NEW)
+
+    async def test_corrupt_archive_refuses_without_changing_current(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        archive=self.root/"artifact-revisions"/old.model_id/old.artifact_digest
+        archive.write_bytes(b"x"*len(OLD))
+        with self.assertRaises(Hold):
+            self.store.rollback(old.model_id,old.revision)
+        self.assertEqual(self.target.read_bytes(),NEW)
+        self.assertEqual(self.store.card(old.model_id),new)
+
+    async def test_archive_is_not_hardlinked_to_active_bytes(self):
+        old=await self.install_verified()
+        await self.transfer(old,self.source()).update()
+        archive=self.root/"artifact-revisions"/old.model_id/old.artifact_digest
+        self.store.rollback(old.model_id,old.revision)
+        self.assertNotEqual(archive.stat().st_ino,self.target.stat().st_ino)
+        self.target.write_bytes(b"x"*len(OLD))
+        self.assertEqual(archive.read_bytes(),OLD)
+
+    async def test_rollback_save_failure_preserves_current_bytes(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        with patch.object(self.store,"save_card",side_effect=OSError("fixture write failure")):
+            with self.assertRaises(OSError):
+                self.store.rollback(old.model_id,old.revision)
+        self.assertEqual(self.target.read_bytes(),NEW)
+        self.assertEqual(self.store.card(old.model_id),new)
+
+    async def test_mutated_owned_artifact_refuses_update(self):
+        old=await self.install_verified()
+        self.target.write_bytes(b"x"*len(OLD))
+        with self.assertRaises(Hold):
+            await self.transfer(old,self.source()).update()
+        self.assertEqual(self.target.read_bytes(),b"x"*len(OLD))
+        self.assertEqual(self.store.card(old.model_id),old)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
