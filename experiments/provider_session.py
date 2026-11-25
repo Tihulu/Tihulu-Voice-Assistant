@@ -4,8 +4,8 @@ Synthetic endpoint identities only, no vendor API compatibility claim.
 """
 from dataclasses import dataclass
 from hashlib import sha256
-from threading import Lock
-from gateway import Request,Refused,token
+from threading import RLock
+from gateway import Context,FixtureGateway,Request,Refused,token
 from inference import Envelope
 from adapter_protocol import disclosure_target
 
@@ -40,10 +40,18 @@ class CallPlan:
         return sha256(repr(("provider-call",a.provider,a.reference,a.method,a.origin,
                             a.generation,self.model,self.payload_digest)).encode("ascii")).hexdigest()
 
+def payload_target(plan,envelope):
+    if type(plan) is not CallPlan or type(envelope) is not Envelope:
+        raise Refused("invalid_plan")
+    if plan.account.provider!=envelope.destination or plan.payload_digest!=envelope.digest:
+        raise Refused("account_or_payload_mismatch")
+    return sha256(repr(("provider-payload",plan.target(),disclosure_target(envelope))).encode("ascii")).hexdigest()
+
 class ProviderSession:
     """Only synthetic minimized envelopes. No API key/token strings or transport."""
     def __init__(self,gateway,context,accounts):
-        if context.mode!="SECURE_HYBRID" or context.offline:
+        if (type(gateway) is not FixtureGateway or type(context) is not Context
+                or gateway.context!=context or context.mode!="SECURE_HYBRID" or context.offline):
             raise Refused("secure_online_context_required")
         if type(accounts) is not tuple or not 1<=len(accounts)<=16:
             raise Refused("invalid_accounts")
@@ -57,7 +65,8 @@ class ProviderSession:
             self._accounts[a.reference]=a
         self._g,self._ctx=gateway,context.checked()
         self._closed=False
-        self._lock=Lock()
+        self._lock=RLock()
+        self._used={}
 
     def prepare(self,plan,envelope,provider_grant,payload_grant):
         with self._lock:
@@ -68,25 +77,47 @@ class ProviderSession:
             if (self._accounts.get(a.reference)!=a or envelope.destination!=a.provider
                     or envelope.digest!=plan.payload_digest):
                 raise Refused("account_or_payload_mismatch")
-            digest_target=disclosure_target(envelope)
+            digest_target=payload_target(plan,envelope)
             pr=Request(self._ctx,"provider",target,"local","minimized")
             dr=Request(self._ctx,"disclose",digest_target,"local","minimized")
             self._g.checkpoint(provider_grant,pr)
             self._g.checkpoint(payload_grant,dr)
             # Two independent, single-use fixture permissions. Failure burns
             # any already-claimed permission; no retry or partial effect.
-            self._g.claim(provider_grant,pr)
-            self._g.claim(payload_grant,dr)
-            self._g.checkpoint(provider_grant,pr)
-            self._g.checkpoint(payload_grant,dr)
-            return "SIMULATED_PROVIDER_REQUEST_ONLY",envelope.payload
+            claimed=[]
+            def live():
+                if self._closed or self._accounts.get(a.reference)!=a:
+                    raise Refused("account_unavailable")
+                self._g.checkpoint(provider_grant,pr)
+                self._g.checkpoint(payload_grant,dr)
+                if self._closed or self._accounts.get(a.reference)!=a:
+                    raise Refused("account_unavailable")
+            try:
+                self._g.claim(provider_grant,pr)
+                claimed.append(provider_grant)
+                live()
+                self._g.claim(payload_grant,dr)
+                claimed.append(payload_grant)
+                live()
+                self._used.setdefault(a.reference,[]).extend(claimed)
+                return "SIMULATED_PROVIDER_REQUEST_ONLY",envelope.payload
+            except BaseException:
+                for grant in claimed:
+                    self._g.revoke(grant.identity)
+                raise
 
     def forget(self,reference):
         token(reference)
         with self._lock:
             self._accounts.pop(reference,None)
+            for grant in self._used.pop(reference,()):
+                self._g.revoke(grant.identity)
 
     def close(self):
         with self._lock:
             self._closed=True
             self._accounts.clear()
+            for grants in self._used.values():
+                for grant in grants:
+                    self._g.revoke(grant.identity)
+            self._used.clear()
