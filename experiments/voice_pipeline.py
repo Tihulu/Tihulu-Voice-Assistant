@@ -18,6 +18,7 @@ class VoicePlan:
     budget_mib: int
     reserve_mib: int
     peak_mib: int
+    pinned: tuple
     digest: str
 
 def plan_voice(context,candidates,budget_mib,*,reserve_mib=0,
@@ -79,22 +80,23 @@ def plan_voice(context,candidates,budget_mib,*,reserve_mib=0,
     if winner is None:
         raise Refused("pipeline_over_budget")
     _,models,peak=winner
+    pinned=tuple(sorted(pins.items()))
     payload={"context":[context.task,context.session,context.profile,context.generation,
                        context.route,context.mode,context.offline,context.public_opt_in],
              "models":[[c.identity,c.task,c.locality,c.provider,c.compatible,c.healthy,
                         c.memory_mib,c.rank] for c in models],
              "strategy":strategy,"residency":residency,"budget":budget_mib,
-             "reserve":reserve_mib,"peak":peak}
+             "reserve":reserve_mib,"peak":peak,"pinned":pinned}
     digest=sha256(json.dumps(payload,sort_keys=True,separators=(",",":")).encode("ascii")).hexdigest()
-    return VoicePlan(context,models,strategy,residency,budget_mib,reserve_mib,peak,digest)
+    return VoicePlan(context,models,strategy,residency,budget_mib,reserve_mib,peak,pinned,digest)
 
-def revalidate(expected,context,candidates,*,pinned=()):
+def revalidate(expected,context,candidates):
     """Recompute from current trusted inventory metadata; never auto-switch."""
     if type(expected) is not VoicePlan:
         raise Refused("invalid_pipeline_plan")
     current=plan_voice(context,candidates,expected.budget_mib,
         reserve_mib=expected.reserve_mib,strategy=expected.strategy,
-        residency=expected.residency,pinned=pinned)
+        residency=expected.residency,pinned=expected.pinned)
     if current!=expected:
         raise Refused("pipeline_plan_changed")
     return current

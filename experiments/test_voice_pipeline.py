@@ -58,3 +58,10 @@ class VoicePipelineTests(unittest.TestCase):
                 plan_voice(self.ctx,self.c,**args)
         with self.assertRaises(Refused):
             plan_voice(self.ctx,(*self.c,self.c[0]),20)
+
+    def test_pins_are_bound_to_plan_and_preserved_on_revalidation(self):
+        p=plan_voice(self.ctx,self.c,20,pinned=(("llm","jan-small"),))
+        self.assertEqual(revalidate(p,self.ctx,self.c),p)
+        self.assertNotEqual(p.digest,plan_voice(self.ctx,self.c,20).digest)
+        with self.assertRaises(Refused):
+            revalidate(p,self.ctx,tuple(c for c in self.c if c.identity!="jan-small"))
