@@ -1,0 +1,133 @@
+name: Independent complaint candidate reproduction
+on:
+  pull_request:
+    branches: [fix/owner-complaint-retained-state]
+  workflow_dispatch:
+permissions:
+  contents: read
+env:
+  CANDIDATE: 9f9f26344409a7727af6e62937c4e2e9e44c5089
+  BASELINE: 16b341b57fe7ef1a33d76434efce0c8b301b1273
+  PYTHONDONTWRITEBYTECODE: '1'
+jobs:
+  reproduce:
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'qa/independent-complaint-fix-environment'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        layer: [py310, py312, gtk, packages]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 9f9f26344409a7727af6e62937c4e2e9e44c5089
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Establish exact source identity
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$CANDIDATE"
+          git merge-base --is-ancestor "$BASELINE" HEAD
+          git fsck --full --no-reflogs
+          git show -s --format='%H %T' "$BASELINE" "$CANDIDATE"
+          git diff --stat "$BASELINE" "$CANDIDATE"
+          git ls-tree -r HEAD | sha256sum
+          test -z "$(git status --porcelain)"
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        if: matrix.layer != 'gtk'
+        with:
+          python-version: ${{ matrix.layer == 'py310' && '3.10' || '3.12' }}
+      - name: Core independent execution
+        if: startsWith(matrix.layer, 'py')
+        shell: bash
+        run: |
+          python -VV
+          PYTHONPATH=src python -m unittest discover -s tests -v
+          echo "core exit=0"
+      - name: Native dependency provisioning in disposable runner
+        if: matrix.layer == 'gtk' || matrix.layer == 'packages'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+      - name: Native GTK independent execution
+        if: matrix.layer == 'gtk'
+        env:
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          GTK_A11Y: none
+          G_DEBUG: fatal-criticals
+          PYTHONPATH: src
+        run: |
+          /usr/bin/python3 -VV
+          dbus-run-session -- xvfb-run -a /usr/bin/python3 -m unittest discover -s tests/gtk -v
+          echo "GTK exit=0; synthetic backends, not owner acceptance"
+      - name: Independent package build and byte inventory
+        if: matrix.layer == 'packages'
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/builder"
+          "$RUNNER_TEMP/builder/bin/pip" install build
+          "$RUNNER_TEMP/builder/bin/python" -m build --sdist --wheel --outdir dist
+          sha256sum dist/*
+          python - <<'PY'
+          import pathlib, subprocess, zipfile, tarfile
+          def git(*args): return subprocess.check_output(['git', *args])
+          root='src/tihulu_jarvis/'
+          paths=git('ls-tree','-r','--name-only','HEAD','--',root).decode().splitlines()
+          expected={p.removeprefix('src/'):git('show','HEAD:'+p) for p in paths}
+          wheels=list(pathlib.Path('dist').glob('*.whl'))
+          sdists=list(pathlib.Path('dist').glob('*.tar.gz'))
+          assert len(wheels)==len(sdists)==1
+          with zipfile.ZipFile(wheels[0]) as z:
+              names=z.namelist()
+              assert len(names)==len(set(names))
+              assert {n for n in names if n.startswith('tihulu_jarvis/') and not n.endswith('/')}==set(expected)
+              for n,b in expected.items(): assert z.read(n)==b,n
+              ep=next(n for n in names if n.endswith('.dist-info/entry_points.txt'))
+              assert b'tihulu-jarvis = tihulu_jarvis.desktop:main' in z.read(ep)
+              assert not any(n.startswith(('tests/','docs/','experiments/','qa/')) for n in names)
+          with tarfile.open(sdists[0]) as t:
+              names=t.getnames()
+              prefix=names[0].split('/')[0]
+              for n,b in expected.items(): assert t.extractfile(prefix+'/src/'+n).read()==b,n
+          print('wheel/sdist exact application modules:',len(expected))
+          PY
+          python -m venv "$RUNNER_TEMP/installed"
+          "$RUNNER_TEMP/installed/bin/pip" install --no-index --no-deps dist/*.whl
+          "$RUNNER_TEMP/installed/bin/pip" check
+          sh packaging/deb/build.sh "$RUNNER_TEMP/deb-stage" dist
+          # build.sh writes tihulu-jarvis.deb beside the staging directory
+          deb="$RUNNER_TEMP/tihulu-jarvis.deb"
+          test -f "$deb"
+          sha256sum "$deb"
+          dpkg-deb -I "$deb"
+          dpkg-deb -c "$deb"
+          dpkg-deb -x "$deb" "$RUNNER_TEMP/extracted"
+          python - <<'PY'
+          import pathlib, subprocess, os, sys
+          root=pathlib.Path(os.environ['RUNNER_TEMP'])/'extracted'
+          runtime=root/'usr/share/tihulu-jarvis/python/tihulu_jarvis'
+          paths=subprocess.check_output(['git','ls-tree','-r','--name-only','HEAD','--','src/tihulu_jarvis/']).decode().splitlines()
+          expected={p.removeprefix('src/tihulu_jarvis/'):subprocess.check_output(['git','show','HEAD:'+p]) for p in paths}
+          actual={str(p.relative_to(runtime)) for p in runtime.rglob('*') if p.is_file()}
+          assert actual==set(expected),(actual-set(expected),set(expected)-actual)
+          assert not any(p.is_symlink() for p in runtime.rglob('*'))
+          for n,b in expected.items(): assert (runtime/n).read_bytes()==b,n
+          for s,d in [('packaging/deb/launch.py','usr/share/tihulu-jarvis/launch.py'),('data/io.github.Tihulu.Jarvis.desktop','usr/share/applications/io.github.Tihulu.Jarvis.desktop'),('data/io.github.Tihulu.Jarvis.svg','usr/share/icons/hicolor/scalable/apps/io.github.Tihulu.Jarvis.svg')]:
+              assert (root/d).read_bytes()==subprocess.check_output(['git','show','HEAD:'+s])
+          print('Debian byte-identical modules:',len(expected))
+          PY
+          python tools/owner_preview.py --root "$RUNNER_TEMP/extracted" --commit "$CANDIDATE"
+          runtime="$RUNNER_TEMP/extracted/usr/share/tihulu-jarvis/python"
+          cd "$RUNNER_TEMP"
+          PYTHONPATH="$GITHUB_WORKSPACE" installed/bin/python -c 'import pathlib,sys,tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).is_relative_to(pathlib.Path(sys.prefix))'
+          PYTHONPATH="$GITHUB_WORKSPACE" installed/bin/python -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests"
+          installed/bin/python "$GITHUB_WORKSPACE/tools/smoke.py"
+          PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -c 'import pathlib,os,tihulu_jarvis; assert pathlib.Path(tihulu_jarvis.__file__).is_relative_to(pathlib.Path(os.environ["PYTHONPATH"].split(":")[0]))'
+          PYTHONPATH="$runtime:$GITHUB_WORKSPACE" /usr/bin/python3 -m unittest discover -s "$GITHUB_WORKSPACE/tests" -t "$GITHUB_WORKSPACE/tests"
+          PYTHONPATH="$runtime" /usr/bin/python3 "$GITHUB_WORKSPACE/tools/smoke.py"
+          GDK_BACKEND=x11 GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a extracted/usr/bin/tihulu-jarvis --check-runtime
+          echo "package and smoke exit=0"
