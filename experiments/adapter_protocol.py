@@ -7,6 +7,7 @@ provider wire compatibility. No client, network or inference is invoked.
 from dataclasses import dataclass
 from hashlib import sha256
 import json
+from threading import Lock
 from gateway import Request, Refused, token
 from inference import Candidate, Envelope
 
@@ -58,10 +59,15 @@ class LocalAdapter:
         self._state="ready"
         self._seq=0
         self._result=bytearray()
+        self._lock=Lock()
     @property
     def state(self):
-        return self._state
+        with self._lock:
+            return self._state
     def event(self,identity,sequence,kind,value):
+        with self._lock:
+            return self._event(identity,sequence,kind,value)
+    def _event(self,identity,sequence,kind,value):
         if self._state not in ("ready","running"):
             raise Refused("terminal_call")
         try:
@@ -94,6 +100,9 @@ class LocalAdapter:
             self._state="held"
             raise
     def result(self):
+        with self._lock:
+            return self._completed_result()
+    def _completed_result(self):
         if self._state!="completed":
             raise Refused("no_completed_result")
         try:
@@ -104,8 +113,10 @@ class LocalAdapter:
             raise
         return bytes(self._result)
     def cancel(self):
-        self._result.clear()
-        self._state="cancelled"
+        with self._lock:
+            self._result.clear()
+            self._state="cancelled"
+            self._g.revoke(self._grant.identity)
 
 def disclosure_target(envelope):
     if type(envelope) is not Envelope:
