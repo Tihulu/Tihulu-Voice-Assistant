@@ -1211,5 +1211,140 @@ class ConditionalRegistryTests(unittest.TestCase):
             self.other.record_discovered(self.card)
         self.assertEqual(self.registry.card(installed.model_id), installed)
 
+class TransferLeaseTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.other = market.Registry(self.root)
+        self.source = market.Source(reference="catalog:fixture",
+                                    checksum=hashlib.sha256(NEW).hexdigest(),
+                                    size=len(NEW), network_approval="fixture",
+                                    approval_expires_at=1e12)
+        self.card = self.registry.save_card(market.ModelCard(
+            model_id="fixture-model", display_name="Fixture", category="stt"))
+        self.calls = []
+
+    async def fetch(self, path, note, start=0):
+        self.calls.append(start)
+        Path(path).write_bytes(NEW)
+        note(len(NEW))
+        return len(NEW)
+
+    async def test_competing_transfer_cannot_call_transport(self):
+        entered = asyncio.Event()
+        async def stalled(path, note):
+            entered.set()
+            await asyncio.Future()
+        first = market.Transfer(self.registry, self.card, self.source, stalled, now=1)
+        task = asyncio.create_task(first.run())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            current = self.other.card(self.card.model_id)
+            second = market.Transfer(self.other, current, self.source, self.fetch, now=1)
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                await second.resume()
+            self.assertEqual(self.calls, [])
+            self.assertEqual(self.other.card(self.card.model_id), current)
+        finally:
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        # Cancellation drains the first operation and releases the lease.
+        current = self.other.card(self.card.model_id)
+        second = market.Transfer(self.other, current, self.source, self.fetch, now=1)
+        result = await second.resume()
+        self.assertEqual(result.artifact_digest, self.source.checksum)
+        self.assertEqual(self.calls, [0])
+
+    async def test_different_models_can_transfer_while_first_awaits(self):
+        entered = asyncio.Event()
+        async def stalled(path, note):
+            entered.set()
+            await asyncio.Future()
+        task = asyncio.create_task(market.Transfer(
+            self.registry, self.card, self.source, stalled, now=1).run())
+        try:
+            await asyncio.wait_for(entered.wait(), 2)
+            other_card = self.other.save_card(market.ModelCard(
+                model_id="other-model", display_name="Other", category="stt"))
+            result = await market.Transfer(self.other, other_card, self.source,
+                                           self.fetch, now=1).run()
+            self.assertEqual(result.artifact_digest, self.source.checksum)
+        finally:
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+
+    async def test_explicit_discard_refuses_during_active_lease(self):
+        transfer = market.Transfer(self.registry, self.card, self.source, self.fetch, now=1)
+        payload, metadata = transfer._partial_paths()
+        payload.write_bytes(NEW[:3])
+        status = self.other.partial_status(self.card.model_id)
+        with self.registry.transfer_lease(self.card.model_id):
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                self.other.discard_partial(self.card.model_id, status["identity"])
+            self.assertEqual(payload.read_bytes(), NEW[:3])
+        self.other.discard_partial(self.card.model_id, status["identity"])
+        self.assertFalse(payload.exists())
+        self.assertFalse(metadata.exists())
+
+    async def test_real_process_exit_releases_transfer_lease(self):
+        import subprocess
+        import sys
+        import select
+        code = """
+import os, sys
+sys.path.insert(0, sys.argv[2])
+from tihulu_jarvis import market
+r = market.Registry(sys.argv[1])
+with r.transfer_lease("fixture-model"):
+    print("locked", flush=True)
+    sys.stdin.read()
+    os._exit(73)
+"""
+        proc = subprocess.Popen([sys.executable, "-c", code, str(self.root),
+                                 str(Path(market.__file__).resolve().parent.parent)],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                text=True)
+        try:
+            ready, _, _ = select.select([proc.stdout], [], [], 10)
+            self.assertTrue(ready)
+            self.assertEqual(proc.stdout.readline().strip(), "locked")
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                with self.registry.transfer_lease(self.card.model_id):
+                    self.fail("competing process entered")
+        finally:
+            proc.stdin.close()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+            proc.stdout.close()
+        self.assertEqual(proc.returncode, 73)
+        with self.registry.transfer_lease(self.card.model_id):
+            self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    async def test_symlink_lease_file_refused_before_transport(self):
+        folder = self.root / ".transfer-locks"
+        folder.mkdir(mode=0o700)
+        outside = self.root / "outside"
+        outside.write_bytes(b"untouched")
+        (folder / (self.card.model_id + ".lock")).symlink_to(outside)
+        with self.assertRaisesRegex(Hold, "transfer_lock_unavailable"):
+            await market.Transfer(self.registry, self.card, self.source, self.fetch, now=1).run()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(outside.read_bytes(), b"untouched")
+
+    async def test_lease_released_after_transport_failure(self):
+        async def failure(path, note):
+            raise Hold("fixture_failure")
+        with self.assertRaisesRegex(Hold, "fixture_failure"):
+            await market.Transfer(self.registry, self.card, self.source, failure, now=1).run()
+        with self.other.transfer_lease(self.card.model_id):
+            self.assertEqual(self.other.card(self.card.model_id).state, "FAILED")
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
