@@ -1862,6 +1862,52 @@ class UpdateUITests(DownloadFixture):
         self.assertEqual(self.ui.market.card("fixture-update").state, "ACTIVE")
         # The failed update replaced nothing; only the explicit rename revision exists.
         self.assertEqual(len(self.ui.market.history("fixture-update")), 1)
+class LocalSelectionConsistencyUITests(MarketFixture):
+    def prepare_stt(self):
+        path = self.weights("fixture-transaction.bin")
+        card = self.ui.register_choice("stt", str(path))
+        self.pick_card(card.model_id)
+        return card, path
+
+    def test_settings_failure_preserves_registry_and_choice(self):
+        card, path = self.prepare_stt()
+        old = settings.load()
+        before = self.ui.cfg["stt"]
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "settings_unwritable")
+        self.assertEqual(self.ui.market.card(card.model_id), card)
+        self.assertEqual(self.ui.cfg["stt"], before)
+        self.assertEqual(settings.load(), old)
+
+    def test_registry_failure_restores_settings_and_choice(self):
+        card, path = self.prepare_stt()
+        old = settings.load()
+        before = self.ui.cfg["stt"]
+        with patch.object(self.ui.market, "save_card", side_effect=OSError("fixture")):
+            self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "model_selection_write_failed")
+        self.assertEqual(self.ui.market.card(card.model_id), card)
+        self.assertEqual(self.ui.cfg["stt"], before)
+        self.assertEqual(settings.load(), old)
+
+    def test_active_model_lease_refuses_selection_without_writes(self):
+        card, path = self.prepare_stt()
+        old = settings.load()
+        with self.ui.market.transfer_lease(card.model_id):
+            self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "transfer_busy")
+        self.assertEqual(self.ui.market.card(card.model_id), card)
+        self.assertEqual(settings.load(), old)
+
+    def test_success_updates_both_stores_and_visible_choice(self):
+        card, path = self.prepare_stt()
+        self.ui.use_selected_card()
+        self.assertEqual(self.ui.market.card(card.model_id).state, "ACTIVE")
+        self.assertEqual(settings.load()["stt"], str(path))
+        self.assertEqual(self.ui.cfg["stt"], str(path))
+        self.assertEqual(self.ui.status.get_text(), "Model selected.")
+
 class MarketSelectionPreflightUITests(MarketFixture):
     def test_missing_local_file_does_not_advance_state(self):
         path = self.weights("fixture-missing.bin")
