@@ -96,3 +96,61 @@ class InventoryTests(unittest.TestCase):
         for g in groups:
             self.i.release_pipeline(g)
         self.assertEqual(self.i.removal_plan("m"),"REFERENCE_ONLY")
+
+    def metered(self,capacity):
+        self.i=Inventory(capacity)
+        self.i.register(self.e)
+        return self.pipeline()
+
+    def test_metered_group_and_individual_share_budget(self):
+        ctx,c,p=self.metered(10)
+        g=self.i.lease_pipeline(p,ctx,c)
+        self.assertEqual(self.i.capacity_snapshot(),(10,7,3))
+        with self.assertRaisesRegex(Refused,"aggregate_capacity_exceeded"):
+            self.i.lease_candidate(c[1])
+        with self.assertRaisesRegex(Refused,"candidate_required"):
+            self.i.lease("m")
+        h=self.i.lease_candidate(c[0])
+        self.assertEqual(self.i.capacity_snapshot(),(10,9,4))
+        self.i.release_pipeline(g)
+        self.assertEqual(self.i.capacity_snapshot(),(10,2,1))
+        self.i.release(h)
+        self.assertEqual(self.i.capacity_snapshot(),(10,0,0))
+
+    def test_metered_sequential_plan_charged_conservatively(self):
+        from voice_pipeline import plan_voice
+        ctx,c,_=self.metered(6)
+        p=plan_voice(ctx,c,6,residency="sequential",reserve_mib=1)
+        self.assertEqual(p.peak_mib,5)
+        with self.assertRaisesRegex(Refused,"aggregate_capacity_exceeded"):
+            self.i.lease_pipeline(p,ctx,c)
+        self.assertEqual(self.i.capacity_snapshot(),(6,0,0))
+
+    def test_metered_concurrent_group_admission_never_overbooks(self):
+        from concurrent.futures import ThreadPoolExecutor
+        ctx,c,p=self.metered(14)
+        def start(_):
+            try:
+                return self.i.lease_pipeline(p,ctx,c)
+            except Refused:
+                return None
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            groups=[g for g in pool.map(start,range(12)) if g is not None]
+        self.assertEqual(len(groups),2)
+        self.assertEqual(self.i.capacity_snapshot(),(14,14,6))
+        for g in groups:
+            self.i.release_pipeline(g)
+        self.assertEqual(self.i.capacity_snapshot(),(14,0,0))
+
+    def test_metered_failed_group_rolls_back_without_charge(self):
+        self.i=Inventory(10)
+        self.i.register(self.e)
+        ctx,c,p=self.pipeline(False)
+        with self.assertRaises(Refused):
+            self.i.lease_pipeline(p,ctx,c)
+        self.assertEqual(self.i.capacity_snapshot(),(10,0,0))
+
+    def test_metered_capacity_validation(self):
+        for bad in (True,0,-1,1.5,1048577):
+            with self.assertRaises(Refused):
+                Inventory(bad)
