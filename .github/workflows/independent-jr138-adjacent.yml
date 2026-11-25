@@ -1,0 +1,191 @@
+name: Independent JR138 adjacent boundary matrix
+on:
+  pull_request:
+    branches: [fix/jr128-owned-audio-validation]
+permissions:
+  contents: read
+jobs:
+  probes:
+    if: github.head_ref == 'qa/independent-jr138-reproduction' && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    env:
+      PYTHONPATH: src:tests/gtk
+      PYTHONDONTWRITEBYTECODE: '1'
+      GDK_BACKEND: x11
+      GSK_RENDERER: cairo
+      GTK_A11Y: none
+      G_DEBUG: fatal-criticals
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 40dc8f73ad6d5f4daf7cf1afbb3f8b79b687ec12
+          persist-credentials: false
+      - run: |
+          test "$(git rev-parse HEAD)" = 40dc8f73ad6d5f4daf7cf1afbb3f8b79b687ec12
+          test "$(git rev-parse HEAD^{tree})" = 5f844f34524f23a8b0ef59d91fda041e66a4f86d
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+      - name: Independent adversarial tests
+        run: |
+          dbus-run-session -- xvfb-run -a /usr/bin/python3 - <<'PY'
+          import asyncio, tempfile, time, wave, struct, unittest
+          from pathlib import Path
+          from threading import Event
+          from unittest.mock import patch
+          from test_desktop import DesktopFixture, desktop, profiles, GLib
+          from tihulu_jarvis import files, model_discovery
+          from tihulu_jarvis.voice import audio
+          from tihulu_jarvis.voice.m1 import Hold
+          class Adjacent(DesktopFixture):
+              def setUp(self):
+                  self.real_listen=audio.listen
+                  super().setUp()
+                  self.root=Path(self.stack.enter_context(tempfile.TemporaryDirectory()))
+              def wav(self,p):
+                  with wave.open(str(p),'wb') as f:
+                      f.setparams((1,2,16000,0,'NONE','not compressed'))
+                      f.writeframes(struct.pack('<hh',1250,-1250)*1600)
+              def tick(self,ms):
+                  done=[]
+                  GLib.timeout_add(ms,lambda:(done.append(True),False)[1])
+                  self.until(lambda:bool(done))
+              def validation(self,mode,stop):
+                  if mode=='capture': self.connect_model()
+                  clock=[time.time()]
+                  profile=profiles.Profile(id='independent-audio',name='Independent audio',
+                      tool_rules=(profiles.Rule('local_audio_device',('push_to_talk',),'allow','fixture',clock[0]+60),),
+                      filesystem_rules=(profiles.Rule('filesystem_read',('recording',),'allow','fixture',clock[0]+60),))
+                  self.ui.store.save(profile)
+                  self.ui.activate_profile(profile.id)
+                  if mode=='capture': self.connect_model()
+                  p=self.root/'clip.wav'; self.wav(p)
+                  entered,release,exited=Event(),Event(),Event()
+                  paths=[]; calls=[]; observed=[]
+                  original=audio.has_signal
+                  def delayed(path,*,checkpoint):
+                      paths.append(path)
+                      entered.set()
+                      try:
+                          if not release.wait(15): raise AssertionError('review barrier timeout')
+                          observed.append(path.is_file())
+                          return original(path,checkpoint=checkpoint)
+                      finally: exited.set()
+                  async def capture(path,*args,checkpoint,**kw):
+                      checkpoint(); self.wav(path); checkpoint()
+                  async def engine(*a,**kw):
+                      calls.append('whisper')
+                      raise AssertionError('unexpected Whisper start')
+                  self.ui.transcribe_runner=engine
+                  audio.listen.side_effect=self.real_listen
+                  with patch.object(profiles.time,'time',side_effect=lambda:clock[0]), \
+                       patch.object(audio,'has_signal',side_effect=delayed), \
+                       patch.object(audio,'_capture',side_effect=capture), \
+                       patch.object(audio,'_whisper',side_effect=engine), \
+                       patch.object(audio,'AUTH_POLL',.02):
+                      if mode=='capture': self.ui.voice()
+                      else: self.ui.run_transcribe(str(p))
+                      try:
+                          self.until(entered.is_set)
+                          task=self.ui.session.active
+                          board_id=self.ui.active_task
+                          self.assertTrue(paths[0].is_file())
+                          if stop=='expire': clock[0]+=120
+                          elif stop=='close': self.ui.win.close()
+                          else: self.ui.hard_stop()
+                          self.tick(180)
+                          self.assertTrue(self.ui.busy)
+                          self.assertTrue(self.ui.board.get(board_id).busy)
+                          self.assertFalse(task.done())
+                          self.assertTrue(paths[0].is_file())
+                          self.assertFalse(exited.is_set())
+                          self.assertFalse(calls)
+                          if mode=='capture': self.assertIn('microphone',self.ui.leases.held())
+                          if stop=='close':
+                              self.assertTrue(self.ui.win.get_visible())
+                              self.ui.win.close()
+                          elif stop=='stop': self.ui.hard_stop()
+                          self.tick(60)
+                          self.assertTrue(self.ui.busy)
+                          self.assertTrue(paths[0].exists())
+                      finally:
+                          release.set()
+                          self.until(exited.is_set)
+                          self.until(lambda:not self.ui.busy)
+                      if stop=='expire':
+                          self.assertIsInstance(task.exception(),Hold)
+                          self.assertEqual(str(task.exception()),'approval_expired')
+                      else: self.assertTrue(task.cancelled())
+                      if stop=='close': self.until(lambda:not self.app.get_windows())
+                  self.assertEqual(observed,[True])
+                  self.assertFalse(paths[0].exists())
+                  self.assertFalse(calls)
+                  self.assertFalse(self.backend.requests)
+                  self.assertFalse(self.backend.speeches)
+                  self.assertFalse(self.ui.session.history)
+                  self.assertEqual(self.ui.board.get(board_id).locks,())
+                  self.assertFalse(self.ui.leases.held())
+                  self.assertEqual(self.ui.board.get(board_id).state,'failed' if stop=='expire' else 'cancelled')
+              def test_capture_repeated_stop(self): self.validation('capture','stop')
+              def test_capture_expiry(self): self.validation('capture','expire')
+              def test_capture_close(self): self.validation('capture','close')
+              def test_recording_repeated_stop(self): self.validation('recording','stop')
+              def test_recording_expiry(self): self.validation('recording','expire')
+              def test_recording_close(self): self.validation('recording','close')
+              def root_swap_after_scan(self,mode):
+                  selected=self.root/'selected'; selected.mkdir()
+                  (selected/'approved.bin').write_bytes(b'synthetic')
+                  other=self.root/'other'; other.mkdir()
+                  (other/'UNSELECTED-CANARY.bin').write_bytes(b'synthetic')
+                  reached=Event(); release=Event()
+                  module,name=(model_discovery,'scan') if mode=='model' else (files,'list_dir')
+                  original=getattr(module,name)
+                  def delayed(path,checkpoint=None,*,expected_root):
+                      assert expected_root is not None
+                      result=original(path,checkpoint=checkpoint,expected_root=expected_root)
+                      reached.set()
+                      if not release.wait(15): raise AssertionError('fixture timeout')
+                      return result
+                  with patch.object(module,name,side_effect=delayed):
+                      if mode=='model': self.ui.scan_model_folder(str(selected))
+                      else: self.ui.chat_files.start(str(selected))
+                      try:
+                          self.until(reached.is_set)
+                          selected.rename(self.root/'previous')
+                          other.rename(selected)
+                      finally: release.set()
+                      self.until(lambda:not self.ui.busy)
+                  self.assertIsInstance(self.ui.session.active.exception(),Hold)
+                  self.assertEqual(str(self.ui.session.active.exception()),'folder_changed')
+                  if mode=='model': self.assertIsNone(self.ui.model_scan_result)
+                  else:
+                      self.assertIsNone(self.ui.chat_files.folder)
+                      self.assertEqual(self.ui.chat_files.listing.get_text(),'')
+                  self.jan.assert_not_called()
+              def test_model_root_replaced_after_scan(self): self.root_swap_after_scan('model')
+              def test_chat_root_replaced_after_scan(self): self.root_swap_after_scan('chat')
+              def test_expired_attachment_switch_and_stop(self):
+                  self.connect_model()
+                  clock=[time.time()]
+                  p=profiles.Profile(id='review-attachment',name='Review attachment',
+                      filesystem_rules=(profiles.Rule('filesystem_read',('attachment',),'allow','fixture',clock[0]+60),))
+                  q=profiles.Profile(id='review-new-profile',name='Review new')
+                  self.ui.store.save(p); self.ui.store.save(q)
+                  self.ui.activate_profile(p.id)
+                  path=self.root/'note.txt'; path.write_text('SYNTHETIC')
+                  with patch.object(profiles.time,'time',side_effect=lambda:clock[0]):
+                      self.assertIsNotNone(self.ui.read_attachment(str(path)))
+                      self.ui.entry.set_text('Merhaba summarize this')
+                      clock[0]+=120
+                      self.ui.refresh()
+                      self.assertTrue(self.ui.attachment_invalidated)
+                      self.ui.activate_profile(q.id)
+                      self.ui.hard_stop()
+                      self.assertTrue(self.ui.attachment_invalidated)
+                      self.assertIsNone(self.ui.attachment)
+                      self.assertEqual(self.ui.entry.get_text(),'Merhaba summarize this')
+                      self.ui.send_text()
+                      self.assertFalse(self.ui.busy)
+                      self.assertFalse(self.backend.requests)
+          unittest.main(verbosity=2)
+          PY

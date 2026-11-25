@@ -1,0 +1,114 @@
+name: Independent JR138 adversarial replay
+on:
+  pull_request:
+    branches: [fix/jr128-owned-audio-validation]
+permissions:
+  contents: read
+jobs:
+  probes:
+    if: github.head_ref == 'qa/independent-jr138-reproduction'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: 40dc8f73ad6d5f4daf7cf1afbb3f8b79b687ec12
+          persist-credentials: false
+      - run: |
+          test "$(git rev-parse HEAD)" = 40dc8f73ad6d5f4daf7cf1afbb3f8b79b687ec12
+          test "$(git rev-parse HEAD^{tree})" = 5f844f34524f23a8b0ef59d91fda041e66a4f86d
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+      - name: Independent negative scenarios
+        env:
+          PYTHONPATH: src:tests/gtk
+          PYTHONDONTWRITEBYTECODE: '1'
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          GTK_A11Y: none
+          G_DEBUG: fatal-criticals
+        run: |
+          dbus-run-session -- xvfb-run -a /usr/bin/python3 - <<'PY'
+          import unittest, tempfile, os, time
+          from pathlib import Path
+          from unittest.mock import patch
+          from test_desktop import DesktopFixture, GLib, profiles
+          from tihulu_jarvis import model_discovery
+          class IndependentRetainedState(DesktopFixture):
+              def attach_draft(self):
+                  self.connect_model()
+                  p=Path(self.profile_home)/'synthetic.txt'
+                  p.write_text('SYNTHETIC-CANARY',encoding='utf-8')
+                  self.assertIsNotNone(self.ui.read_attachment(str(p)))
+                  self.ui.entry.set_text('Merhaba! Summarize the file.')
+              def new_profile(self):
+                  p=profiles.Profile(id='independent-other', name='Independent other')
+                  self.ui.store.save(p)
+                  self.ui.switch_profile(p.id)
+                  self.assertEqual(self.ui.cfg['profile'],p.id)
+              def test_profile_switch_requires_explicit_attachment_resolution(self):
+                  self.attach_draft()
+                  draft=self.ui.entry.get_text()
+                  self.new_profile()
+                  self.assertIsNone(self.ui.attachment)
+                  self.assertEqual(self.ui.entry.get_text(),draft)
+                  self.ui.send_text()
+                  if self.ui.busy: self.until(lambda:not self.ui.busy)
+                  self.assertEqual(len(self.backend.requests),0,'unattached draft was transported after profile switch')
+                  self.assertTrue(self.ui.attachment_invalidated)
+              def test_deferred_recall_does_not_cross_profile_change(self):
+                  self.ui.search_panel.set_expanded(True)
+                  self.ui.remember_search('synthetic-recall')
+                  self.ui.search_entry.set_text('')
+                  row=self.ui.search_history.get_first_child()
+                  self.assertIsNotNone(row)
+                  self.ui.activate_search_history(row)
+                  self.new_profile()
+                  self.until(lambda:not GLib.MainContext.default().pending())
+                  self.assertEqual(self.ui.search_entry.get_text(),'','queued old-context recall restored query')
+              def test_selected_model_root_replacement_during_worker_handoff(self):
+                  with tempfile.TemporaryDirectory() as d:
+                      root=Path(d)/'selected'
+                      root.mkdir()
+                      (root/'original.bin').write_bytes(b'fixture')
+                      other=Path(d)/'unselected'
+                      other.mkdir()
+                      (other/'UNSELECTED-CANARY.bin').write_bytes(b'fixture')
+                      original=model_discovery.scan
+                      def swapped(path, checkpoint, *, expected_root):
+                          root.rename(Path(d)/'old-selected')
+                          other.rename(root)
+                          return original(path,checkpoint,expected_root=expected_root)
+                      with patch.object(model_discovery,'scan',side_effect=swapped):
+                          self.ui.scan_model_folder(str(root))
+                          self.until(lambda:not self.ui.busy)
+                      self.assertIsInstance(self.ui.session.active.exception(), Hold)
+                      self.assertEqual(str(self.ui.session.active.exception()), 'folder_changed')
+                      result=self.ui.model_scan_result
+                      self.assertFalse(result and any('UNSELECTED-CANARY' in c.relative for c in result.candidates),
+                                       'metadata from substituted root published')
+              def test_expired_draft_repeated_refusal(self):
+                  self.connect_model()
+                  clock=[time.time()]
+                  p=profiles.Profile(id='independent-expiry',name='Independent expiry',
+                      filesystem_rules=(profiles.Rule('filesystem_read',('attachment',),'allow','fixture',clock[0]+30),))
+                  self.ui.store.save(p)
+                  self.ui.activate_profile(p.id)
+                  path=Path(self.profile_home)/'synthetic.txt'
+                  path.write_text('SYNTHETIC-CANARY',encoding='utf-8')
+                  with patch.object(profiles.time,'time',side_effect=lambda:clock[0]):
+                      self.assertIsNotNone(self.ui.read_attachment(str(path)))
+                      draft='Merhaba! Summarize the file.'
+                      self.ui.entry.set_text(draft)
+                      clock[0]+=60
+                      self.ui.send_text()
+                      self.assertIsNone(self.ui.attachment)
+                      self.assertIsNone(self.ui.attachment_context)
+                      self.assertIsNone(self.ui.attachment_live)
+                      self.assertTrue(self.ui.attachment_invalidated)
+                      self.ui.send_text()
+                      self.assertEqual(self.ui.entry.get_text(),draft)
+                      self.assertEqual(len(self.backend.requests),0)
+          from tihulu_jarvis.voice.m1 import Hold
+          unittest.main(verbosity=2)
+          PY
