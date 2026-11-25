@@ -1995,6 +1995,27 @@ class CatalogUITests(MarketFixture):
         card = self.ui.market.card("fixture-whisper-large")
         self.assertTrue(card.approved_source())
 
+    def test_catalog_approval_refuses_changed_registry_terms(self):
+        market.save_key("fixture-key", "shared-secret-for-catalog-signing")
+        self.ui.load_catalog_text(market.sign_catalog(json.dumps(self.document),
+                                                      "fixture-key", now=1.0))
+        self.pick_entry("fixture-whisper-large")
+        self.ui.add_catalog_entry()
+        card = self.ui.market.card("fixture-whisper-large")
+        changed = self.ui.market.save_card(market.replace(card, source_checksum="0"*64),
+                                           expected=card)
+        self.ui.approve_download()
+        self.assertEqual(self.ui.status.get_text(), "catalog_entry_changed")
+        self.assertEqual(self.ui.market.card(card.model_id), changed)
+        self.assertFalse(changed.approved_source())
+
+    def test_direct_catalog_approval_refuses_unsigned_catalog(self):
+        self.ui.load_catalog_text(json.dumps(self.document))
+        self.pick_entry("fixture-whisper-large")
+        self.ui.approve_download()
+        self.assertEqual(self.ui.status.get_text(), "catalog_not_verified")
+        self.assertIsNone(self.ui.market.lookup_card("fixture-whisper-large"))
+
     def test_catalog_search_and_filter_are_narrow(self):
         self.ui.load_catalog_text(json.dumps(self.document))
         self.ui.catalog_search.set_text("voice")

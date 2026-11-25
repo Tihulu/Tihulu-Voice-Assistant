@@ -1143,5 +1143,73 @@ class PartialQueueIdentityTests(unittest.TestCase):
         self.assertEqual(status["state"], "UNVERIFIED")
         self.assertTrue(self.payload.exists())
 
+class ConditionalRegistryTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.other = market.Registry(self.root)
+        self.entry = market.Entry(model_id="fixture-model", display_name="Fixture",
+                                  category="stt", source_ref="catalog:fixture",
+                                  source_checksum=hashlib.sha256(NEW).hexdigest(),
+                                  source_size=len(NEW), source_version="2.0")
+        self.card = self.entry.checked()
+
+    def test_exact_card_compare_and_swap_rejects_stale_editor(self):
+        from dataclasses import replace
+        original = self.registry.save_card(self.card, expected=None)
+        newer = self.other.save_card(replace(original, display_name="Newer"), expected=original)
+        with self.assertRaisesRegex(Hold, "registry_card_changed"):
+            self.registry.save_card(replace(original, display_name="Stale"), expected=original)
+        self.assertEqual(self.registry.card(original.model_id), newer)
+
+    def test_create_only_cannot_replace_existing_model(self):
+        self.registry.save_card(self.card, expected=None)
+        with self.assertRaisesRegex(Hold, "registry_card_changed"):
+            self.other.save_card(self.card, expected=None)
+
+    def test_generation_compare_and_swap_rejects_stale_registry(self):
+        generation, cards, selection = self.registry.snapshot()
+        self.other.save_card(self.card)
+        with self.assertRaisesRegex(Hold, "registry_generation_changed"):
+            self.registry.store_if_current(generation, cards, selection)
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    def test_matching_generation_can_commit(self):
+        generation, _, selection = self.registry.snapshot()
+        self.registry.store_if_current(generation, (self.card,), selection)
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    def test_catalog_approval_matches_exact_selected_terms(self):
+        from dataclasses import replace
+        original = self.registry.record_discovered(self.card)
+        changed = self.other.save_card(replace(original, source_checksum="0"*64), expected=original)
+        with self.assertRaisesRegex(Hold, "catalog_entry_changed"):
+            self.registry.approve_catalog_entry(self.entry, "fixture", 1e12)
+        self.assertEqual(self.registry.card(original.model_id), changed)
+        self.assertFalse(changed.approved_source())
+
+    def test_matching_catalog_approval_and_rediscovery_preserve_grant(self):
+        approved = self.registry.approve_catalog_entry(self.entry, "fixture", 1e12)
+        self.assertTrue(approved.approved_source())
+        self.assertEqual(self.other.record_discovered(self.card), approved)
+        self.assertEqual(self.registry.card(approved.model_id), approved)
+
+    def test_changed_discovery_cannot_replace_approved_model(self):
+        from dataclasses import replace
+        approved = self.registry.approve_catalog_entry(self.entry, "fixture", 1e12)
+        with self.assertRaisesRegex(Hold, "registry_discovery_conflict"):
+            self.other.record_discovered(replace(self.card, source_checksum="0"*64))
+        self.assertEqual(self.registry.card(approved.model_id), approved)
+
+    def test_discovery_cannot_replace_installed_model(self):
+        from dataclasses import replace
+        installed = self.registry.save_card(replace(self.card, installed=True,
+                                                     registered=True, state="REGISTERED"))
+        with self.assertRaisesRegex(Hold, "registry_discovery_conflict"):
+            self.other.record_discovered(self.card)
+        self.assertEqual(self.registry.card(installed.model_id), installed)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
