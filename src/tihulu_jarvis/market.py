@@ -16,6 +16,8 @@ import os
 import time
 import re
 import tempfile
+import stat
+from .owned_wait import await_authorized
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -621,17 +623,51 @@ class Transfer:
     it never opens a connection itself.
     """
 
-    def __init__(self, registry, card, source, fetch, root=None, now=0.0):
+    def __init__(self, registry, card, source, fetch, root=None, now=None, *, checkpoint=lambda: None):
         self.registry = registry
         self.card = card
         self.source = source.checked()
         self.fetch = fetch
-        self.now = now
+        started = time.monotonic()
+        self._clock = time.time if now is None else lambda: now + (time.monotonic() - started)
+        self._checkpoint = checkpoint
         self.root = Path(root) if root else registry.root / "transfers"
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.temp = None
         self.received = 0
         self.state = card.state
+
+    def _check(self):
+        self._checkpoint()
+        if not self.source.authorized(self._clock()):
+            raise Hold("network_not_authorized")
+
+    async def _fetch(self, progress, start=None):
+        self._check()
+        def note(count):
+            self._check()
+            self.received = count
+            if progress:
+                progress(count)
+            self._check()
+        async def run():
+            self._check()
+            if start is None:
+                return await self.fetch(str(self.temp), note)
+            return await self.fetch(str(self.temp), note, start)
+        return await await_authorized(run, 300, self._check)
+
+    def _verified(self, written):
+        self._check()
+        if type(written) is not int or not 0 < written <= DIGEST_LIMIT:
+            raise Hold("transfer_reported_invalid_length")
+        if self.source.size and written != self.source.size:
+            raise Hold("transfer_size_mismatch")
+        checksum = _verified_artifact(self.temp, written, checkpoint=self._check)
+        if checksum != self.source.checksum:
+            raise Hold("transfer_checksum_mismatch")
+        self._check()
+        return checksum
 
     def _persist(self, state):
         self.card = advance(self.card, state)
@@ -646,6 +682,11 @@ class Transfer:
         """
         if not allow_installed and self.card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
             raise Hold("model_already_registered")
+        self._check()
+        if type(start) is not int or not 0 <= start < DIGEST_LIMIT or (self.source.size and start >= self.source.size):
+            raise Hold("transfer_resume_offset_unverified")
+        if self.card.shared_storage_owner or self.card.loaded:
+            raise Hold("artifact_not_replaceable")
         fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
         os.close(fd)
         self.temp = Path(name)
@@ -655,15 +696,18 @@ class Transfer:
                 partial = self.root / ("partial-" + self.card.model_id)
                 if not partial.is_file() or partial.stat().st_size != start:
                     raise Hold("transfer_resume_offset_unverified")
-                self.temp.write_bytes(partial.read_bytes())
-            written = await self.fetch(str(self.temp), lambda count: progress(count) if progress else None, start)
+                from .selected_csv import selection_identity, copy_selected_to
+                def authorized():
+                    self._check()
+                    return True
+                identity = selection_identity(str(partial.absolute()), authorized=authorized, max_bytes=start)
+                self.temp.unlink()
+                await copy_selected_to(str(partial.absolute()), self.temp, authorized=authorized,
+                                       expected_identity=identity, max_bytes=start)
+            written = await self._fetch(progress, start)
+            checksum = self._verified(written)
             if start and written <= start:
                 raise Hold("transfer_resume_made_no_progress")
-            checksum, _ = digest(self.temp)
-            if checksum != self.source.checksum:
-                # A failed update leaves the installed item and its settings intact.
-                self.state = "FAILED"
-                raise Hold("transfer_checksum_mismatch")
             # A resumed transfer registers directly; the interrupted item's
             # lifecycle was not advanced for the retry itself.
             target = self.registry.root / "artifacts" / self.card.model_id
@@ -680,23 +724,21 @@ class Transfer:
                                  storage_ref="sha256-" + checksum[:32],
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
                                  source_version=self.source.version,
-                                 license_id=self.source.license_id, trust_level="curated")
+                                 license_id=self.source.license_id)
             self.registry.save_card(registered)
             self.card = registered
             self.state = registered.state
             return registered
         except asyncio.CancelledError:
-            if self.state not in TERMINAL:
-                self._persist("CANCELLED")
+            self.state = "CANCELLED"
             raise
-        except Hold:
-            if self.state not in TERMINAL:
-                self._persist("FAILED")
+        except (Hold, OSError, asyncio.TimeoutError):
+            self.state = "FAILED"
             raise
         finally:
             if self.temp is not None:
                 # Keep a cancelled partial so a later resume can continue from it.
-                if self.state == "CANCELLED" and self.temp.stat().st_size > 0:
+                if self.state == "CANCELLED" and self.temp.is_file() and self.temp.stat().st_size > 0:
                     self.temp.replace(self.root / ("partial-" + self.card.model_id))
                 else:
                     Path(self.temp).unlink(missing_ok=True)
@@ -716,9 +758,11 @@ class Transfer:
             # Nothing already installed is ever overwritten by a transfer.
             raise Hold("model_already_registered")
         self._persist("REVIEWED")
-        if not self.source.authorized(self.now):
+        try:
+            self._check()
+        except Hold:
             self._persist("HOLD")
-            raise Hold("network_not_authorized")
+            raise
         self._persist("APPROVED")
         self._persist("QUEUED")
         fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
@@ -727,21 +771,8 @@ class Transfer:
         try:
             os.chmod(self.temp, 0o600)
             self._persist("DOWNLOADING")
-            def note(count):
-                self.received = count
-                if progress:
-                    progress(count)
-            written = await self.fetch(str(self.temp), note)
-            if not isinstance(written, int) or written <= 0 or written > DIGEST_LIMIT:
-                raise Hold("transfer_reported_invalid_length")
-            if self.temp.stat().st_size != written:
-                raise Hold("transfer_length_mismatch")
-            if self.source.size and written != self.source.size:
-                raise Hold("transfer_size_mismatch")
-            checksum, _ = digest(self.temp)
-            if checksum != self.source.checksum:
-                self._persist("FAILED")
-                raise Hold("transfer_checksum_mismatch")
+            written = await self._fetch(progress)
+            checksum = self._verified(written)
             self._persist("VERIFIED")
             target = self.registry.root / "artifacts" / self.card.model_id
             target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -752,7 +783,8 @@ class Transfer:
                                  owned_by_jarvis=True, disk_size_bytes=written,
                                  storage_ref="sha256-" + checksum[:32],
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
-                                 license_id=self.source.license_id, trust_level="curated")
+                                 source_version=self.source.version,
+                                  license_id=self.source.license_id)
             self.registry.save_card(registered)
             self.card = registered
             self.state = registered.state
@@ -767,7 +799,7 @@ class Transfer:
             raise
         finally:
             if self.temp is not None:
-                if self.state == "CANCELLED" and self.temp.stat().st_size > 0:
+                if self.state == "CANCELLED" and self.temp.is_file() and self.temp.stat().st_size > 0:
                     # Keep the partial so a later resume can continue from it.
                     self.temp.replace(self.root / ("partial-" + self.card.model_id))
                 else:
@@ -775,6 +807,40 @@ class Transfer:
 
     def cancel(self):
         raise Hold("transfer_cancelled_by_owner")
+
+
+def _verified_artifact(path, size, *, checkpoint=lambda: None):
+    """Hash an exact bounded regular file; refuse symlink/size changes."""
+    if type(size) is not int or not 0 < size <= DIGEST_LIMIT:
+        raise Hold("transfer_length_mismatch")
+    fd = None
+    try:
+        checkpoint()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != size:
+            raise Hold("transfer_length_mismatch")
+        h = hashlib.sha256()
+        total = 0
+        while total < size:
+            checkpoint()
+            block = os.read(fd, min(1 << 20, size-total))
+            if not block:
+                raise Hold("transfer_length_mismatch")
+            h.update(block)
+            total += len(block)
+        after = os.fstat(fd)
+        current = os.stat(path, follow_symlinks=False)
+        identity = lambda x: (x.st_dev,x.st_ino,x.st_size,x.st_mtime_ns,x.st_ctime_ns,x.st_mode)
+        if identity(before) != identity(after) or identity(before) != identity(current):
+            raise Hold("transfer_artifact_changed")
+        checkpoint()
+        return h.hexdigest()
+    except OSError:
+        raise Hold("transfer_artifact_unreadable") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _normalized(items):
