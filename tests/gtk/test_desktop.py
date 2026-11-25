@@ -1861,6 +1861,43 @@ class UpdateUITests(DownloadFixture):
         self.assertEqual(self.ui.market.card("fixture-update").state, "ACTIVE")
         # The failed update replaced nothing; only the explicit rename revision exists.
         self.assertEqual(len(self.ui.market.history("fixture-update")), 1)
+class InterruptedRetryUITests(MarketFixture):
+    def setUp(self):
+        super().setUp()
+        self.card = self.ui.market.save_card(market.ModelCard(
+            model_id="fixture-retry", display_name="Fixture retry", category="stt",
+            state="DOWNLOADING", installed=True, source_ref="catalog:fixture",
+            source_checksum=hashlib.sha256(b"weights").hexdigest(),
+            source_size=7, network_approval="fixture", approval_expires_at=1e12))
+        self.ui.market_filter.set_active(0)
+        self.ui.build_market_page()
+        self.pick_card(self.card.model_id)
+
+    def test_explicit_reset_does_not_start_transfer(self):
+        folder = Path(self.market_home, "transfers")
+        folder.mkdir(mode=0o700, exist_ok=True)
+        partial = folder / ("partial-" + self.card.model_id)
+        partial.write_bytes(b"wei")
+        self.click(self.ui.market_retry)
+        current = self.ui.market.card(self.card.model_id)
+        self.assertEqual(current.state, "DISCOVERED")
+        self.assertFalse(current.installed)
+        self.assertEqual(partial.read_bytes(), b"wei")
+        self.assertFalse(self.ui.busy)
+        self.assertEqual(self.ui.downloads, [])
+
+    def test_changed_model_after_display_is_not_reset(self):
+        changed = self.ui.market.save_card(market.replace(self.card, display_name="Changed"))
+        self.click(self.ui.market_retry)
+        self.assertEqual(self.ui.status.get_text(), "registry_card_changed")
+        self.assertEqual(self.ui.market.card(self.card.model_id), changed)
+
+    def test_other_process_lease_refuses_reset(self):
+        with self.ui.market.transfer_lease(self.card.model_id):
+            self.click(self.ui.market_retry)
+        self.assertEqual(self.ui.status.get_text(), "transfer_busy")
+        self.assertEqual(self.ui.market.card(self.card.model_id), self.card)
+
 class StagingCleanupUITests(MarketFixture):
     def setUp(self):
         super().setUp()
