@@ -1597,5 +1597,86 @@ class StoragePreflightTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(saved.artifact_digest, self.source.checksum)
         self.assertEqual(self.calls, [0])
 
+class RegistryBoundTransferTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.card = self.registry.save_card(market.ModelCard(
+            model_id="fixture-model", display_name="Fixture", category="stt",
+            source_ref="http://127.0.0.1:12345/weights",
+            source_checksum=hashlib.sha256(NEW).hexdigest(), source_size=len(NEW),
+            source_version="2.0", license_id="MIT", network_approval="fixture",
+            approval_expires_at=1e12))
+        self.calls = []
+
+    async def fetch(self, path, note, start=0):
+        self.calls.append(start)
+        Path(path).write_bytes(NEW)
+        note(len(NEW))
+        return len(NEW)
+
+    async def test_factory_binds_exact_reference_and_source(self):
+        with patch.object(market, "transport_for", return_value=self.fetch) as factory:
+            transfer = market.Transfer.from_registry(self.registry, self.card.model_id)
+            factory.assert_called_once_with(self.card.source_ref)
+            self.assertEqual(transfer.source, market.source_of(self.card))
+            result = await transfer.run()
+        self.assertEqual(result.artifact_digest, self.card.source_checksum)
+        self.assertEqual(self.calls, [0])
+
+    async def test_factory_refuses_unapproved_or_expired_card(self):
+        from dataclasses import replace
+        for approval, expires in (("", 1e12), ("fixture", 1.0)):
+            self.registry.save_card(replace(self.card, network_approval=approval,
+                                           approval_expires_at=expires))
+            with patch.object(market, "transport_for") as factory:
+                with self.assertRaises(Hold):
+                    market.Transfer.from_registry(self.registry, self.card.model_id)
+                factory.assert_not_called()
+        self.assertEqual(self.calls, [])
+
+    async def test_factory_refuses_missing_transport_without_fallback(self):
+        with patch.object(market, "transport_for", return_value=None) as factory:
+            with self.assertRaisesRegex(Hold, "download_transport_not_available"):
+                market.Transfer.from_registry(self.registry, self.card.model_id)
+            factory.assert_called_once_with(self.card.source_ref)
+
+    async def test_changed_source_after_factory_before_run_is_refused(self):
+        from dataclasses import replace
+        transfer = market.Transfer.from_registry(self.registry, self.card.model_id,
+                                                transport=self.fetch)
+        current = self.registry.save_card(replace(self.card, source_checksum="0"*64))
+        with self.assertRaisesRegex(Hold, "transfer_card_changed"):
+            await transfer.run()
+        self.assertEqual(self.calls, [])
+        self.assertEqual(self.registry.card(current.model_id), current)
+
+    async def test_factory_refuses_mutation_during_transport_selection(self):
+        from dataclasses import replace
+        def changed(reference):
+            self.registry.save_card(replace(self.card, source_ref="catalog:changed"))
+            return self.fetch
+        with patch.object(market, "transport_for", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "download_terms_changed"):
+                market.Transfer.from_registry(self.registry, self.card.model_id)
+        self.assertEqual(self.calls, [])
+
+    async def test_revocation_during_fetch_blocks_publication(self):
+        from dataclasses import replace
+        async def revoked(path, note, start=0):
+            Path(path).write_bytes(NEW)
+            current = self.registry.card(self.card.model_id)
+            self.registry.save_card(replace(current, network_approval="", approval_expires_at=0))
+            note(len(NEW))
+            return len(NEW)
+        transfer = market.Transfer.from_registry(self.registry, self.card.model_id,
+                                                transport=revoked)
+        with self.assertRaises(Hold):
+            await transfer.run()
+        self.assertFalse((self.root / "artifacts" / self.card.model_id).exists())
+        self.assertFalse(self.registry.card(self.card.model_id).network_approval)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
