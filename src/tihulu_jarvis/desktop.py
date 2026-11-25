@@ -184,6 +184,7 @@ def create_window(app, loop, bridge=None):
             self.search_matches = ()
             self.growing = {}
             self.transcribe_runner = None
+            self.result_watch = None
             self.win = Gtk.ApplicationWindow(application=app, title="TIHULU JARVIS")
             self.win.set_default_size(920, 650)
             self.session, self.inventory = Session(), ()
@@ -1357,6 +1358,7 @@ def create_window(app, loop, bridge=None):
                                 "Keine aktuelle Modellliste. Verbindung suchen oder erneut versuchen.")
             self.model_discovery_note.set_text(model_note)
             self.refresh_model_scan()
+            self.refresh_research_scope()
             self.refresh_model_probe(connected)
             self.setup_connect.set_sensitive(not self.busy)
             if not self.url.get_text().strip():
@@ -1451,6 +1453,10 @@ def create_window(app, loop, bridge=None):
                 if self.chat_files.folder is not None:
                     self.hard.set_sensitive(True)
                     self.quick_stop.set_sensitive(True)
+            if self.research_folder is not None or self.model_scan_result is not None:
+                self.hard.set_sensitive(True)
+                self.quick_stop.set_sensitive(True)
+            self.watch_local_results()
             # Keep turn-specific actions visible only while they can be used.
             # The top-bar hard stop remains permanently visible.
             self.finish_btn.set_visible(self.finish_btn.get_sensitive())
@@ -2318,6 +2324,57 @@ def create_window(app, loop, bridge=None):
             self.folder_root.connect("changed", lambda *_: self.clear_folder_view())
             self.refresh_files_buttons()
 
+        def research_allowed(self, scope, generation):
+            # Display-only check. Actual effects still use audited require_tools
+            # and live operation checkpoints. Never mint a new selection grant.
+            try:
+                profile, stamp = self.store.snapshot(self.cfg.get("profile"))
+                if generation != (profile.id, stamp):
+                    return False
+                profiles.require_tool(profile, "filesystem_read", (scope,),
+                                      self.store.policy_now(), selected=True)
+                return self.cfg.get("profile") == profile.id and self.store.is_current(profile.id, stamp)
+            except Hold:
+                return False
+
+        def refresh_research_scope(self):
+            if self.research_folder is not None and not self.research_allowed("folder", self.research_context):
+                self.clear_folder_view()
+            row = self.folder_entries.get_selected_row()
+            readable = (not self.busy and self.research_folder is not None
+                        and row is not None and not row.entry.directory
+                        and self.research_allowed("file", self.research_context))
+            if not readable:
+                # A busy task alone does not revoke an already accepted preview.
+                if self.research_folder is None or not self.research_allowed("file", self.research_context):
+                    self.file_preview.set_text("")
+            self.file_read.set_sensitive(readable)
+
+        def watch_local_results(self):
+            # No polling when there is no retained private result. This checks
+            # display lifetimes only, not a filesystem or background task grant.
+            if self.closing or self.result_watch is not None:
+                return
+            if not (self.research_folder is not None or self.model_scan_result is not None
+                    or (hasattr(self, "chat_files") and self.chat_files.folder is not None)):
+                return
+            def tick():
+                self.refresh_research_scope()
+                self.refresh_model_scan()
+                if hasattr(self, "chat_files"):
+                    self.chat_files.refresh()
+                if (self.research_folder is None and self.model_scan_result is None
+                        and (not hasattr(self, "chat_files") or self.chat_files.folder is None)):
+                    self.result_watch = None
+                    return False
+                return True
+            self.result_watch = GLib.timeout_add(500, tick)
+
+        def stop_result_watch(self):
+            if self.result_watch is not None:
+                GLib.source_remove(self.result_watch)
+                self.result_watch = None
+
         def clear_folder_view(self):
             self.research_folder = self.research_context = None
             item = self.folder_entries.get_first_child()
@@ -2379,6 +2436,11 @@ def create_window(app, loop, bridge=None):
                 return None
             self.cfg["research_root"] = folder.root
             self.save()
+            try:
+                check()
+            except Hold as exc:
+                self.file_note.set_text(str(exc))
+                return None
             self.folder_root.set_text(folder.root)
             self.research_folder = folder
             self.research_context = (context[0], context[4])
@@ -2390,7 +2452,9 @@ def create_window(app, loop, bridge=None):
                 note += " " + tr("Listing limit reached.", "Listeleme sınırına ulaşıldı.",
                                   "Listengrenze erreicht.")
             self.file_note.set_text(note)
-            return folder
+            self.watch_local_results()
+            self.refresh_research_scope()
+            return self.research_folder
 
         def show_folder(self, folder):
             rows, item = [], self.folder_entries.get_first_child()
@@ -2412,8 +2476,9 @@ def create_window(app, loop, bridge=None):
         def refresh_files_buttons(self):
             row = self.folder_entries.get_selected_row()
             self.file_preview.set_text("")
-            self.file_read.set_sensitive(row is not None and not row.entry.directory
-                                         and self.research_folder is not None)
+            self.file_read.set_sensitive(not self.busy and row is not None and not row.entry.directory
+                                         and self.research_folder is not None
+                                         and self.research_allowed("file", self.research_context))
 
         def read_selected_file(self):
             row = self.folder_entries.get_selected_row()
@@ -2427,9 +2492,16 @@ def create_window(app, loop, bridge=None):
                 folder = self.research_folder
                 if folder is None or folder.root != self.folder_root.get_text().strip():
                     raise Hold("folder_changed")
-                self.require_tools(("filesystem_read", ("file",)), selected=True)
-                check = self.tool_checkpoint("filesystem_read", ("file",),
-                    self.session.epoch, selected=True, expected_generation=self.research_context)
+                generation = self.research_context
+                self.require_tools(("filesystem_read", ("folder",)),
+                                   ("filesystem_read", ("file",)), selected=True)
+                folder_check = self.tool_checkpoint("filesystem_read", ("folder",),
+                    self.session.epoch, selected=True, expected_generation=generation)
+                file_check = self.tool_checkpoint("filesystem_read", ("file",),
+                    self.session.epoch, selected=True, expected_generation=generation)
+                def check():
+                    folder_check()
+                    file_check()
                 text = files.preview(folder.root, entry.name, expected_root=folder.identity,
                                      expected_entry=entry.identity, checkpoint=check)
                 check()
@@ -3239,7 +3311,9 @@ def create_window(app, loop, bridge=None):
             current = False
             if result is not None:
                 try:
-                    current = self.picker_context() == self.model_scan_context
+                    context = self.picker_context()
+                    current = (context == self.model_scan_context
+                               and self.research_allowed("folder", (context[0], context[4])))
                 except Hold:
                     pass
                 if not current:
@@ -3840,8 +3914,10 @@ def create_window(app, loop, bridge=None):
             self.clear_model_scan()
             if clear:
                 self.clear_attachment()
+                self.clear_folder_view()
                 if hasattr(self, "chat_files"):
                     self.chat_files.reset()
+                self.stop_result_watch()
             if hasattr(self, "analysis"):
                 if clear:
                     self.analysis.reset()
@@ -4185,6 +4261,11 @@ def create_window(app, loop, bridge=None):
         def close(self,*_):
             self.dismiss_picker()
             self.clear_attachment()
+            self.clear_folder_view()
+            self.clear_model_scan()
+            if hasattr(self, "chat_files"):
+                self.chat_files.reset()
+            self.stop_result_watch()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             if not self.busy:
