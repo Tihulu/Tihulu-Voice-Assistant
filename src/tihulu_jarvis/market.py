@@ -746,13 +746,13 @@ class Transfer:
             return await self.fetch(str(self.temp), note, start)
         return await await_authorized(run, 300, self._check)
 
-    def _verified(self, written):
+    async def _verified(self, written):
         self._check()
         if type(written) is not int or not 0 < written <= DIGEST_LIMIT:
             raise Hold("transfer_reported_invalid_length")
         if self.source.size and written != self.source.size:
             raise Hold("transfer_size_mismatch")
-        checksum = _verified_artifact(self.temp, written, checkpoint=self._check)
+        checksum = await _verified_artifact_async(self.temp, written, checkpoint=self._check)
         if checksum != self.source.checksum:
             raise Hold("transfer_checksum_mismatch")
         self._check()
@@ -920,10 +920,10 @@ class Transfer:
                 self.temp.unlink()
                 await copy_selected_to(str(partial.absolute()), self.temp, authorized=authorized,
                                        expected_identity=identity, max_bytes=start)
-                if _verified_artifact(self.temp, start, checkpoint=self._check) != record["digest"]:
+                if await _verified_artifact_async(self.temp, start, checkpoint=self._check) != record["digest"]:
                     raise Hold("transfer_resume_identity_unverified")
             written = await self._fetch(progress, start)
-            checksum = self._verified(written)
+            checksum = await self._verified(written)
             if start and written <= start:
                 raise Hold("transfer_resume_made_no_progress")
             # A successful update keeps an installed item installed.
@@ -978,7 +978,7 @@ class Transfer:
             os.chmod(self.temp, 0o600)
             self._persist("DOWNLOADING")
             written = await self._fetch(progress)
-            checksum = self._verified(written)
+            checksum = await self._verified(written)
             self._persist("VERIFIED")
             registered = replace(self.card, state="REGISTERED", registered=True, installed=True,
                                  owned_by_jarvis=True, disk_size_bytes=written,
@@ -1001,8 +1001,8 @@ class Transfer:
         raise Hold("transfer_cancelled_by_owner")
 
 
-def _verified_artifact(path, size, *, checkpoint=lambda: None):
-    """Hash an exact bounded regular file; refuse symlink/size changes."""
+def _artifact_hash_steps(path, size, *, checkpoint=lambda: None):
+    """Shared bounded hashing iterator; closes descriptor even when abandoned."""
     if type(size) is not int or not 0 < size <= DIGEST_LIMIT:
         raise Hold("transfer_length_mismatch")
     fd = None
@@ -1021,6 +1021,7 @@ def _verified_artifact(path, size, *, checkpoint=lambda: None):
                 raise Hold("transfer_length_mismatch")
             h.update(block)
             total += len(block)
+            yield None
         after = os.fstat(fd)
         current = os.stat(path, follow_symlinks=False)
         identity = lambda x: (x.st_dev,x.st_ino,x.st_size,x.st_mtime_ns,x.st_ctime_ns,x.st_mode)
@@ -1033,6 +1034,36 @@ def _verified_artifact(path, size, *, checkpoint=lambda: None):
     finally:
         if fd is not None:
             os.close(fd)
+
+
+def _verified_artifact(path, size, *, checkpoint=lambda: None):
+    steps = _artifact_hash_steps(path, size, checkpoint=checkpoint)
+    try:
+        while True:
+            next(steps)
+    except StopIteration as done:
+        return done.value
+    finally:
+        steps.close()
+
+
+async def _verified_artifact_async(path, size, *, checkpoint=lambda: None):
+    """Yield between bounded reads on the owning event loop.
+
+    No worker can outlive cancellation; permission callbacks remain on their
+    original thread. Publication still rechecks bytes under the registry lock.
+    This bounds work per iteration, not filesystem I/O latency.
+    """
+    steps = _artifact_hash_steps(path, size, checkpoint=checkpoint)
+    try:
+        while True:
+            try:
+                next(steps)
+            except StopIteration as done:
+                return done.value
+            await asyncio.sleep(0)
+    finally:
+        steps.close()
 
 
 def _copy_verified_artifact(source, target, card, *, checkpoint=lambda: None):
