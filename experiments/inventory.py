@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Synthetic model inventory and reference ownership, no actual filesystem."""
 from dataclasses import dataclass
+from threading import RLock
 from gateway import Refused, token
 
 @dataclass(frozen=True)
@@ -17,7 +18,13 @@ class Inventory:
         self._entries={}
         self._refs={}
         self._leases={}
+        self._lock=RLock()
+        self._groups={}
     def register(self, entry):
+        with self._lock:
+            return self._register(entry)
+
+    def _register(self, entry):
         if type(entry) is not Entry:
             raise Refused("invalid_entry")
         for v in (entry.identity,entry.runtime):
@@ -33,6 +40,10 @@ class Inventory:
             raise Refused("identity_conflict")
         self._entries[entry.identity]=entry
     def select(self, profile, kind, identity):
+        with self._lock:
+            return self._select(profile, kind, identity)
+
+    def _select(self, profile, kind, identity):
         token(profile)
         entry=self._entries.get(identity)
         if entry is None or entry.kind!=kind or not entry.compatible:
@@ -42,6 +53,10 @@ class Inventory:
             raise Refused("reference_limit")
         self._refs[key]=identity
     def lease(self, identity):
+        with self._lock:
+            return self._lease(identity)
+
+    def _lease(self, identity):
         entry=self._entries.get(identity)
         if entry is None or not entry.compatible or len(self._leases)>=64:
             raise Refused("unavailable")
@@ -49,6 +64,10 @@ class Inventory:
         self._leases[h]=identity
         return h
     def lease_candidate(self, candidate):
+        with self._lock:
+            return self._lease_candidate(candidate)
+
+    def _lease_candidate(self, candidate):
         # Match the trusted selection metadata to the inventory record before
         # issuing a fixture lease. This does not open or verify real weights.
         from inference import Candidate
@@ -61,12 +80,26 @@ class Inventory:
             raise Refused("candidate_inventory_mismatch")
         return self.lease(candidate.identity)
     def release(self, handle):
-        if handle not in self._leases:
+        with self._lock:
+            if any(handle is h for group in self._groups.values() for h in group):
+                raise Refused("group_owned_lease")
+            return self._release(handle)
+
+    def _release(self, handle):
+        if type(handle) is not object or handle not in self._leases:
             raise Refused("not_owned")
         self._leases.pop(handle)
     def unselect(self, profile, kind):
+        with self._lock:
+            return self._unselect(profile, kind)
+
+    def _unselect(self, profile, kind):
         self._refs.pop((profile,kind),None)
     def removal_plan(self, identity):
+        with self._lock:
+            return self._removal_plan(identity)
+
+    def _removal_plan(self, identity):
         entry=self._entries.get(identity)
         if entry is None:
             raise Refused("unknown_model")
@@ -74,3 +107,29 @@ class Inventory:
         if aliases.intersection(self._refs.values()) or aliases.intersection(self._leases.values()):
             raise Refused("model_in_use")
         return "REFERENCE_ONLY" if not entry.owned or len(aliases)>1 else "REVIEW_OWNED_ARTIFACT"
+
+    def lease_pipeline(self, expected, context, candidates):
+        """All-or-nothing synthetic reservations; never loads model weights."""
+        from voice_pipeline import revalidate
+        with self._lock:
+            plan=revalidate(expected,context,candidates)
+            handles=[]
+            try:
+                for candidate in plan.models:
+                    handles.append(self._lease_candidate(candidate))
+            except BaseException:
+                for handle in handles:
+                    self._release(handle)
+                raise
+            group=object()
+            self._groups[group]=tuple(handles)
+            return group
+
+    def release_pipeline(self, group):
+        with self._lock:
+            if type(group) is not object or group not in self._groups:
+                raise Refused("not_owned")
+            handles=self._groups[group]
+            for handle in handles:
+                self._release(handle)
+            del self._groups[group]

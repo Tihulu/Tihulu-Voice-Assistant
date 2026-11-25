@@ -45,3 +45,54 @@ class InventoryTests(unittest.TestCase):
             with self.assertRaises(Refused):
                 self.i.lease_candidate(invalid)
         self.assertEqual(self.i.removal_plan("m"),"REFERENCE_ONLY")
+
+    def pipeline(self, include_tts=True):
+        from inference import Candidate
+        from gateway import Context
+        from voice_pipeline import plan_voice
+        ctx=Context("task","session","profile",1,"route","LOCAL_ONLY")
+        candidates=(Candidate("s","stt","local","whisper",True,True,2,80),
+                    Candidate("m","llm","local","jan",True,True,4,80),
+                    Candidate("t","tts","local","piper",True,True,1,80))
+        self.i.register(Entry("s","b"*64,"stt","whisper",True,True))
+        if include_tts:
+            self.i.register(Entry("t","c"*64,"tts","piper",True,True))
+        return ctx,candidates,plan_voice(ctx,candidates,10)
+
+    def test_pipeline_group_pins_all_models_and_releases_once(self):
+        ctx,c,p=self.pipeline()
+        g=self.i.lease_pipeline(p,ctx,c)
+        for identity in ("s","m","t"):
+            with self.assertRaisesRegex(Refused,"model_in_use"):
+                self.i.removal_plan(identity)
+        with self.assertRaises(Refused):
+            self.i.release_pipeline(object())
+        self.i.release_pipeline(g)
+        with self.assertRaises(Refused):
+            self.i.release_pipeline(g)
+        self.assertEqual(self.i.removal_plan("m"),"REFERENCE_ONLY")
+        self.assertEqual(self.i.removal_plan("t"),"REVIEW_OWNED_ARTIFACT")
+
+    def test_pipeline_missing_stage_rolls_back_previous_reservations(self):
+        ctx,c,p=self.pipeline(False)
+        with self.assertRaises(Refused):
+            self.i.lease_pipeline(p,ctx,c)
+        self.assertEqual(self.i.removal_plan("s"),"REVIEW_OWNED_ARTIFACT")
+        self.assertEqual(self.i.removal_plan("m"),"REFERENCE_ONLY")
+
+    def test_pipeline_revoked_plan_and_concurrent_capacity(self):
+        from concurrent.futures import ThreadPoolExecutor
+        ctx,c,p=self.pipeline()
+        with self.assertRaises(Refused):
+            self.i.lease_pipeline(p,replace(ctx,generation=2),c)
+        def start(_):
+            try:
+                return self.i.lease_pipeline(p,ctx,c)
+            except Refused:
+                return None
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            groups=[g for g in pool.map(start,range(24)) if g is not None]
+        self.assertEqual(len(groups),21)
+        for g in groups:
+            self.i.release_pipeline(g)
+        self.assertEqual(self.i.removal_plan("m"),"REFERENCE_ONLY")
