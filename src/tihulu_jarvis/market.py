@@ -1545,6 +1545,36 @@ class Registry:
         self.store(cards, selection, history=history)
         return card
 
+    @staticmethod
+    def _jan_inventory_card(card):
+        return (card.category == "llm" and card.provider == "jan"
+                and card.engine == "jan" and card.local_or_cloud == "local"
+                and card.installed and not card.owned_by_jarvis
+                and not card.shared_storage_owner and not card.storage_ref
+                and not card.artifact_digest and not card.source_ref
+                and not card.source_checksum and not card.network_approval
+                and card.state in ("DISCOVERED", "REGISTERED", "TESTABLE", "ACTIVE"))
+
+    @_registry_locked
+    def record_jan_inventory(self, cards):
+        """Preflight all IDs before refreshing only compatible Jan records."""
+        incoming = tuple(card.checked() for card in cards)
+        if len({card.model_id for card in incoming}) != len(incoming):
+            raise Hold("registry_discovery_conflict")
+        known = {card.model_id: card for card in self.cards()}
+        for card in incoming:
+            previous = known.get(card.model_id)
+            if (not self._jan_inventory_card(card) or card.state != "DISCOVERED"
+                    or card.registered or card.loaded
+                    or (previous is not None and not self._jan_inventory_card(previous))):
+                raise Hold("registry_discovery_conflict")
+        for card in incoming:
+            previous = known.get(card.model_id)
+            if previous is None:
+                self.save_card(card, expected=None)
+            # Keep the existing Jan metadata, state, revision and health.
+        return tuple(card.model_id for card in incoming)
+
     @_registry_locked
     def record_discovered(self, card):
         """Discovery cannot overwrite installed or already approved records."""
