@@ -3812,6 +3812,25 @@ class ChatFilesTests(DesktopFixture):
         self.assertEqual(view.preview.get_text(), "")
         self.assertIsNone(view.folder)
 
+    def test_local_search_beyond_preview_does_not_reach_jan(self):
+        view = self.ui.chat_files
+        (self.tmp / "notes.txt").write_text("x" * 9000 + "\nPRIVATE-SEARCH-CANARY")
+        view.start(str(self.tmp))
+        self.until(lambda: not self.ui.busy)
+        view.entries.set_active_id("1")
+        view.query.set_text("private-search")
+        self.click(view.search_button)
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertIn("2: PRIVATE-SEARCH-CANARY", view.search_result.get_text())
+        self.assertEqual(self.ui.session.history, ())
+        self.jan.assert_not_called()
+        view.query.set_text("other")
+        self.assertEqual(view.search_result.get_text(), "")
+        self.ui.hard_stop()
+        self.assertEqual(view.query.get_text(), "")
+        self.assertEqual(view.search_result.get_text(), "")
+
     def test_replaced_entry_never_publishes_new_contents(self):
         view = self.ui.chat_files
         view.start(str(self.tmp))

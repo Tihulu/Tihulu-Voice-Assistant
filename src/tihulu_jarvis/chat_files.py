@@ -39,6 +39,22 @@ class ChatFiles:
         preview_scroll.set_propagate_natural_height(True)
         preview_scroll.set_child(self.preview)
         self.panel.append(preview_scroll)
+        search_row = Gtk.Box(spacing=6)
+        self.panel.append(search_row)
+        self.query = Gtk.Entry(hexpand=True, max_length=files.MAX_QUERY,
+            placeholder_text=tr("Find in selected file", "Seçilen dosyada ara",
+                                "In gewählter Datei suchen"))
+        search_row.append(self.query)
+        self.search_button = ui.button(search_row, tr("Find", "Ara", "Suchen"), self.search)
+        self.query.connect("activate", lambda *_: self.search())
+        self.search_result = Gtk.Label(xalign=0, wrap=True, selectable=True)
+        search_scroll = Gtk.ScrolledWindow()
+        search_scroll.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
+        search_scroll.set_max_content_height(180)
+        search_scroll.set_propagate_natural_height(True)
+        search_scroll.set_child(self.search_result)
+        self.panel.append(search_scroll)
+        self.query.connect("changed", lambda *_: self.query_changed())
         self.close_button = ui.button(self.panel, tr("Clear local result",
             "Yerel sonucu temizle", "Lokales Ergebnis löschen"), self.clear)
         self.entries.connect("changed", lambda *_: self.selection_changed())
@@ -58,6 +74,8 @@ class ChatFiles:
         self.listing.set_text("")
         self.entries.remove_all()
         self.preview.set_text("")
+        self.search_result.set_text("")
+        self.query.set_text("")
         self.panel.set_visible(False)
         self.read_button.set_sensitive(False)
 
@@ -73,6 +91,12 @@ class ChatFiles:
     def selection_changed(self):
         self.previewed = False
         self.preview.set_text("")
+        self.search_result.set_text("")
+        self.query.set_text("")
+        self.refresh()
+
+    def query_changed(self):
+        self.search_result.set_text("")
         self.refresh()
 
     def refresh(self):
@@ -83,13 +107,16 @@ class ChatFiles:
         self.choose_button.set_sensitive(idle and local)
         if self.folder is not None and not self.current("folder"):
             self.reset()
-        elif self.previewed and not self.current("file"):
+        elif self.folder is not None and not self.current("file"):
             self.previewed = False
             self.preview.set_text("")
+            self.search_result.set_text("")
         self.entries.set_sensitive(idle)
         self.close_button.set_sensitive(not ui.busy)
-        self.read_button.set_sensitive(idle and local and self.current("file")
-                                       and self.entries.get_active_id() is not None)
+        ready = idle and local and self.current("file") and self.entries.get_active_id() is not None
+        self.read_button.set_sensitive(ready)
+        self.query.set_sensitive(ready)
+        self.search_button.set_sensitive(ready and bool(self.query.get_text().strip()))
 
     def bind(self, scope):
         ui = self.ui
@@ -211,3 +238,39 @@ class ChatFiles:
             self.previewed = True
         ui.submit(run, kind="file_research", label=self.tr("Preview local text file",
             "Yerel metin dosyasını önizle", "Lokale Textdatei ansehen"))
+
+    def search(self):
+        ui = self.ui
+        if ui.busy or ui.closing or ui.owned_picker is not None or ui.analysis.dialog is not None:
+            return
+        token = self.entries.get_active_id()
+        self.search_result.set_text("")
+        try:
+            query = files.checked_query(self.query.get_text())
+            if token is None or not self.current("file"):
+                raise Hold("local_file_not_authorized")
+            folder = self.folder
+            entry = folder.entries[int(token)]
+            if entry.directory:
+                raise Hold("file_not_found")
+            profile_id, live = self.bind("file")
+            if profile_id != self.profile_id or live.stamp != self.live.stamp:
+                raise Hold("profile_changed")
+        except (Hold, ValueError, IndexError) as exc:
+            ui.set_state("ready", str(exc) if isinstance(exc, Hold) else "file_not_found")
+            return
+        async def run(epoch):
+            result = await self.run_worker(epoch, profile_id, live, ("folder", "file"),
+                lambda checkpoint: files.search_text(folder.root, entry.name, query,
+                    expected_root=folder.identity, expected_entry=entry.identity,
+                    checkpoint=checkpoint))
+            if (self.folder is not folder or self.entries.get_active_id() != token
+                    or self.query.get_text().strip() != query):
+                raise Hold("file_selection_changed")
+            header = self.tr("%d matching lines · %d shown",
+                "%d eşleşen satır · %d gösteriliyor",
+                "%d passende Zeilen · %d angezeigt") % (result.matching_lines, len(result.matches))
+            self.search_result.set_text("\n".join([header] + [
+                "%d: %s" % (m.line, m.snippet) for m in result.matches]))
+        ui.submit(run, kind="file_research", label=self.tr("Search selected text file",
+            "Seçilen metin dosyasında ara", "Gewählte Textdatei durchsuchen"))

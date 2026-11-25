@@ -177,3 +177,37 @@ class SafeFolderTests(unittest.TestCase):
             with self.assertRaisesRegex(Hold, "revoked"):
                 preview(str(self.folder), path.name, checkpoint=revoke)
         self.assertTrue(finished_reading)
+
+
+class TextSearchTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.path = self.root / "notes.txt"
+
+    def test_search_uses_full_bounded_file_and_preserves_line_numbers(self):
+        self.path.write_text("\n\n" + "x" * 9000 + "\nA.B literal\naxb not literal\n", encoding="utf-8")
+        result = files.search_text(str(self.root), self.path.name, "a.b")
+        self.assertEqual(result.matching_lines, 1)
+        self.assertEqual(result.matches, (files.Match(4, "A.B literal"),))
+
+    def test_search_counts_all_matching_lines_but_caps_snippets(self):
+        self.path.write_text(("x" * 500 + "NEEDLE" + "y" * 500 + "\n") * 45)
+        result = files.search_text(str(self.root), self.path.name, "needle")
+        self.assertEqual(result.matching_lines, 45)
+        self.assertEqual(len(result.matches), files.MAX_MATCHES)
+        self.assertTrue(all("NEEDLE" in m.snippet and len(m.snippet) <= files.MAX_SNIPPET + 2
+                            for m in result.matches))
+
+    def test_bad_query_and_changed_file_are_refused(self):
+        self.path.write_text("old")
+        for query in ("", "x" * 129, "a\nb", None):
+            with self.assertRaisesRegex(Hold, "invalid_file_query"):
+                files.search_text(str(self.root), self.path.name, query)
+        listing = list_dir(str(self.root))
+        self.path.unlink()
+        self.path.write_text("new")
+        with self.assertRaisesRegex(Hold, "file_changed"):
+            files.search_text(str(self.root), self.path.name, "new",
+                expected_root=listing.identity, expected_entry=listing.entries[0].identity)

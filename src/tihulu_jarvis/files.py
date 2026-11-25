@@ -8,6 +8,7 @@ followed out of the chosen root, and a binary file is refused before it is
 decoded rather than shown as noise.
 """
 import os
+import re
 import stat
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,9 @@ MAX_PREVIEW = 8000
 MAX_ROOT = 4096
 MAX_SCAN = 1024
 MAX_BYTES = 262144
+MAX_QUERY = 128
+MAX_MATCHES = 30
+MAX_SNIPPET = 240
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
 
@@ -164,10 +168,10 @@ def list_dir(root, *, checkpoint=lambda: None):
         os.close(fd)
 
 
-def preview(root, name, limit=MAX_PREVIEW, *, expected_root=None,
-            expected_entry=None, checkpoint=lambda: None):
+def _read_text(root, name, *, expected_root=None, expected_entry=None,
+               checkpoint=lambda: None):
     """Read only the pinned regular entry, never a link, device or FIFO."""
-    if not _valid_name(name) or type(limit) is not int or not 1 <= limit <= MAX_PREVIEW:
+    if not _valid_name(name):
         raise Hold("invalid_local_settings")
     folder = _open_root(root, checkpoint)
     fd = None
@@ -228,10 +232,63 @@ def preview(root, name, limit=MAX_PREVIEW, *, expected_root=None,
         text = data.decode("utf-8")
     except UnicodeDecodeError:
         raise Hold("file_not_text") from None
-    text = text.strip()
-    if not text:
+    if not text.strip():
         raise Hold("file_empty")
+    checkpoint()
+    return text
+
+
+def preview(root, name, limit=MAX_PREVIEW, *, expected_root=None,
+            expected_entry=None, checkpoint=lambda: None):
+    if type(limit) is not int or not 1 <= limit <= MAX_PREVIEW:
+        raise Hold("invalid_local_settings")
+    text = _read_text(root, name, expected_root=expected_root,
+                      expected_entry=expected_entry, checkpoint=checkpoint).strip()
     if len(text) > limit:
         text = text[:limit].rstrip() + " …"
     checkpoint()
     return text
+
+
+@dataclass(frozen=True)
+class Match:
+    line: int
+    snippet: str
+
+
+@dataclass(frozen=True)
+class TextSearch:
+    matches: tuple
+    matching_lines: int
+
+
+def checked_query(query):
+    if (not isinstance(query, str) or not 1 <= len(query.strip()) <= MAX_QUERY
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in query)):
+        raise Hold("invalid_file_query")
+    return query.strip()
+
+
+def search_text(root, name, query, *, expected_root=None, expected_entry=None,
+                checkpoint=lambda: None):
+    """Literal search of one selected bounded snapshot, not a directory crawl."""
+    query = checked_query(query)
+    pattern = re.compile(re.escape(query), re.IGNORECASE)
+    text = _read_text(root, name, expected_root=expected_root,
+                      expected_entry=expected_entry, checkpoint=checkpoint)
+    matches = []
+    total = 0
+    for number, line in enumerate(text.splitlines(), 1):
+        if number % 128 == 1:
+            checkpoint()
+        hit = pattern.search(line)
+        if hit is None:
+            continue
+        total += 1
+        if len(matches) < MAX_MATCHES:
+            start = max(0, hit.start() - 40)
+            end = min(len(line), start + MAX_SNIPPET)
+            snippet = ("…" if start else "") + line[start:end] + ("…" if end < len(line) else "")
+            matches.append(Match(number, snippet))
+    checkpoint()
+    return TextSearch(tuple(matches), total)
