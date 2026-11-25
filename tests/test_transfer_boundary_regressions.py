@@ -367,5 +367,93 @@ class RegistryDecodeTests(unittest.TestCase):
         with self.assertRaises(Hold):
             self.registry.load()
 
+class RegistryIsolationTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.other = market.Registry(self.root)
+        self.card = market.ModelCard(model_id="isolation-fixture",
+                                     display_name="Fixture", category="stt")
+
+    def test_competing_instance_cannot_read_or_write_during_transaction(self):
+        saved = self.registry.save_card(self.card)
+        with self.registry._write_guard():
+            with self.assertRaisesRegex(Hold, "registry_busy"):
+                self.other.load()
+            with self.assertRaisesRegex(Hold, "registry_busy"):
+                self.other.save_card(self.card)
+            self.assertEqual(self.registry.card(saved.model_id), saved)
+        self.assertEqual(self.other.card(saved.model_id), saved)
+
+    def test_process_lock_contention_and_release(self):
+        import subprocess
+        import sys
+        # A real independent process holds the same inode until stdin closes.
+        code = ("import fcntl, sys; "
+                "f = open(sys.argv[1], 'a+b'); "
+                "fcntl.flock(f, fcntl.LOCK_EX); "
+                "print('locked', flush=True); sys.stdin.read()")
+        lock = self.root / ".registry.lock"
+        self.registry.save_card(self.card)
+        proc = subprocess.Popen([sys.executable, "-c", code, str(lock)],
+                                stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                                text=True)
+        try:
+            import select
+            ready, _, _ = select.select([proc.stdout], [], [], 10)
+            self.assertTrue(ready, "child did not acquire lock")
+            self.assertEqual(proc.stdout.readline().strip(), "locked")
+            with self.assertRaisesRegex(Hold, "registry_busy"):
+                self.registry.save_card(self.card)
+        finally:
+            proc.stdin.close()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=10)
+            proc.stdout.close()
+        self.assertEqual(proc.returncode, 0)
+        self.assertEqual(self.registry.save_card(self.card), self.card)
+
+    def test_exception_releases_lock_and_preserves_registry(self):
+        saved = self.registry.save_card(self.card)
+        with self.assertRaises(OSError):
+            with self.registry._write_guard():
+                raise OSError("fixture fault")
+        self.assertEqual(self.other.card(saved.model_id), saved)
+
+    def test_symlink_lock_refused_without_touching_target(self):
+        outside = self.root / "outside"
+        outside.write_bytes(b"untouched")
+        (self.root / ".registry.lock").symlink_to(outside)
+        with self.assertRaisesRegex(Hold, "registry_lock_unavailable"):
+            self.registry.save_card(self.card)
+        self.assertEqual(outside.read_bytes(), b"untouched")
+        self.assertFalse(self.registry.path.exists())
+
+    def test_hardlinked_lock_refused(self):
+        import os
+        outside = self.root / "outside"
+        outside.write_bytes(b"untouched")
+        os.chmod(outside, 0o600)
+        os.link(outside, self.root / ".registry.lock")
+        with self.assertRaisesRegex(Hold, "registry_lock_unavailable"):
+            self.registry.save_card(self.card)
+        self.assertEqual(outside.read_bytes(), b"untouched")
+
+    def test_transfer_persist_rejects_competing_writer(self):
+        card = self.registry.save_card(self.card)
+        source = market.Source(reference="catalog:fixture",
+                               checksum=hashlib.sha256(NEW).hexdigest(),
+                               size=len(NEW), license_id="MIT")
+        transfer = market.Transfer(self.other, card, source, None, now=1)
+        with self.registry._write_guard():
+            with self.assertRaisesRegex(Hold, "registry_busy"):
+                transfer._persist("REVIEWED")
+        self.assertEqual(self.registry.card(card.model_id), card)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
