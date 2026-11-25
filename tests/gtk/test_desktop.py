@@ -334,6 +334,40 @@ class FreshStartTests(DesktopFixture):
         self.until(lambda: not self.ui.busy)
         self.assertTrue(self.ui.return_to_chat.get_sensitive())
 
+    def test_selected_folder_discovery_does_not_activate_or_register_weights(self):
+        folder = Path(self.profile_home) / "models"
+        folder.mkdir()
+        (folder / "fixture.bin").write_bytes(b"synthetic fixture")
+        (folder / "fixture.onnx").write_bytes(b"synthetic fixture")
+        self.ui.scan_model_folder(str(folder))
+        self.until(lambda: not self.ui.busy)
+        self.assert_no_failed_turn()
+        self.assertEqual(len(self.ui.model_scan_result.candidates), 2)
+        self.assertEqual(self.ui.cfg["stt"], "")
+        self.assertFalse(self.ui.cfg["voices"])
+        self.assertFalse(self.ui.market.cards())
+        self.jan.assert_not_called()
+        self.ui.model_candidates.set_active(0)
+        self.ui.model_kind.set_active_id("stt")
+        self.assertTrue(self.ui.model_candidate_choose.get_sensitive())
+        with patch.object(self.ui, "choose") as chooser:
+            self.ui.review_model_candidate()
+        chooser.assert_called_once_with("stt", initial=str(folder / "fixture.bin"))
+        self.ui.hard_stop()
+        self.assertIsNone(self.ui.model_scan_result)
+        self.assertFalse(self.ui.model_candidate_choose.get_sensitive())
+
+    def test_selected_folder_discovery_respects_read_denial(self):
+        profile = Profile(id="no-model-scan", name="No scan",
+                          filesystem_rules=(Rule("filesystem_read", (), "deny"),))
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        with patch.object(desktop.model_discovery, "scan") as scan:
+            self.ui.scan_model_folder(self.profile_home)
+            scan.assert_not_called()
+        self.assertIsNone(self.ui.model_scan_result)
+        self.assertIn("profile_forbids_filesystem_read", self.ui.status.get_text())
+
     def test_blank_start_keeps_local_analysis_available(self):
         self.assertFalse(self.ui.tool_panel.get_expanded())
         self.assertFalse(self.ui.analysis.result_actions.get_visible())

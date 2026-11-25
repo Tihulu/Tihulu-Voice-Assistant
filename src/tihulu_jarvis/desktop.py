@@ -6,6 +6,7 @@ import json
 import locale
 import os
 import time
+from threading import Event
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
@@ -13,7 +14,8 @@ from pathlib import Path
 from . import (a11y, agents, attachments, catalog_sources, files, keys, queries,
                  readiness, receipts, resources, tasks, transcript, usage, web)
 from .voice.jan import MAX_TEXT as STREAM_CAP
-from . import catalog_fetch, disclosure, routing
+from . import catalog_fetch, disclosure, routing, model_discovery
+from .owned_wait import finish_owned
 from .analysis_ui import AnalysisView
 from .selected_csv import selection_identity
 from . import analysis_intent
@@ -366,6 +368,25 @@ def create_window(app, loop, bridge=None):
             self.preview_locales = {}
             self.voice_setup_note = Gtk.Label(xalign=0, wrap=True)
             models.append(self.voice_setup_note)
+            self.model_scan_result = self.model_scan_context = None
+            self.model_scan = self.button(models, tr(
+                "Find existing audio models in a folder", "Klasörde mevcut ses modellerini bul",
+                "Vorhandene Audiomodelle im Ordner suchen"), self.choose_model_folder)
+            self.model_scan_note = Gtk.Label(xalign=0, wrap=True)
+            models.append(self.model_scan_note)
+            self.model_candidates = Gtk.ComboBoxText()
+            models.append(self.model_candidates)
+            self.model_kind = Gtk.ComboBoxText()
+            for key, caption in (("stt", "Whisper STT"), ("tr", "Piper TR"),
+                                 ("en", "Piper EN"), ("de", "Piper DE")):
+                self.model_kind.append(key, caption)
+            self.model_kind.set_active_id("stt")
+            models.append(self.model_kind)
+            self.model_candidate_choose = self.button(models, tr(
+                "Review selected file", "Seçilen dosyayı incele", "Ausgewählte Datei prüfen"),
+                self.review_model_candidate)
+            self.model_candidates.connect("changed", lambda *_: self.refresh_model_scan())
+            self.model_kind.connect("changed", lambda *_: self.refresh_model_scan())
             for key, caption in [("stt","STT · Whisper (.bin)"),("tr","Piper · Türkçe"),("en","Piper · English"),("de","Piper · Deutsch")]:
                 row = Gtk.Box(spacing=8)
                 models.append(row)
@@ -760,6 +781,7 @@ def create_window(app, loop, bridge=None):
                 raise Hold("profile_not_active")
             self.dismiss_picker()
             self.clear_attachment()
+            self.clear_model_scan()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
             self.cfg["profile"] = entry.id
@@ -1319,6 +1341,7 @@ def create_window(app, loop, bridge=None):
                                 "Güncel model listesi yok. Bağlantıyı keşfet veya yeniden dene.",
                                 "Keine aktuelle Modellliste. Verbindung suchen oder erneut versuchen.")
             self.model_discovery_note.set_text(model_note)
+            self.refresh_model_scan()
             self.setup_connect.set_sensitive(not self.busy)
             if not self.url.get_text().strip():
                 self.setup_note.set_text(tr(
@@ -3076,11 +3099,133 @@ def create_window(app, loop, bridge=None):
         def ref_still_registered(self, ref):
             return any(card.storage_ref == ref for card in self.market.cards())
 
-        def choose(self, key):
+        def clear_model_scan(self):
+            self.model_scan_result = self.model_scan_context = None
+            self.model_candidates.remove_all()
+            self.model_scan_note.set_text("")
+
+        def refresh_model_scan(self):
+            result = self.model_scan_result
+            current = False
+            if result is not None:
+                try:
+                    current = self.picker_context() == self.model_scan_context
+                except Hold:
+                    pass
+            index = self.model_candidates.get_active()
+            kind = self.model_kind.get_active_id()
+            candidate = result.candidates[index] if current and 0 <= index < len(result.candidates) else None
+            matches = candidate is not None and (
+                (candidate.kind == "stt" and kind == "stt")
+                or (candidate.kind == "tts" and kind in ("tr", "en", "de")))
+            idle = not self.busy and not self.closing and self.owned_picker is None
+            local = getattr(self, "policy", None) is not None and self.policy.mode == "LOCAL_ONLY"
+            self.model_scan.set_sensitive(idle and local)
+            for widget in (self.model_candidates, self.model_kind, self.model_candidate_choose):
+                widget.set_visible(current and bool(result.candidates))
+                widget.set_sensitive(idle and current and (matches if widget is self.model_candidate_choose else True))
+
+        def choose_model_folder(self):
+            if self.busy:
+                return
+            dialog = Gtk.FileChooserNative.new(tr(
+                "Choose an existing model folder", "Mevcut model klasörünü seç",
+                "Vorhandenen Modellordner wählen"), self.win,
+                Gtk.FileChooserAction.SELECT_FOLDER, tr("Choose", "Seç", "Auswählen"),
+                tr("Cancel", "İptal", "Abbrechen"))
+            def response(d, res):
+                try:
+                    if res == Gtk.ResponseType.ACCEPT:
+                        file = d.get_file()
+                        self.scan_model_folder(file.get_path() if file else None)
+                finally:
+                    d.destroy()
+            self.show_owned_picker(dialog, response)
+
+        def scan_model_folder(self, root):
+            if self.busy or self.closing:
+                return
+            self.clear_model_scan()
+            try:
+                profile, stamp = self.store.snapshot(self.cfg["profile"])
+                if profile.based_on_mode != "LOCAL_ONLY":
+                    raise Hold("model_discovery_mode_denied")
+                self.require_tools(("filesystem_read", ("folder",)), selected=True)
+                live = self.store.bind_live(profile.id)
+                if live.stamp != stamp:
+                    raise Hold("profile_changed")
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
+            stop = Event()
+            def checkpoint():
+                if stop.is_set():
+                    raise Hold("turn_cancelled")
+                decision, reason = live.evaluate("filesystem_read", ("folder",))
+                if decision != profiles.ALLOW and reason != "no_rule_matches":
+                    raise Hold("model_discovery_not_authorized")
+            async def run(epoch):
+                self.session.check(epoch)
+                checkpoint()
+                worker = asyncio.create_task(asyncio.to_thread(model_discovery.scan, root, checkpoint))
+                try:
+                    result = await asyncio.shield(worker)
+                except asyncio.CancelledError:
+                    stop.set()
+                    await finish_owned(asyncio.gather(worker, return_exceptions=True))
+                    raise
+                self.session.check(epoch)
+                checkpoint()
+                if self.cfg["profile"] != profile.id or not self.store.is_current(profile.id, stamp):
+                    raise Hold("profile_changed")
+                self.model_scan_context = self.picker_context()
+                self.model_scan_result = result
+                for item in result.candidates:
+                    self.model_candidates.append_text(item.relative)
+                note = tr("%d candidate files; compatibility not tested.",
+                          "%d aday dosya; uyumluluk test edilmedi.",
+                          "%d Dateikandidaten; Kompatibilität ungeprüft.") % len(result.candidates)
+                if result.limited:
+                    note += " " + tr("Scan limit reached.", "Tarama sınırına ulaşıldı.", "Suchgrenze erreicht.")
+                self.model_scan_note.set_text(note)
+                self.refresh_model_scan()
+            self.turn_note = tr("Finding local audio candidates", "Yerel ses adayları aranıyor",
+                                "Lokale Audiokandidaten suchen")
+            self.submit(run)
+
+        def review_model_candidate(self):
+            result = self.model_scan_result
+            try:
+                if self.busy or self.closing or result is None or self.picker_context() != self.model_scan_context:
+                    raise Hold("model_discovery_stale")
+                index = self.model_candidates.get_active()
+                key = self.model_kind.get_active_id()
+                if not 0 <= index < len(result.candidates):
+                    raise Hold("select_local_model")
+                item = result.candidates[index]
+                if not ((item.kind == "stt" and key == "stt") or
+                        (item.kind == "tts" and key in ("tr", "en", "de"))):
+                    raise Hold("incompatible_model_file")
+                self.require_tools(("filesystem_read", ("folder",)), selected=True)
+                # This only seeds a native chooser. The actual owner selection
+                # and existing registration/locale validation still decide.
+                self.choose(key, initial=str(Path(result.root) / item.relative))
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+
+        def choose(self, key, *, initial=None):
             dialog=Gtk.FileChooserNative.new("Select a trusted installed local model", self.win,Gtk.FileChooserAction.OPEN,"Select","Cancel")
             filt=Gtk.FileFilter()
             filt.add_pattern("*.bin" if key=="stt" else "*.onnx")
             dialog.add_filter(filt)
+            if initial is not None:
+                from gi.repository import Gio
+                try:
+                    dialog.set_file(Gio.File.new_for_path(initial))
+                except GLib.Error:
+                    dialog.destroy()
+                    self.set_state("ready", "model_candidate_unavailable")
+                    return
             def response(d, res):
                 try:
                     if res!=Gtk.ResponseType.ACCEPT or self.busy:
@@ -3535,6 +3680,7 @@ def create_window(app, loop, bridge=None):
 
         def interrupt(self, clear):
             self.dismiss_picker()
+            self.clear_model_scan()
             if clear:
                 self.clear_attachment()
             if hasattr(self, "analysis"):
