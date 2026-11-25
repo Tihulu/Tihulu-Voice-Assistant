@@ -165,3 +165,41 @@ class RichChatTests(unittest.TestCase):
             self.s.publish(c,p,confirmed=True)
         with self.assertRaises(Refused):
             self.g.checkpoint(s,s.request)
+
+    def test_literal_multilingual_search_with_line_numbers(self):
+        raw="Mavi renk\nBlau MAVI\nBlue\n<svg>mavi</svg>".encode()
+        s=self.grant("engine",source_target("search","search",raw,query="mavi"))
+        c=self.s.prepare("search","search",raw,s,query="mavi")
+        result=json.loads(c.parts[0].data)
+        self.assertEqual(result["matching_lines"],3)
+        self.assertEqual([m["line"] for m in result["matches"]],[1,2,4])
+        self.assertEqual(c.parts[0].mime,"application/json")
+        p=self.grant("publish",publish_target("room",c))
+        self.s.publish(c,p,confirmed=True)
+        self.assertEqual(self.s.cards(),(c,))
+
+    def test_search_query_and_room_bound_to_source_grant(self):
+        raw=b"one two"
+        s=self.grant("engine",source_target("search","search",raw,query="one"))
+        with self.assertRaises(Refused):
+            self.s.prepare("search","search",raw,s,query="two")
+        foreign=self.grant("engine",source_target("search","search",raw,room="other",query="one"))
+        with self.assertRaises(Refused):
+            self.s.prepare("search","search",raw,foreign,query="one")
+        self.s.prepare("search","search",raw,s,query="one")
+        self.s.discard()
+
+    def test_search_limits_and_literal_metacharacters(self):
+        from tihulu_jarvis.files import MAX_MATCHES
+        raw=b"a.*\n"*(MAX_MATCHES+2)+b"abc\n"
+        result=json.loads(build("search","search",raw,query=".*").parts[0].data)
+        self.assertEqual(result["matching_lines"],MAX_MATCHES+2)
+        self.assertEqual(result["shown"],MAX_MATCHES)
+        self.assertTrue(result["truncated"])
+        for q in ("",None,"bad\x00"):
+            with self.assertRaises(Refused):
+                build("search","search",raw,query=q)
+
+    def test_search_cancellation_refuses_partial_result(self):
+        with self.assertRaises(Refused):
+            build("search","search",b"one\n"*300,query="one",cancelled=lambda:True)

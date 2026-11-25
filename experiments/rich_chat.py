@@ -6,15 +6,17 @@ from threading import RLock
 import csv
 import io
 import json
+import re
 from gateway import Context, FixtureGateway, Request, Refused, token
 from tihulu_jarvis.temperature_engine import analyze_temperature, render_svg
 from tihulu_jarvis.analysis_export import summary_rows
+from tihulu_jarvis.files import checked_query, MAX_MATCHES, MAX_SNIPPET
 from tihulu_jarvis.voice.m1 import Hold
 
 MAX_CARDS=16
 MAX_TOTAL=1048576
 MAX_INPUT=262144
-KINDS=("text","temperature")
+KINDS=("text","temperature","search")
 
 def digest(data):
     return sha256(data).hexdigest()
@@ -25,10 +27,25 @@ def key(*parts):
 def room_target(identity):
     return key("rich-chat",token(identity))
 
-def source_target(identity,kind,data):
+def query_value(kind,query):
+    if kind=="search":
+        if type(query) is not str:
+            raise Refused("invalid_query")
+        try:
+            query=checked_query(query)
+        except Hold:
+            raise Refused("invalid_query") from None
+        if any(127<=ord(c)<=159 or 0xd800<=ord(c)<=0xdfff for c in query):
+            raise Refused("invalid_query")
+        return query
+    if query is not None:
+        raise Refused("unexpected_query")
+    return None
+
+def source_target(identity,kind,data,*,room="room",query=None):
     if (kind not in KINDS or type(data) is not bytes or not 0<len(data)<=MAX_INPUT):
         raise Refused("invalid_source")
-    return key("rich-source",token(identity),kind,digest(data))
+    return key("rich-source",token(room),token(identity),kind,digest(data),query_value(kind,query))
 
 @dataclass(frozen=True)
 class Part:
@@ -48,16 +65,40 @@ class Card:
 def part(name,mime,data):
     return Part(name,mime,data,digest(data))
 
-def build(identity,kind,data,*,cancelled=lambda:False,color="blue"):
-    source_target(identity,kind,data)
-    if kind=="text":
+def build(identity,kind,data,*,cancelled=lambda:False,color="blue",query=None):
+    source_target(identity,kind,data,query=query)
+    query=query_value(kind,query)
+    if kind in ("text","search"):
         try:
             text=data.decode("utf-8")
         except UnicodeError:
             raise Refused("invalid_utf8") from None
         if any((ord(c)<32 and c not in "\n\t\r") or 127<=ord(c)<=159 for c in text):
             raise Refused("invalid_text")
-        parts=(part("preview","text/plain",data),)
+        if kind=="text":
+            parts=(part("preview","text/plain",data),)
+        else:
+            pattern=re.compile(re.escape(query),re.IGNORECASE)
+            matches=[]
+            total=0
+            for number,line in enumerate(text.splitlines(),1):
+                if number%128==1 and cancelled():
+                    raise Refused("search_cancelled")
+                hit=pattern.search(line)
+                if hit is None:
+                    continue
+                total+=1
+                if len(matches)<MAX_MATCHES:
+                    start=max(0,hit.start()-40)
+                    end=min(len(line),start+MAX_SNIPPET)
+                    snippet=("…" if start else "")+line[start:end]+("…" if end<len(line) else "")
+                    matches.append({"line":number,"snippet":snippet})
+            if cancelled():
+                raise Refused("search_cancelled")
+            result=json.dumps({"query":query,"matching_lines":total,"shown":len(matches),
+                               "truncated":total>len(matches),"matches":matches},
+                              ensure_ascii=False,separators=(",",":")).encode("utf-8")
+            parts=(part("matches","application/json",result),)
     else:
         try:
             series=analyze_temperature(data,cancelled=cancelled)
@@ -144,7 +185,7 @@ class RichChat:
             self._pending=None
             self._g.revoke(grant.identity)
 
-    def prepare(self,identity,kind,data,source_grant,*,color="blue"):
+    def prepare(self,identity,kind,data,source_grant,*,color="blue",query=None):
         """Compute one private draft after exact source consent; never publish automatically."""
         with self._lock:
             self._live()
@@ -153,7 +194,7 @@ class RichChat:
                 raise Refused("draft_pending")
             if identity in self._seen or len(self._seen)>=64 or len(self._cards)>=MAX_CARDS:
                 raise Refused("card_limit_or_duplicate")
-            req=Request(self._ctx,"engine",source_target(identity,kind,data),"local","private")
+            req=Request(self._ctx,"engine",source_target(identity,kind,data,room=self._id,query=query),"local","private")
             self._g.claim(source_grant,req)
             self._seen.add(identity)
             try:
@@ -162,7 +203,7 @@ class RichChat:
                     self._g.checkpoint(source_grant,req)
                     return False
                 checkpoint()
-                card=build(identity,kind,data,cancelled=checkpoint,color=color)
+                card=build(identity,kind,data,cancelled=checkpoint,color=color,query=query)
                 checkpoint()
                 total=sum(len(p.data) for c,_ in self._cards.values() for p in c.parts)
                 if total+sum(len(p.data) for p in card.parts)>MAX_TOTAL:
@@ -207,10 +248,10 @@ class RichChat:
                 raise Refused("no_pending_card")
             self._drop_pending()
 
-    def add(self,identity,kind,data,source_grant,publish_grant,*,color="blue"):
+    def add(self,identity,kind,data,source_grant,publish_grant,*,color="blue",query=None):
         """Trusted fixture convenience for pre-authorized exact output."""
         with self._lock:
-            card=self.prepare(identity,kind,data,source_grant,color=color)
+            card=self.prepare(identity,kind,data,source_grant,color=color,query=query)
             return self.publish(card,publish_grant,confirmed=True)
 
     def poll(self):
@@ -250,6 +291,8 @@ class RichChat:
             if self._check_card(identity) is not card:
                 raise Refused("stale_card")
             self._g.checkpoint(grant,req)
+            if self._check_card(identity) is not card:
+                raise Refused("stale_card")
             return next(p.data for p in card.parts if p.name==name)
 
     def clear(self,identity):
