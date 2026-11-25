@@ -43,9 +43,10 @@ class CallPlan:
 def payload_target(plan,envelope):
     if type(plan) is not CallPlan or type(envelope) is not Envelope:
         raise Refused("invalid_plan")
+    call_target=plan.target()
     if plan.account.provider!=envelope.destination or plan.payload_digest!=envelope.digest:
         raise Refused("account_or_payload_mismatch")
-    return sha256(repr(("provider-payload",plan.target(),disclosure_target(envelope))).encode("ascii")).hexdigest()
+    return sha256(repr(("provider-payload",call_target,disclosure_target(envelope))).encode("ascii")).hexdigest()
 
 class ProviderSession:
     """Only synthetic minimized envelopes. No API key/token strings or transport."""

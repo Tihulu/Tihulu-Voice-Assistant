@@ -99,3 +99,7 @@ class ProviderSessionTests(unittest.TestCase):
         with self.assertRaises(Refused):
             self.s.prepare(self.p,self.e,self.pg,generic)
         self.s.prepare(self.p,self.e,self.pg,self.dg)
+
+    def test_malformed_account_is_controlled_refusal(self):
+        with self.assertRaises(Refused):
+            payload_target(replace(self.p,account=None),self.e)
