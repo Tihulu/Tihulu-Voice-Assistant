@@ -116,3 +116,52 @@ class RichChatTests(unittest.TestCase):
         c,s,p=self.consents("card0","text",b"new")
         with self.assertRaises(Refused):
             self.s.add("card0","text",b"new",s,p)
+
+    def test_staged_preview_requires_explicit_current_draft(self):
+        from dataclasses import replace
+        s=self.grant("engine",source_target("draft","temperature",CSV))
+        c=self.s.prepare("draft","temperature",CSV,s)
+        p=self.grant("publish",publish_target("room",c))
+        self.assertEqual(self.s.cards(),())
+        for card,confirm in ((c,False),(replace(c),True)):
+            with self.assertRaises(Refused):
+                self.s.publish(card,p,confirmed=confirm)
+        self.assertEqual(self.s.publish(c,p,confirmed=True),c)
+        self.assertEqual(self.s.cards(),(c,))
+
+    def test_pending_source_revocation_and_discard_burn_grants(self):
+        s=self.grant("engine",source_target("draft","text",b"hello"))
+        c=self.s.prepare("draft","text",b"hello",s)
+        self.g.revoke(s.identity)
+        self.assertEqual(self.s.poll(),())
+        self.assertIsNone(self.s._pending)
+        p=self.grant("publish",publish_target("room",c))
+        with self.assertRaises(Refused):
+            self.s.publish(c,p,confirmed=True)
+        s2=self.grant("engine",source_target("new","text",b"hello"))
+        self.s.prepare("new","text",b"hello",s2)
+        self.s.discard()
+        with self.assertRaises(Refused):
+            self.g.checkpoint(s2,s2.request)
+
+    def test_failed_publish_revokes_source_not_foreign_publication(self):
+        s=self.grant("engine",source_target("draft","text",b"hello"))
+        c=self.s.prepare("draft","text",b"hello",s)
+        foreign=self.grant("publish",room_target("other"),"none")
+        with self.assertRaises(Refused):
+            self.s.publish(c,foreign,confirmed=True)
+        with self.assertRaises(Refused):
+            self.g.checkpoint(s,s.request)
+        self.assertEqual(self.g.checkpoint(foreign,foreign.request),"SIMULATED_ALLOW")
+        self.assertIsNone(self.s._pending)
+
+    def test_close_clears_unpublished_draft(self):
+        s=self.grant("engine",source_target("draft","text",b"hello"))
+        c=self.s.prepare("draft","text",b"hello",s)
+        p=self.grant("publish",publish_target("room",c))
+        self.s.close()
+        self.assertIsNone(self.s._pending)
+        with self.assertRaises(Refused):
+            self.s.publish(c,p,confirmed=True)
+        with self.assertRaises(Refused):
+            self.g.checkpoint(s,s.request)

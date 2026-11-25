@@ -101,10 +101,15 @@ class RichChat:
         self._lock=RLock()
         self._cards={}
         self._seen=set()
+        self._pending=None
         self._closed=False
         req=Request(context,"publish",room_target(identity),"local")
         gateway.claim(grant,req)
-        gateway.checkpoint(grant,req)
+        try:
+            gateway.checkpoint(grant,req)
+        except BaseException:
+            gateway.revoke(grant.identity)
+            raise
         self._room=(grant,req)
 
     def _live(self):
@@ -133,32 +138,91 @@ class RichChat:
             raise
         return card
 
-    def add(self,identity,kind,data,source_grant,publish_grant,*,color="blue"):
+    def _drop_pending(self):
+        if self._pending is not None:
+            _,grant,_=self._pending
+            self._pending=None
+            self._g.revoke(grant.identity)
+
+    def prepare(self,identity,kind,data,source_grant,*,color="blue"):
+        """Compute one private draft after exact source consent; never publish automatically."""
         with self._lock:
             self._live()
             token(identity)
+            if self._pending is not None:
+                raise Refused("draft_pending")
             if identity in self._seen or len(self._seen)>=64 or len(self._cards)>=MAX_CARDS:
                 raise Refused("card_limit_or_duplicate")
             req=Request(self._ctx,"engine",source_target(identity,kind,data),"local","private")
             self._g.claim(source_grant,req)
             self._seen.add(identity)
-            def checkpoint():
-                self._live()
-                self._g.checkpoint(source_grant,req)
-                return False
-            checkpoint()
-            card=build(identity,kind,data,cancelled=checkpoint,color=color)
-            checkpoint()
-            total=sum(len(p.data) for c,_ in self._cards.values() for p in c.parts)
-            if total+sum(len(p.data) for p in card.parts)>MAX_TOTAL:
-                raise Refused("chat_bytes_limit")
-            pub=Request(self._ctx,"publish",publish_target(self._id,card),"local","private")
-            self._g.claim(publish_grant,pub)
-            checkpoint()
-            self._g.checkpoint(publish_grant,pub)
+            try:
+                def checkpoint():
+                    self._live()
+                    self._g.checkpoint(source_grant,req)
+                    return False
+                checkpoint()
+                card=build(identity,kind,data,cancelled=checkpoint,color=color)
+                checkpoint()
+                total=sum(len(p.data) for c,_ in self._cards.values() for p in c.parts)
+                if total+sum(len(p.data) for p in card.parts)>MAX_TOTAL:
+                    raise Refused("chat_bytes_limit")
+                self._pending=(card,source_grant,req)
+                return card
+            except BaseException:
+                self._g.revoke(source_grant.identity)
+                raise
+
+    def publish(self,card,publish_grant,*,confirmed=False):
+        with self._lock:
             self._live()
-            self._cards[identity]=(card,((source_grant,req),(publish_grant,pub)))
-            return card
+            if confirmed is not True or self._pending is None or card is not self._pending[0]:
+                raise Refused("explicit_current_card_required")
+            record=self._pending
+            _,source_grant,req=record
+            pub=Request(self._ctx,"publish",publish_target(self._id,card),"local","private")
+            claimed=False
+            try:
+                self._g.checkpoint(source_grant,req)
+                self._g.claim(publish_grant,pub)
+                claimed=True
+                self._g.checkpoint(source_grant,req)
+                self._g.checkpoint(publish_grant,pub)
+                self._live()
+                if self._pending is not record:
+                    raise Refused("stale_draft")
+                self._cards[card.identity]=(card,((source_grant,req),(publish_grant,pub)))
+                self._pending=None
+                return card
+            except BaseException:
+                if claimed:
+                    self._g.revoke(publish_grant.identity)
+                self._drop_pending()
+                raise
+
+    def discard(self):
+        with self._lock:
+            self._live()
+            if self._pending is None:
+                raise Refused("no_pending_card")
+            self._drop_pending()
+
+    def add(self,identity,kind,data,source_grant,publish_grant,*,color="blue"):
+        """Trusted fixture convenience for pre-authorized exact output."""
+        with self._lock:
+            card=self.prepare(identity,kind,data,source_grant,color=color)
+            return self.publish(card,publish_grant,confirmed=True)
+
+    def poll(self):
+        with self._lock:
+            self._live()
+            if self._pending is not None:
+                _,grant,req=self._pending
+                try:
+                    self._g.checkpoint(grant,req)
+                except Refused:
+                    self._drop_pending()
+            return self.cards()
 
     def cards(self):
         with self._lock:
@@ -201,6 +265,7 @@ class RichChat:
     def close(self):
         with self._lock:
             self._closed=True
+            self._drop_pending()
             for _,checks in self._cards.values():
                 for grant,_ in checks:
                     self._g.revoke(grant.identity)
