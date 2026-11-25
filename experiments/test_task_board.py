@@ -113,3 +113,21 @@ class TaskBoardTests(unittest.TestCase):
         with self.assertRaises(Refused):
             TaskBoard(self.g,self.ctx,"room",2,10,self.root)
         self.assertEqual(self.b.snapshot(),())
+
+    def test_receipt_requires_completed_local_analysis_and_live_grants(self):
+        from hashlib import sha256
+        raw=b"fixture"
+        job,spec=plan(self.scope,"analysis","opencode","local-analysis",raw,4,50)
+        grants=[self.g.fixture_grant("analysis"+str(n),Request(self.ctx,"agent",target,"local"),60)
+                for n,target in enumerate((job.target(),spec.target()))]
+        self.b.queue("analysis","opencode","local-analysis",raw,4,50,*grants)
+        with self.assertRaises(Refused):
+            self.b.receipt("analysis")
+        self.b.dispatch()
+        self.b.receive("analysis",self.event("analysis",1,"completed"))
+        receipt=self.b.receipt("analysis")
+        self.assertEqual(receipt.payload_digest,sha256(raw).hexdigest())
+        self.assertEqual(receipt.spec_target,spec.target())
+        self.g.revoke(grants[0].identity)
+        with self.assertRaises(Refused):
+            self.b.receipt("analysis")

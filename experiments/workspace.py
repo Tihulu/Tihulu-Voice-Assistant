@@ -7,7 +7,8 @@ from gateway import Context, FixtureGateway, Request, Refused, token
 from conversation import Conversation, session_target
 from rich_chat import RichChat, Card, room_target, key
 from adapter_protocol import text_bytes
-from task_board import TaskBoard
+from task_board import TaskBoard, Receipt
+from hashlib import sha256
 from voice_review import review, target as stt_target
 
 @dataclass(frozen=True)
@@ -34,6 +35,14 @@ def attachment_target(workspace,card,name,question):
     return key("local-attachment",token(workspace),card.identity,card.digest,
                part.name,part.digest,question)
 
+def task_result_target(receipt,identity,data,color="blue"):
+    if (type(receipt) is not Receipt or type(data) is not bytes
+            or sha256(data).hexdigest()!=receipt.payload_digest
+            or color not in ("blue","green","orange")):
+        raise Refused("task_result_input_mismatch")
+    return key("task-result",receipt.scope,receipt.identity,receipt.spec_target,
+               receipt.payload_digest,token(identity),"temperature",color)
+
 class Workspace:
     """Owns both child lifetimes; cards never become automatic model messages."""
     def __init__(self,gateway,context,identity,candidate,url,grant,chat_grant,room_grant):
@@ -49,6 +58,8 @@ class Workspace:
         self._voice_checks=[]
         self._attachment=None
         self._attachment_checks=[]
+        self._task_draft=None
+        self._task_links={}
         self._timeline=[]
         self._counter=0
         self._sequence=0
@@ -88,19 +99,35 @@ class Workspace:
         if self._rich.read(card.identity) is not card:
             raise Refused("stale_attachment")
 
+    def _drop_task_draft(self):
+        if self._task_draft is not None:
+            _,_,grant,_=self._task_draft
+            self._task_draft=None
+            self._g.revoke(grant.identity)
+
+    def _check_task_link(self,link):
+        _,receipt,grant,req=link
+        self._g.checkpoint(grant,req)
+        if self._tasks.receipt(receipt.identity)!=receipt:
+            raise Refused("stale_task_result")
+
     def _clear(self,state):
         self._state=state
         self._timeline.clear()
         self._drop_voice()
         self._drop_attachment()
+        self._drop_task_draft()
         try:
             for grant,_ in self._voice_checks:
                 self._g.revoke(grant.identity)
             for _,_,grant,_ in self._attachment_checks:
                 self._g.revoke(grant.identity)
+            for _,_,grant,_ in self._task_links.values():
+                self._g.revoke(grant.identity)
         finally:
             self._voice_checks.clear()
             self._attachment_checks.clear()
+            self._task_links.clear()
             try:
                 if self._chat is not None:
                     self._chat.close()
@@ -135,6 +162,11 @@ class Workspace:
                     self._check_attachment(self._attachment)
             if self._tasks is not None:
                 self._tasks.snapshot()
+                if self._task_draft is not None:
+                    self._check_task_link(self._task_draft)
+                for link in self._task_links.values():
+                    self._check_task_link(link)
+                    self._rich.read(link[0].identity)
             if self._state in ("held","closed"):
                 raise Refused("workspace_unavailable")
         except Refused:
@@ -277,10 +309,44 @@ class Workspace:
             self._live()
             return result
 
+    def prepare_task_card(self,task,identity,data,source_grant,link_grant,*,color="blue",confirmed=False):
+        """Deterministic local analysis of exact original fixture input, not agent output."""
+        with self._lock:
+            self._ready()
+            if confirmed is not True or self._task_draft is not None:
+                raise Refused("explicit_task_result_required")
+            receipt=self._board().receipt(task)
+            req=Request(self._ctx,"engine",task_result_target(receipt,identity,data,color),"local","private")
+            self._g.claim(link_grant,req)
+            try:
+                self._g.checkpoint(link_grant,req)
+                card=self._rich.prepare(identity,"temperature",data,source_grant,color=color)
+                self._task_draft=(card,receipt,link_grant,req)
+                self._live()
+                return card
+            except BaseException:
+                self._g.revoke(link_grant.identity)
+                if self._task_draft is not None:
+                    self._drop_task_draft()
+                    try:
+                        self._rich.discard()
+                    except Refused:
+                        pass
+                raise
+
     def publish_card(self,card,grant,*,confirmed=False):
         with self._lock:
             self._ready()
-            result=self._rich.publish(card,grant,confirmed=confirmed)
+            linked=self._task_draft is not None and card is self._task_draft[0]
+            try:
+                result=self._rich.publish(card,grant,confirmed=confirmed)
+            except BaseException:
+                if linked and confirmed is True:
+                    self._drop_task_draft()
+                raise
+            if linked:
+                self._task_links[result.identity]=self._task_draft
+                self._task_draft=None
             self._live()
             self._append("card",result.identity)
             return result
@@ -289,11 +355,15 @@ class Workspace:
         with self._lock:
             self._ready()
             self._rich.discard()
+            self._drop_task_draft()
 
     def clear_card(self,identity):
         with self._lock:
             self._ready()
             self._rich.clear(identity)
+            link=self._task_links.pop(identity,None)
+            if link is not None:
+                self._g.revoke(link[2].identity)
             self._timeline=[item for item in self._timeline
                             if not (item.kind=="card" and item.value==identity)]
             # If already used as model evidence, losing the source invalidates

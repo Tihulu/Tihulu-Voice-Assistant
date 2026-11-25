@@ -278,3 +278,58 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(Refused):
             self.s.queue_task("job","opencode","plan",b"x",4,50,sg,cg)
         self.assertEqual(self.s.timeline(),())
+
+    def completed_analysis(self,scope):
+        from task_board import plan
+        job,spec=plan(scope,"analysis","opencode","local-analysis",CSV,4,50)
+        sg=self.grant("agent",job.target())
+        cg=self.grant("agent",spec.target())
+        self.s.queue_task("analysis","opencode","local-analysis",CSV,4,50,sg,cg,confirmed=True)
+        self.s.dispatch_tasks()
+        self.s.task_event("analysis",self.task_frame(scope,"analysis",1,"completed"))
+        return sg,cg
+    def linked_card(self):
+        from workspace import task_result_target
+        receipt=self.s._tasks.receipt("analysis")
+        sg=self.grant("engine",source_target("result","temperature",CSV,room=self.room),"private")
+        lg=self.grant("engine",task_result_target(receipt,"result",CSV),"private")
+        c=self.s.prepare_task_card("analysis","result",CSV,sg,lg,confirmed=True)
+        pg=self.grant("publish",publish_target(self.room,c),"private")
+        self.s.publish_card(c,pg,confirmed=True)
+        return c,lg
+    async def test_completed_analysis_yields_linked_deterministic_card(self):
+        _,scope=self.enable_board()
+        self.completed_analysis(scope)
+        c,lg=self.linked_card()
+        items=self.s.timeline()
+        self.assertEqual([i.kind for i in items],["task","card"])
+        self.assertEqual(items[1].value,c)
+        self.assertEqual(c.kind,"temperature")
+        self.s.clear_card("result")
+        with self.assertRaises(Refused):
+            self.g.checkpoint(lg,lg.request)
+        self.assertEqual([i.kind for i in self.s.timeline()],["task"])
+    async def test_task_grant_revocation_invalidates_linked_result(self):
+        _,scope=self.enable_board()
+        sg,cg=self.completed_analysis(scope)
+        c,lg=self.linked_card()
+        self.g.revoke(sg.identity)
+        self.assertEqual(self.s.poll(),"held")
+        self.assertEqual(self.s._rich._cards,{})
+        with self.assertRaises(Refused):
+            self.g.checkpoint(lg,lg.request)
+    async def test_task_result_rejects_changed_input_and_missing_confirmation(self):
+        from workspace import task_result_target
+        _,scope=self.enable_board()
+        self.completed_analysis(scope)
+        receipt=self.s._tasks.receipt("analysis")
+        sg=self.grant("engine",source_target("result","temperature",CSV,room=self.room),"private")
+        lg=self.grant("engine",task_result_target(receipt,"result",CSV),"private")
+        with self.assertRaises(Refused):
+            self.s.prepare_task_card("analysis","result",CSV,sg,lg)
+        with self.assertRaises(Refused):
+            self.s.prepare_task_card("analysis","result",CSV+b"\n",sg,lg,confirmed=True)
+        c=self.s.prepare_task_card("analysis","result",CSV,sg,lg,confirmed=True)
+        self.s.discard_card()
+        with self.assertRaises(Refused):
+            self.g.checkpoint(lg,lg.request)
