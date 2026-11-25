@@ -1912,7 +1912,23 @@ def create_window(app, loop, bridge=None):
                 self.market_find = self.button(row, tr("Discover installed Jan models","Kurulu Jan modellerini bul","Installierte Jan-Modelle suchen"), self.discover_market)
                 self.market_rollback = self.button(row, tr("Roll back","Geri al","Zurücksetzen"), self.rollback_selected_card)
                 self.market_update = self.button(row, tr("Update","Güncelle","Aktualisieren"), self.update_selected_card)
+                cleanup = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
+                page.append(cleanup)
+                self.staging_note = Gtk.Label(xalign=0, wrap=True)
+                cleanup.append(self.staging_note)
+                self.staging_choice = Gtk.ComboBoxText()
+                cleanup.append(self.staging_choice)
+                controls = Gtk.Box(spacing=8)
+                cleanup.append(controls)
+                self.staging_scan = self.button(controls, tr(
+                    "Inspect abandoned transfers", "Yarım kalan aktarımları incele",
+                    "Verwaiste Übertragungen prüfen"), self.inspect_staging)
+                self.staging_discard = self.button(controls, tr(
+                    "Delete selected temporary file", "Seçili geçici dosyayı sil",
+                    "Gewählte temporäre Datei löschen"), self.discard_staging)
+                self.staging_choice.connect("changed", lambda *_: self.refresh_staging_buttons())
 
+            self.clear_staging_review()
             wanted = self.market_filter.get_active_text() or "stt"
             rows = [c for c in self.market.cards() if c.category == wanted]
             for card in sorted(rows, key=lambda c: (c.state, c.model_id)):
@@ -3020,6 +3036,10 @@ def create_window(app, loop, bridge=None):
 
         def refresh_market_buttons(self):
             chosen = self.selected_card()
+            if getattr(self, "staging_scan", None) is not None:
+                if self.staging_model != chosen:
+                    self.clear_staging_review()
+                self.refresh_staging_buttons()
             for w in (self.market_use, self.market_forget):
                 w.set_sensitive(not self.busy and chosen is not None)
             self.market_list.set_sensitive(not self.busy)
@@ -3050,6 +3070,68 @@ def create_window(app, loop, bridge=None):
                     except Hold:
                         updatable = False
                 self.market_update.set_sensitive(not self.busy and updatable)
+
+        def clear_staging_review(self):
+            self.staging_model = None
+            self.staging_context = None
+            self.staging_rows = ()
+            self.staging_choice.remove_all()
+            self.staging_note.set_text(tr(
+                "Inspect temporary files first. Installed models and archives are not removed.",
+                "Önce geçici dosyaları inceleyin. Kurulu modeller ve arşivler silinmez.",
+                "Zuerst temporäre Dateien prüfen. Installierte Modelle und Archive bleiben erhalten."))
+
+        def refresh_staging_buttons(self):
+            chosen = self.selected_card()
+            index = self.staging_choice.get_active()
+            self.staging_scan.set_sensitive(not self.busy and chosen is not None)
+            self.staging_discard.set_sensitive(
+                not self.busy and chosen is not None and chosen == self.staging_model
+                and 0 <= index < len(self.staging_rows))
+
+        def inspect_staging(self):
+            chosen = self.selected_card()
+            if self.busy or chosen is None:
+                return
+            self.clear_staging_review()
+            try:
+                context = self.picker_context()
+                rows = self.market.staging_candidates(chosen)
+                if chosen != self.selected_card() or context != self.picker_context():
+                    raise Hold("profile_changed")
+                self.staging_model, self.staging_context, self.staging_rows = chosen, context, rows
+                for name, identity in rows:
+                    self.staging_choice.append_text("%s · %s" % (name[-8:], market.human_size(identity[2])))
+                self.staging_note.set_text(tr(
+                    "%d inactive temporary files for %s. Select one to delete." % (len(rows), chosen),
+                    "%s için %d etkin olmayan geçici dosya. Silmek için birini seçin." % (chosen, len(rows)),
+                    "%d inaktive temporäre Dateien für %s. Eine zum Löschen auswählen." % (len(rows), chosen)))
+            except (Hold, OSError) as exc:
+                self.clear_staging_review()
+                self.set_state("ready", str(exc))
+            self.refresh_staging_buttons()
+
+        def discard_staging(self):
+            chosen = self.selected_card()
+            index = self.staging_choice.get_active()
+            if (self.busy or chosen is None or chosen != self.staging_model
+                    or not 0 <= index < len(self.staging_rows)):
+                return
+            if self.staging_context != self.picker_context():
+                self.clear_staging_review()
+                self.refresh_staging_buttons()
+                self.set_state("ready", "profile_changed")
+                return
+            name, identity = self.staging_rows[index]
+            # A new scan and selection are required after every attempt.
+            self.clear_staging_review()
+            try:
+                self.market.discard_staging(chosen, name, identity)
+                self.set_state("ready", tr("Temporary file deleted.", "Geçici dosya silindi.",
+                                           "Temporäre Datei gelöscht."))
+            except (Hold, OSError) as exc:
+                self.set_state("ready", str(exc))
+            self.refresh_staging_buttons()
 
         def use_selected_card(self):
             model_id = self.selected_card()
