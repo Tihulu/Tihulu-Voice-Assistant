@@ -317,6 +317,23 @@ class FreshStartTests(DesktopFixture):
         self.text("Merhaba!")
         self.assertEqual(len(self.ui.session.history), 2)
 
+    def test_discovery_failure_invalidates_previously_ready_inventory(self):
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.ui.reload.emit("clicked")
+        self.until(lambda: not self.ui.busy)
+        self.ui.models.set_active(0)
+        self.assertTrue(self.ui.return_to_chat.get_sensitive())
+        with patch.object(self.backend, "models", side_effect=Hold("jan_unavailable")):
+            self.ui.reload.emit("clicked")
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.inventory, ())
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.assertFalse(self.ui.send.get_sensitive())
+        self.assertEqual(self.ui.cfg["llm"], "fixture-chat")
+        self.ui.reload.emit("clicked")
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(self.ui.return_to_chat.get_sensitive())
+
     def test_blank_start_keeps_local_analysis_available(self):
         self.assertFalse(self.ui.tool_panel.get_expanded())
         self.assertFalse(self.ui.analysis.result_actions.get_visible())
@@ -1032,6 +1049,32 @@ class PreviewTests(MarketFixture):
         self.ui.cfg["llm"] = "fixture-chat"
         self.ui.refresh()
         self.assertTrue(self.ui.test_chat_button.get_sensitive())
+
+    def test_preview_does_not_require_a_chat_model(self):
+        self.assertEqual(self.ui.inventory, ())
+        self.assertTrue(self.preview_of("tr").get_sensitive())
+        self.click(self.preview_of("tr"))
+        self.until(lambda: bool(self.backend.speeches))
+        self.assertEqual(self.backend.speeches[-1].language, "tr")
+        self.jan.assert_not_called()
+        self.ui.interrupt(False)
+        self.backend.playback_release.set()
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(self.backend.playback_cleaned)
+
+    def test_missing_voice_file_is_not_ready(self):
+        Path(self.ui.cfg["voices"]["tr"]).unlink()
+        self.ui.refresh()
+        self.assertFalse(self.preview_of("tr").get_sensitive())
+        self.assertIn("tr", self.ui.voice_setup_note.get_text())
+
+    def test_missing_whisper_file_disables_talk_but_not_text(self):
+        self.connect_model()
+        Path(self.ui.cfg["stt"]).unlink()
+        self.ui.refresh()
+        self.assertFalse(self.ui.talk.get_sensitive())
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.assertIn("Whisper", self.ui.voice_setup_note.get_text())
 
     def test_preview_checkpoint_refuses_replaced_profile(self):
         self.connect_model()

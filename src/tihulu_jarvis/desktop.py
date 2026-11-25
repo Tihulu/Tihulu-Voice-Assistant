@@ -350,6 +350,8 @@ def create_window(app, loop, bridge=None):
             self.url = Gtk.Entry(text=self.cfg["endpoint"],placeholder_text="Jan · HTTP loopback URL")
             models.append(self.url)
             self.reload = self.button(models,tr("Discover Jan models","Jan modellerini bul","Jan-Modelle suchen"),self.discover)
+            self.model_discovery_note = Gtk.Label(xalign=0, wrap=True)
+            models.append(self.model_discovery_note)
             self.models = Gtk.ComboBoxText()
             models.append(self.models)
             self.models.connect("changed", self.select_model)
@@ -362,6 +364,8 @@ def create_window(app, loop, bridge=None):
             self.url.connect("changed", lambda *_:self.forget_inventory())
             self.labels, self.pickers, self.previews = {}, [], {}
             self.preview_locales = {}
+            self.voice_setup_note = Gtk.Label(xalign=0, wrap=True)
+            models.append(self.voice_setup_note)
             for key, caption in [("stt","STT · Whisper (.bin)"),("tr","Piper · Türkçe"),("en","Piper · English"),("de","Piper · Deutsch")]:
                 row = Gtk.Box(spacing=8)
                 models.append(row)
@@ -1302,6 +1306,19 @@ def create_window(app, loop, bridge=None):
             connected = self.cfg["llm"] in self.inventory
             self.setup.set_visible(not connected)
             self.return_to_chat.set_sensitive(not self.busy and connected)
+            if connected:
+                model_note = tr("Model selected. Text chat is available.",
+                                "Model seçildi. Yazılı sohbet kullanılabilir.",
+                                "Modell ausgewählt. Textchat verfügbar.")
+            elif self.inventory:
+                model_note = tr("Choose one of the discovered models.",
+                                "Bulunan modellerden birini seç.",
+                                "Eines der gefundenen Modelle auswählen.")
+            else:
+                model_note = tr("No current model inventory. Discover or retry the connection.",
+                                "Güncel model listesi yok. Bağlantıyı keşfet veya yeniden dene.",
+                                "Keine aktuelle Modellliste. Verbindung suchen oder erneut versuchen.")
+            self.model_discovery_note.set_text(model_note)
             self.setup_connect.set_sensitive(not self.busy)
             if not self.url.get_text().strip():
                 self.setup_note.set_text(tr(
@@ -1349,9 +1366,34 @@ def create_window(app, loop, bridge=None):
                     "local_audio_device", ("push_to_talk",), now)[0] == profiles.ALLOW)
             except Hold:
                 allowed = False
-            self.talk.set_sensitive(not self.busy and connected and allowed \
-                and bool(self.cfg["stt"]) and bool(self.cfg["voices"]) \
-                and audio.tools_ready("arecord","whisper-cli","piper","aplay"))
+            stt_present = bool(self.cfg["stt"]) and Path(self.cfg["stt"]).is_file()
+            voices_present = tuple(lang for lang, path in self.cfg["voices"].items()
+                                   if path and Path(path).is_file())
+            missing_tools = tuple(name for name in readiness.AUDIO_TOOLS
+                                  if not audio.tools_ready(name))
+            voice_ready = allowed and stt_present and bool(voices_present) and not missing_tools
+            if not allowed:
+                voice_note = tr("Audio permission is not granted.", "Ses izni verilmemiş.",
+                                "Audiofreigabe fehlt.")
+            elif missing_tools:
+                voice_note = tr("Missing audio tools: ", "Eksik ses araçları: ",
+                                "Fehlende Audiowerkzeuge: ") + ", ".join(missing_tools)
+            elif not stt_present:
+                voice_note = tr("Choose an existing Whisper model.", "Mevcut bir Whisper modeli seç.",
+                                "Vorhandenes Whisper-Modell wählen.")
+            elif not voices_present:
+                voice_note = tr("Choose an existing Piper voice.", "Mevcut bir Piper sesi seç.",
+                                "Vorhandene Piper-Stimme wählen.")
+            else:
+                voice_note = tr("Audio files and tools detected; test playback and microphone.",
+                                "Ses dosyaları ve araçlar bulundu; ses ve mikrofonu test et.",
+                                "Audiodateien und Werkzeuge gefunden; Wiedergabe und Mikrofon testen.")
+                absent = tuple(lang for lang in ("tr", "en", "de") if lang not in voices_present)
+                if absent:
+                    voice_note += " " + tr("Unconfigured voices: ", "Ayarlanmamış sesler: ",
+                                           "Nicht eingerichtete Stimmen: ") + ", ".join(absent)
+            self.voice_setup_note.set_text(voice_note)
+            self.talk.set_sensitive(not self.busy and connected and voice_ready)
             self.stop.set_sensitive(self.stage in ("synthesizing","speaking") and self.playback is not None)
             # Muting is available while a turn is idle or while output plays.
             self.mute.set_sensitive(not self.busy or self.playback is not None)
@@ -1379,7 +1421,7 @@ def create_window(app, loop, bridge=None):
                 self.transcribe_button.set_sensitive(connected and bool(self.cfg["stt"]))
                 for widget, lang in self.previews.items():
                     # A preview speaks only the locale that is actually selected.
-                    widget.set_sensitive(bool(self.cfg["voices"].get(lang)) and allowed
+                    widget.set_sensitive(lang in voices_present and allowed
                                          and audio.tools_ready("piper","aplay"))
 
         def build_resources_page(self):
@@ -2750,6 +2792,9 @@ def create_window(app, loop, bridge=None):
                 self.set_state("ready", str(exc))
 
         def discover_market(self):
+            if self.busy:
+                return
+            self.forget_inventory()
             async def run(epoch):
                 client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 cards = await market.from_models(client, languages=(), now=0.0)
@@ -3056,14 +3101,17 @@ def create_window(app, loop, bridge=None):
             self.show_owned_picker(dialog, response)
 
         def preview(self, lang):
-            if self.busy or self.cfg["llm"] not in self.inventory:
+            if self.busy or lang not in ("tr", "en", "de"):
+                return
+            if not audio.tools_ready("piper", "aplay"):
+                self.set_state("ready", "audio_backend_missing")
                 return
             sample = {"tr": "Bu bir ses önizlemesidir.",
                       "en": "This is a voice preview.",
                       "de": "Das ist eine Stimmprobe."}[lang]
             try:
                 self.require_tools(("local_audio_device", ("push_to_talk",)))
-                speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"][lang], lang).id)
+                speech = SpeechRequest(sample, lang, audio.voice_for(self.cfg["voices"].get(lang), lang).id)
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return
@@ -3351,6 +3399,11 @@ def create_window(app, loop, bridge=None):
             task.add_done_callback(finished)
 
         def discover(self):
+            if self.busy:
+                return
+            # A new discovery must not leave an old inventory actionable on failure.
+            # Keep the saved preference, but restore it only if returned again.
+            self.forget_inventory()
             if not self.url.get_text().strip():
                 self.set_state("ready", tr(
                     "Enter the local Jan API URL first.",
