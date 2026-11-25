@@ -14,8 +14,8 @@ class AdapterTests(unittest.TestCase):
         self.c=Candidate("jan","llm","local","jan",True,True,4,80)
         self.call=prepare(self.c,"job","llm",b"mavi")
         self.grant=self.g.fixture_grant("e",Request(self.ctx,"engine",self.call.target,"local"),60)
-    def adapter(self,data=b"mavi"):
-        return LocalAdapter(self.g,self.ctx,self.c,"job","llm",data,self.grant)
+    def adapter(self,data=b"mavi",grant=None):
+        return LocalAdapter(self.g,self.ctx,self.c,"job","llm",data,self.grant if grant is None else grant)
     def test_exact_input_and_model_bound(self):
         a=self.adapter()
         a.event("job",1,"text","Merhaba")
@@ -26,8 +26,9 @@ class AdapterTests(unittest.TestCase):
         with self.assertRaises(Refused):
             a.event("job",3,"text","late")
     def test_invalid_sequence_and_oversized_output(self):
-        for seq,value in ((True,"a"),(2,"a"),(1,"x"*16385)):
-            a=self.adapter()
+        for i,(seq,value) in enumerate(((True,"a"),(2,"a"),(1,"x"*16385))):
+            grant=self.g.fixture_grant("bad"+str(i),Request(self.ctx,"engine",self.call.target,"local"),60)
+            a=self.adapter(grant=grant)
             with self.assertRaises(Refused):
                 a.event("job",seq,"text",value)
             self.assertEqual(a.state,"held")
@@ -39,10 +40,13 @@ class AdapterTests(unittest.TestCase):
         a.cancel()
         with self.assertRaises(Refused):
             a.event("job",2,"completed",None)
-        b=self.adapter()
+        with self.assertRaises(Refused):
+            self.adapter()
+        fresh=self.g.fixture_grant("fresh",Request(self.ctx,"engine",self.call.target,"local"),60)
+        b=self.adapter(grant=fresh)
         b.event("job",1,"text","mavi")
         b.event("job",2,"completed",None)
-        self.g.revoke("e")
+        self.g.revoke("fresh")
         with self.assertRaises(Refused):
             b.result()
     def test_exact_disclosure_content_and_destination(self):
@@ -61,3 +65,25 @@ class AdapterTests(unittest.TestCase):
         for data in (b'{"count":5,"count":6}',b'{"secret":"canary"}',b'{"count":true}',b'{"count": 5}'):
             with self.assertRaises(Refused):
                 disclosure_target(Envelope("provider",data,sha256(data).hexdigest()))
+
+    def test_same_grant_cannot_start_two_adapters(self):
+        a=self.adapter()
+        with self.assertRaisesRegex(Refused,"grant_already_claimed"):
+            self.adapter()
+        a.event("job",1,"text","mavi")
+        a.event("job",2,"completed",None)
+        self.assertEqual(a.result(),b"mavi")
+
+    def test_simultaneous_claim_has_one_winner(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Barrier
+        barrier=Barrier(2)
+        def start(_):
+            barrier.wait(timeout=5)
+            try:
+                self.adapter()
+                return True
+            except Refused:
+                return False
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            self.assertEqual(sorted(pool.map(start,range(2))),[False,True])
