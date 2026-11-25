@@ -2,6 +2,7 @@
 """Owner-reviewed model revision pointer experiment; no disk or download."""
 from dataclasses import dataclass
 from hashlib import sha256
+from threading import RLock
 from gateway import Request, Refused, token
 from market_fixture import Manifest
 
@@ -32,6 +33,7 @@ class VersionBook:
         self._items={}
         self._current={}
         self._gen={}
+        self._lock=RLock()
     def record(self,manifest,data):
         if type(manifest) is not Manifest:
             raise Refused("invalid_manifest")
@@ -39,29 +41,37 @@ class VersionBook:
         if (type(data) is not bytes or len(data)!=manifest.size
                 or sha256(data).hexdigest()!=manifest.sha256):
             raise Refused("integrity_mismatch")
-        if manifest.identity not in self._items and len(self._items)>=64:
-            raise Refused("version_limit")
-        self._items[manifest.identity]=manifest
-        return manifest.identity
+        with self._lock:
+            for item in self._items.values():
+                if ((item.model,item.revision,item.file)==(manifest.model,manifest.revision,manifest.file)
+                        and item.identity!=manifest.identity):
+                    raise Refused("revision_identity_conflict")
+            if manifest.identity not in self._items and len(self._items)>=64:
+                raise Refused("version_limit")
+            self._items[manifest.identity]=manifest
+            return manifest.identity
     def plan(self,model,next_identity):
         token(model)
         token(next_identity)
-        item=self._items.get(next_identity)
-        if item is None or item.model!=model:
-            raise Refused("revision_not_verified")
-        c=Change(model,self._current.get(model,""),next_identity,self._gen.get(model,0))
-        c.target()
-        return c
+        with self._lock:
+            item=self._items.get(next_identity)
+            if item is None or item.model!=model:
+                raise Refused("revision_not_verified")
+            c=Change(model,self._current.get(model,""),next_identity,self._gen.get(model,0))
+            c.target()
+            return c
     def apply(self,change,grant):
         if type(change) is not Change:
             raise Refused("invalid_change")
         req=Request(self._ctx,"publish",change.target(),"local")
-        self._g.checkpoint(grant,req)
-        if self.plan(change.model,change.next)!=change:
-            raise Refused("stale_change")
-        self._g.checkpoint(grant,req)
-        self._current[change.model]=change.next
-        self._gen[change.model]=change.generation+1
-        return "FIXTURE_POINTER_ONLY"
+        with self._lock:
+            self._g.checkpoint(grant,req)
+            if self.plan(change.model,change.next)!=change:
+                raise Refused("stale_change")
+            self._g.claim(grant,req)
+            self._current[change.model]=change.next
+            self._gen[change.model]=change.generation+1
+            return "FIXTURE_POINTER_ONLY"
     def current(self,model):
-        return self._current.get(model)
+        with self._lock:
+            return self._current.get(model)

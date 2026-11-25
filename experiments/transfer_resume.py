@@ -27,8 +27,10 @@ class ResumeBook:
         self._closed=False
 
     def pause(self, transfer):
-        with self._lock:
-            if (self._closed or type(transfer) is not FixtureTransfer or transfer._done
+        if type(transfer) is not FixtureTransfer:
+            raise Refused("invalid_partial")
+        with self._lock, transfer._lock:
+            if (self._closed or transfer._done
                     or transfer._g is not self._g or transfer._ctx!=self._ctx
                     or len(self._issued)>=64):
                 raise Refused("invalid_partial")
