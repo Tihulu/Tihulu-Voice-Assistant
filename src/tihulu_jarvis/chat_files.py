@@ -184,12 +184,18 @@ class ChatFiles:
         try:
             root = files.checked_root(root)
             profile_id, live = self.bind("folder")
+            def selected_check():
+                if not self.allowed(live, "folder"):
+                    raise Hold("local_file_not_authorized")
+            identity = files.root_identity(root, checkpoint=selected_check)
         except Hold as exc:
             ui.set_state("ready", str(exc))
             return
         async def run(epoch):
             folder = await self.run_worker(epoch, profile_id, live, ("folder",),
-                lambda checkpoint: files.list_dir(root, checkpoint=checkpoint))
+                lambda checkpoint: files.list_dir(root, checkpoint=checkpoint, expected_root=identity))
+            files.require_root_identity(root, identity, checkpoint=selected_check)
+            ui.session.check(epoch)
             self.folder, self.profile_id, self.live = folder, profile_id, live
             rows = []
             for index, entry in enumerate(folder.entries):
