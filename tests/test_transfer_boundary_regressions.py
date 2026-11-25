@@ -2269,6 +2269,40 @@ class JanInventoryIdentityTests(unittest.TestCase):
             category="llm", provider="jan", engine="jan", installed=True,
             trust_level="curated").checked()
 
+    def test_inventory_batch_commits_once(self):
+        with patch.object(self.registry, "store", wraps=self.registry.store) as store:
+            self.registry.record_jan_inventory((self.jan("one"), self.jan("two")))
+            self.assertEqual(store.call_count, 1)
+            self.registry.record_jan_inventory((self.jan("one"), self.jan("two")))
+            self.assertEqual(store.call_count, 1)
+        self.assertEqual(len(self.registry.cards()), 2)
+
+    def test_inventory_write_failure_leaves_no_partial_additions(self):
+        existing = self.registry.save_card(self.jan("existing"))
+        with patch.object(market.os, "replace", side_effect=OSError("fixture")):
+            with self.assertRaises(OSError):
+                self.registry.record_jan_inventory((self.jan("one"), self.jan("two")))
+        self.assertEqual(self.registry.cards(), (existing,))
+
+    def test_rediscovery_preserves_revision_sequence_after_unregister(self):
+        initial = self.registry.save_card(self.jan())
+        registered = self.registry.save_card(market.register_installed(initial))
+        self.registry.unregister(registered.model_id)
+        self.registry.record_jan_inventory((self.jan(),))
+        current = self.registry.card(initial.model_id)
+        self.assertGreater(current.revision, initial.revision)
+        self.assertEqual(self.registry.history(initial.model_id), (initial,))
+
+    def test_forgotten_foreign_history_blocks_inventory_batch(self):
+        old = self.registry.save_card(market.ModelCard(
+            model_id="fixture", display_name="Other", category="stt"))
+        current = self.registry.save_card(market.replace(old, display_name="Other revised"))
+        self.registry.unregister(current.model_id)
+        with self.assertRaisesRegex(Hold, "registry_discovery_conflict"):
+            self.registry.record_jan_inventory((self.jan("new"), self.jan()))
+        self.assertEqual(self.registry.cards(), ())
+        self.assertEqual(self.registry.history(old.model_id), (old,))
+
     def test_new_inventory_records_preserve_order(self):
         self.assertEqual(self.registry.record_jan_inventory(
             (self.jan("second"), self.jan("first"))), ("second", "first"))

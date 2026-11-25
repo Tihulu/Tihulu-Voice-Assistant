@@ -1561,18 +1561,27 @@ class Registry:
         incoming = tuple(card.checked() for card in cards)
         if len({card.model_id for card in incoming}) != len(incoming):
             raise Hold("registry_discovery_conflict")
-        known = {card.model_id: card for card in self.cards()}
+        current, selection = self.load()
+        known = {card.model_id: card for card in current}
+        additions = []
         for card in incoming:
             previous = known.get(card.model_id)
             if (not self._jan_inventory_card(card) or card.state != "DISCOVERED"
                     or card.registered or card.loaded
                     or (previous is not None and not self._jan_inventory_card(previous))):
                 raise Hold("registry_discovery_conflict")
-        for card in incoming:
-            previous = known.get(card.model_id)
             if previous is None:
-                self.save_card(card, expected=None)
-            # Keep the existing Jan metadata, state, revision and health.
+                rows = self.history(card.model_id)
+                if rows:
+                    # A forgotten foreign identity must not inherit Jan provenance.
+                    if any(not self._jan_inventory_card(row) for row in rows):
+                        raise Hold("registry_discovery_conflict")
+                    card = replace(card, revision=rows[-1].revision + 1)
+                additions.append(card)
+            # Keep existing Jan metadata, state, revision and health.
+        if additions:
+            # Publish the entire validated inventory in one registry generation.
+            self.store(current + tuple(additions), selection)
         return tuple(card.model_id for card in incoming)
 
     @_registry_locked
