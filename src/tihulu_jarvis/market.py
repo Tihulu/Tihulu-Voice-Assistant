@@ -746,6 +746,7 @@ class Transfer:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self._root_identity = _directory_identity(self.root)
         self.temp = None
+        self._staging_proof = None
         self.received = 0
         self.state = card.state
 
@@ -807,11 +808,13 @@ class Transfer:
             raise Hold("transfer_reported_invalid_length")
         if self.source.size and written != self.source.size:
             raise Hold("transfer_size_mismatch")
-        checksum = await _verified_artifact_async(self.temp, written, checkpoint=self._check)
-        if checksum != self.source.checksum:
+        proof = await _verified_artifact_async(self.temp, written, checkpoint=self._check,
+                                               return_proof=True)
+        if proof.digest != self.source.checksum:
             raise Hold("transfer_checksum_mismatch")
         self._check()
-        return checksum
+        self._staging_proof = proof
+        return proof.digest
 
     @_transfer_locked
     def _publish(self, registered, *, replacing):
@@ -829,7 +832,9 @@ class Transfer:
             if self.card.artifact_digest:
                 self.registry.retain_artifact(self.card, target, checkpoint=self._check)
         saved = self.registry._publish_owned(self.card, registered, self.temp,
-                                             checkpoint=self._check)
+                                             checkpoint=self._check,
+                                             staging_proof=self._staging_proof)
+        self._staging_proof = None
         self.temp = None
         self.card, self.state = saved, saved.state
         return saved
@@ -1087,6 +1092,18 @@ def _require_free_space(directory, size):
         raise Hold("insufficient_storage")
 
 
+def _artifact_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode, info.st_nlink)
+
+
+@dataclass(frozen=True)
+class _ArtifactProof:
+    path: Path
+    identity: tuple
+    digest: str
+
+
 def _artifact_hash_steps(path, size, *, checkpoint=lambda: None):
     """Shared bounded hashing iterator; closes descriptor even when abandoned."""
     if type(size) is not int or not 0 < size <= DIGEST_LIMIT:
@@ -1108,13 +1125,13 @@ def _artifact_hash_steps(path, size, *, checkpoint=lambda: None):
             h.update(block)
             total += len(block)
             yield None
+        checkpoint()
         after = os.fstat(fd)
         current = os.stat(path, follow_symlinks=False)
-        identity = lambda x: (x.st_dev,x.st_ino,x.st_size,x.st_mtime_ns,x.st_ctime_ns,x.st_mode)
-        if identity(before) != identity(after) or identity(before) != identity(current):
+        identity = _artifact_identity(before)
+        if identity != _artifact_identity(after) or identity != _artifact_identity(current):
             raise Hold("transfer_artifact_changed")
-        checkpoint()
-        return h.hexdigest()
+        return _ArtifactProof(Path(path), identity, h.hexdigest())
     except OSError:
         raise Hold("transfer_artifact_unreadable") from None
     finally:
@@ -1128,16 +1145,17 @@ def _verified_artifact(path, size, *, checkpoint=lambda: None):
         while True:
             next(steps)
     except StopIteration as done:
-        return done.value
+        return done.value.digest
     finally:
         steps.close()
 
 
-async def _verified_artifact_async(path, size, *, checkpoint=lambda: None):
+async def _verified_artifact_async(path, size, *, checkpoint=lambda: None, return_proof=False):
     """Yield between bounded reads on the owning event loop.
 
     No worker can outlive cancellation; permission callbacks remain on their
-    original thread. Publication still rechecks bytes under the registry lock.
+    original thread. Publication revalidates the exact verified file identity
+    under the registry lock; restart recovery always hashes bytes independently.
     This bounds work per iteration, not filesystem I/O latency.
     """
     steps = _artifact_hash_steps(path, size, checkpoint=checkpoint)
@@ -1146,7 +1164,7 @@ async def _verified_artifact_async(path, size, *, checkpoint=lambda: None):
             try:
                 next(steps)
             except StopIteration as done:
-                return done.value
+                return done.value if return_proof else done.value.digest
             await asyncio.sleep(0)
     finally:
         steps.close()
@@ -1902,21 +1920,35 @@ class Registry:
                 temp.unlink(missing_ok=True)
 
     @staticmethod
-    def _payload_record(path, *, checkpoint=lambda: None):
+    def _payload_record(path, *, checkpoint=lambda: None, proof=None):
+        path = Path(path)
+        checkpoint()
         info = path.lstat()
-        digest = _verified_artifact(path, info.st_size, checkpoint=checkpoint)
+        if proof is None:
+            digest = _verified_artifact(path, info.st_size, checkpoint=checkpoint)
+        else:
+            # Internal, ephemeral evidence from the completed async hash;
+            # never accept a persisted or caller-supplied digest as proof.
+            if (not isinstance(proof, _ArtifactProof) or proof.path != path
+                    or proof.identity != _artifact_identity(info)
+                    or info.st_nlink != 1):
+                raise Hold("transfer_artifact_changed")
+            digest = proof.digest
         fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
         try:
-            now = os.fstat(fd)
-            identity = lambda x: (x.st_dev, x.st_ino, x.st_size, x.st_mtime_ns, x.st_ctime_ns)
-            if not stat.S_ISREG(now.st_mode) or identity(info) != identity(now):
+            identity = _artifact_identity(info)
+            if not stat.S_ISREG(info.st_mode) or identity != _artifact_identity(os.fstat(fd)):
                 raise Hold("artifact_not_replaceable")
             os.fsync(fd)
+            checkpoint()
+            if (identity != _artifact_identity(os.fstat(fd))
+                    or identity != _artifact_identity(path.lstat())):
+                raise Hold("transfer_artifact_changed")
         finally:
             os.close(fd)
         return {"size": info.st_size, "digest": digest}
 
-    def _publish_owned(self, current, candidate, staged, *, checkpoint=lambda: None):
+    def _publish_owned(self, current, candidate, staged, *, checkpoint=lambda: None, staging_proof=None):
         """Publish verified bytes with a recovery record; caller holds lock."""
         if self.card(current.model_id) != current or current.model_id != candidate.model_id:
             raise Hold("transfer_card_changed")
@@ -1931,7 +1963,7 @@ class Registry:
         if _exists_entry(backup):
             raise Hold("publication_recovery_required")
         staged = Path(staged)
-        incoming = self._payload_record(staged, checkpoint=checkpoint)
+        incoming = self._payload_record(staged, checkpoint=checkpoint, proof=staging_proof)
         if incoming != {"size": candidate.disk_size_bytes, "digest": candidate.artifact_digest}:
             raise Hold("transfer_checksum_mismatch")
         previous = None
@@ -1963,6 +1995,8 @@ class Registry:
                 os.link(target, backup, follow_symlinks=False)
                 _sync_directory(target.parent)
             checkpoint()
+            if staging_proof is not None and staging_proof.identity != _artifact_identity(staged.lstat()):
+                raise Hold("transfer_artifact_changed")
             os.replace(staged, target)
             _sync_directory(target.parent)
             checkpoint()

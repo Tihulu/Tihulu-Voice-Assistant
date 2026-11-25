@@ -1930,5 +1930,73 @@ class ArchiveDurabilityTests(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), OLD)
         self.assertFalse(self.registry.removal_journal.exists())
 
+class StagingProofTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.file = self.root / "stage"
+        self.file.write_bytes(NEW)
+
+    async def proof(self):
+        return await market._verified_artifact_async(
+            self.file, len(NEW), return_proof=True)
+
+    async def test_valid_proof_avoids_duplicate_hash(self):
+        proof = await self.proof()
+        with patch.object(market, "_verified_artifact", side_effect=AssertionError("duplicate hash")):
+            self.assertEqual(self.registry._payload_record(self.file, proof=proof),
+                             {"size": len(NEW), "digest": hashlib.sha256(NEW).hexdigest()})
+
+    async def test_replaced_file_cannot_reuse_proof(self):
+        proof = await self.proof()
+        other = self.root / "replacement"
+        other.write_bytes(NEW)
+        other.replace(self.file)
+        with self.assertRaisesRegex(Hold, "transfer_artifact_changed"):
+            self.registry._payload_record(self.file, proof=proof)
+
+    async def test_same_size_edit_cannot_reuse_proof(self):
+        proof = await self.proof()
+        self.file.write_bytes(b"x" * len(NEW))
+        with self.assertRaisesRegex(Hold, "transfer_artifact_changed"):
+            self.registry._payload_record(self.file, proof=proof)
+
+    async def test_hardlink_cannot_reuse_proof(self):
+        import os
+        proof = await self.proof()
+        os.link(self.file, self.root / "alias")
+        with self.assertRaisesRegex(Hold, "transfer_artifact_changed"):
+            self.registry._payload_record(self.file, proof=proof)
+
+    async def test_mutation_in_final_checkpoint_is_detected(self):
+        proof = await self.proof()
+        calls = []
+        def checkpoint():
+            calls.append(True)
+            if len(calls) == 2:
+                self.file.write_bytes(b"x" * len(NEW))
+        with self.assertRaisesRegex(Hold, "transfer_artifact_changed"):
+            self.registry._payload_record(self.file, proof=proof, checkpoint=checkpoint)
+
+    async def test_transfer_retains_independent_recovery_hash(self):
+        card = self.registry.save_card(market.ModelCard(
+            model_id="fixture-model", display_name="Fixture", category="stt"))
+        source = market.Source(reference="catalog:fixture",
+                               checksum=hashlib.sha256(NEW).hexdigest(),
+                               size=len(NEW), network_approval="fixture",
+                               approval_expires_at=1e12)
+        async def fetch(path, note):
+            Path(path).write_bytes(NEW)
+            note(len(NEW))
+            return len(NEW)
+        with patch.object(market, "_verified_artifact", wraps=market._verified_artifact) as sync:
+            saved = await market.Transfer(self.registry, card, source, fetch, now=1).run()
+        self.assertEqual(saved.artifact_digest, source.checksum)
+        self.assertEqual(sync.call_count, 1)
+        self.assertEqual(Path(sync.call_args.args[0]), self.root / "artifacts" / card.model_id)
+        self.assertFalse(self.registry.publication_journal.exists())
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
