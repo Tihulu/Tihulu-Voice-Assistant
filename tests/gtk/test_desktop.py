@@ -1019,6 +1019,68 @@ class MarketInventoryTests(MarketFixture):
         self.assertEqual(self.ui.models.get_active_text(), "fixture-qwen")
         self.assertTrue(self.ui.send.get_sensitive())
 
+    def prepare_jan_choice(self):
+        self.backend.inventory = ("fixture-qwen",)
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy and len(self.ui.market.cards()) == 1)
+        self.ui.market_filter.set_active(1)
+        self.pick_card("fixture-qwen")
+        return self.ui.market.card("fixture-qwen")
+
+    def test_jan_settings_failure_does_not_register_or_select(self):
+        card = self.prepare_jan_choice()
+        old = settings.load()
+        profile = self.ui.store.snapshot(self.ui.cfg["profile"])
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "settings_unwritable")
+        self.assertEqual(self.ui.market.card(card.model_id), card)
+        self.assertEqual(self.ui.store.snapshot(profile[0].id), profile)
+        self.assertEqual(settings.load(), old)
+        self.assertEqual(self.ui.cfg["llm"], old["llm"])
+
+    def test_jan_profile_failure_restores_local_selection(self):
+        card = self.prepare_jan_choice()
+        old = settings.load()
+        profile = self.ui.store.snapshot(self.ui.cfg["profile"])
+        with patch.object(self.ui.store, "_save_locked", side_effect=Hold("profile_write_failed")):
+            self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "profile_write_failed")
+        self.assertEqual(self.ui.market.card(card.model_id).state, "REGISTERED")
+        self.assertEqual(self.ui.store.snapshot(profile[0].id), profile)
+        self.assertEqual(settings.load(), old)
+        self.assertEqual(self.ui.cfg["llm"], old["llm"])
+
+    def test_jan_partial_profile_commit_reports_recovery(self):
+        card = self.prepare_jan_choice()
+        old = settings.load()
+        profile = self.ui.store.snapshot(self.ui.cfg["profile"])
+        original = self.ui.store._save_locked
+
+        def committed_then_failed(updated):
+            original(updated)
+            raise Hold("profile_history_write_failed")
+
+        with patch.object(self.ui.store, "_save_locked", side_effect=committed_then_failed):
+            self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "llm_choice_recovery_required")
+        self.assertEqual(settings.load(), old)
+        self.assertEqual(self.ui.cfg["llm"], old["llm"])
+        self.assertEqual(self.ui.store.load(profile[0].id).llm_model_id, card.model_id)
+
+    def test_jan_stale_settings_refuse_choice_before_registration(self):
+        card = self.prepare_jan_choice()
+        profile = self.ui.store.snapshot(self.ui.cfg["profile"])
+        newer = settings.load()
+        newer["text_scale"] = "large"
+        settings.save(newer)
+        self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "settings_changed")
+        self.assertEqual(self.ui.market.card(card.model_id), card)
+        self.assertEqual(self.ui.store.snapshot(profile[0].id), profile)
+        self.assertEqual(settings.load(), newer)
+
     def test_registered_jan_model_can_be_selected_again(self):
         self.backend.inventory = ("fixture-qwen", "fixture-llama")
         self.ui.url.set_text("http://127.0.0.1:9876")

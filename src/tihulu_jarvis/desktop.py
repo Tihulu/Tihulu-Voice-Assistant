@@ -827,7 +827,7 @@ def create_window(app, loop, bridge=None):
             return (profile.id, profile.version, profile.based_on_mode,
                     self.url.get_text().strip(), self.cfg["llm"], stamp)
 
-        def activate_profile(self, profile_id, quiet=False, expected=None):
+        def activate_profile(self, profile_id, quiet=False, expected=None, *, persist=True):
             entry, stamp = self.store.snapshot(profile_id)
             if expected is not None and (entry, stamp) != expected:
                 raise Hold("profile_changed")
@@ -846,7 +846,8 @@ def create_window(app, loop, bridge=None):
                 self.analysis.reset()
             self.cfg["profile"] = entry.id
             self.policy = profiles.effective(entry)
-            self.save()
+            if persist:
+                self.save()
             self.profile_note.set_text("%s · %s · %s" % (entry.name, entry.based_on_mode,
                                                           profiles.MODE_TEXT[entry.based_on_mode]))
             if not quiet:
@@ -1795,10 +1796,9 @@ def create_window(app, loop, bridge=None):
 
         def select_model(self, widget):
             value = widget.get_active_text()
-            if value and value in self.inventory:
-                if value != self.cfg["llm"]:
-                    self.search_recall_epoch += 1
-                    self.clear_model_probe()
+            if value and value in self.inventory and value != self.cfg["llm"]:
+                self.search_recall_epoch += 1
+                self.clear_model_probe()
                 self.cfg["llm"] = value
                 self.save()
                 self.refresh()
@@ -1828,13 +1828,43 @@ def create_window(app, loop, bridge=None):
             self.build_market_page()
             return card
 
-        def remember(self, category, value):
-            """Record a choice in this profile and in the local settings."""
-            profile = self.store.load(self.cfg["profile"]).checked()
-            fields = {"llm": "llm_model_id", "stt": "stt_model_id", "tts": "tts_model_id"}
-            updated = replace(profile, version=profile.version + 1, **{fields[category]: value})
-            self.store.save(updated)
-            self.activate_profile(updated.id, quiet=True)
+        def persist_jan_choice(self, card, expected):
+            """Commit a local Jan selection without publishing a premature UI choice.
+
+            A truthful registration can survive a failed choice. Profile history
+            writes can fail after the active profile changed; report that as
+            recovery required rather than rewriting policy or claiming success.
+            """
+            profile, stamp = self.store.snapshot(self.cfg["profile"])
+            if profile.state != "active":
+                raise Hold("profile_not_active")
+            proposed = settings.checked(self.cfg)
+            proposed["llm"] = card.model_id
+            updated = replace(profile, version=profile.version + 1,
+                              llm_model_id=card.model_id).checked()
+            with self.market.transfer_lease(card.model_id), self.market._write_guard():
+                if self.market.card(card.model_id) != expected:
+                    raise Hold("registry_card_changed")
+                with self.store._mutation_lock():
+                    if self.store.snapshot(profile.id) != (profile, stamp):
+                        raise Hold("profile_changed")
+                    with settings.choice_transaction(proposed, expected=self.cfg):
+                        if card != expected:
+                            self.market.save_card(card, expected=expected)
+                        try:
+                            self.store._save_locked(updated)
+                        except (Hold, OSError):
+                            try:
+                                unchanged = self.store.snapshot(profile.id) == (profile, stamp)
+                            except (Hold, OSError):
+                                unchanged = False
+                            if not unchanged:
+                                raise Hold("llm_choice_recovery_required") from None
+                            raise
+            self.cfg = proposed
+            self.activate_profile(updated.id, quiet=True, persist=False)
+            self.models.set_active(self.inventory.index(card.model_id))
+            self.refresh()
 
         def use_card(self, model_id, *, expected=None):
             """Validate selection before recording an activation; never start a model."""
@@ -1852,14 +1882,10 @@ def create_window(app, loop, bridge=None):
                     raise Hold("registry_discovery_conflict")
                 # Existing Jan registrations remain valid for repeat selection.
                 if card.state == "DISCOVERED":
-                    card = self.market.save_card(market.register_installed(card), expected=expected)
+                    card = market.register_installed(card)
                 elif not card.registered:
                     raise Hold("model_not_selectable")
-                self.cfg["llm"] = model_id
-                self.remember("llm", model_id)
-                self.models.set_active(self.inventory.index(model_id))
-                self.save()
-                self.refresh()
+                self.persist_jan_choice(card, expected)
                 return
             if card.state not in ("REGISTERED", "TESTABLE", "ACTIVE"):
                 raise Hold("model_not_selectable")
