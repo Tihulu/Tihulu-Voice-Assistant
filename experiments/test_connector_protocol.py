@@ -79,3 +79,13 @@ class ConnectorTests(unittest.TestCase):
         self.c.cancel(h)
         with self.assertRaises(Refused):
             self.g.checkpoint(self.grant,Request(self.ctx,"agent",self.spec.target(),"local"))
+
+    def test_idle_poll_detects_revocation_and_drops_handle(self):
+        h=self.c.begin(self.spec,self.grant,self.data)
+        self.assertEqual(self.c.poll(),"running")
+        self.g.revoke("a")
+        self.assertEqual(self.c.poll(),"held")
+        with self.assertRaises(Refused):
+            self.c.event(h,"s","j",1,"completed")
+        self.c.close()
+        self.assertEqual(self.c.poll(),"closed")

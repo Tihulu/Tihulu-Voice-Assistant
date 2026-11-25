@@ -80,3 +80,41 @@ class SchedulerTests(unittest.TestCase):
             with self.assertRaises(Refused):
                 self.s.cancel(invalid)
         self.assertEqual(self.s.finish(h),"j0")
+
+    def test_revoked_running_reservation_reclaims_capacity_on_dispatch(self):
+        self.add(0,8,9)
+        self.add(1,8,8)
+        [(old,_)]=self.s.dispatch()
+        self.g.revoke("g0")
+        self.assertEqual(self.s.poll(),(1,0,0))
+        [(new,identity)]=self.s.dispatch()
+        self.assertEqual(identity,"j1")
+        with self.assertRaises(Refused):
+            self.s.finish(old)
+        self.assertEqual(self.s.finish(new),"j1")
+
+    def test_queued_cancel_and_close_revoke_owned_grants(self):
+        j0=Job("j0","agent",8,9)
+        j1=Job("j1","agent",8,8)
+        g0=self.grant(j0,"g0")
+        g1=self.grant(j1,"g1")
+        self.s.queue(j0,g0)
+        self.s.queue(j1,g1)
+        self.s.cancel_queued("j1")
+        with self.assertRaises(Refused):
+            self.g.checkpoint(g1,Request(self.ctx,"agent",j1.target(),"local"))
+        self.s.dispatch()
+        self.s.close()
+        with self.assertRaises(Refused):
+            self.g.checkpoint(g0,Request(self.ctx,"agent",j0.target(),"local"))
+        self.assertEqual(self.s.poll(),(0,0,0))
+
+    def test_running_cancel_revokes_permission(self):
+        j=Job("j","agent",8,9)
+        g=self.grant(j,"g")
+        self.s.queue(j,g)
+        [(h,_)]=self.s.dispatch()
+        self.s.cancel(h)
+        with self.assertRaises(Refused):
+            self.g.checkpoint(g,Request(self.ctx,"agent",j.target(),"local"))
+        self.assertEqual(self.s.poll(),(0,0,0))

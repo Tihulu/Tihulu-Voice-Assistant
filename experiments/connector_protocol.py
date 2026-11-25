@@ -40,6 +40,19 @@ class Connector:
         with self._lock:
             return self._status
 
+    def poll(self):
+        """Owner tick, not a real process cancellation or background worker."""
+        with self._lock:
+            if self._active is not None:
+                _,_,grant,req,_=self._active
+                try:
+                    self._g.checkpoint(grant,req)
+                except Refused:
+                    self._g.revoke(grant.identity)
+                    self._active=None
+                    self._status="held"
+            return self._status
+
     def begin(self,spec,grant,payload):
         with self._lock:
             return self._begin(spec,grant,payload)
