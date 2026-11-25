@@ -75,3 +75,65 @@ class SourceSettingsTests(unittest.TestCase):
             with self.subTest(bad=bad):
                 with self.assertRaises(Hold):
                     settings.checked({"sources": bad})
+
+
+class ChoiceTransactionTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "models.json"
+        self.old = settings.empty()
+        self.new = settings.empty()
+        self.new["stt"] = "/fixture/model.bin"
+
+    def test_success_retains_new_settings(self):
+        settings.save(self.old, self.path)
+        with settings.choice_transaction(self.new, self.path):
+            self.assertEqual(settings.load(self.path), self.new)
+        self.assertEqual(settings.load(self.path), self.new)
+
+    def test_failure_restores_exact_previous_text(self):
+        import json
+        original = json.dumps(self.old, indent=2)
+        self.path.write_text(original)
+        with self.assertRaisesRegex(Hold, "registry_fixture"):
+            with settings.choice_transaction(self.new, self.path):
+                raise Hold("registry_fixture")
+        self.assertEqual(self.path.read_text(), original)
+
+    def test_failure_restores_absence(self):
+        with self.assertRaisesRegex(Hold, "registry_fixture"):
+            with settings.choice_transaction(self.new, self.path):
+                raise Hold("registry_fixture")
+        self.assertFalse(self.path.exists())
+
+    def test_interleaving_writers_and_forget_refused(self):
+        settings.save(self.old, self.path)
+        with settings.choice_transaction(self.new, self.path):
+            with self.assertRaisesRegex(Hold, "settings_busy"):
+                settings.save(self.old, self.path)
+            with self.assertRaisesRegex(Hold, "settings_busy"):
+                settings.forget(self.path)
+        self.assertEqual(settings.load(self.path), self.new)
+
+    def test_compensation_failure_reports_recovery_required(self):
+        from unittest.mock import patch
+        settings.save(self.old, self.path)
+        original = settings._replace_text
+        def fail_restore(path, text):
+            if settings._serialize(self.old) == text:
+                raise OSError("fixture")
+            original(path, text)
+        with patch.object(settings, "_replace_text", side_effect=fail_restore):
+            with self.assertRaisesRegex(Hold, "settings_recovery_required"):
+                with settings.choice_transaction(self.new, self.path):
+                    raise Hold("registry_fixture")
+        self.assertEqual(settings.load(self.path), self.new)
+
+    def test_oversized_settings_refused_without_overwriting(self):
+        settings.save(self.old, self.path)
+        huge = settings.empty()
+        huge["market_refs"] = {str(i): "x" * 4096 for i in range(10)}
+        with self.assertRaisesRegex(Hold, "invalid_local_settings"):
+            settings.save(huge, self.path)
+        self.assertEqual(settings.load(self.path), self.old)
