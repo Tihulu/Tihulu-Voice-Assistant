@@ -64,11 +64,17 @@ class Scheduler:
             except Refused:
                 del self._running[handle]
 
-    def poll(self):
+    def reservations(self):
+        """One coherent owner snapshot after pruning invalid reservations."""
         with self._lock:
             self._prune()
-            return (len(self._queued),len(self._running),
-                    sum(j[0].memory for j in self._running.values()))
+            queued=tuple(j.identity for j,_,_ in self._queued)
+            running=tuple(j.identity for j,_,_ in self._running.values())
+            return queued,running,sum(j[0].memory for j in self._running.values())
+
+    def poll(self):
+        queued,running,memory=self.reservations()
+        return len(queued),len(running),memory
 
     def cancel_queued(self, identity):
         token(identity)

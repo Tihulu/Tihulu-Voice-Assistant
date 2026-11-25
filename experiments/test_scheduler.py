@@ -127,3 +127,12 @@ class SchedulerTests(unittest.TestCase):
         with self.assertRaises(Refused):
             self.s.queue(replace(job,spec_target=[]),grant)
         self.s.queue(job,grant)
+
+    def test_reservation_snapshot_reflects_revocation_and_memory(self):
+        self.add(0,4,9)
+        self.add(1,4,8)
+        self.add(2,4,7)
+        self.s.dispatch()
+        self.assertEqual(self.s.reservations(),(("j2",),("j0","j1"),8))
+        self.g.revoke("g1")
+        self.assertEqual(self.s.reservations(),(("j2",),("j0",),4))
