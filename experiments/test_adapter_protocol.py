@@ -113,3 +113,26 @@ class AdapterTests(unittest.TestCase):
             a.result()
         with self.assertRaises(Refused):
             self.g.checkpoint(self.grant,Request(self.ctx,"engine",self.call.target,"local"))
+
+    def test_payload_consent_cannot_be_replayed(self):
+        data=b'{"count":5}'
+        env=Envelope("provider",data,sha256(data).hexdigest())
+        req=Request(self.ctx,"disclose",disclosure_target(env),"local","minimized")
+        grant=self.g.fixture_grant("one",req,60)
+        self.assertEqual(approved_payload(self.g,grant,self.ctx,env),data)
+        with self.assertRaisesRegex(Refused,"grant_already_claimed"):
+            approved_payload(self.g,grant,self.ctx,env)
+
+    def test_payload_revocation_at_claim_refuses_return(self):
+        from unittest.mock import patch
+        data=b'{"count":5}'
+        env=Envelope("provider",data,sha256(data).hexdigest())
+        req=Request(self.ctx,"disclose",disclosure_target(env),"local","minimized")
+        grant=self.g.fixture_grant("one",req,60)
+        original=self.g.claim
+        def revoke(g,r):
+            original(g,r)
+            self.g.revoke(g.identity)
+        with patch.object(self.g,"claim",side_effect=revoke):
+            with self.assertRaises(Refused):
+                approved_payload(self.g,grant,self.ctx,env)
