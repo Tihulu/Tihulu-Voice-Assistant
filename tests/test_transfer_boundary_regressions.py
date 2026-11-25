@@ -693,5 +693,195 @@ sys.exit(99)
         self.assertEqual(self.backup.read_bytes(), NEW)
         self.assertEqual(self.target.read_bytes(), OLD)
 
+class PublicationRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.target = self.root / "artifacts" / "fixture-model"
+        self.backup = self.target.parent / ".publish-backup"
+
+    def install_old(self):
+        from dataclasses import replace
+        digest = hashlib.sha256(OLD).hexdigest()
+        card = market.ModelCard(model_id="fixture-model", display_name="Fixture",
+                                category="stt")
+        for state in ("REVIEWED", "APPROVED", "QUEUED", "DOWNLOADING",
+                      "VERIFIED", "REGISTERED"):
+            card = market.advance(card, state)
+        card = replace(card, owned_by_jarvis=True, artifact_digest=digest,
+                       disk_size_bytes=len(OLD), storage_ref="sha256-" + digest[:32])
+        self.target.parent.mkdir()
+        self.target.write_bytes(OLD)
+        return self.registry.save_card(card)
+
+    def child(self, operation, phase):
+        import subprocess
+        import sys
+        code = """
+import asyncio, hashlib, os, sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[2])
+from tihulu_jarvis import market
+r = market.Registry(sys.argv[1])
+operation, phase = sys.argv[3:5]
+target = r.root / "artifacts" / "fixture-model"
+backup = target.parent / ".publish-backup"
+if phase == "journal":
+    original = r._write_journal
+    def hook(path, record):
+        original(path, record)
+        if path == r.publication_journal:
+            os._exit(73)
+    r._write_journal = hook
+elif phase == "linked":
+    original = market.os.link
+    def hook(src, dst, **kw):
+        original(src, dst, **kw)
+        if Path(dst) == backup:
+            os._exit(73)
+    market.os.link = hook
+elif phase == "moved":
+    original = market.os.replace
+    def hook(src, dst, **kw):
+        original(src, dst, **kw)
+        if Path(dst) == target and r.publication_journal.exists():
+            os._exit(73)
+    market.os.replace = hook
+elif phase == "committed":
+    original = r.save_card
+    def hook(card):
+        saved = original(card)
+        if r.publication_journal.exists():
+            os._exit(73)
+        return saved
+    r.save_card = hook
+elif phase == "cleaned":
+    original = market._sync_directory
+    def hook(path):
+        original(path)
+        if (path == target.parent and r.publication_journal.exists()
+                and target.exists() and not backup.exists()):
+            os._exit(73)
+    market._sync_directory = hook
+if operation == "rollback":
+    r.rollback("fixture-model", 0)
+else:
+    data = b"synthetic-new"
+    source = market.Source(reference="catalog:fixture",
+                           checksum=hashlib.sha256(data).hexdigest(),
+                           size=len(data), network_approval="fixture",
+                           approval_expires_at=100)
+    async def fetch(path, note, start=0):
+        Path(path).write_bytes(data)
+        note(len(data))
+        return len(data)
+    t = market.Transfer(r, r.card("fixture-model"), source, fetch, now=1)
+    asyncio.run(t.run() if operation == "initial" else t.update())
+sys.exit(99)
+"""
+        result = subprocess.run([sys.executable, "-c", code, str(self.root),
+                                 str(Path(market.__file__).resolve().parent.parent),
+                                 operation, phase], capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 73, result.stderr)
+        self.assertTrue(self.registry.publication_journal.exists())
+
+    def assert_recovered(self, expected):
+        reopened = market.Registry(self.root)
+        card = reopened.card("fixture-model")
+        self.assertEqual(self.target.read_bytes(), expected)
+        self.assertEqual(card.artifact_digest, hashlib.sha256(expected).hexdigest())
+        self.assertFalse(self.backup.exists())
+        self.assertFalse(reopened.publication_journal.exists())
+        self.assertEqual(reopened.card("fixture-model"), card)
+        return card
+
+    def test_update_death_after_journal(self):
+        old = self.install_old()
+        self.child("update", "journal")
+        self.assertEqual(self.assert_recovered(OLD), old)
+
+    def test_update_death_after_backup_link(self):
+        old = self.install_old()
+        self.child("update", "linked")
+        self.assertEqual(self.assert_recovered(OLD), old)
+
+    def test_update_death_after_payload_move(self):
+        old = self.install_old()
+        self.child("update", "moved")
+        self.assertEqual(self.target.read_bytes(), NEW)
+        self.assertEqual(self.assert_recovered(OLD), old)
+
+    def test_update_death_after_registry_commit(self):
+        old = self.install_old()
+        self.child("update", "committed")
+        self.assertGreater(self.assert_recovered(NEW).revision, old.revision)
+
+    def test_update_death_after_cleanup(self):
+        self.install_old()
+        self.child("update", "cleaned")
+        self.assert_recovered(NEW)
+
+    def test_initial_publication_death_before_commit(self):
+        self.registry.save_card(market.ModelCard(model_id="fixture-model",
+                                                display_name="Fixture", category="stt"))
+        self.child("initial", "moved")
+        reopened = market.Registry(self.root)
+        card = reopened.card("fixture-model")
+        self.assertEqual(card.state, "VERIFIED")
+        self.assertFalse(card.artifact_digest)
+        self.assertFalse(self.target.exists())
+        self.assertFalse(reopened.publication_journal.exists())
+
+    def test_initial_publication_death_after_commit(self):
+        self.registry.save_card(market.ModelCard(model_id="fixture-model",
+                                                display_name="Fixture", category="stt"))
+        self.child("initial", "committed")
+        self.assertEqual(self.assert_recovered(NEW).state, "REGISTERED")
+
+    def prepare_rollback(self):
+        old = self.install_old()
+        source = market.Source(reference="catalog:fixture",
+                               checksum=hashlib.sha256(NEW).hexdigest(),
+                               size=len(NEW), network_approval="fixture",
+                               approval_expires_at=100)
+        async def fetch(path, note, start=0):
+            Path(path).write_bytes(NEW)
+            note(len(NEW))
+            return len(NEW)
+        return asyncio.run(market.Transfer(self.registry, old, source, fetch, now=1).update())
+
+    def test_rollback_death_before_commit(self):
+        current = self.prepare_rollback()
+        self.child("rollback", "moved")
+        self.assertEqual(self.assert_recovered(NEW), current)
+
+    def test_rollback_death_after_commit(self):
+        current = self.prepare_rollback()
+        self.child("rollback", "committed")
+        restored = self.assert_recovered(OLD)
+        self.assertGreater(restored.revision, current.revision)
+        self.assertEqual(restored.network_approval, "")
+
+    def test_corrupt_backup_blocks_recovery(self):
+        self.install_old()
+        self.child("update", "moved")
+        self.backup.write_bytes(b"corrupt")
+        with self.assertRaisesRegex(Hold, "publication_recovery_required"):
+            market.Registry(self.root).load()
+        self.assertEqual(self.target.read_bytes(), NEW)
+        self.assertEqual(self.backup.read_bytes(), b"corrupt")
+        self.assertTrue(self.registry.publication_journal.exists())
+
+    def test_two_journals_fail_closed(self):
+        self.install_old()
+        self.child("update", "moved")
+        self.registry.removal_journal.write_text("{}")
+        with self.assertRaisesRegex(Hold, "registry_recovery_conflict"):
+            market.Registry(self.root).load()
+        self.assertEqual(self.target.read_bytes(), NEW)
+        self.assertEqual(self.backup.read_bytes(), OLD)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
