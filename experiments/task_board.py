@@ -39,6 +39,13 @@ class Status:
     state: str
     sequence: int
 
+@dataclass(frozen=True)
+class Receipt:
+    identity: str
+    scope: str
+    spec_target: str
+    payload_digest: str
+
 @dataclass
 class _Record:
     job: Job
@@ -208,6 +215,15 @@ class TaskBoard:
         with self._lock:
             self._poll()
             return tuple(Status(i,r.state,r.sequence) for i,r in self._records.items())
+
+    def receipt(self,identity):
+        with self._lock:
+            self._poll()
+            r=self._records.get(token(identity))
+            if r is None or r.state!="completed" or r.spec.capability!="local-analysis":
+                raise Refused("completed_analysis_required")
+            self._check(r)
+            return Receipt(identity,self._room,r.spec.target(),r.spec.payload_digest)
 
     def capacity(self):
         with self._lock:
