@@ -1509,7 +1509,8 @@ class Registry:
                             (known.artifact_digest != record["digest"]
                              or known.disk_size_bytes != record["size"]))):
                     raise Hold("uninstall_recovery_required")
-                if has_target == has_backup:
+                if (_text_digest(self._serialized(*self._without_card(record["model"])))
+                        != record["new"] or has_target == has_backup):
                     raise Hold("uninstall_recovery_required")
                 if has_backup:
                     verify(backup)
@@ -1567,6 +1568,20 @@ class Registry:
                       "new": _text_digest(new)}
             # Bind the journal before moving bytes. Recovery observes either
             # exact registry generation, never a guessed transaction phase.
+            # Flush the old payload as well as its directory entry before
+            # allowing recovery to depend on its continued existence.
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                verified = os.fstat(fd)
+                if (not stat.S_ISREG(verified.st_mode)
+                        or (verified.st_dev, verified.st_ino, verified.st_size,
+                            verified.st_mtime_ns, verified.st_ctime_ns)
+                        != (info.st_dev, info.st_ino, info.st_size,
+                            info.st_mtime_ns, info.st_ctime_ns)):
+                    raise Hold("artifact_not_replaceable")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
             _sync_directory(target.parent)
             _sync_directory(self.root)
             self._write_removal_journal(record)
