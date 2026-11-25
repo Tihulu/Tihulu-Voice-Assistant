@@ -185,3 +185,27 @@ class TaskBoardTests(unittest.TestCase):
                 self.b.dispatch()
         self.assertEqual(self.b.capacity(),(0,0,0))
         self.assertEqual([s.state for s in self.b.snapshot()],["held","held"])
+
+    def test_revocation_during_scheduler_prune_reconciles_visible_status(self):
+        grants=self.queue("one")
+        self.b.dispatch()
+        original=self.b._scheduler.reservations
+        def revoke():
+            self.g.revoke(grants[0].identity)
+            return original()
+        with patch.object(self.b._scheduler,"reservations",side_effect=revoke):
+            self.assertEqual(self.b.capacity(),(0,0,0))
+        self.assertEqual(self.b.snapshot()[0].state,"held")
+        with self.assertRaises(Refused):
+            self.g.checkpoint(grants[1],grants[1].request)
+
+    def test_queued_revocation_during_scheduler_prune_clears_payload(self):
+        grants=self.queue("one")
+        original=self.b._scheduler.reservations
+        def revoke():
+            self.g.revoke(grants[0].identity)
+            return original()
+        with patch.object(self.b._scheduler,"reservations",side_effect=revoke):
+            self.assertEqual(self.b.snapshot()[0].state,"held")
+        self.assertEqual(self.b._records["one"].payload,b"")
+        self.assertEqual(self.b.dispatch(),())

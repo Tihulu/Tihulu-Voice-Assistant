@@ -144,8 +144,13 @@ class TaskBoard:
                     self._check(r)
                 except Refused:
                     self._stop(r,"held")
-        self._scheduler.poll()
+        queued,running,memory=self._scheduler.reservations()
+        for r in self._records.values():
+            if ((r.state=="queued" and r.job.identity not in queued)
+                    or (r.state=="running" and r.job.identity not in running)):
+                self._stop(r,"held")
         self._open()
+        return len(queued),len(running),memory
 
     def dispatch(self):
         with self._lock:
@@ -240,10 +245,7 @@ class TaskBoard:
 
     def capacity(self):
         with self._lock:
-            self._poll()
-            result=self._scheduler.poll()
-            self._open()
-            return result
+            return self._poll()
 
     def close(self):
         with self._lock:
