@@ -58,6 +58,8 @@ def loopback_fetch(raw, limit=MAX_BODY):
     ip, port, path = _url(raw)
 
     async def fetch(path_name, note, start=0):
+        if type(start) is not int or not 0 <= start < limit:
+            raise Hold("transfer_resume_offset_unverified")
         family = socket.AF_INET if ip.version == 4 else socket.AF_INET6
         try:
             reader, writer = await asyncio.open_connection(str(ip), port, family=family, limit=16384)
@@ -77,10 +79,12 @@ def loopback_fetch(raw, limit=MAX_BODY):
             if not line.endswith(b"\r\n"):
                 raise Hold("transfer_invalid_response")
             status = line[:-2]
-            if not re.fullmatch(rb"HTTP/1\.[01] (?:200|206)(?: [^\r\n]*)?", status):
+            match = re.fullmatch(rb"HTTP/1\.[01] (200|206)(?: [^\r\n]*)?", status)
+            if not match:
                 # A redirect or an error from the source is never followed.
                 raise Hold("transfer_rejected_by_source")
-            if status.endswith(b" 206 Partial Content") and not start:
+            partial = match.group(1) == b"206"
+            if partial and not start:
                 raise Hold("transfer_range_not_honoured")
             headers, size = {}, 0
             while True:
@@ -93,28 +97,46 @@ def loopback_fetch(raw, limit=MAX_BODY):
                 if size > 16384:
                     raise Hold("transfer_invalid_response")
                 key, sep, value = field[:-2].partition(b":")
-                headers[key.lower().strip()] = value.strip()
+                key = key.lower()
+                if not sep or not re.fullmatch(rb"[a-z0-9!#$%&'*+.^_`|~-]+", key) or key in headers:
+                    raise Hold("transfer_invalid_response")
+                headers[key] = value.strip()
             length = headers.get(b"content-length")
             if headers.get(b"transfer-encoding") is not None or headers.get(b"location") is not None:
                 raise Hold("transfer_redirect_or_stream_rejected")
             if length is not None and not re.fullmatch(rb"[0-9]{1,10}", length):
                 raise Hold("transfer_invalid_response")
             ranged = headers.get(b"content-range")
-            if status.endswith(b" 206 Partial Content"):
-                # The source must confirm exactly the offset we asked for.
-                if ranged is None or not re.fullmatch(rb"bytes %d-[0-9]+/[0-9]+" % start, ranged.strip()):
+            if partial:
+                # The open-ended range must cover exactly the remaining bytes.
+                bounds = re.fullmatch(rb"bytes ([0-9]{1,10})-([0-9]{1,10})/([0-9]{1,10})",
+                                      ranged or b"")
+                if not bounds:
                     raise Hold("transfer_range_not_honoured")
-                mode, offset = "ab", start
-                length = None  # the range length is described by Content-Range
-                total = int(ranged.strip().rsplit(b"/", 1)[1])
+                first, last, total = map(int, bounds.groups())
                 if total > limit:
                     raise Hold("transfer_too_large")
-            elif start and status.endswith(b" 200 OK"):
+                if first != start or not first <= last == total - 1:
+                    raise Hold("transfer_range_not_honoured")
+                expected = last - first + 1
+                if length is not None and int(length) != expected:
+                    raise Hold("transfer_invalid_response")
+                length = str(expected).encode("ascii")
+                mode, offset = "ab", start
+            elif ranged is not None:
+                raise Hold("transfer_invalid_response")
+            elif start:
                 mode, offset = "wb", 0  # no Range support: start over, verify later
             if length is not None and int(length) > limit:
                 raise Hold("transfer_too_large")
             if headers.get(b"content-type") is not None and b"application/octet-stream" not in headers[b"content-type"]:
                 raise Hold("transfer_unexpected_content_type")
+            # The caller owns a verified isolated prefix. Never append at a
+            # different offset, even when called without the market wrapper.
+            if offset:
+                import os
+                if os.stat(path_name, follow_symlinks=False).st_size != offset:
+                    raise Hold("transfer_resume_offset_unverified")
             with open(path_name, mode) as out:
                 if length is None:
                     while written <= limit:
