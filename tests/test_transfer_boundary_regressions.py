@@ -1678,5 +1678,94 @@ class RegistryBoundTransferTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse((self.root / "artifacts" / self.card.model_id).exists())
         self.assertFalse(self.registry.card(self.card.model_id).network_approval)
 
+class StagingCleanupTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.other = market.Registry(self.root)
+        self.folder = self.root / "transfers"
+        self.folder.mkdir(mode=0o700)
+        self.model_id = "fixture-model"
+
+    def stage(self, model_id=None):
+        import os
+        fd, name = tempfile.mkstemp(prefix=market._staging_prefix(
+            model_id or self.model_id), dir=self.folder)
+        os.close(fd)
+        path = Path(name)
+        path.write_bytes(NEW)
+        return path
+
+    def test_only_exact_model_staging_candidates_are_listed(self):
+        owned = self.stage()
+        unrelated = self.stage("other-model")
+        legacy = self.folder / "tihulu-transfer-abcdefgh"
+        legacy.write_bytes(OLD)
+        partial = self.folder / "partial-fixture-model"
+        partial.write_bytes(OLD)
+        found = self.registry.staging_candidates(self.model_id)
+        self.assertEqual([name for name, _ in found], [owned.name])
+        self.registry.discard_staging(self.model_id, *found[0])
+        self.assertFalse(owned.exists())
+        for path in (unrelated, legacy, partial):
+            self.assertTrue(path.exists())
+
+    def test_active_lease_prevents_inspection_and_discard(self):
+        stage = self.stage()
+        candidate = self.registry.staging_candidates(self.model_id)[0]
+        with self.other.transfer_lease(self.model_id):
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                self.registry.staging_candidates(self.model_id)
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                self.registry.discard_staging(self.model_id, *candidate)
+        self.assertEqual(stage.read_bytes(), NEW)
+        self.registry.discard_staging(self.model_id, *candidate)
+        self.assertFalse(stage.exists())
+
+    def test_changed_file_identity_refuses_stale_cleanup(self):
+        stage = self.stage()
+        candidate = self.registry.staging_candidates(self.model_id)[0]
+        replacement = self.stage()
+        replacement.replace(stage)
+        with self.assertRaisesRegex(Hold, "staging_changed"):
+            self.registry.discard_staging(self.model_id, *candidate)
+        self.assertEqual(stage.read_bytes(), NEW)
+
+    def test_foreign_name_and_traversal_refused(self):
+        foreign = self.stage("other-model")
+        identity = market._staging_identity(foreign)
+        for name in (foreign.name, "../" + foreign.name):
+            with self.assertRaisesRegex(Hold, "staging_name_untrusted"):
+                self.registry.discard_staging(self.model_id, name, identity)
+        self.assertTrue(foreign.exists())
+
+    def test_symlink_and_hardlink_never_deleted(self):
+        import os
+        outside = self.root / "outside"
+        outside.write_bytes(OLD)
+        alias = self.stage()
+        alias.unlink()
+        alias.symlink_to(outside)
+        hard = self.stage()
+        hard.unlink()
+        os.link(outside, hard)
+        self.assertEqual(self.registry.staging_candidates(self.model_id), ())
+        for path in (alias, hard):
+            with self.assertRaisesRegex(Hold, "staging_file_untrusted"):
+                self.registry.discard_staging(self.model_id, path.name, ())
+        self.assertEqual(outside.read_bytes(), OLD)
+        self.assertTrue(alias.is_symlink())
+        self.assertTrue(hard.exists())
+
+    def test_symlink_staging_directory_refused(self):
+        outside = self.root / "outside"
+        outside.mkdir()
+        self.folder.rmdir()
+        self.folder.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(Hold, "staging_directory_untrusted"):
+            self.registry.staging_candidates(self.model_id)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
