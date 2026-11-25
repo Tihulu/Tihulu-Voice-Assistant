@@ -669,6 +669,48 @@ class Transfer:
         self._check()
         return checksum
 
+    def _publish(self, registered, *, replacing):
+        self._check()
+        target = self.registry.root / "artifacts" / self.card.model_id
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Preserve the previous inode across ordinary registry write failure.
+        # This private-directory protocol is NOT crash-durable or a sandbox.
+        backup = None
+        replaced = False
+        try:
+            if target.exists() or target.is_symlink():
+                if (not replacing or not self.card.owned_by_jarvis
+                        or self.card.shared_storage_owner or self.card.loaded
+                        or not stat.S_ISREG(target.lstat().st_mode)):
+                    raise Hold("artifact_not_replaceable")
+                fd, name = tempfile.mkstemp(prefix=".previous-", dir=target.parent)
+                os.close(fd)
+                backup = Path(name)
+                backup.unlink()
+                os.link(target, backup, follow_symlinks=False)
+            self._check()
+            os.replace(self.temp, target)
+            self.temp = None
+            replaced = True
+            try:
+                self._check()
+                saved = self.registry.save_card(registered)
+            except BaseException:
+                # If recovery itself fails, leave the backup intact for review.
+                if backup is not None:
+                    os.replace(backup, target)
+                    backup = None
+                else:
+                    target.unlink(missing_ok=True)
+                replaced = False
+                raise
+            self.card, self.state = saved, saved.state
+            replaced = False
+            return saved
+        finally:
+            if backup is not None and not replaced:
+                backup.unlink(missing_ok=True)
+
     def _persist(self, state):
         self.card = advance(self.card, state)
         self.state = self.card.state
@@ -708,15 +750,6 @@ class Transfer:
             checksum = self._verified(written)
             if start and written <= start:
                 raise Hold("transfer_resume_made_no_progress")
-            # A resumed transfer registers directly; the interrupted item's
-            # lifecycle was not advanced for the retry itself.
-            target = self.registry.root / "artifacts" / self.card.model_id
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.replace(self.temp, target)
-            self.temp = None
-            os.chmod(target, 0o600)
-            # The resumed bytes are the artifact now; the partial is no longer needed.
-            (self.root / ("partial-" + self.card.model_id)).unlink(missing_ok=True)
             # A successful update keeps an installed item installed.
             stays = self.card.state if self.card.state in ("TESTABLE", "ACTIVE") else "REGISTERED"
             registered = replace(self.card, state=stays, registered=True, installed=True,
@@ -725,10 +758,13 @@ class Transfer:
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
                                  source_version=self.source.version,
                                  license_id=self.source.license_id)
-            self.registry.save_card(registered)
-            self.card = registered
-            self.state = registered.state
-            return registered
+            result = self._publish(registered, replacing=allow_installed)
+            # A cleanup failure must not turn a committed result into a failed update.
+            try:
+                (self.root / ("partial-" + self.card.model_id)).unlink(missing_ok=True)
+            except OSError:
+                pass
+            return result
         except asyncio.CancelledError:
             self.state = "CANCELLED"
             raise
@@ -774,26 +810,18 @@ class Transfer:
             written = await self._fetch(progress)
             checksum = self._verified(written)
             self._persist("VERIFIED")
-            target = self.registry.root / "artifacts" / self.card.model_id
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.replace(self.temp, target)
-            self.temp = None
-            os.chmod(target, 0o600)
             registered = replace(self.card, state="REGISTERED", registered=True, installed=True,
                                  owned_by_jarvis=True, disk_size_bytes=written,
                                  storage_ref="sha256-" + checksum[:32],
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
                                  source_version=self.source.version,
                                   license_id=self.source.license_id)
-            self.registry.save_card(registered)
-            self.card = registered
-            self.state = registered.state
-            return registered
+            return self._publish(registered, replacing=False)
         except asyncio.CancelledError:
             if self.state not in TERMINAL:
                 self._persist("CANCELLED")
             raise
-        except Hold:
+        except (Hold, OSError, asyncio.TimeoutError):
             if self.state not in TERMINAL:
                 self._persist("FAILED")
             raise
@@ -989,6 +1017,17 @@ class Registry:
         current = self.card(model_id)
         for candidate in self.history(model_id):
             if candidate.revision == revision:
+                # Metadata history cannot restore bytes that no longer exist.
+                if current.owned_by_jarvis or candidate.owned_by_jarvis:
+                    if not candidate.owned_by_jarvis or not candidate.storage_ref.startswith("sha256-"):
+                        raise Hold("rollback_artifact_unverified")
+                    try:
+                        checksum = _verified_artifact(self.root / "artifacts" / model_id,
+                                                      candidate.disk_size_bytes)
+                    except Hold:
+                        raise Hold("rollback_artifact_unverified") from None
+                    if candidate.storage_ref != "sha256-" + checksum[:32]:
+                        raise Hold("rollback_artifact_unverified")
                 restored = replace(current, **{k: v for k, v in candidate.__dict__.items()
                                               if k not in ("revision", "state")})
                 return self.save_card(restored)
