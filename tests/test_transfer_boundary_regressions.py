@@ -928,6 +928,62 @@ class PersistentPartialTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(payload.exists())
         self.assertFalse(record.exists())
 
+    async def test_displayed_pair_replacement_refused_under_lease(self):
+        payload, metadata = self.partial()
+        t = self.transfer()
+        expected = t._partial_pair_identity()
+        replacement = metadata.with_name("replacement")
+        replacement.write_bytes(metadata.read_bytes())
+        replacement.replace(metadata)
+        with self.assertRaisesRegex(Hold, "partial_changed"):
+            await t.resume(start=3, expected_pair=expected)
+        self.assertEqual(self.calls, [])
+        self.assertTrue(payload.exists() and metadata.exists())
+
+    async def test_displayed_pair_allows_exact_resume(self):
+        payload, metadata = self.partial()
+        t = self.transfer()
+        expected = t._partial_pair_identity()
+        saved = await t.resume(start=3, expected_pair=expected)
+        self.assertEqual(saved.artifact_digest, self.source.checksum)
+        self.assertEqual(self.calls, [3])
+        self.assertFalse(payload.exists() or metadata.exists())
+
+    async def test_replaced_metadata_during_copy_refused_before_transport(self):
+        from tihulu_jarvis import selected_csv
+        payload, metadata = self.partial()
+        original = selected_csv.copy_selected_to
+
+        async def changed(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            replacement = metadata.with_name("replacement")
+            replacement.write_bytes(metadata.read_bytes())
+            replacement.replace(metadata)
+            return result
+
+        with patch.object(selected_csv, "copy_selected_to", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "partial_changed"):
+                await self.transfer().resume(start=3)
+        self.assertEqual(self.calls, [])
+        self.assertTrue(payload.exists() and metadata.exists())
+
+    async def test_replaced_metadata_during_fetch_is_not_deleted(self):
+        payload, metadata = self.partial()
+        t = self.transfer()
+        original = self.fetch
+
+        async def changed(*args, **kwargs):
+            result = await original(*args, **kwargs)
+            replacement = metadata.with_name("replacement")
+            replacement.write_bytes(metadata.read_bytes())
+            replacement.replace(metadata)
+            return result
+
+        t.fetch = changed
+        saved = await t.resume(start=3)
+        self.assertEqual(saved.artifact_digest, self.source.checksum)
+        self.assertTrue(payload.exists() and metadata.exists())
+
     async def test_changed_prefix_never_reaches_transport(self):
         payload, record = self.partial()
         payload.write_bytes(b"bad")
