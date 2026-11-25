@@ -710,52 +710,18 @@ class Transfer:
             raise Hold("transfer_card_changed")
         target = self.registry.root / "artifacts" / self.card.model_id
         target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        # Preserve the previous inode across ordinary registry write failure.
-        # This private-directory protocol is NOT crash-durable or a sandbox.
-        backup = None
-        replaced = False
-        try:
-            if target.exists() or target.is_symlink():
-                if (not replacing or not self.card.owned_by_jarvis
-                        or self.card.shared_storage_owner or self.card.loaded
-                        or not stat.S_ISREG(target.lstat().st_mode)):
-                    raise Hold("artifact_not_replaceable")
-                if self.card.artifact_digest:
-                    self.registry.retain_artifact(self.card, target, checkpoint=self._check)
-                fd, name = tempfile.mkstemp(prefix=".previous-", dir=target.parent)
-                os.close(fd)
-                backup = Path(name)
-                backup.unlink()
-                os.link(target, backup, follow_symlinks=False)
-            self._check()
-            os.replace(self.temp, target)
-            self.temp = None
-            replaced = True
-            try:
-                self._check()
-                if self.registry.card(self.card.model_id) != self.card:
-                    raise Hold("transfer_card_changed")
-                saved = self.registry.save_card(registered)
-            except BaseException:
-                # If recovery itself fails, leave the backup intact for review.
-                if backup is not None:
-                    os.replace(backup, target)
-                    backup = None
-                else:
-                    target.unlink(missing_ok=True)
-                replaced = False
-                raise
-            self.card, self.state = saved, saved.state
-            replaced = False
-            return saved
-        finally:
-            if backup is not None and not replaced:
-                try:
-                    backup.unlink(missing_ok=True)
-                except OSError:
-                    # Do not report a committed update as failed because an
-                    # old backup could not be removed.
-                    pass
+        if _exists_entry(target):
+            if (not replacing or not self.card.owned_by_jarvis
+                    or self.card.shared_storage_owner or self.card.loaded
+                    or not stat.S_ISREG(target.lstat().st_mode)):
+                raise Hold("artifact_not_replaceable")
+            if self.card.artifact_digest:
+                self.registry.retain_artifact(self.card, target, checkpoint=self._check)
+        saved = self.registry._publish_owned(self.card, registered, self.temp,
+                                             checkpoint=self._check)
+        self.temp = None
+        self.card, self.state = saved, saved.state
+        return saved
 
     @_transfer_locked
     def _persist(self, state):
@@ -1074,6 +1040,7 @@ class Registry:
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = self.root / "registry.json"
         self.removal_journal = self.root / ".uninstall-journal.json"
+        self.publication_journal = self.root / ".publish-journal.json"
         self._guard_state = threading.local()
         # A directory of append-only revision logs; not the history() method.
         self.revisions = self.root / "revisions"
@@ -1116,7 +1083,10 @@ class Registry:
             raise Hold("registry_lock_unavailable") from None
         self._guard_state.pid = pid
         try:
+            if _exists_entry(self.removal_journal) and _exists_entry(self.publication_journal):
+                raise Hold("registry_recovery_conflict")
             self._recover_removal()
+            self._recover_publication()
             yield
         finally:
             self._guard_state.pid = None
@@ -1242,9 +1212,7 @@ class Registry:
                 return card
         raise Hold("model_not_registered")
 
-    @_registry_locked
-    def save_card(self, card):
-        """Persist a card, keeping the previous entry as a revision."""
+    def _prepared_card(self, card):
         card = card.checked()
         cards, selection = self.load()
         previous = None
@@ -1266,7 +1234,13 @@ class Registry:
         kept = tuple(c for c in cards if c.model_id != card.model_id)
         # Current card and its revision history share one atomic JSON replace.
         # Legacy jsonl files remain read-only fallback; no destructive migration.
-        self.store(kept + (card,), selection, history=history)
+        return card, kept + (card,), selection, history
+
+    @_registry_locked
+    def save_card(self, card):
+        """Persist a card, keeping the previous entry as a revision."""
+        card, cards, selection, history = self._prepared_card(card)
+        self.store(cards, selection, history=history)
         return card
 
     @_registry_locked
@@ -1341,6 +1315,9 @@ class Registry:
             checkpoint()
             # No overwrite, even if another operation published the same digest.
             os.link(temp, target, follow_symlinks=False)
+            _sync_directory(target.parent)
+            _sync_directory(target.parent.parent)
+            _sync_directory(self.root)
             return target
         except FileExistsError:
             raise Hold("artifact_archive_changed") from None
@@ -1366,35 +1343,11 @@ class Registry:
         os.close(fd)
         temp = Path(name)
         temp.unlink()
-        fd, name = tempfile.mkstemp(prefix=".previous-", dir=target.parent)
-        os.close(fd)
-        backup = Path(name)
-        backup.unlink()
-        replaced = False
         try:
             _copy_verified_artifact(archive, temp, candidate)
-            if self.card(current.model_id) != current:
-                raise Hold("transfer_card_changed")
-            if _verified_artifact(target, current.disk_size_bytes) != current.artifact_digest:
-                raise Hold("rollback_artifact_unverified")
-            os.link(target, backup, follow_symlinks=False)
-            os.replace(temp, target)
-            replaced = True
-            try:
-                saved = self.save_card(restored)
-            except BaseException:
-                os.replace(backup, target)
-                replaced = False
-                raise
-            replaced = False
-            return saved
+            return self._publish_owned(current, restored, temp)
         finally:
             temp.unlink(missing_ok=True)
-            if not replaced:
-                try:
-                    backup.unlink(missing_ok=True)
-                except OSError:
-                    pass
 
     @_registry_locked
     def rollback(self, model_id, revision):
@@ -1448,6 +1401,9 @@ class Registry:
         self.store(*self._without_card(model_id))
 
     def _write_removal_journal(self, record):
+        self._write_journal(self.removal_journal, record)
+
+    def _write_journal(self, path, record):
         temp = None
         try:
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
@@ -1456,11 +1412,158 @@ class Registry:
                 json.dump(record, stream, sort_keys=True)
                 stream.flush()
                 os.fsync(stream.fileno())
-            os.link(temp, self.removal_journal, follow_symlinks=False)
+            os.link(temp, path, follow_symlinks=False)
             _sync_directory(self.root)
         finally:
             if temp is not None:
                 temp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _payload_record(path, *, checkpoint=lambda: None):
+        info = path.lstat()
+        digest = _verified_artifact(path, info.st_size, checkpoint=checkpoint)
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            now = os.fstat(fd)
+            identity = lambda x: (x.st_dev, x.st_ino, x.st_size, x.st_mtime_ns, x.st_ctime_ns)
+            if not stat.S_ISREG(now.st_mode) or identity(info) != identity(now):
+                raise Hold("artifact_not_replaceable")
+            os.fsync(fd)
+        finally:
+            os.close(fd)
+        return {"size": info.st_size, "digest": digest}
+
+    def _publish_owned(self, current, candidate, staged, *, checkpoint=lambda: None):
+        """Publish verified bytes with a recovery record; caller holds lock."""
+        if self.card(current.model_id) != current or current.model_id != candidate.model_id:
+            raise Hold("transfer_card_changed")
+        if not candidate.owned_by_jarvis or not candidate.artifact_digest:
+            raise Hold("artifact_not_replaceable")
+        target = self.root / "artifacts" / current.model_id
+        backup = target.parent / ".publish-backup"
+        if target.parent.is_symlink() or not target.parent.is_dir() or _exists_entry(backup):
+            raise Hold("publication_recovery_required")
+        staged = Path(staged)
+        incoming = self._payload_record(staged, checkpoint=checkpoint)
+        if incoming != {"size": candidate.disk_size_bytes, "digest": candidate.artifact_digest}:
+            raise Hold("transfer_checksum_mismatch")
+        previous = None
+        if _exists_entry(target):
+            if not current.owned_by_jarvis or current.shared_storage_owner or current.loaded:
+                raise Hold("artifact_not_replaceable")
+            previous = self._payload_record(target, checkpoint=checkpoint)
+            if current.artifact_digest and previous != {
+                    "size": current.disk_size_bytes, "digest": current.artifact_digest}:
+                raise Hold("artifact_not_replaceable")
+        elif current.artifact_digest:
+            raise Hold("artifact_not_replaceable")
+        old = self._read_document()
+        prepared, cards, selection, history = self._prepared_card(candidate)
+        new = self._serialized(cards, selection, history=history)
+        checkpoint()
+        if old == new:
+            if previous != incoming:
+                raise Hold("publication_recovery_required")
+            staged.unlink()
+            return prepared
+        record = {"version": 1, "model": current.model_id, "old": _text_digest(old),
+                  "new": _text_digest(new), "previous": previous, "incoming": incoming}
+        _sync_directory(target.parent)
+        _sync_directory(self.root)
+        self._write_journal(self.publication_journal, record)
+        try:
+            if previous is not None:
+                os.link(target, backup, follow_symlinks=False)
+                _sync_directory(target.parent)
+            checkpoint()
+            os.replace(staged, target)
+            _sync_directory(target.parent)
+            checkpoint()
+            saved = self.save_card(candidate)
+        except BaseException:
+            self._recover_publication()
+            raise
+        self._recover_publication()
+        return saved
+
+    def _recover_publication(self):
+        """Restore the old artifact or finalize the exact committed generation."""
+        try:
+            raw = _bounded_registry_text(self.publication_journal, 4096)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, Hold):
+            raise Hold("publication_recovery_required") from None
+        try:
+            record = _strict_registry_json(raw)
+            def valid_payload(value):
+                return (isinstance(value, dict) and set(value) == {"size", "digest"}
+                        and type(value["size"]) is int and 0 < value["size"] <= DIGEST_LIMIT
+                        and isinstance(value["digest"], str)
+                        and re.fullmatch(r"[0-9a-f]{64}", value["digest"]))
+            if (not isinstance(record, dict)
+                    or set(record) != {"version", "model", "old", "new", "previous", "incoming"}
+                    or type(record["version"]) is not int or record["version"] != 1
+                    or not isinstance(record["model"], str)
+                    or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", record["model"])
+                    or any(not isinstance(record[k], str)
+                           or not re.fullmatch(r"[0-9a-f]{64}", record[k]) for k in ("old", "new"))
+                    or record["old"] == record["new"]
+                    or not valid_payload(record["incoming"])
+                    or (record["previous"] is not None and not valid_payload(record["previous"]))):
+                raise Hold("publication_recovery_required")
+            raw_registry = self._read_document()
+            generation = _text_digest(raw_registry)
+            cards, _ = self._parse(raw_registry)
+            known = next((c for c in cards if c.model_id == record["model"]), None)
+            target = self.root / "artifacts" / record["model"]
+            backup = target.parent / ".publish-backup"
+            if target.parent.is_symlink() or not target.parent.is_dir() or known is None:
+                raise Hold("publication_recovery_required")
+            previous, incoming = record["previous"], record["incoming"]
+
+            def observed(path):
+                if not _exists_entry(path):
+                    return None
+                size = path.lstat().st_size
+                return {"size": size, "digest": _verified_artifact(path, size)}
+
+            actual, retained = observed(target), observed(backup)
+            if retained is not None and (previous is None or retained != previous):
+                raise Hold("publication_recovery_required")
+            if generation == record["old"]:
+                if (known.artifact_digest and previous !=
+                        {"size": known.disk_size_bytes, "digest": known.artifact_digest}):
+                    raise Hold("publication_recovery_required")
+                if previous is not None and (not known.owned_by_jarvis or known.shared_storage_owner):
+                    raise Hold("publication_recovery_required")
+                if previous is None:
+                    if actual is not None:
+                        if actual != incoming:
+                            raise Hold("publication_recovery_required")
+                        target.unlink()
+                elif actual == previous:
+                    if retained is not None:
+                        backup.unlink()
+                elif actual == incoming and retained == previous:
+                    os.replace(backup, target)
+                else:
+                    raise Hold("publication_recovery_required")
+            elif generation == record["new"]:
+                if (not known.owned_by_jarvis or known.shared_storage_owner
+                        or incoming != {"size": known.disk_size_bytes, "digest": known.artifact_digest}
+                        or actual != incoming):
+                    raise Hold("publication_recovery_required")
+                _sync_directory(self.root)
+                if retained is not None:
+                    backup.unlink()
+            else:
+                raise Hold("publication_recovery_required")
+            _sync_directory(target.parent)
+            self.publication_journal.unlink()
+            _sync_directory(self.root)
+        except (OSError, ValueError, TypeError, RecursionError, Hold):
+            raise Hold("publication_recovery_required") from None
 
     def _recover_removal(self):
         """Recover an interrupted removal under the cooperative lock.
