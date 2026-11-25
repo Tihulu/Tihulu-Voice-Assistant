@@ -587,6 +587,43 @@ def source_of(card):
                  card.license_id, card.network_approval, card.approval_expires_at).checked()
 
 
+def _partial_binding(card, source):
+    terms = {k: v for k, v in source.__dict__.items()
+             if k not in ("network_approval", "approval_expires_at")}
+    canonical = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=False)
+    return {"version": 1, "model": card.model_id,
+            "card": _text_digest(canonical(card.__dict__)),
+            "source": _text_digest(canonical(terms))}
+
+
+def _read_partial_record(metadata):
+    try:
+        record = _strict_registry_json(_bounded_registry_text(metadata, 4096))
+        if (not isinstance(record, dict)
+                or set(record) != {"version", "model", "card", "source", "size", "digest"}
+                or type(record["version"]) is not int or record["version"] != 1
+                or type(record["size"]) is not int or not 0 < record["size"] <= DIGEST_LIMIT
+                or any(not isinstance(record[k], str)
+                       or not re.fullmatch(r"[0-9a-f]{64}", record[k])
+                       for k in ("card", "source", "digest"))):
+            raise Hold("transfer_resume_identity_unverified")
+        return record
+    except (OSError, ValueError, TypeError, RecursionError, Hold):
+        raise Hold("transfer_resume_identity_unverified") from None
+
+
+
+def _partial_file_identity(path):
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise Hold("partial_file_untrusted")
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode)
+
+
 def resumable_partials(root):
     """Partial transfers on disk, so a restart can continue from them.
 
@@ -743,30 +780,11 @@ class Transfer:
                 self.root / (".partial-meta-" + self.card.model_id))
 
     def _partial_binding(self):
-        # A fresh grant is checked separately. Bind immutable source terms,
-        # not the approval token, and never persist credentials or raw URLs.
-        terms = {k: v for k, v in self.source.__dict__.items()
-                 if k not in ("network_approval", "approval_expires_at")}
-        canonical = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=False)
-        return {"version": 1, "model": self.card.model_id,
-                "card": _text_digest(canonical(self.card.__dict__)),
-                "source": _text_digest(canonical(terms))}
+        return _partial_binding(self.card, self.source)
 
     def _read_partial_record(self):
         _, metadata = self._partial_paths()
-        try:
-            record = _strict_registry_json(_bounded_registry_text(metadata, 4096))
-            if (not isinstance(record, dict)
-                    or set(record) != {"version", "model", "card", "source", "size", "digest"}
-                    or type(record["version"]) is not int or record["version"] != 1
-                    or type(record["size"]) is not int or not 0 < record["size"] <= DIGEST_LIMIT
-                    or any(not isinstance(record[k], str)
-                           or not re.fullmatch(r"[0-9a-f]{64}", record[k])
-                           for k in ("card", "source", "digest"))):
-                raise Hold("transfer_resume_identity_unverified")
-            return record
-        except (OSError, ValueError, TypeError, RecursionError, Hold):
-            raise Hold("transfer_resume_identity_unverified") from None
+        return _read_partial_record(metadata)
 
     def _save_partial(self, temp):
         self._assert_current()
@@ -1459,6 +1477,54 @@ class Registry:
 
     def selection(self, profile):
         return dict(self.load()[1].get(profile, {}))
+
+    def _queue_partial_paths(self, model_id):
+        if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model_id):
+            raise Hold("invalid_model_id")
+        folder = self.root / "transfers"
+        if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
+            raise Hold("partial_file_untrusted")
+        return folder / ("partial-" + model_id), folder / (".partial-meta-" + model_id)
+
+    @_registry_locked
+    def partial_status(self, model_id):
+        """Cheap metadata-only inspection. Resume verifies the actual prefix."""
+        payload, metadata = self._queue_partial_paths(model_id)
+        identity = (_partial_file_identity(payload), _partial_file_identity(metadata))
+        if identity == (None, None):
+            return None
+        size = identity[0][2] if identity[0] else 0
+        state = "UNVERIFIED"
+        try:
+            card = self.card(model_id)
+            source = source_of(card)
+            record = _read_partial_record(metadata)
+            if (identity[0] is not None and 0 < size < DIGEST_LIMIT
+                    and (not source.size or size < source.size)
+                    and card.state not in ("REGISTERED", "TESTABLE", "ACTIVE")
+                    and not card.loaded and not card.shared_storage_owner
+                    and source.authorized(time.time())
+                    and record["size"] == size
+                    and all(record[k] == v for k, v in _partial_binding(card, source).items())):
+                state = "RESUMABLE"
+        except Hold:
+            pass
+        return {"state": state, "size": size, "identity": identity}
+
+    @_registry_locked
+    def discard_partial(self, model_id, expected_identity):
+        """Explicitly discard the two exact files observed by the owner."""
+        payload, metadata = self._queue_partial_paths(model_id)
+        actual = (_partial_file_identity(payload), _partial_file_identity(metadata))
+        if actual != expected_identity or actual == (None, None):
+            raise Hold("partial_changed")
+        # Remove the binding first: interruption cannot leave trusted bytes.
+        if actual[1] is not None:
+            metadata.unlink()
+            _sync_directory(metadata.parent)
+        if actual[0] is not None:
+            payload.unlink()
+            _sync_directory(payload.parent)
 
     def _without_card(self, model_id):
         cards, selection = self.load()

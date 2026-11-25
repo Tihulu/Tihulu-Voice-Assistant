@@ -3139,15 +3139,7 @@ def create_window(app, loop, bridge=None):
                 entry["note"] = tr("Registered.","Kaydedildi.","Registriert.")
             finally:
                 if transfer.state == "CANCELLED":
-                    partial = Path(self.market.root, "transfers", "partial-" + model_id)
-                    if partial.is_file() and partial.stat().st_size > 0:
-                        entry["state"], entry["resume"] = "RESUMABLE", partial.stat().st_size
-                        entry["note"] = tr("Partial kept; resume continues from here.",
-                                           "Kısmi tutuldu; sürdürme buradan devam eder.",
-                                           "Teil erhalten; Fortsetzung ab hier.")
-                    else:
-                        entry["state"], entry["note"] = "CANCELLED", tr(
-                            "Cancelled.", "İptal edildi.", "Abgebrochen.")
+                    self.refresh_partial_entry(entry)
                 elif transfer.state in market.TERMINAL:
                     # A failed transfer is reported by the reason in the status line.
                     entry["state"], entry["note"] = transfer.state, ""
@@ -3162,7 +3154,35 @@ def create_window(app, loop, bridge=None):
                 self.build_downloads_page()
                 self.build_market_page()
 
+        def refresh_partial_entry(self, entry):
+            entry["resume"], entry["partial_identity"] = 0, None
+            try:
+                status = self.market.partial_status(entry["id"])
+            except (Hold, OSError):
+                entry["state"], entry["note"] = "UNVERIFIED", tr(
+                    "Partial files require review.", "Kısmi dosyalar incelenmeli.",
+                    "Teildateien müssen geprüft werden.")
+                return
+            if status is None:
+                entry["state"], entry["note"] = "CANCELLED", tr(
+                    "Cancelled.", "İptal edildi.", "Abgebrochen.")
+                return
+            entry["state"], entry["partial_identity"] = status["state"], status["identity"]
+            entry["received"] = status["size"]
+            if status["state"] == "RESUMABLE":
+                entry["resume"] = status["size"]
+                entry["note"] = tr("Prefix will be verified before resuming.",
+                                   "Devam etmeden önce kısmi içerik doğrulanacak.",
+                                   "Teilinhalt wird vor der Fortsetzung geprüft.")
+            else:
+                entry["note"] = tr("Unverified partial; resume blocked.",
+                                   "Doğrulanmamış kısmi dosya; sürdürme engellendi.",
+                                   "Ungeprüfte Teildatei; Fortsetzung gesperrt.")
+
         def build_downloads_page(self):
+            selected = None
+            if getattr(self, "download_list", None) is not None:
+                selected = self.download_entries.get(self.download_list.get_selected_row())
             self.download_entries = {}
             if getattr(self, "download_list", None) is not None:
                 child = self.download_list.get_first_child()
@@ -3192,6 +3212,8 @@ def create_window(app, loop, bridge=None):
                 item.set_child(label)
                 self.download_list.append(item)
                 self.download_entries[item] = entry
+                if entry is selected:
+                    self.download_list.select_row(item)
             self.download_note.set_text(tr(
                 "Only approved, verified transfers. Nothing is downloaded without an approved source and checksum.",
                 "Yalnızca onaylı ve doğrulanmış aktarımlar. Onaylı kaynak ve sağlama toplamı olmadan hiçbir şey indirilmez.",
@@ -3206,20 +3228,28 @@ def create_window(app, loop, bridge=None):
         def in_flight(self):
             return any(entry["state"] in ("QUEUED", "DOWNLOADING") for entry in self.downloads)
 
+        def partial_entry(self, *, discard=False):
+            states = ("RESUMABLE", "UNVERIFIED") if discard else ("RESUMABLE",)
+            row = self.download_list.get_selected_row()
+            selected = self.download_entries.get(row)
+            if selected is not None:
+                return selected if (selected["state"] in states
+                                    and selected.get("partial_identity") is not None) else None
+            eligible = [entry for entry in self.downloads if entry["state"] in states
+                        and entry.get("partial_identity") is not None]
+            return eligible[0] if len(eligible) == 1 else None
+
         def resumable(self):
-            return any(entry["state"] == "RESUMABLE" for entry in self.downloads)
+            return self.resumable_entry() is not None
 
         def resumable_entry(self):
-            for entry in self.downloads:
-                if entry["state"] == "RESUMABLE":
-                    return entry
-            return None
+            return self.partial_entry()
 
         def refresh_download_buttons(self):
             # Cancelling is available while a transfer runs; it is not new work.
             self.download_cancel.set_sensitive(self.in_flight())
             self.download_resume.set_sensitive(self.resumable())
-            self.download_discard.set_sensitive(self.resumable())
+            self.download_discard.set_sensitive(self.partial_entry(discard=True) is not None)
 
         def cancel_download(self):
             if not self.in_flight():
@@ -3231,12 +3261,18 @@ def create_window(app, loop, bridge=None):
             self.build_downloads_page()
 
         def discard_download(self):
-            entry = self.resumable_entry()
+            entry = self.partial_entry(discard=True)
             if entry is None or self.busy:
                 return
-            Path(self.market.root, "transfers", "partial-" + entry["id"]).unlink(missing_ok=True)
-            entry["state"], entry["resume"], entry["note"] = "CANCELLED", 0, tr(
-                "Partial discarded.", "Kısmi atıldı.", "Teil verworfen.")
+            try:
+                self.market.discard_partial(entry["id"], entry["partial_identity"])
+            except (Hold, OSError) as exc:
+                self.refresh_partial_entry(entry)
+                self.set_state("ready", str(exc))
+            else:
+                entry["state"], entry["resume"], entry["note"] = "CANCELLED", 0, tr(
+                    "Partial discarded.", "Kısmi atıldı.", "Teil verworfen.")
+                entry["partial_identity"] = None
             self.build_downloads_page()
 
         def resume_download(self):
@@ -3245,7 +3281,15 @@ def create_window(app, loop, bridge=None):
                 return
             start = entry["resume"]
 
+            expected = entry["partial_identity"]
+
             async def run(epoch):
+                status = self.market.partial_status(entry["id"])
+                if (status is None or status["state"] != "RESUMABLE"
+                        or status["identity"] != expected or status["size"] != start):
+                    self.refresh_partial_entry(entry)
+                    self.build_downloads_page()
+                    raise Hold("partial_changed")
                 card = self.market.card(entry["id"])
                 source = market.source_of(card)
                 transport = self.transport or market.transport_for(source.reference)
@@ -3261,11 +3305,10 @@ def create_window(app, loop, bridge=None):
                     entry["state"], entry["note"] = result.state, tr(
                         "Registered.", "Kaydedildi.", "Registriert.")
                 finally:
-                    if transfer.state == "CANCELLED":
-                        partial = Path(self.market.root, "transfers",
-                                       "partial-" + entry["id"])
-                        if partial.is_file():
-                            entry["state"], entry["resume"] = "RESUMABLE", partial.stat().st_size
+                    if transfer.state in ("CANCELLED", "FAILED"):
+                        self.refresh_partial_entry(entry)
+                        if transfer.state == "FAILED":
+                            entry["state"], entry["resume"] = "UNVERIFIED", 0
                     self.build_downloads_page()
                     self.build_market_page()
             self.submit(run, kind="download",
@@ -3273,20 +3316,22 @@ def create_window(app, loop, bridge=None):
                                  "Modelldownload fortsetzen"))
 
         def restore_download_queue(self):
-            """Rebuild the queue from disk: a partial transfer is resumable."""
-            for model_id, size in market.resumable_partials(self.market.root):
+            """Rebuild pending rows without claiming unbound bytes are resumable."""
+            folder = Path(self.market.root, "transfers")
+            ids = {model_id for model_id, _ in market.resumable_partials(self.market.root)}
+            if folder.is_dir() and not folder.is_symlink():
+                ids.update(path.name[len(".partial-meta-"):] for path in folder.glob(".partial-meta-*"))
+            for model_id in sorted(ids):
                 try:
                     card = self.market.card(model_id)
                 except Hold:
                     continue  # an orphan partial is not this client's business
                 if card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
                     continue  # an installed item has no pending transfer
-                self.downloads.append({
-                    "id": model_id, "state": "RESUMABLE", "received": size,
-                    "total": card.source_size,
-                    "note": tr("Restored from disk.","Diskten geri yüklendi.",
-                               "Von der Festplatte wiederhergestellt."),
-                    "resume": size})
+                entry = {"id": model_id, "state": "UNVERIFIED", "received": 0,
+                         "total": card.source_size, "note": "", "resume": 0}
+                self.refresh_partial_entry(entry)
+                self.downloads.append(entry)
 
         def note_transfer_bytes(self, count, total, epoch, task_id, *, redraw=True):
             # Ignore callbacks from old work, not merely from another model.
@@ -3363,10 +3408,7 @@ def create_window(app, loop, bridge=None):
                         "Updated.", "Güncellendi.", "Aktualisiert.")
                 finally:
                     if transfer.state == "CANCELLED":
-                        partial = Path(self.market.root, "transfers",
-                                       "partial-" + model_id)
-                        if partial.is_file():
-                            entry["state"], entry["resume"] = "RESUMABLE", partial.stat().st_size
+                        entry["state"], entry["resume"], entry["partial_identity"] = "CANCELLED", 0, None
                     try:
                         self.session.check(epoch)
                     except Hold:
