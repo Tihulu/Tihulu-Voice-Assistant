@@ -137,3 +137,75 @@ class ChoiceTransactionTests(unittest.TestCase):
         with self.assertRaisesRegex(Hold, "invalid_local_settings"):
             settings.save(huge, self.path)
         self.assertEqual(settings.load(self.path), self.old)
+
+
+class SettingsSnapshotBoundaryTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.path = Path(tmp.name) / "models.json"
+
+    def test_stale_snapshot_does_not_overwrite_current_preferences(self):
+        before = settings.empty()
+        newer = settings.empty()
+        newer["text_scale"] = "large"
+        settings.save(newer, self.path)
+        with self.assertRaisesRegex(Hold, "settings_changed"):
+            with settings.choice_transaction(before, self.path, expected=before):
+                self.fail("unexpected commit")
+        self.assertEqual(settings.load(self.path), newer)
+
+    def test_current_snapshot_allows_choice(self):
+        before = settings.empty()
+        settings.save(before, self.path)
+        newer = settings.empty()
+        newer["stt"] = "/fixture/model.bin"
+        with settings.choice_transaction(newer, self.path, expected=before):
+            pass
+        self.assertEqual(settings.load(self.path), newer)
+
+    def test_duplicate_nested_keys_are_refused(self):
+        self.path.write_text('{"voices":{"tr":"first","tr":"second"}}')
+        with self.assertRaisesRegex(Hold, "settings_unreadable"):
+            settings.load(self.path)
+
+    def test_symlink_and_fifo_are_refused(self):
+        import os
+        outside = self.path.with_name("outside")
+        outside.write_text("{}")
+        self.path.symlink_to(outside)
+        with self.assertRaises(Hold):
+            settings.load(self.path)
+        self.path.unlink()
+        os.mkfifo(self.path)
+        with self.assertRaises(Hold):
+            settings.load(self.path)
+        self.assertEqual(outside.read_text(), "{}")
+
+    def test_growth_during_read_is_refused(self):
+        from unittest.mock import patch
+        import os
+        self.path.write_text("{}")
+        real_read = os.read
+        def growing(fd, n):
+            self.path.write_bytes(b"x" * 32769)
+            return real_read(fd, n)
+        with patch.object(settings.os, "read", side_effect=growing):
+            with self.assertRaisesRegex(Hold, "settings_changed"):
+                settings.load(self.path)
+
+    def test_disappearing_opened_path_is_not_treated_as_empty(self):
+        from unittest.mock import patch
+        import os
+        self.path.write_text("{}")
+        real_read = os.read
+        removed = False
+        def disappearing(fd, n):
+            nonlocal removed
+            if not removed:
+                self.path.unlink()
+                removed = True
+            return real_read(fd, n)
+        with patch.object(settings.os, "read", side_effect=disappearing):
+            with self.assertRaisesRegex(Hold, "settings_changed"):
+                settings.load(self.path)
