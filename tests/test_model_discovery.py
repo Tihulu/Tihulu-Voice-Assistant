@@ -43,6 +43,44 @@ class DiscoveryTests(unittest.TestCase):
             with self.assertRaises(Hold):
                 discovery.scan(root)
 
+    def test_rejects_symlink_in_any_root_component(self):
+        outside = self.root / "outside"
+        models = outside / "models"
+        models.mkdir(parents=True)
+        (models / "private.bin").write_bytes(b"x")
+        alias = self.root / "alias"
+        alias.symlink_to(outside, target_is_directory=True)
+        for selected in (alias / "models", str(alias / "models") + "/"):
+            with self.subTest(selected=selected):
+                with self.assertRaises(Hold):
+                    discovery.scan(str(selected))
+        self.assertEqual(discovery.scan(str(models)).candidates[0].relative,
+                         "private.bin")
+
+    def test_rejects_parent_traversal_in_selected_root(self):
+        child = self.root / "child"
+        child.mkdir()
+        (self.root / "private.bin").write_bytes(b"x")
+        with self.assertRaisesRegex(Hold, "model_folder_invalid"):
+            discovery.scan(str(child / ".."))
+
+    def test_checkpoint_revocation_during_root_open_closes_descriptor(self):
+        real_open = os.open
+        opened = []
+        def track(*args, **kwargs):
+            fd = real_open(*args, **kwargs)
+            opened.append(fd)
+            return fd
+        def checkpoint():
+            if opened:
+                raise Hold("revoked")
+        with patch.object(discovery.os, "open", side_effect=track):
+            with self.assertRaisesRegex(Hold, "revoked"):
+                discovery.scan(str(self.root), checkpoint)
+        self.assertEqual(len(opened), 1)
+        with self.assertRaises(OSError):
+            os.fstat(opened[0])
+
     def test_caps_entries_and_candidates(self):
         for i in range(10):
             (self.root / ("%d.bin" % i)).write_bytes(b"x")
@@ -69,9 +107,21 @@ class DiscoveryTests(unittest.TestCase):
     def test_checkpoint_revocation_never_returns_partial_inventory(self):
         (self.root / "model.bin").write_bytes(b"x")
         calls = []
+        root_opened = False
+        original = discovery._open_root
+        def open_root(*args):
+            nonlocal root_opened
+            fd = original(*args)
+            root_opened = True
+            return fd
         def checkpoint():
-            calls.append(1)
-            if len(calls) == 3:
-                raise Hold("revoked")
-        with self.assertRaisesRegex(Hold, "revoked"):
-            discovery.scan(str(self.root), checkpoint)
+            if root_opened:
+                calls.append(1)
+                if len(calls) == 3:
+                    raise Hold("revoked")
+        # Fail after the single candidate has been collected, at the final
+        # checkpoint; root traversal must not turn this into an early abort test.
+        with patch.object(discovery, "_open_root", side_effect=open_root):
+            with self.assertRaisesRegex(Hold, "revoked"):
+                discovery.scan(str(self.root), checkpoint)
+        self.assertEqual(len(calls), 3)
