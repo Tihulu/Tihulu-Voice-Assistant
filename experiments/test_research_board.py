@@ -119,3 +119,36 @@ class ResearchBoardTests(unittest.TestCase):
             self.b.cards()
         self.assertEqual(self.b._cards,{})
         self.assertEqual(self.b._session._sources,{})
+
+    def test_invalid_span_identity_is_refused_without_retaining_draft(self):
+        a,_,_=self.collect()
+        with self.assertRaises(Refused):
+            self.b.prepare("bad",(Span([],a.digest,0,1),))
+        self.assertIsNone(self.b._pending)
+        self.b.prepare("good",(a,))
+
+    def test_publication_revoked_during_report_rebuild(self):
+        c,p=self.report()
+        record=self.b._cards[c.identity]
+        builder=record[1]
+        original=builder.preview
+        def preview():
+            result=original()
+            self.g.revoke(p.identity)
+            return result
+        with patch.object(builder,"preview",side_effect=preview):
+            with self.assertRaises(Refused):
+                self.b.read(c.identity)
+        self.assertEqual(self.b.cards(),())
+
+    def test_source_expiry_invalidates_report(self):
+        url=ROOT+"/a"
+        n=self.g.fixture_grant("short",Request(self.ctx,"research",canonical(url).identity,"local","public"),1)
+        s=self.grant("research",collect_target(self.b.scope,url,BODY))
+        i=self.b.collect(url,("8.8.8.8",),"8.8.8.8",headers(BODY),BODY,n,s,confirmed=True)
+        a=Span(i,sha256(BODY).hexdigest(),0,4)
+        c,p=self.report(spans=(a,))
+        with patch.object(self.g._clock,"now",return_value=n.deadline):
+            self.assertEqual(self.b.cards(),())
+        with self.assertRaises(Refused):
+            self.b.read(c.identity)

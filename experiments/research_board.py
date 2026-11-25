@@ -122,6 +122,8 @@ class ResearchBoard:
         if report.digest!=card.digest or report.payload!=card.payload:
             raise Refused("report_changed")
         self._checks(identities)
+        for grant,req in checks:
+            self._g.checkpoint(grant,req)
         self._live()
         return card
 
@@ -132,8 +134,10 @@ class ResearchBoard:
             if self._pending is not None or identity in self._seen or len(self._seen)>=16 or len(self._cards)>=8:
                 raise Refused("report_limit_or_pending")
             builder=ReportBuilder(self._g,self._ctx,self._session,spans)
-            ids=tuple(dict.fromkeys(s.identity for s in spans))
             try:
+                for span in spans:
+                    token(span.identity)
+                ids=tuple(dict.fromkeys(s.identity for s in spans))
                 self._checks(ids)
                 report=builder.preview()
                 card=Card(identity,report.digest,report.payload)
@@ -171,6 +175,8 @@ class ResearchBoard:
                 self._verify(record)
                 self._g.claim(grant,req)
                 claimed=True
+                self._verify(record)
+                self._g.checkpoint(grant,req)
                 self._verify(record)
                 self._g.checkpoint(grant,req)
                 if self._pending is not record:
