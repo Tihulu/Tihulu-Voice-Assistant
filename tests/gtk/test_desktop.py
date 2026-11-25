@@ -4021,6 +4021,108 @@ class SuccessorBoundaryRegressionTests(DesktopFixture):
             self.assertEqual(self.ui.file_preview.get_text(), "")
 
 
+
+class OwnerComplaintRegressionTests(DesktopFixture):
+    def attachment(self, expiry=None):
+        if expiry is not None:
+            p=profiles.Profile(id="sweep-reader",name="Sweep reader",
+                filesystem_rules=(profiles.Rule("filesystem_read",("attachment",),"allow","fixture",expiry),))
+            self.ui.store.save(p)
+            self.ui.activate_profile(p.id)
+        self.connect_model()
+        path=Path(self.profile_home).resolve()/"fixture.txt"
+        path.write_text("SYNTHETIC-ATTACHMENT",encoding="utf-8")
+        self.assertIsNotNone(self.ui.read_attachment(str(path)))
+
+    def test_idle_attachment_keeps_hard_stop_available(self):
+        self.attachment()
+        self.assertTrue(self.ui.quick_stop.get_sensitive())
+        self.assertTrue(self.ui.remove_attachment_button.get_visible())
+        self.click(self.ui.quick_stop)
+        self.assertIsNone(self.ui.attachment)
+        self.assertFalse(self.ui.quick_stop.get_sensitive())
+        self.assertFalse(self.ui.remove_attachment_button.get_visible())
+        self.until(lambda: self.ui.result_watch is None)
+
+    def test_idle_attachment_expiry_drops_data_and_blocks_draft(self):
+        clock=[time.time()]
+        with patch.object(profiles.time,"time",side_effect=lambda:clock[0]):
+            self.attachment(clock[0]+60)
+            self.ui.entry.set_text("Merhaba! Summarize the file.")
+            clock[0]+=120
+            self.until(lambda: self.ui.attachment is None)
+            self.assertIsNone(self.ui.attachment_context)
+            self.assertIsNone(self.ui.attachment_live)
+            self.assertTrue(self.ui.attachment_invalidated)
+            self.assertNotIn("fixture.txt",self.ui.attachment_note.get_text())
+            self.click(self.ui.send)
+            self.assertFalse(self.ui.busy)
+            self.assertEqual(self.ui.entry.get_text(),"Merhaba! Summarize the file.")
+            self.assertFalse(self.backend.requests)
+            self.click(self.ui.remove_attachment_button)
+            self.assertFalse(self.ui.attachment_invalidated)
+            self.assertEqual(self.ui.attachment_note.get_text(),"")
+            self.assertFalse(self.ui.quick_stop.get_sensitive())
+
+    def test_empty_search_drops_cached_matches(self):
+        self.connect_model()
+        self.text("Merhaba! Benim kelimem mavi.")
+        self.assert_no_failed_turn()
+        self.ui.search_panel.set_expanded(True)
+        self.ui.search_entry.set_text("mavi")
+        self.assertTrue(self.ui.search_matches)
+        self.ui.clear_search()
+        self.assertEqual(self.ui.search_matches,())
+        self.assertIsNone(self.ui.search_results.get_first_child())
+
+    def test_end_closed_search_panel_drops_retained_snippets(self):
+        self.connect_model()
+        self.text("Merhaba! Benim kelimem mavi.")
+        self.assert_no_failed_turn()
+        self.ui.search_panel.set_expanded(True)
+        self.ui.search_entry.set_text("mavi")
+        self.assertTrue(self.ui.search_matches)
+        self.ui.search_panel.set_expanded(False)
+        self.assertEqual(self.ui.search_matches,())
+        self.ui.interrupt(True)
+        self.assertEqual(self.ui.session.history,())
+        self.assertEqual(self.ui.search_matches,())
+        self.assertEqual(self.ui.search_entry.get_text(),"")
+        self.assertIsNone(self.ui.search_results.get_first_child())
+        self.assertEqual(self.ui.search_note.get_text(),"")
+
+    def test_voice_does_not_silently_ignore_pending_attachment(self):
+        self.attachment()
+        self.click(self.ui.talk)
+        self.assertFalse(self.ui.busy)
+        self.assertIsNotNone(self.ui.attachment)
+        self.assertFalse(self.backend.requests)
+        self.click(self.ui.remove_attachment_button)
+        self.assertIsNone(self.ui.attachment)
+
+    def test_failed_replacement_never_sends_without_attachment(self):
+        self.attachment()
+        self.ui.entry.set_text("Merhaba! Summarize the file.")
+        self.assertIsNone(self.ui.read_attachment(str(Path(self.profile_home)/"missing.txt")))
+        self.assertTrue(self.ui.attachment_invalidated)
+        self.assertIsNone(self.ui.attachment)
+        self.click(self.ui.send)
+        self.assertFalse(self.ui.busy)
+        self.assertFalse(self.backend.requests)
+        self.assertEqual(self.ui.entry.get_text(),"Merhaba! Summarize the file.")
+
+    def test_deferred_search_cannot_restore_forgotten_query(self):
+        self.ui.search_panel.set_expanded(True)
+        self.ui.remember_search("mavi")
+        row=self.ui.search_history.get_first_child()
+        self.assertIsNotNone(row)
+        self.ui.activate_search_history(row)
+        self.ui.forget_searches()
+        self.ui.clear_search()
+        self.until(lambda: not GLib.MainContext.default().pending())
+        self.assertEqual(self.ui.cfg["search_history"],[])
+        self.assertEqual(self.ui.search_entry.get_text(),"")
+
 class ReadinessUITests(DesktopTests):
     """What this machine can do is stated, before a turn fails."""
 
@@ -5704,7 +5806,16 @@ class ReviewSecurityTests(DesktopFixture):
         self.assertEqual(str(self.ui.session.active.exception()), "attachment_context_changed")
         self.assertFalse(self.backend.requests)
         self.assertEqual(self.ui.entry.get_text(), "Merhaba!")
-        self.assertIs(self.ui.attachment, item)
+        # Expired bytes are discarded even when expiry follows submission.
+        # Preserve the draft and require explicit removal or reattachment.
+        self.assertIsNone(self.ui.attachment)
+        self.assertIsNone(self.ui.attachment_context)
+        self.assertIsNone(self.ui.attachment_live)
+        self.assertTrue(self.ui.attachment_invalidated)
+        self.click(self.ui.send)
+        self.assertFalse(self.ui.busy)
+        self.assertFalse(self.backend.requests)
+        self.assertEqual(self.ui.entry.get_text(), "Merhaba!")
         self.assertNotIn("private-fixture", self.ui.board.rows[-1].label)
 
     def test_expired_attachment_history_blocks_same_route_until_explicit_end(self):

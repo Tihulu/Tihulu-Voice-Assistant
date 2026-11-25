@@ -182,6 +182,7 @@ def create_window(app, loop, bridge=None):
             self.history_attachment_live = None
             self.leases = locks.Leases()
             self.search_matches = ()
+            self.search_recall_epoch = 0
             self.growing = {}
             self.transcribe_runner = None
             self.result_watch = None
@@ -314,6 +315,9 @@ def create_window(app, loop, bridge=None):
             chat.append(entryrow)
             chat.append(self.attachment_note)
             self.attachment = None
+            self.attachment_invalidated = False
+            self.remove_attachment_button = self.button(chat, tr("Remove attachment", "Eki kaldır", "Anhang entfernen"), self.remove_attachment)
+            self.remove_attachment_button.set_visible(False)
             controls = Gtk.FlowBox(selection_mode=Gtk.SelectionMode.NONE, column_spacing=6,row_spacing=4)
             chat.append(controls)
             self.finish_btn = self.button(controls,tr("Finish recording","Kaydı bitir","Aufnahme beenden"),lambda:self.finish.set() if self.finish else None)
@@ -776,7 +780,37 @@ def create_window(app, loop, bridge=None):
 
         def clear_attachment(self):
             self.attachment = self.attachment_context = self.attachment_live = None
+            self.attachment_invalidated = False
             self.attachment_note.set_text("")
+            self.remove_attachment_button.set_visible(False)
+
+        def remove_attachment(self):
+            if not self.busy:
+                self.clear_attachment()
+                self.refresh()
+
+        def invalidate_attachment(self):
+            # Drop the data immediately, but never silently send an existing
+            # draft without the attachment the owner thought was included.
+            self.clear_attachment()
+            self.attachment_invalidated = True
+            self.attachment_note.set_text(tr(
+                "Attachment permission expired or changed. Reattach or remove before sending.",
+                "Dosya eki izni sona erdi veya değişti. Göndermeden önce yeniden ekle veya kaldır.",
+                "Anhangberechtigung abgelaufen oder geändert. Vor dem Senden erneut anhängen oder entfernen."))
+            self.remove_attachment_button.set_visible(True)
+
+        def refresh_attachment_scope(self):
+            if self.attachment is not None and not self.busy:
+                try:
+                    self.attachment_policy()
+                    valid = (self.attachment_route() == self.attachment_context
+                             and self.attachment_live_allowed(self.attachment_live))
+                except Hold:
+                    valid = False
+                if not valid:
+                    self.invalidate_attachment()
+            self.remove_attachment_button.set_sensitive(not self.busy)
 
         def attachment_route(self):
             profile, stamp = self.store.snapshot(self.cfg.get("profile"))
@@ -1083,15 +1117,16 @@ def create_window(app, loop, bridge=None):
             Nothing leaves this machine, and the field is disabled while a turn
             runs so a search can never race a reply.
             """
-            if not self.search_panel.get_expanded():
+            if not hasattr(self, "search_note"):
                 return
             query = self.search_entry.get_text().strip()
-            rows, item = [], self.search_results.get_first_child()
+            self.search_matches = ()
+            item = self.search_results.get_first_child()
             while item is not None:
                 nxt = item.get_next_sibling()
                 self.search_results.remove(item)
                 item = nxt
-            if not query:
+            if not query or not self.search_panel.get_expanded():
                 self.search_note.set_text("")
                 return
             try:
@@ -1151,10 +1186,11 @@ def create_window(app, loop, bridge=None):
             # Rebuilding the list during GTK's row activation can invalidate
             # the row whose native activation is still being dispatched.
             if not self.busy and self.search_panel.get_expanded():
-                GLib.idle_add(self.recall_search, row.query)
+                GLib.idle_add(self.recall_search, row.query, self.search_recall_epoch)
 
-        def recall_search(self, query):
-            if not self.busy and not self.closing and self.search_panel.get_expanded():
+        def recall_search(self, query, epoch):
+            if (epoch == self.search_recall_epoch and query in self.cfg.get("search_history", [])
+                    and not self.busy and not self.closing and self.search_panel.get_expanded()):
                 self.search_entry.set_text(query)
                 self.run_search(remember=True)
 
@@ -1169,6 +1205,7 @@ def create_window(app, loop, bridge=None):
             self.refresh_search_history()
 
         def forget_searches(self):
+            self.search_recall_epoch += 1
             self.cfg["search_history"] = list(queries.clear())
             self.save()
             self.refresh_search_history()
@@ -1214,7 +1251,9 @@ def create_window(app, loop, bridge=None):
             return target
 
         def clear_search(self):
+            self.search_recall_epoch += 1
             self.search_entry.set_text("")
+            self.run_search()
             if self.search_panel.get_expanded():
                 self.search_entry.grab_focus()
 
@@ -1360,6 +1399,7 @@ def create_window(app, loop, bridge=None):
             self.model_discovery_note.set_text(model_note)
             self.refresh_model_scan()
             self.refresh_research_scope()
+            self.refresh_attachment_scope()
             self.refresh_model_probe(connected)
             self.setup_connect.set_sensitive(not self.busy)
             if not self.url.get_text().strip():
@@ -2354,6 +2394,7 @@ def create_window(app, loop, bridge=None):
 
         def refresh_local_stop(self):
             active = (self.busy or self.owned_picker is not None
+                      or self.attachment is not None or self.attachment_invalidated
                       or self.research_folder is not None or self.model_scan_result is not None
                       or (hasattr(self, "chat_files") and self.chat_files.folder is not None)
                       or (hasattr(self, "analysis") and
@@ -2367,16 +2408,17 @@ def create_window(app, loop, bridge=None):
             # display lifetimes only, not a filesystem or background task grant.
             if self.closing or self.result_watch is not None:
                 return
-            if not (self.research_folder is not None or self.model_scan_result is not None
+            if not (self.attachment is not None or self.research_folder is not None or self.model_scan_result is not None
                     or (hasattr(self, "chat_files") and self.chat_files.folder is not None)):
                 return
             def tick():
+                self.refresh_attachment_scope()
                 self.refresh_research_scope()
                 self.refresh_model_scan()
                 if hasattr(self, "chat_files"):
                     self.chat_files.refresh()
                 self.refresh_local_stop()
-                if (self.research_folder is None and self.model_scan_result is None
+                if (self.attachment is None and self.research_folder is None and self.model_scan_result is None
                         and (not hasattr(self, "chat_files") or self.chat_files.folder is None)):
                     self.result_watch = None
                     return False
@@ -3941,6 +3983,9 @@ def create_window(app, loop, bridge=None):
             self.session.invalidate(clear=clear)
             if clear:
                 self.history_attachment_live = None
+                self.search_recall_epoch += 1
+                self.search_entry.set_text("")
+                self.run_search()
                 child=self.log.get_first_child()
                 while child is not None:
                     nxt=child.get_next_sibling()
@@ -3992,8 +4037,14 @@ def create_window(app, loop, bridge=None):
 
         def read_attachment(self, path):
             """Trusted chooser acceptance: recheck policy at the actual read."""
+            replacing = self.attachment is not None or self.attachment_invalidated
+            def failed_selection():
+                if replacing:
+                    self.invalidate_attachment()
+                else:
+                    self.clear_attachment()
             if self.require_attachment() is None:
-                self.clear_attachment()
+                failed_selection()
                 return None
             try:
                 route = self.attachment_route()
@@ -4025,19 +4076,24 @@ def create_window(app, loop, bridge=None):
                     }.get(str(exc), "attachment_unreadable")) from None
                 item = attachments.load(path, authorized=authorized, expected_identity=identity)
             except Hold as exc:
-                self.clear_attachment()
+                failed_selection()
                 self.set_state("ready", str(exc))
                 return None
             except Exception:
-                self.clear_attachment()
+                failed_selection()
                 self.set_state("ready", "local_operation_failed")
                 return None
             self.attachment = item
+            self.attachment_invalidated = False
             self.attachment_context = route
             self.attachment_live = live
             self.attachment_note.set_text(tr("Attached: %s" % attachments.describe(item),
                                              "Eklendi: %s" % attachments.describe(item),
                                              "Angehängt: %s" % attachments.describe(item)))
+            self.remove_attachment_button.set_visible(True)
+            self.remove_attachment_button.set_sensitive(True)
+            self.refresh_local_stop()
+            self.watch_local_results()
             return item
 
         def send_local_action(self, text, action):
@@ -4081,6 +4137,9 @@ def create_window(app, loop, bridge=None):
             text=self.entry.get_text().strip()
             if self.busy or not text:
                 return
+            if self.attachment_invalidated:
+                self.set_state("ready", "attachment_context_changed")
+                return
             action = local_actions.direct(text)
             if action is not None:
                 self.send_local_action(text, action)
@@ -4120,7 +4179,7 @@ def create_window(app, loop, bridge=None):
                 except Hold:
                     return False
             if item is not None and (not allowed() or self.require_attachment() is None):
-                self.clear_attachment()
+                self.invalidate_attachment()
                 self.set_state("ready", "attachment_context_changed")
                 return
             # Validate language and total wire size before consuming the draft.
@@ -4168,6 +4227,11 @@ def create_window(app, loop, bridge=None):
             self.submit(run)
 
         def voice(self):
+            if self.attachment_invalidated or self.attachment is not None:
+                self.set_state("ready", tr("Remove the text attachment before starting voice chat.",
+                    "Sesli sohbete başlamadan önce metin ekini kaldır.",
+                    "Textanhang vor dem Sprachchat entfernen."))
+                return
             async def run(epoch):
                 def progress(stage):
                     if epoch == self.session.epoch and not self.playback_stopping:
@@ -4274,6 +4338,7 @@ def create_window(app, loop, bridge=None):
             self.submit(run, label=tr("a spoken turn", "sesli tur", "eine gesprochene Runde"))
 
         def close(self,*_):
+            self.search_recall_epoch += 1
             self.dismiss_picker()
             self.clear_attachment()
             if hasattr(self, "file_read"):
