@@ -1041,6 +1041,26 @@ def _strict_registry_json(text):
     return json.loads(text, object_pairs_hook=pairs, parse_constant=nonfinite)
 
 
+def _sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def _text_digest(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _exists_entry(path):
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+
+
 class Registry:
     """Local registry with per-profile independent STT/LLM/TTS selection."""
 
@@ -1053,6 +1073,7 @@ class Registry:
         self.root = Path(root)
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.path = self.root / "registry.json"
+        self.removal_journal = self.root / ".uninstall-journal.json"
         self._guard_state = threading.local()
         # A directory of append-only revision logs; not the history() method.
         self.revisions = self.root / "revisions"
@@ -1095,6 +1116,7 @@ class Registry:
             raise Hold("registry_lock_unavailable") from None
         self._guard_state.pid = pid
         try:
+            self._recover_removal()
             yield
         finally:
             self._guard_state.pid = None
@@ -1184,8 +1206,7 @@ class Registry:
         except (ValueError, OSError, TypeError, AttributeError, RecursionError, OverflowError):
             raise Hold("registry_unreadable") from None
 
-    @_registry_locked
-    def store(self, cards, selection, *, history=None):
+    def _serialized(self, cards, selection, *, history=None):
         document = json.loads(self._dump(cards, selection))
         document["history"] = self._inline_history() if history is None else history
         text = json.dumps(document, ensure_ascii=False, sort_keys=True)
@@ -1194,6 +1215,11 @@ class Registry:
         self._parse(text)
         if len(selection) > self.SELECTION_LIMIT:
             raise Hold("selection_profile_limit")
+        return text
+
+    @_registry_locked
+    def store(self, cards, selection, *, history=None):
+        text = self._serialized(cards, selection, history=history)
         tmp = None
         try:
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=str(self.root), delete=False) as f:
@@ -1406,9 +1432,7 @@ class Registry:
     def selection(self, profile):
         return dict(self.load()[1].get(profile, {}))
 
-    @_registry_locked
-    def unregister(self, model_id):
-        """Remove a registry entry. This never deletes a file by itself."""
+    def _without_card(self, model_id):
         cards, selection = self.load()
         kept = tuple(c for c in cards if c.model_id != model_id)
         if len(kept) == len(cards):
@@ -1416,7 +1440,99 @@ class Registry:
         cleaned = {p: {k: v for k, v in choices.items() if v != model_id}
                    for p, choices in selection.items()}
         cleaned = {p: v for p, v in cleaned.items() if v}
-        self.store(kept, cleaned)
+        return kept, cleaned
+
+    @_registry_locked
+    def unregister(self, model_id):
+        """Remove a registry entry. This never deletes a file by itself."""
+        self.store(*self._without_card(model_id))
+
+    def _write_removal_journal(self, record):
+        temp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                             dir=self.root, delete=False) as stream:
+                temp = Path(stream.name)
+                json.dump(record, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.link(temp, self.removal_journal, follow_symlinks=False)
+            _sync_directory(self.root)
+        finally:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+
+    def _recover_removal(self):
+        """Recover an interrupted removal under the cooperative lock.
+
+        Exact registry generations and verified payload are required.
+        Unexpected states are preserved and fail closed. Private local
+        state is assumed; this is not a hostile same-UID sandbox.
+        """
+        try:
+            raw = _bounded_registry_text(self.removal_journal, 4096)
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError, Hold):
+            raise Hold("uninstall_recovery_required") from None
+        try:
+            record = _strict_registry_json(raw)
+            if (not isinstance(record, dict)
+                    or set(record) != {"version", "model", "size", "digest", "old", "new"}
+                    or type(record["version"]) is not int or record["version"] != 1
+                    or not isinstance(record["model"], str)
+                    or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", record["model"])
+                    or type(record["size"]) is not int
+                    or not 0 < record["size"] <= DIGEST_LIMIT
+                    or any(not isinstance(record[key], str)
+                           or not re.fullmatch(r"[0-9a-f]{64}", record[key])
+                           for key in ("digest", "old", "new"))
+                    or record["old"] == record["new"]):
+                raise Hold("uninstall_recovery_required")
+            registry_text = self._read_document()
+            generation = _text_digest(registry_text)
+            cards, _ = self._parse(registry_text)
+            known = next((card for card in cards if card.model_id == record["model"]), None)
+            target = self.root / "artifacts" / record["model"]
+            backup = target.parent / ".uninstall-recovery"
+            if target.parent.is_symlink() or not target.parent.is_dir():
+                raise Hold("uninstall_recovery_required")
+            has_target, has_backup = _exists_entry(target), _exists_entry(backup)
+
+            def verify(path):
+                if _verified_artifact(path, record["size"]) != record["digest"]:
+                    raise Hold("uninstall_recovery_required")
+
+            if generation == record["old"]:
+                if (known is None or not known.owned_by_jarvis or known.shared_storage_owner
+                        or (known.artifact_digest and
+                            (known.artifact_digest != record["digest"]
+                             or known.disk_size_bytes != record["size"]))):
+                    raise Hold("uninstall_recovery_required")
+                if (_text_digest(self._serialized(*self._without_card(record["model"])))
+                        != record["new"] or has_target == has_backup):
+                    raise Hold("uninstall_recovery_required")
+                if has_backup:
+                    verify(backup)
+                    os.replace(backup, target)
+                else:
+                    verify(target)
+                _sync_directory(target.parent)
+            elif generation == record["new"]:
+                if known is not None or has_target:
+                    raise Hold("uninstall_recovery_required")
+                # The new registry must be durable before removing old bytes.
+                _sync_directory(self.root)
+                if has_backup:
+                    verify(backup)
+                    backup.unlink()
+                _sync_directory(target.parent)
+            else:
+                raise Hold("uninstall_recovery_required")
+            self.removal_journal.unlink()
+            _sync_directory(self.root)
+        except (OSError, ValueError, TypeError, RecursionError, Hold):
+            raise Hold("uninstall_recovery_required") from None
 
     @_registry_locked
     def uninstall(self, model_id, approval=""):
@@ -1427,9 +1543,6 @@ class Registry:
         if card.owned_by_jarvis:
             if not approval:
                 raise Hold("uninstall_requires_approval")
-            # Keep bytes until the registry removal commits. Ordinary failures
-            # restore the original name; an interrupted process may leave a
-            # quarantined file for manual review (not a crash transaction).
             target = self.root / "artifacts" / model_id
             if target.parent.is_symlink():
                 raise Hold("artifact_not_replaceable")
@@ -1440,27 +1553,46 @@ class Registry:
                 return
             if not stat.S_ISREG(info.st_mode):
                 raise Hold("artifact_not_replaceable")
-            if card.artifact_digest and _verified_artifact(target, card.disk_size_bytes) != card.artifact_digest:
+            digest = _verified_artifact(target, info.st_size)
+            if card.artifact_digest and (digest != card.artifact_digest
+                                         or card.disk_size_bytes != info.st_size):
                 raise Hold("artifact_not_replaceable")
-            fd, name = tempfile.mkstemp(prefix=".uninstall-", dir=target.parent)
-            os.close(fd)
-            backup = Path(name)
+            backup = target.parent / ".uninstall-recovery"
+            if _exists_entry(backup):
+                raise Hold("uninstall_recovery_required")
+            old = self._read_document()
+            remaining = self._without_card(model_id)
+            new = self._serialized(*remaining)
+            record = {"version": 1, "model": model_id, "size": info.st_size,
+                      "digest": digest, "old": _text_digest(old),
+                      "new": _text_digest(new)}
+            # Bind the journal before moving bytes. Recovery observes either
+            # exact registry generation, never a guessed transaction phase.
+            # Flush the old payload as well as its directory entry before
+            # allowing recovery to depend on its continued existence.
+            fd = os.open(target, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+            try:
+                verified = os.fstat(fd)
+                if (not stat.S_ISREG(verified.st_mode)
+                        or (verified.st_dev, verified.st_ino, verified.st_size,
+                            verified.st_mtime_ns, verified.st_ctime_ns)
+                        != (info.st_dev, info.st_ino, info.st_size,
+                            info.st_mtime_ns, info.st_ctime_ns)):
+                    raise Hold("artifact_not_replaceable")
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            _sync_directory(target.parent)
+            _sync_directory(self.root)
+            self._write_removal_journal(record)
             try:
                 os.replace(target, backup)
+                _sync_directory(target.parent)
+                self.store(*remaining)
             except BaseException:
-                backup.unlink(missing_ok=True)
+                self._recover_removal()
                 raise
-            try:
-                self.unregister(model_id)
-            except BaseException:
-                # On failed recovery retain the backup, never delete it.
-                os.replace(backup, target)
-                raise
-            # A cleanup error leaves quarantined bytes, not a false rollback.
-            try:
-                backup.unlink()
-            except OSError:
-                raise Hold("uninstall_cleanup_pending") from None
+            self._recover_removal()
             return
         elif not approval:
             raise Hold("unregister_only_without_approval")

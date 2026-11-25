@@ -558,5 +558,140 @@ class RemovalPartialTests(unittest.TestCase):
         (transfer.root / "partial-valid").write_bytes(NEW)
         self.assertEqual(market.resumable_partials(self.root), (("valid", len(NEW)),))
 
+class RemovalRecoveryTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        from dataclasses import replace
+        checksum = hashlib.sha256(OLD).hexdigest()
+        self.card = self.registry.save_card(replace(
+            market.ModelCard(model_id="fixture-model", display_name="Fixture", category="stt"),
+            owned_by_jarvis=True, artifact_digest=checksum,
+            storage_ref="sha256-" + checksum[:32], disk_size_bytes=len(OLD)))
+        self.target = self.root / "artifacts" / self.card.model_id
+        self.target.parent.mkdir()
+        self.target.write_bytes(OLD)
+        self.backup = self.target.parent / ".uninstall-recovery"
+
+    def interrupt(self, phase):
+        import subprocess
+        import sys
+        # Real process death; no finally clauses or exception cleanup runs.
+        code = """
+import os, sys
+sys.path.insert(0, sys.argv[2])
+from tihulu_jarvis import market
+r = market.Registry(sys.argv[1])
+phase = sys.argv[3]
+with r._write_guard():
+    if phase == "journal":
+        original = r._write_removal_journal
+        def hook(record):
+            original(record)
+            os._exit(73)
+        r._write_removal_journal = hook
+    elif phase == "moved":
+        r.store = lambda *a, **kw: os._exit(73)
+    elif phase == "committed":
+        original = r.store
+        def hook(*a, **kw):
+            original(*a, **kw)
+            os._exit(73)
+        r.store = hook
+    elif phase == "cleaned":
+        original = market._sync_directory
+        def hook(path):
+            original(path)
+            if (path == r.root / "artifacts"
+                    and not (path / "fixture-model").exists()
+                    and not (path / ".uninstall-recovery").exists()):
+                os._exit(73)
+        market._sync_directory = hook
+    r.uninstall("fixture-model", approval="fixture")
+sys.exit(99)
+"""
+        result = subprocess.run([sys.executable, "-c", code, str(self.root),
+                                 str(Path(market.__file__).resolve().parent.parent), phase],
+                                capture_output=True, text=True, timeout=20)
+        self.assertEqual(result.returncode, 73, result.stderr)
+        self.assertTrue(self.registry.removal_journal.exists())
+
+    def assert_old_restored(self):
+        reopened = market.Registry(self.root)
+        self.assertEqual(reopened.card(self.card.model_id), self.card)
+        self.assertEqual(self.target.read_bytes(), OLD)
+        self.assertFalse(self.backup.exists())
+        self.assertFalse(reopened.removal_journal.exists())
+        self.assertEqual(reopened.card(self.card.model_id), self.card)
+
+    def assert_new_recovered(self):
+        reopened = market.Registry(self.root)
+        self.assertEqual(reopened.cards(), ())
+        self.assertFalse(self.target.exists())
+        self.assertFalse(self.backup.exists())
+        self.assertFalse(reopened.removal_journal.exists())
+        self.assertEqual(reopened.cards(), ())
+
+    def test_process_death_after_journal_before_move(self):
+        self.interrupt("journal")
+        self.assert_old_restored()
+
+    def test_process_death_after_move_before_commit(self):
+        self.interrupt("moved")
+        self.assertFalse(self.target.exists())
+        self.assertEqual(self.backup.read_bytes(), OLD)
+        self.assert_old_restored()
+
+    def test_process_death_after_registry_commit(self):
+        self.interrupt("committed")
+        self.assertEqual(self.backup.read_bytes(), OLD)
+        self.assert_new_recovered()
+
+    def test_process_death_after_backup_cleanup(self):
+        self.interrupt("cleaned")
+        self.assertFalse(self.backup.exists())
+        self.assert_new_recovered()
+
+    def test_recovery_refuses_corrupt_backup(self):
+        self.interrupt("moved")
+        self.backup.write_bytes(NEW)
+        with self.assertRaisesRegex(Hold, "uninstall_recovery_required"):
+            market.Registry(self.root).load()
+        self.assertEqual(self.backup.read_bytes(), NEW)
+        self.assertTrue(self.registry.removal_journal.exists())
+        self.assertFalse(self.target.exists())
+
+    def test_recovery_refuses_unknown_registry_generation(self):
+        self.interrupt("moved")
+        self.registry.path.write_text('{"cards":[],"selection":{}}')
+        with self.assertRaisesRegex(Hold, "uninstall_recovery_required"):
+            market.Registry(self.root).load()
+        self.assertEqual(self.backup.read_bytes(), OLD)
+        self.assertTrue(self.registry.removal_journal.exists())
+
+    def test_recovery_refuses_ambiguous_two_paths(self):
+        self.interrupt("moved")
+        self.target.write_bytes(NEW)
+        with self.assertRaisesRegex(Hold, "uninstall_recovery_required"):
+            market.Registry(self.root).load()
+        self.assertEqual(self.target.read_bytes(), NEW)
+        self.assertEqual(self.backup.read_bytes(), OLD)
+
+    def test_bad_journal_never_removes_payload(self):
+        self.registry.removal_journal.write_text('{"version":1,"model":"../outside"}')
+        with self.assertRaisesRegex(Hold, "uninstall_recovery_required"):
+            market.Registry(self.root).load()
+        self.assertEqual(self.target.read_bytes(), OLD)
+        self.assertTrue(self.registry.removal_journal.exists())
+
+    def test_existing_untracked_backup_blocks_removal(self):
+        self.backup.write_bytes(NEW)
+        with self.assertRaisesRegex(Hold, "uninstall_recovery_required"):
+            self.registry.uninstall(self.card.model_id, approval="fixture")
+        self.assertEqual(self.backup.read_bytes(), NEW)
+        self.assertEqual(self.target.read_bytes(), OLD)
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
