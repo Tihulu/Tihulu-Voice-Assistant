@@ -118,3 +118,12 @@ class SchedulerTests(unittest.TestCase):
         with self.assertRaises(Refused):
             self.g.checkpoint(g,Request(self.ctx,"agent",j.target(),"local"))
         self.assertEqual(self.s.poll(),(0,0,0))
+
+    def test_job_spec_digest_bound_to_resource_grant(self):
+        job=Job("j","agent",4,5,"a"*64)
+        grant=self.grant(job,"bound-spec")
+        with self.assertRaises(Refused):
+            self.s.queue(replace(job,spec_target="b"*64),grant)
+        with self.assertRaises(Refused):
+            self.s.queue(replace(job,spec_target=[]),grant)
+        self.s.queue(job,grant)

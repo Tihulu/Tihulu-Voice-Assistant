@@ -131,3 +131,57 @@ class TaskBoardTests(unittest.TestCase):
         self.g.revoke(grants[0].identity)
         with self.assertRaises(Refused):
             self.b.receipt("analysis")
+
+    def test_schedule_grant_binds_payload_and_capability_independent_of_connector_grant(self):
+        a=self.grants("one")
+        changed=self.grants("one",payload=b"changed")
+        with self.assertRaises(Refused):
+            self.b.queue("one","opencode","plan",b"changed",4,50,a[0],changed[1])
+        _,spec=plan(self.scope,"one","opencode","local-analysis",b"fixture",4,50)
+        other=self.g.fixture_grant("other-capability",Request(self.ctx,"agent",spec.target(),"local"),60)
+        with self.assertRaises(Refused):
+            self.b.queue("one","opencode","local-analysis",b"fixture",4,50,a[0],other)
+        self.b.queue("one","opencode","plan",b"fixture",4,50,*a)
+
+    def test_root_revoked_during_queue_drains_reservation(self):
+        grants=self.grants("one")
+        original=self.g.claim
+        def revoke(grant,req):
+            original(grant,req)
+            if grant is grants[0]:
+                self.g.revoke(self.root.identity)
+        with patch.object(self.g,"claim",side_effect=revoke):
+            with self.assertRaises(Refused):
+                self.b.queue("one","opencode","plan",b"fixture",4,50,*grants)
+        self.assertEqual(self.b._scheduler.poll(),(0,0,0))
+        self.assertEqual(self.b._records,{})
+        for grant in grants:
+            with self.assertRaises(Refused):
+                self.g.checkpoint(grant,grant.request)
+
+    def test_root_revoked_after_scheduler_dispatch_prevents_connector_creation(self):
+        grants=self.queue("one")
+        original=self.b._scheduler.dispatch
+        def revoke():
+            result=original()
+            self.g.revoke(self.root.identity)
+            return result
+        with patch.object(self.b._scheduler,"dispatch",side_effect=revoke),patch("task_board.Connector") as connector:
+            with self.assertRaises(Refused):
+                self.b.dispatch()
+            connector.assert_not_called()
+        self.assertEqual(self.b._scheduler.poll(),(0,0,0))
+
+    def test_later_connector_claim_revokes_earlier_batch_member(self):
+        a=self.queue("a")
+        b=self.queue("b")
+        original=self.g.claim
+        def revoke(grant,req):
+            original(grant,req)
+            if grant is b[1]:
+                self.g.revoke(a[1].identity)
+        with patch.object(self.g,"claim",side_effect=revoke):
+            with self.assertRaises(Refused):
+                self.b.dispatch()
+        self.assertEqual(self.b.capacity(),(0,0,0))
+        self.assertEqual([s.state for s in self.b.snapshot()],["held","held"])
