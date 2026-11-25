@@ -125,3 +125,16 @@ class DiscoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(Hold, "revoked"):
                 discovery.scan(str(self.root), checkpoint)
         self.assertEqual(len(calls), 3)
+
+    def test_selected_directory_identity_refuses_regular_replacement_before_scan(self):
+        from tihulu_jarvis import files
+        root=self.root/"chosen"
+        root.mkdir()
+        expected=files.root_identity(str(root))
+        root.rename(self.root/"original")
+        root.mkdir()
+        (root/"replacement.bin").write_bytes(b"x")
+        with patch.object(discovery.os,"scandir") as scan:
+            with self.assertRaisesRegex(Hold,"folder_changed"):
+                discovery.scan(str(root),expected_root=expected)
+            scan.assert_not_called()

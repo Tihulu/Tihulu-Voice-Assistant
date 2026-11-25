@@ -118,6 +118,23 @@ def _root_identity(info):
     return info.st_dev, info.st_ino
 
 
+def root_identity(root, *, checkpoint=lambda: None):
+    fd = _open_root(root, checkpoint)
+    try:
+        checkpoint()
+        return _root_identity(os.fstat(fd))
+    except OSError:
+        raise Hold("folder_not_found") from None
+    finally:
+        os.close(fd)
+
+
+def require_root_identity(root, expected, *, checkpoint=lambda: None):
+    if root_identity(root, checkpoint=checkpoint) != expected:
+        raise Hold("folder_changed")
+    checkpoint()
+
+
 def _file_identity(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_size,
             info.st_mtime_ns, info.st_ctime_ns)
@@ -135,12 +152,14 @@ def _valid_name(name):
     return True
 
 
-def list_dir(root, *, checkpoint=lambda: None):
+def list_dir(root, *, checkpoint=lambda: None, expected_root=None):
     """Scan bounded metadata without following symlinks or opening file contents."""
     root = checked_root(root)
     fd = _open_root(root, checkpoint)
     try:
         identity = _root_identity(os.fstat(fd))
+        if expected_root is not None and identity != expected_root:
+            raise Hold("folder_changed")
         entries = []
         limited = False
         with os.scandir(fd) as rows:
@@ -160,6 +179,8 @@ def list_dir(root, *, checkpoint=lambda: None):
                                          _file_identity(info)))
         entries.sort(key=lambda entry: (not entry.directory, entry.name.lower(), entry.name))
         checkpoint()
+        if expected_root is not None:
+            require_root_identity(root, expected_root, checkpoint=checkpoint)
         return Folder(root, tuple(entries[:MAX_ENTRIES]), identity,
                       limited or len(entries) > MAX_ENTRIES).checked()
     except OSError:

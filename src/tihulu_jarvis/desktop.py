@@ -800,6 +800,13 @@ def create_window(app, loop, bridge=None):
                 "Anhangberechtigung abgelaufen oder geändert. Vor dem Senden erneut anhängen oder entfernen."))
             self.remove_attachment_button.set_visible(True)
 
+        def drop_attachment_for_context_change(self):
+            # A retained draft must not silently lose its selected data.
+            if self.attachment_invalidated or (self.attachment is not None and self.entry.get_text().strip()):
+                self.invalidate_attachment()
+            else:
+                self.clear_attachment()
+
         def refresh_attachment_scope(self):
             if self.attachment is not None and not self.busy:
                 try:
@@ -826,7 +833,8 @@ def create_window(app, loop, bridge=None):
             if entry.state != "active":
                 raise Hold("profile_not_active")
             self.dismiss_picker()
-            self.clear_attachment()
+            self.search_recall_epoch += 1
+            self.drop_attachment_for_context_change()
             self.clear_model_scan()
             self.clear_model_probe()
             if hasattr(self, "folder_entries"):
@@ -1186,9 +1194,18 @@ def create_window(app, loop, bridge=None):
             # Rebuilding the list during GTK's row activation can invalidate
             # the row whose native activation is still being dispatched.
             if not self.busy and self.search_panel.get_expanded():
-                GLib.idle_add(self.recall_search, row.query, self.search_recall_epoch)
+                try:
+                    context = self.picker_context()
+                except Hold:
+                    return
+                GLib.idle_add(self.recall_search, row.query, self.search_recall_epoch, context)
 
-        def recall_search(self, query, epoch):
+        def recall_search(self, query, epoch, context):
+            try:
+                if self.picker_context() != context:
+                    return
+            except Hold:
+                return
             if (epoch == self.search_recall_epoch and query in self.cfg.get("search_history", [])
                     and not self.busy and not self.closing and self.search_panel.get_expanded()):
                 self.search_entry.set_text(query)
@@ -1769,6 +1786,7 @@ def create_window(app, loop, bridge=None):
                     "Modelltest nicht abgeschlossen. Status prüfen und erneut versuchen."))
 
         def forget_inventory(self):
+            self.search_recall_epoch += 1
             self.clear_model_probe()
             self.inventory = ()
             self.models.remove_all()
@@ -1778,6 +1796,7 @@ def create_window(app, loop, bridge=None):
             value = widget.get_active_text()
             if value and value in self.inventory:
                 if value != self.cfg["llm"]:
+                    self.search_recall_epoch += 1
                     self.clear_model_probe()
                 self.cfg["llm"] = value
                 self.save()
@@ -3425,6 +3444,12 @@ def create_window(app, loop, bridge=None):
                 live = self.store.bind_live(profile.id)
                 if live.stamp != stamp:
                     raise Hold("profile_changed")
+                def selected_check():
+                    decision, reason = live.evaluate("filesystem_read", ("folder",))
+                    if decision != profiles.ALLOW and reason != "no_rule_matches":
+                        raise Hold("model_discovery_not_authorized")
+                root = files.checked_root(root)
+                identity = files.root_identity(root, checkpoint=selected_check)
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return
@@ -3438,7 +3463,7 @@ def create_window(app, loop, bridge=None):
             async def run(epoch):
                 self.session.check(epoch)
                 checkpoint()
-                worker = asyncio.create_task(asyncio.to_thread(model_discovery.scan, root, checkpoint))
+                worker = asyncio.create_task(asyncio.to_thread(model_discovery.scan, root, checkpoint, expected_root=identity))
                 try:
                     result = await asyncio.shield(worker)
                 except asyncio.CancelledError:
@@ -3449,6 +3474,8 @@ def create_window(app, loop, bridge=None):
                 checkpoint()
                 if self.cfg["profile"] != profile.id or not self.store.is_current(profile.id, stamp):
                     raise Hold("profile_changed")
+                files.require_root_identity(root, identity, checkpoint=checkpoint)
+                checkpoint()
                 self.model_scan_context = self.picker_context()
                 self.model_scan_result = result
                 for item in result.candidates:
@@ -3957,7 +3984,7 @@ def create_window(app, loop, bridge=None):
                 self.set_state("stopping_playback")
 
         def hard_stop(self):
-            self.clear_attachment()
+            self.drop_attachment_for_context_change()
             if hasattr(self, "chat_files"):
                 self.chat_files.reset()
             if hasattr(self, "folder_entries"):

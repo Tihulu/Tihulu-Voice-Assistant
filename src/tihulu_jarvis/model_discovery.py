@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .voice.m1 import Hold
+from . import files
 
 MAX_ENTRIES = 512
 MAX_CANDIDATES = 64
@@ -45,7 +46,7 @@ def _open_root(root, checkpoint):
         raise
 
 
-def scan(root, checkpoint=lambda: None):
+def scan(root, checkpoint=lambda: None, *, expected_root=None):
     """Only the selected folder and two descendant levels; never open weights.
 
     Suffixes identify candidates, not usable models. No symlink following,
@@ -93,6 +94,9 @@ def scan(root, checkpoint=lambda: None):
                     except OSError:
                         continue
                     try:
+                        opened = os.fstat(child)
+                        if (opened.st_dev, opened.st_ino) != (info.st_dev, info.st_ino):
+                            raise Hold("model_folder_changed")
                         walk(child, relative + "/", depth + 1)
                     finally:
                         os.close(child)
@@ -104,8 +108,12 @@ def scan(root, checkpoint=lambda: None):
                     if kind is not None:
                         found.append(Candidate(relative, kind, info.st_size))
     try:
+        if expected_root is not None and (os.fstat(fd).st_dev, os.fstat(fd).st_ino) != expected_root:
+            raise Hold("folder_changed")
         walk(fd, "", 0)
         checkpoint()
+        if expected_root is not None:
+            files.require_root_identity(root, expected_root, checkpoint=checkpoint)
         return Result(root, tuple(sorted(found, key=lambda row: row.relative)), limited)
     except OSError:
         raise Hold("model_folder_unavailable") from None

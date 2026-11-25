@@ -211,3 +211,21 @@ class TextSearchTests(unittest.TestCase):
         with self.assertRaisesRegex(Hold, "file_changed"):
             files.search_text(str(self.root), self.path.name, "new",
                 expected_root=listing.identity, expected_entry=listing.entries[0].identity)
+
+class SelectedRootTests(unittest.TestCase):
+    def test_regular_root_replacement_refused_before_listing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root=Path(tmp)/"chosen"
+            root.mkdir()
+            expected=files.root_identity(str(root))
+            root.rename(Path(tmp)/"original")
+            root.mkdir()
+            with patch.object(files.os,"scandir") as scan:
+                with self.assertRaisesRegex(Hold,"folder_changed"):
+                    files.list_dir(str(root),expected_root=expected)
+                scan.assert_not_called()
+
+    def test_selected_root_identity_still_allows_unchanged_directory(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            expected=files.root_identity(tmp)
+            self.assertEqual(files.list_dir(tmp,expected_root=expected).identity,expected)

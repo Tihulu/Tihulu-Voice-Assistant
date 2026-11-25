@@ -3854,12 +3854,12 @@ class ChatFilesTests(DesktopFixture):
         from threading import Event
         entered, release = Event(), Event()
         real_list = desktop.files.list_dir
-        def delayed(root, *, checkpoint):
+        def delayed(root, *, checkpoint, expected_root=None):
             entered.set()
             if not release.wait(10):
                 raise AssertionError("worker test timeout")
             checkpoint()
-            return real_list(root, checkpoint=checkpoint)
+            return real_list(root, checkpoint=checkpoint, expected_root=expected_root)
         view = self.ui.chat_files
         with patch.object(desktop.files, "list_dir", side_effect=delayed):
             view.start(str(self.tmp))
@@ -4122,6 +4122,125 @@ class OwnerComplaintRegressionTests(DesktopFixture):
         self.until(lambda: not GLib.MainContext.default().pending())
         self.assertEqual(self.ui.cfg["search_history"],[])
         self.assertEqual(self.ui.search_entry.get_text(),"")
+
+    def test_profile_switch_retains_attachment_resolution_and_blocks_transport(self):
+        self.attachment()
+        self.ui.entry.set_text("Summarize the selected file")
+        profile=Profile(id="review-local",name="Review local")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.assertIsNone(self.ui.attachment)
+        self.assertIsNone(self.ui.attachment_context)
+        self.assertIsNone(self.ui.attachment_live)
+        self.assertTrue(self.ui.attachment_invalidated)
+        for _ in range(2):
+            self.click(self.ui.send)
+            self.assertFalse(self.ui.busy)
+            self.assertEqual(self.ui.entry.get_text(),"Summarize the selected file")
+            self.assertFalse(self.backend.requests)
+        self.ui.activate_profile(profile.id)
+        self.assertTrue(self.ui.attachment_invalidated)
+        self.click(self.ui.remove_attachment_button)
+        self.assertFalse(self.ui.attachment_invalidated)
+
+    def test_hard_stop_retained_attachment_draft_requires_explicit_resolution(self):
+        self.attachment()
+        self.ui.entry.set_text("Summarize the selected file")
+        self.ui.hard_stop()
+        self.assertTrue(self.ui.attachment_invalidated)
+        self.click(self.ui.send)
+        self.assertFalse(self.backend.requests)
+        self.assertEqual(self.ui.entry.get_text(),"Summarize the selected file")
+
+    def test_profile_switch_invalidates_deferred_search(self):
+        self.ui.search_panel.set_expanded(True)
+        self.ui.remember_search("mavi")
+        row=self.ui.search_history.get_first_child()
+        self.ui.activate_search_history(row)
+        profile=Profile(id="review-local",name="Review local")
+        self.ui.store.save(profile)
+        self.ui.activate_profile(profile.id)
+        self.until(lambda: not GLib.MainContext.default().pending())
+        self.assertEqual(self.ui.search_entry.get_text(),"")
+        self.assertEqual(self.ui.search_matches,())
+
+    def test_deferred_search_refuses_external_profile_generation_change(self):
+        from dataclasses import replace
+        self.ui.search_panel.set_expanded(True)
+        self.ui.remember_search("mavi")
+        self.ui.activate_search_history(self.ui.search_history.get_first_child())
+        p=self.ui.active_profile()
+        self.ui.store.save(replace(p,version=p.version+1))
+        self.until(lambda: not GLib.MainContext.default().pending())
+        self.assertEqual(self.ui.search_entry.get_text(),"")
+
+    def test_model_folder_substitution_before_worker_refused(self):
+        root=Path(self.profile_home)/"selected-models"
+        root.mkdir()
+        (root/"original.bin").write_bytes(b"original")
+        original=self.ui.submit
+        def substituted(work,*args,**kwargs):
+            root.rename(root.with_name("original-models"))
+            root.mkdir()
+            (root/"replacement.bin").write_bytes(b"replacement")
+            return original(work,*args,**kwargs)
+        with patch.object(self.ui,"submit",side_effect=substituted):
+            self.ui.scan_model_folder(str(root))
+            self.until(lambda: not self.ui.busy)
+        self.assertIsNone(self.ui.model_scan_result)
+        self.assertEqual(self.ui.status.get_text(),"folder_changed")
+        self.jan.assert_not_called()
+
+    def test_chat_folder_substitution_before_worker_refused(self):
+        root=Path(self.profile_home)/"selected-folder"
+        root.mkdir()
+        (root/"original.txt").write_text("original")
+        original=self.ui.submit
+        def substituted(work,*args,**kwargs):
+            root.rename(root.with_name("original-folder"))
+            root.mkdir()
+            (root/"replacement.txt").write_text("replacement")
+            return original(work,*args,**kwargs)
+        with patch.object(self.ui,"submit",side_effect=substituted):
+            self.ui.chat_files.start(str(root))
+            self.until(lambda: not self.ui.busy)
+        self.assertIsNone(self.ui.chat_files.folder)
+        self.assertFalse(self.ui.chat_files.panel.get_visible())
+        self.assertEqual(self.ui.status.get_text(),"folder_changed")
+        self.jan.assert_not_called()
+
+    def test_model_folder_substitution_after_scan_before_publication_refused(self):
+        root=Path(self.profile_home)/"selected-models"
+        root.mkdir()
+        (root/"original.bin").write_bytes(b"original")
+        original=desktop.model_discovery.scan
+        def substituted(*args,**kwargs):
+            result=original(*args,**kwargs)
+            root.rename(root.with_name("original-models"))
+            root.mkdir()
+            return result
+        with patch.object(desktop.model_discovery,"scan",side_effect=substituted):
+            self.ui.scan_model_folder(str(root))
+            self.until(lambda: not self.ui.busy)
+        self.assertIsNone(self.ui.model_scan_result)
+        self.assertEqual(self.ui.status.get_text(),"folder_changed")
+
+    def test_chat_folder_substitution_after_listing_before_publication_refused(self):
+        root=Path(self.profile_home)/"selected-folder"
+        root.mkdir()
+        (root/"original.txt").write_text("original")
+        original=desktop.files.list_dir
+        def substituted(*args,**kwargs):
+            result=original(*args,**kwargs)
+            root.rename(root.with_name("original-folder"))
+            root.mkdir()
+            return result
+        with patch.object(desktop.files,"list_dir",side_effect=substituted):
+            self.ui.chat_files.start(str(root))
+            self.until(lambda: not self.ui.busy)
+        self.assertIsNone(self.ui.chat_files.folder)
+        self.assertEqual(self.ui.status.get_text(),"folder_changed")
+
 
 class ReadinessUITests(DesktopTests):
     """What this machine can do is stated, before a turn fails."""
