@@ -738,6 +738,67 @@ class Transfer:
         except (Hold, OSError):
             self.state = state
 
+    def _partial_paths(self):
+        return (self.root / ("partial-" + self.card.model_id),
+                self.root / (".partial-meta-" + self.card.model_id))
+
+    def _partial_binding(self):
+        # A fresh grant is checked separately. Bind immutable source terms,
+        # not the approval token, and never persist credentials or raw URLs.
+        terms = {k: v for k, v in self.source.__dict__.items()
+                 if k not in ("network_approval", "approval_expires_at")}
+        canonical = lambda value: json.dumps(value, sort_keys=True, ensure_ascii=False)
+        return {"version": 1, "model": self.card.model_id,
+                "card": _text_digest(canonical(self.card.__dict__)),
+                "source": _text_digest(canonical(terms))}
+
+    def _read_partial_record(self):
+        _, metadata = self._partial_paths()
+        try:
+            record = _strict_registry_json(_bounded_registry_text(metadata, 4096))
+            if (not isinstance(record, dict)
+                    or set(record) != {"version", "model", "card", "source", "size", "digest"}
+                    or type(record["version"]) is not int or record["version"] != 1
+                    or type(record["size"]) is not int or not 0 < record["size"] <= DIGEST_LIMIT
+                    or any(not isinstance(record[k], str)
+                           or not re.fullmatch(r"[0-9a-f]{64}", record[k])
+                           for k in ("card", "source", "digest"))):
+                raise Hold("transfer_resume_identity_unverified")
+            return record
+        except (OSError, ValueError, TypeError, RecursionError, Hold):
+            raise Hold("transfer_resume_identity_unverified") from None
+
+    def _save_partial(self, temp):
+        self._assert_current()
+        if not self.source.authorized(self._clock()):
+            return
+        partial, metadata = self._partial_paths()
+        if _exists_entry(partial) or _exists_entry(metadata):
+            return
+        info = temp.lstat()
+        if (not stat.S_ISREG(info.st_mode) or not 0 < info.st_size < DIGEST_LIMIT
+                or (self.source.size and info.st_size >= self.source.size)):
+            return
+        payload = self.registry._payload_record(temp)
+        record = {**self._partial_binding(), **payload}
+        # A crash between the two publications leaves an untrusted partial;
+        # resume never accepts bytes without the complete matching record.
+        os.link(temp, partial, follow_symlinks=False)
+        _sync_directory(self.root)
+        tmp = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
+                                             dir=self.root, delete=False) as stream:
+                tmp = Path(stream.name)
+                json.dump(record, stream, sort_keys=True)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.link(tmp, metadata, follow_symlinks=False)
+            _sync_directory(self.root)
+        finally:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+
     def _finish_temp(self, *, keep):
         """Never overwrite another operation's partial or mask a cancellation."""
         if self.temp is None:
@@ -746,12 +807,7 @@ class Transfer:
         try:
             if keep:
                 with self.registry._write_guard():
-                    self._assert_current()
-                    info = temp.lstat()
-                    if stat.S_ISREG(info.st_mode) and 0 < info.st_size <= DIGEST_LIMIT:
-                        partial = self.root / ("partial-" + self.card.model_id)
-                        # Atomic no-clobber publication. An existing partial wins.
-                        os.link(temp, partial, follow_symlinks=False)
+                    self._save_partial(temp)
         except (Hold, OSError):
             pass
         finally:
@@ -761,19 +817,25 @@ class Transfer:
                 pass
             self.temp = None
 
-    def _consume_partial(self, identity):
+    def _consume_partial(self, identity, record=None):
         """Remove only the exact partial consumed by this committed resume."""
         if identity is None:
             return
         try:
             with self.registry._write_guard():
                 self._assert_current()
-                partial = self.root / ("partial-" + self.card.model_id)
+                partial, metadata = self._partial_paths()
                 info = partial.lstat()
                 actual = (info.st_dev, info.st_ino, info.st_size,
                           info.st_mtime_ns, info.st_ctime_ns, info.st_mode)
                 if actual == identity:
+                    if record is not None:
+                        if self._read_partial_record() != record:
+                            return
+                        metadata.unlink()
+                        _sync_directory(self.root)
                     partial.unlink()
+                    _sync_directory(self.root)
         except (Hold, OSError):
             pass
 
@@ -794,22 +856,35 @@ class Transfer:
         os.close(fd)
         self.temp = Path(name)
         identity = None
+        record = None
         try:
             os.chmod(self.temp, 0o600)
             if start:
-                partial = self.root / ("partial-" + self.card.model_id)
-                if not partial.is_file() or partial.stat().st_size != start:
-                    raise Hold("transfer_resume_offset_unverified")
+                partial, _ = self._partial_paths()
                 from .selected_csv import selection_identity, copy_selected_to
                 def authorized():
                     self._check()
                     return True
-                identity = selection_identity(str(partial.absolute()), authorized=authorized, max_bytes=start)
-                if identity[2] != start:
-                    raise Hold("transfer_resume_offset_unverified")
+                with self.registry._write_guard():
+                    self._check()
+                    try:
+                        info = partial.lstat()
+                    except OSError:
+                        raise Hold("transfer_resume_offset_unverified") from None
+                    if not stat.S_ISREG(info.st_mode) or info.st_size != start:
+                        raise Hold("transfer_resume_offset_unverified")
+                    record = self._read_partial_record()
+                    if (record["size"] != start
+                            or any(record[k] != v for k, v in self._partial_binding().items())):
+                        raise Hold("transfer_resume_identity_unverified")
+                    identity = selection_identity(str(partial.absolute()), authorized=authorized, max_bytes=start)
+                    if identity[2] != start:
+                        raise Hold("transfer_resume_offset_unverified")
                 self.temp.unlink()
                 await copy_selected_to(str(partial.absolute()), self.temp, authorized=authorized,
                                        expected_identity=identity, max_bytes=start)
+                if _verified_artifact(self.temp, start, checkpoint=self._check) != record["digest"]:
+                    raise Hold("transfer_resume_identity_unverified")
             written = await self._fetch(progress, start)
             checksum = self._verified(written)
             if start and written <= start:
@@ -825,7 +900,7 @@ class Transfer:
                                  license_id=self.source.license_id)
             result = self._publish(registered, replacing=allow_installed)
             # A cleanup failure must not turn a committed result into a failed update.
-            self._consume_partial(identity)
+            self._consume_partial(identity, record)
             return result
         except asyncio.CancelledError:
             self.state = "CANCELLED"
