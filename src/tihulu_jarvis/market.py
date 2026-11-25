@@ -753,7 +753,8 @@ class Transfer:
         self.state = card.state
 
     @classmethod
-    def from_registry(cls, registry, model_id, *, checkpoint=lambda: None, transport=None):
+    def from_registry(cls, registry, model_id, *, checkpoint=lambda: None, transport=None,
+                      expected=None):
         """Production entrypoint: derive transport and terms from one card.
 
         An explicitly injected transport is a trusted test/host adapter, not
@@ -761,6 +762,8 @@ class Transfer:
         from the exact approved reference. No fallback to other endpoints.
         """
         card = registry.card(model_id)
+        if expected is not None and card != expected:
+            raise Hold("registry_card_changed")
         source = source_of(card)
         if not source.authorized(time.time()):
             raise Hold("network_not_authorized")
@@ -1698,9 +1701,13 @@ class Registry:
 
     @_model_leased
     @_registry_locked
-    def rollback(self, model_id, revision):
+    def rollback(self, model_id, revision, *, expected=None):
         """Restore a previous revision as current, as a new revision."""
         current = self.card(model_id)
+        if expected is not None and current != expected:
+            raise Hold("registry_card_changed")
+        if current.loaded:
+            raise Hold("model_loaded")
         for candidate in self.history(model_id):
             if candidate.revision == revision:
                 if candidate.model_id != model_id:
@@ -1952,8 +1959,13 @@ class Registry:
 
     @_model_leased
     @_registry_locked
-    def unregister(self, model_id):
+    def unregister(self, model_id, *, expected=None):
         """Remove a registry entry. This never deletes a file by itself."""
+        card = self.card(model_id)
+        if expected is not None and card != expected:
+            raise Hold("registry_card_changed")
+        if card.loaded:
+            raise Hold("model_loaded")
         self.store(*self._without_card(model_id))
 
     def _write_removal_journal(self, record):
@@ -2215,9 +2227,13 @@ class Registry:
 
     @_model_leased
     @_registry_locked
-    def uninstall(self, model_id, approval=""):
+    def uninstall(self, model_id, approval="", *, expected=None):
         """Delete JARVIS-owned files only. Shared weights are never removed."""
         card = self.card(model_id)
+        if expected is not None and card != expected:
+            raise Hold("registry_card_changed")
+        if card.loaded:
+            raise Hold("model_loaded")
         if card.shared_storage_owner:
             raise Hold("shared_weights_are_not_removable")
         if card.owned_by_jarvis:
