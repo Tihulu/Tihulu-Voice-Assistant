@@ -1,0 +1,274 @@
+import unittest
+import json
+from hashlib import sha256
+from dataclasses import replace
+from unittest.mock import patch
+from tihulu_jarvis import profiles
+from gateway import Context, Request, FixtureGateway, Refused
+from inference import Candidate, Envelope
+from adapter_protocol import disclosure_target
+from inventory import Inventory, Entry
+from research import canonical
+from integrated_workflow import FixtureWorkflow, REPORT_STEP
+from task_chain import Artifact, step_target
+from scheduler import Job
+
+class IntegratedTests(unittest.TestCase):
+    def setUp(self):
+        self.ctx=Context("task","session","profile",1,"route","SECURE_HYBRID",False)
+        self.g=FixtureGateway(self.ctx,tuple(profiles.Rule(a,(),"allow") for a in
+            ("external_network","filesystem_read","host_shell","cloud_disclosure","publish_artifact")),
+            clock=profiles.PolicyClock())
+        self.url="https://example.com/research/fixture"
+        self.destination="fixture-provider"
+        self.body=b"time_s,temperature_c\n0,20\n10,22\n20,24\n30,26\n40,28\n"
+        self.i=Inventory()
+        self.i.register(Entry("jan","a"*64,"llm","jan",True,False))
+        self.candidates=(Candidate("jan","llm","local","jan",True,True,4,80),)
+        self.grants={}
+        for name,action,target,classification in (
+            ("research","research",canonical(self.url).identity,"public"),
+            ("engine","engine",step_target(REPORT_STEP,Artifact("csv",sha256(self.body).hexdigest(),"")),"none"),
+            ("agent","agent",Job("analysis","analysis-fixture",4,50).target(),"none"),
+            ("disclose","disclose",self.destination,"minimized"),
+            ("publish","publish","temperature-report","none")):
+            req=Request(self.ctx,action,target,"local",classification)
+            self.grants[name]=self.g.fixture_grant(name,req,60)
+        data=b'{"count":5}'
+        consent=Envelope(self.destination,data,sha256(data).hexdigest())
+        self.grants["payload"]=self.g.fixture_grant("payload",Request(self.ctx,"disclose",disclosure_target(consent),"local","minimized"),60)
+        self.w=FixtureWorkflow(self.g,self.ctx,self.i,self.candidates)
+
+    def run_fixture(self, **kw):
+        args=dict(url=self.url,root="https://example.com/research",body=self.body,
+                  addresses=("8.8.8.8",),peer="8.8.8.8",
+                  headers=(("Content-Type","text/plain; charset=utf-8"),("Content-Length",str(len(self.body)))),
+                  budget=8,destination=self.destination,grants=self.grants)
+        args.update(kw)
+        return self.w.run(**args)
+
+    def test_four_motor_report_matches_real_engine(self):
+        result=self.run_fixture()
+        self.assertEqual(json.loads(result.table),{"count":5,"mean_c":24,"min_c":20,"max_c":28,"delta_c":8,"duration_s":40})
+        self.assertEqual(result.disclosure,b'{"count":5}')
+        self.assertEqual(result.source_digest,sha256(self.body).hexdigest())
+        self.assertEqual(result.table_digest,sha256(result.table).hexdigest())
+        self.assertEqual(result.chart_digest,sha256(result.svg).hexdigest())
+        self.assertIn(b"<polyline",result.svg)
+        self.assertEqual(result.report_digest,sha256(result.table+b"\n"+result.svg).hexdigest())
+        self.assertEqual(self.w.result(),result)
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+
+    def test_revoked_research_invalidates_retained_report(self):
+        self.run_fixture()
+        self.g.revoke("research")
+        with self.assertRaises(Refused):
+            self.w.result()
+        self.assertEqual(self.w.state,"held")
+
+    def test_no_disclosure_on_revocation_during_compute(self):
+        from tihulu_jarvis.temperature_engine import analyze_temperature as actual
+        def revoked(*args,**kwargs):
+            series=actual(*args,**kwargs)
+            self.g.revoke("disclose")
+            return series
+        with patch("integrated_workflow.analyze_temperature",side_effect=revoked), patch("integrated_workflow.envelope") as send:
+            with self.assertRaises(Refused):
+                self.run_fixture()
+            send.assert_not_called()
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_cross_scope_and_peer_refused(self):
+        for case in ("wrong_grant","wrong_peer"):
+            with self.subTest(case=case):
+                self.w=FixtureWorkflow(self.g,self.ctx,self.i,self.candidates)
+                if case=="wrong_grant":
+                    args={"grants":dict(self.grants,engine=self.grants["agent"])}
+                else:
+                    args={"peer":"1.1.1.1"}
+                with self.assertRaises(Refused):
+                    self.run_fixture(**args)
+                self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+
+    def test_close_and_replay(self):
+        self.run_fixture()
+        with self.assertRaises(Refused):
+            self.run_fixture()
+        self.w.close()
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_no_route_fallback_and_no_retained_result(self):
+        with self.assertRaises(Refused):
+            self.run_fixture(budget=1)
+        self.assertEqual(self.w.state,"held")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_same_source_url_changed_bytes_requires_new_grant(self):
+        changed=self.body.replace(b"0,20",b"0,21")
+        with self.assertRaises(Refused):
+            self.run_fixture(body=changed)
+        self.assertEqual(self.w.state,"held")
+
+    def test_candidate_inventory_mismatch_and_zero_budget(self):
+        self.w=FixtureWorkflow(self.g,self.ctx,self.i,(replace(self.candidates[0],provider="native"),))
+        with self.assertRaises(Refused):
+            self.run_fixture()
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        self.w=FixtureWorkflow(self.g,self.ctx,self.i,self.candidates)
+        with self.assertRaises(Refused):
+            self.run_fixture(budget=0)
+        self.assertEqual(self.w.state,"held")
+
+    def test_dispatch_refusal_drains_lease_and_retains_no_result(self):
+        with patch("integrated_workflow.Scheduler.dispatch",return_value=()):
+            with self.assertRaisesRegex(Refused,"dispatch_refused"):
+                self.run_fixture()
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_close_during_compute_prevents_disclosure_and_publication(self):
+        from tihulu_jarvis.temperature_engine import analyze_temperature as actual
+        def closing(*args,**kwargs):
+            result=actual(*args,**kwargs)
+            self.w.close()
+            return result
+        with patch("integrated_workflow.analyze_temperature",side_effect=closing), patch("integrated_workflow.envelope") as disclose:
+            with self.assertRaises(Refused):
+                self.run_fixture()
+            disclose.assert_not_called()
+        self.assertEqual(self.w.state,"closed")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_preparation_consent_cannot_replace_exact_payload_consent(self):
+        with self.assertRaises(Refused):
+            self.run_fixture(grants=dict(self.grants,payload=self.grants["disclose"]))
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_payload_consent_revocation_invalidates_retained_report(self):
+        self.run_fixture()
+        self.g.revoke("payload")
+        with self.assertRaises(Refused):
+            self.w.result()
+        self.assertEqual(self.w.state,"held")
+
+    def test_model_and_connector_grants_cannot_be_cross_replayed(self):
+        from adapter_protocol import LocalAdapter, prepare
+        from connector_protocol import Connector, JobSpec
+        data=b"synthetic plan"
+        candidate=self.candidates[0]
+        call=prepare(candidate,"call","llm",data)
+        eg=self.g.fixture_grant("model-call",Request(self.ctx,"engine",call.target,"local"),60)
+        spec=JobSpec("opencode-fixture","s","j","plan",sha256(data).hexdigest())
+        ag=self.g.fixture_grant("connector-call",Request(self.ctx,"agent",spec.target(),"local"),60)
+        a=LocalAdapter(self.g,self.ctx,candidate,"call","llm",data,eg)
+        c=Connector(self.g,self.ctx,"opencode-fixture","s")
+        h=c.begin(spec,ag,data)
+        with self.assertRaises(Refused):
+            LocalAdapter(self.g,self.ctx,candidate,"call","llm",data,ag)
+        with self.assertRaises(Refused):
+            Connector(self.g,self.ctx,"opencode-fixture","s").begin(spec,ag,data)
+        a.cancel()
+        c.cancel(h)
+        with self.assertRaises(Refused):
+            LocalAdapter(self.g,self.ctx,candidate,"call","llm",data,eg)
+        with self.assertRaises(Refused):
+            c.event(h,"s","j",1,"completed")
+
+    def test_scheduler_budget_change_requires_new_job_grant(self):
+        candidate=replace(self.candidates[0],memory_mib=5)
+        self.w=FixtureWorkflow(self.g,self.ctx,self.i,(candidate,))
+        with self.assertRaises(Refused):
+            self.run_fixture()
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_close_during_cleanup_cannot_resurrect_report(self):
+        from research_session import ResearchSession
+        original = ResearchSession.close
+        def closing(session):
+            self.w.close()
+            return original(session)
+        with patch.object(ResearchSession,"close",closing):
+            with self.assertRaisesRegex(Refused,"workflow_closed_or_cancelled"):
+                self.run_fixture()
+        self.assertEqual(self.w.state,"closed")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_cleanup_failure_drains_remaining_resources_and_withholds_report(self):
+        with patch("integrated_workflow.Chain.cancel",side_effect=RuntimeError("fixture cleanup")):
+            with self.assertRaisesRegex(RuntimeError,"fixture cleanup"):
+                self.run_fixture()
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_publication_grant_is_single_use(self):
+        self.run_fixture()
+        grant=self.grants["publish"]
+        with self.assertRaisesRegex(Refused,"grant_already_claimed"):
+            self.g.claim(grant,Request(self.ctx,"publish","temperature-report","local"))
+
+    def test_revocation_during_cleanup_refuses_publication(self):
+        from research_session import ResearchSession
+        original=ResearchSession.close
+        def revoking(session):
+            self.g.revoke("publish")
+            return original(session)
+        with patch.object(ResearchSession,"close",revoking):
+            with self.assertRaises(Refused):
+                self.run_fixture()
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_concurrent_start_and_close_are_fail_closed(self):
+        from threading import Event,Thread
+        from tihulu_jarvis.temperature_engine import analyze_temperature as actual
+        entered, resume = Event(), Event()
+        outcomes=[]
+        def blocked(*args,**kwargs):
+            entered.set()
+            if not resume.wait(5):
+                raise RuntimeError("fixture wait expired")
+            return actual(*args,**kwargs)
+        def worker():
+            try:
+                outcomes.append(self.run_fixture())
+            except Exception as exc:
+                outcomes.append(exc)
+        with patch("integrated_workflow.analyze_temperature",side_effect=blocked):
+            thread=Thread(target=worker,daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                with self.assertRaisesRegex(Refused,"workflow_not_ready"):
+                    self.run_fixture()
+                self.w.close()
+            finally:
+                resume.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(outcomes),1)
+        self.assertIsInstance(outcomes[0],(Refused,ValueError))
+        self.assertEqual(self.w.state,"closed")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
