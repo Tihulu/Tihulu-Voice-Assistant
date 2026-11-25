@@ -1,0 +1,23 @@
+name: Frozen transfer boundary probes (maintainer evidence)
+on:
+  pull_request:
+    branches: ['fix/jr128-owned-audio-validation']
+permissions:
+  contents: read
+jobs:
+  probes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify evidence-only diff and run exact source
+        run: |
+          git diff --exit-code 40dc8f73ad6d5f4daf7cf1afbb3f8b79b687ec12 HEAD -- src packaging tools tests pyproject.toml data
+          cp qa/transfer-boundary-probes.py "$RUNNER_TEMP/transfer-boundary-probes.py"
+          git checkout --detach 40dc8f73ad6d5f4daf7cf1afbb3f8b79b687ec12
+          test "$(git rev-parse HEAD)" = "40dc8f73ad6d5f4daf7cf1afbb3f8b79b687ec12"
+          test "$(git rev-parse HEAD^{tree})" = "5f844f34524f23a8b0ef59d91fda041e66a4f86d"
+          PYTHONPATH="$PWD/src" python3 "$RUNNER_TEMP/transfer-boundary-probes.py"
