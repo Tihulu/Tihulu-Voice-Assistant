@@ -1756,6 +1756,7 @@ class ResumeQueueTests(DownloadFixture):
         self.click(self.ui.download_discard)
         self.until(lambda: entry["state"] == "CANCELLED")
         self.assertFalse(self.partial_file().exists())
+        self.assertFalse(Path(self.market_home, "transfers", ".partial-meta-fixture-download").exists())
         self.assertFalse(Path(self.market_home, "artifacts", "fixture-download").exists())
         self.assertEqual(self.ui.market.card("fixture-download").state, "CANCELLED")
         self.assertFalse(self.ui.download_resume.get_sensitive())
@@ -1877,7 +1878,13 @@ class QueueRestoreTests(DownloadFixture):
         return self.ui.market.card(model_id)
 
     def test_a_restart_restores_a_resumable_entry(self):
-        self.partial_on_disk("fixture-restore", b"partial bytes")
+        card = self.partial_on_disk("fixture-restore", b"wei", state="CANCELLED")
+        transfer = market.Transfer(self.ui.market, card, market.source_of(card), None)
+        payload, metadata = transfer._partial_paths()
+        transfer.temp = transfer.root / "fixture-temp"
+        payload.rename(transfer.temp)
+        transfer._finish_temp(keep=True)
+        self.assertTrue(metadata.exists())
         # A fresh window is a restart: the queue is rebuilt from disk only.
         fresh = desktop.create_window(self.app, self.loop, self.bridge)
         self.addCleanup(fresh.win.close)
@@ -1885,12 +1892,26 @@ class QueueRestoreTests(DownloadFixture):
         self.assertEqual(len(restored), 1)
         entry = restored[0]
         self.assertEqual(entry["state"], "RESUMABLE")
-        self.assertEqual(entry["resume"], len(b"partial bytes"))
-        self.assertIn("Restored from disk.", entry["note"])
+        self.assertEqual(entry["resume"], 3)
+        self.assertIn("Prefix will be verified", entry["note"])
         self.assertTrue(fresh.download_resume.get_sensitive())
         self.assertIn("RESUMABLE", fresh.download_line(entry))
         fresh.win.close()
         self.until(lambda: fresh.win.get_visible() is False)
+
+    def test_legacy_partial_is_visible_but_resume_disabled(self):
+        self.partial_on_disk("fixture-legacy", b"wei")
+        fresh = desktop.create_window(self.app, self.loop, self.bridge)
+        self.addCleanup(fresh.win.close)
+        self.assertEqual(len(fresh.downloads), 1)
+        entry = fresh.downloads[0]
+        self.assertEqual(entry["state"], "UNVERIFIED")
+        self.assertEqual(entry["resume"], 0)
+        self.assertFalse(fresh.download_resume.get_sensitive())
+        self.assertTrue(fresh.download_discard.get_sensitive())
+        fresh.discard_download()
+        self.assertFalse(Path(self.market_home, "transfers", "partial-fixture-legacy").exists())
+        self.assertEqual(entry["state"], "CANCELLED")
 
     def test_an_installed_item_is_not_reported_as_pending(self):
         self.partial_on_disk("fixture-installed", b"leftover", state="ACTIVE")
