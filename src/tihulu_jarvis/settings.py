@@ -113,15 +113,51 @@ def checked(obj):
     return out
 
 
+def _read_text(p):
+    """Bound actual reads; never follow a settings symlink or open a FIFO for waiting."""
+    if not hasattr(os, "O_NOFOLLOW"):
+        raise Hold("settings_unreadable")
+    fd = os.open(p, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size > 32768:
+            raise Hold("invalid_local_settings")
+        chunks = bytearray()
+        while len(chunks) <= 32768:
+            part = os.read(fd, min(8192, 32769 - len(chunks)))
+            if not part:
+                break
+            chunks.extend(part)
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+                    info.st_ctime_ns, info.st_mode)
+        if (len(chunks) > 32768 or len(chunks) != before.st_size
+                or identity(before) != identity(os.fstat(fd))
+                or identity(before) != identity(p.lstat())):
+            raise Hold("settings_changed")
+        return chunks.decode("utf-8")
+    finally:
+        os.close(fd)
+
+
+def _decode(text):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError("duplicate settings key")
+            result[key] = value
+        return result
+    return checked(json.loads(text, object_pairs_hook=pairs))
+
+
 def load(path=None):
     p = config_path() if path is None else Path(path)
     try:
-        if p.stat().st_size > 32768:
-            raise Hold("invalid_local_settings")
-        return checked(json.loads(p.read_text(encoding="utf-8")))
+        return _decode(_read_text(p))
     except FileNotFoundError:
         return empty()
-    except (ValueError, OSError):
+    except (ValueError, OSError, RecursionError):
         raise Hold("settings_unreadable") from None
 
 
@@ -188,7 +224,7 @@ def save(obj, path=None):
 
 
 @contextmanager
-def choice_transaction(obj, path=None):
+def choice_transaction(obj, path=None, *, expected=None):
     """Stage settings during a synchronous registry commit.
 
     Cooperating writers cannot interleave. Ordinary commit errors restore
@@ -199,15 +235,14 @@ def choice_transaction(obj, path=None):
     text = _serialize(obj)
     with _write_guard(p):
         try:
-            info = p.lstat()
-            if not stat.S_ISREG(info.st_mode) or info.st_size > 32768:
-                raise Hold("invalid_local_settings")
-            previous = p.read_text(encoding="utf-8")
-            checked(json.loads(previous))
+            previous = _read_text(p)
+            current = _decode(previous)
         except FileNotFoundError:
-            previous = None
-        except (OSError, ValueError):
+            previous, current = None, empty()
+        except (OSError, ValueError, RecursionError):
             raise Hold("settings_unreadable") from None
+        if expected is not None and current != checked(expected):
+            raise Hold("settings_changed")
         try:
             _replace_text(p, text)
         except OSError:
@@ -216,7 +251,7 @@ def choice_transaction(obj, path=None):
             yield
         except BaseException:
             try:
-                if p.read_text(encoding="utf-8") != text:
+                if _read_text(p) != text:
                     raise Hold("settings_recovery_required")
                 if previous is None:
                     p.unlink()
