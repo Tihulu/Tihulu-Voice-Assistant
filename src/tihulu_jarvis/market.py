@@ -16,6 +16,8 @@ import os
 import time
 import re
 import tempfile
+import stat
+from .owned_wait import await_authorized
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -621,22 +623,128 @@ class Transfer:
     it never opens a connection itself.
     """
 
-    def __init__(self, registry, card, source, fetch, root=None, now=0.0):
+    def __init__(self, registry, card, source, fetch, root=None, now=None, *, checkpoint=lambda: None):
         self.registry = registry
         self.card = card
         self.source = source.checked()
         self.fetch = fetch
-        self.now = now
+        started = time.monotonic()
+        self._clock = time.time if now is None else lambda: now + (time.monotonic() - started)
+        self._checkpoint = checkpoint
         self.root = Path(root) if root else registry.root / "transfers"
         self.root.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.temp = None
         self.received = 0
         self.state = card.state
 
+    def _assert_current(self):
+        if self.registry.card(self.card.model_id) != self.card:
+            raise Hold("transfer_card_changed")
+
+    def _check(self):
+        self._checkpoint()
+        if not self.source.authorized(self._clock()):
+            raise Hold("network_not_authorized")
+        self._assert_current()
+
+    async def _fetch(self, progress, start=None):
+        self._check()
+        def note(count):
+            self._check()
+            self.received = count
+            if progress:
+                progress(count)
+            self._check()
+        async def run():
+            self._check()
+            if start is None:
+                return await self.fetch(str(self.temp), note)
+            return await self.fetch(str(self.temp), note, start)
+        return await await_authorized(run, 300, self._check)
+
+    def _verified(self, written):
+        self._check()
+        if type(written) is not int or not 0 < written <= DIGEST_LIMIT:
+            raise Hold("transfer_reported_invalid_length")
+        if self.source.size and written != self.source.size:
+            raise Hold("transfer_size_mismatch")
+        checksum = _verified_artifact(self.temp, written, checkpoint=self._check)
+        if checksum != self.source.checksum:
+            raise Hold("transfer_checksum_mismatch")
+        self._check()
+        return checksum
+
+    def _publish(self, registered, *, replacing):
+        self._check()
+        if self.registry.card(self.card.model_id) != self.card:
+            raise Hold("transfer_card_changed")
+        target = self.registry.root / "artifacts" / self.card.model_id
+        target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        # Preserve the previous inode across ordinary registry write failure.
+        # This private-directory protocol is NOT crash-durable or a sandbox.
+        backup = None
+        replaced = False
+        try:
+            if target.exists() or target.is_symlink():
+                if (not replacing or not self.card.owned_by_jarvis
+                        or self.card.shared_storage_owner or self.card.loaded
+                        or not stat.S_ISREG(target.lstat().st_mode)):
+                    raise Hold("artifact_not_replaceable")
+                fd, name = tempfile.mkstemp(prefix=".previous-", dir=target.parent)
+                os.close(fd)
+                backup = Path(name)
+                backup.unlink()
+                os.link(target, backup, follow_symlinks=False)
+            self._check()
+            os.replace(self.temp, target)
+            self.temp = None
+            replaced = True
+            try:
+                self._check()
+                if self.registry.card(self.card.model_id) != self.card:
+                    raise Hold("transfer_card_changed")
+                saved = self.registry.save_card(registered)
+            except BaseException:
+                # If recovery itself fails, leave the backup intact for review.
+                if backup is not None:
+                    os.replace(backup, target)
+                    backup = None
+                else:
+                    target.unlink(missing_ok=True)
+                replaced = False
+                raise
+            self.card, self.state = saved, saved.state
+            replaced = False
+            return saved
+        finally:
+            if backup is not None and not replaced:
+                try:
+                    backup.unlink(missing_ok=True)
+                except OSError:
+                    # Do not report a committed update as failed because an
+                    # old backup could not be removed.
+                    pass
+
     def _persist(self, state):
-        self.card = advance(self.card, state)
-        self.state = self.card.state
-        return self.registry.save_card(self.card)
+        self._assert_current()
+        saved = self.registry.save_card(advance(self.card, state))
+        self.card, self.state = saved, saved.state
+        return saved
+
+    def _terminal(self, state):
+        # A stale operation must never overwrite a newer registry entry.
+        try:
+            if self.state not in TERMINAL:
+                self._persist(state)
+        except (Hold, OSError):
+            self.state = state
+
+    def _current_for_partial(self):
+        try:
+            self._assert_current()
+            return True
+        except (Hold, OSError):
+            return False
 
     async def resume(self, progress=None, start=0, allow_installed=False):
         """Continue an interrupted transfer from a verified byte offset.
@@ -646,6 +754,11 @@ class Transfer:
         """
         if not allow_installed and self.card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
             raise Hold("model_already_registered")
+        self._check()
+        if type(start) is not int or not 0 <= start < DIGEST_LIMIT or (self.source.size and start >= self.source.size):
+            raise Hold("transfer_resume_offset_unverified")
+        if self.card.shared_storage_owner or self.card.loaded:
+            raise Hold("artifact_not_replaceable")
         fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
         os.close(fd)
         self.temp = Path(name)
@@ -655,24 +768,20 @@ class Transfer:
                 partial = self.root / ("partial-" + self.card.model_id)
                 if not partial.is_file() or partial.stat().st_size != start:
                     raise Hold("transfer_resume_offset_unverified")
-                self.temp.write_bytes(partial.read_bytes())
-            written = await self.fetch(str(self.temp), lambda count: progress(count) if progress else None, start)
+                from .selected_csv import selection_identity, copy_selected_to
+                def authorized():
+                    self._check()
+                    return True
+                identity = selection_identity(str(partial.absolute()), authorized=authorized, max_bytes=start)
+                if identity[2] != start:
+                    raise Hold("transfer_resume_offset_unverified")
+                self.temp.unlink()
+                await copy_selected_to(str(partial.absolute()), self.temp, authorized=authorized,
+                                       expected_identity=identity, max_bytes=start)
+            written = await self._fetch(progress, start)
+            checksum = self._verified(written)
             if start and written <= start:
                 raise Hold("transfer_resume_made_no_progress")
-            checksum, _ = digest(self.temp)
-            if checksum != self.source.checksum:
-                # A failed update leaves the installed item and its settings intact.
-                self.state = "FAILED"
-                raise Hold("transfer_checksum_mismatch")
-            # A resumed transfer registers directly; the interrupted item's
-            # lifecycle was not advanced for the retry itself.
-            target = self.registry.root / "artifacts" / self.card.model_id
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.replace(self.temp, target)
-            self.temp = None
-            os.chmod(target, 0o600)
-            # The resumed bytes are the artifact now; the partial is no longer needed.
-            (self.root / ("partial-" + self.card.model_id)).unlink(missing_ok=True)
             # A successful update keeps an installed item installed.
             stays = self.card.state if self.card.state in ("TESTABLE", "ACTIVE") else "REGISTERED"
             registered = replace(self.card, state=stays, registered=True, installed=True,
@@ -680,23 +789,25 @@ class Transfer:
                                  storage_ref="sha256-" + checksum[:32],
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
                                  source_version=self.source.version,
-                                 license_id=self.source.license_id, trust_level="curated")
-            self.registry.save_card(registered)
-            self.card = registered
-            self.state = registered.state
-            return registered
+                                 license_id=self.source.license_id)
+            result = self._publish(registered, replacing=allow_installed)
+            # A cleanup failure must not turn a committed result into a failed update.
+            try:
+                (self.root / ("partial-" + self.card.model_id)).unlink(missing_ok=True)
+            except OSError:
+                pass
+            return result
         except asyncio.CancelledError:
-            if self.state not in TERMINAL:
-                self._persist("CANCELLED")
+            self.state = "CANCELLED"
             raise
-        except Hold:
-            if self.state not in TERMINAL:
-                self._persist("FAILED")
+        except (Hold, OSError, asyncio.TimeoutError):
+            self.state = "FAILED"
             raise
         finally:
             if self.temp is not None:
                 # Keep a cancelled partial so a later resume can continue from it.
-                if self.state == "CANCELLED" and self.temp.stat().st_size > 0:
+                if (self.state == "CANCELLED" and not allow_installed and self._current_for_partial()
+                        and self.temp.is_file() and not self.temp.is_symlink() and self.temp.stat().st_size > 0):
                     self.temp.replace(self.root / ("partial-" + self.card.model_id))
                 else:
                     Path(self.temp).unlink(missing_ok=True)
@@ -716,9 +827,11 @@ class Transfer:
             # Nothing already installed is ever overwritten by a transfer.
             raise Hold("model_already_registered")
         self._persist("REVIEWED")
-        if not self.source.authorized(self.now):
+        try:
+            self._check()
+        except Hold:
             self._persist("HOLD")
-            raise Hold("network_not_authorized")
+            raise
         self._persist("APPROVED")
         self._persist("QUEUED")
         fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
@@ -727,47 +840,26 @@ class Transfer:
         try:
             os.chmod(self.temp, 0o600)
             self._persist("DOWNLOADING")
-            def note(count):
-                self.received = count
-                if progress:
-                    progress(count)
-            written = await self.fetch(str(self.temp), note)
-            if not isinstance(written, int) or written <= 0 or written > DIGEST_LIMIT:
-                raise Hold("transfer_reported_invalid_length")
-            if self.temp.stat().st_size != written:
-                raise Hold("transfer_length_mismatch")
-            if self.source.size and written != self.source.size:
-                raise Hold("transfer_size_mismatch")
-            checksum, _ = digest(self.temp)
-            if checksum != self.source.checksum:
-                self._persist("FAILED")
-                raise Hold("transfer_checksum_mismatch")
+            written = await self._fetch(progress)
+            checksum = self._verified(written)
             self._persist("VERIFIED")
-            target = self.registry.root / "artifacts" / self.card.model_id
-            target.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-            os.replace(self.temp, target)
-            self.temp = None
-            os.chmod(target, 0o600)
             registered = replace(self.card, state="REGISTERED", registered=True, installed=True,
                                  owned_by_jarvis=True, disk_size_bytes=written,
                                  storage_ref="sha256-" + checksum[:32],
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
-                                 license_id=self.source.license_id, trust_level="curated")
-            self.registry.save_card(registered)
-            self.card = registered
-            self.state = registered.state
-            return registered
+                                 source_version=self.source.version,
+                                  license_id=self.source.license_id)
+            return self._publish(registered, replacing=False)
         except asyncio.CancelledError:
-            if self.state not in TERMINAL:
-                self._persist("CANCELLED")
+            self._terminal("CANCELLED")
             raise
-        except Hold:
-            if self.state not in TERMINAL:
-                self._persist("FAILED")
+        except (Hold, OSError, asyncio.TimeoutError):
+            self._terminal("FAILED")
             raise
         finally:
             if self.temp is not None:
-                if self.state == "CANCELLED" and self.temp.stat().st_size > 0:
+                if (self.state == "CANCELLED" and self._current_for_partial()
+                        and self.temp.is_file() and not self.temp.is_symlink() and self.temp.stat().st_size > 0):
                     # Keep the partial so a later resume can continue from it.
                     self.temp.replace(self.root / ("partial-" + self.card.model_id))
                 else:
@@ -775,6 +867,40 @@ class Transfer:
 
     def cancel(self):
         raise Hold("transfer_cancelled_by_owner")
+
+
+def _verified_artifact(path, size, *, checkpoint=lambda: None):
+    """Hash an exact bounded regular file; refuse symlink/size changes."""
+    if type(size) is not int or not 0 < size <= DIGEST_LIMIT:
+        raise Hold("transfer_length_mismatch")
+    fd = None
+    try:
+        checkpoint()
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or before.st_size != size:
+            raise Hold("transfer_length_mismatch")
+        h = hashlib.sha256()
+        total = 0
+        while total < size:
+            checkpoint()
+            block = os.read(fd, min(1 << 20, size-total))
+            if not block:
+                raise Hold("transfer_length_mismatch")
+            h.update(block)
+            total += len(block)
+        after = os.fstat(fd)
+        current = os.stat(path, follow_symlinks=False)
+        identity = lambda x: (x.st_dev,x.st_ino,x.st_size,x.st_mtime_ns,x.st_ctime_ns,x.st_mode)
+        if identity(before) != identity(after) or identity(before) != identity(current):
+            raise Hold("transfer_artifact_changed")
+        checkpoint()
+        return h.hexdigest()
+    except OSError:
+        raise Hold("transfer_artifact_unreadable") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
 
 
 def _normalized(items):
@@ -923,6 +1049,17 @@ class Registry:
         current = self.card(model_id)
         for candidate in self.history(model_id):
             if candidate.revision == revision:
+                # Metadata history cannot restore bytes that no longer exist.
+                if current.owned_by_jarvis or candidate.owned_by_jarvis:
+                    if not candidate.owned_by_jarvis or not candidate.storage_ref.startswith("sha256-"):
+                        raise Hold("rollback_artifact_unverified")
+                    try:
+                        checksum = _verified_artifact(self.root / "artifacts" / model_id,
+                                                      candidate.disk_size_bytes)
+                    except Hold:
+                        raise Hold("rollback_artifact_unverified") from None
+                    if candidate.storage_ref != "sha256-" + checksum[:32]:
+                        raise Hold("rollback_artifact_unverified")
                 restored = replace(current, **{k: v for k, v in candidate.__dict__.items()
                                               if k not in ("revision", "state")})
                 return self.save_card(restored)
