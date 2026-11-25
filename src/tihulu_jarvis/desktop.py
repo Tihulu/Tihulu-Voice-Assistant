@@ -439,6 +439,7 @@ def create_window(app, loop, bridge=None):
             self.catalog_rows = {}
             self.downloads = []
             self.download_entries = {}
+            self.download_queue_error = ""
             self.restore_download_queue()
             self.build_downloads_page()
             self.build_profiles_page()
@@ -3323,10 +3324,14 @@ def create_window(app, loop, bridge=None):
                 self.download_entries[item] = entry
                 if entry is selected:
                     self.download_list.select_row(item)
-            self.download_note.set_text(tr(
+            note = tr(
                 "Only approved, verified transfers. Nothing is downloaded without an approved source and checksum.",
                 "Yalnızca onaylı ve doğrulanmış aktarımlar. Onaylı kaynak ve sağlama toplamı olmadan hiçbir şey indirilmez.",
-                "Nur genehmigte, geprüfte Übertragungen. Ohne genehmigte Quelle und Prüfsumme wird nichts geladen."))
+                "Nur genehmigte, geprüfte Übertragungen. Ohne genehmigte Quelle und Prüfsumme wird nichts geladen.")
+            if self.download_queue_error:
+                note += "\n" + tr("Queue inspection unavailable: ", "Kuyruk incelemesi yapılamadı: ",
+                                  "Warteschlangenprüfung nicht verfügbar: ") + self.download_queue_error
+            self.download_note.set_text(note)
             self.refresh_download_buttons()
 
         def download_line(self, entry):
@@ -3420,22 +3425,25 @@ def create_window(app, loop, bridge=None):
                                  "Modelldownload fortsetzen"))
 
         def restore_download_queue(self):
-            """Rebuild pending rows without claiming unbound bytes are resumable."""
-            folder = Path(self.market.root, "transfers")
-            ids = {model_id for model_id, _ in market.resumable_partials(self.market.root)}
-            if folder.is_dir() and not folder.is_symlink():
-                ids.update(path.name[len(".partial-meta-"):] for path in folder.glob(".partial-meta-*"))
-            for model_id in sorted(ids):
-                try:
-                    card = self.market.card(model_id)
-                except Hold:
-                    continue  # an orphan partial is not this client's business
-                if card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
-                    continue  # an installed item has no pending transfer
-                entry = {"id": model_id, "state": "UNVERIFIED", "received": 0,
-                         "total": card.source_size, "note": "", "resume": 0}
-                self.refresh_partial_entry(entry)
-                self.downloads.append(entry)
+            """Rebuild pending rows from one bounded registry snapshot."""
+            try:
+                rows = self.market.pending_partials()
+            except (Hold, OSError) as exc:
+                self.download_queue_error = str(exc)
+                return
+            self.download_queue_error = ""
+            for model_id, total, status in rows:
+                verified = status["state"] == "RESUMABLE"
+                note = (tr("Prefix will be verified before resuming.",
+                           "Devam etmeden önce kısmi içerik doğrulanacak.",
+                           "Teilinhalt wird vor der Fortsetzung geprüft.") if verified else
+                        tr("Unverified partial; resume blocked.",
+                           "Doğrulanmamış kısmi dosya; sürdürme engellendi.",
+                           "Ungeprüfte Teildatei; Fortsetzung gesperrt."))
+                self.downloads.append({"id": model_id, "state": status["state"],
+                                       "received": status["size"], "total": total,
+                                       "note": note, "resume": status["size"] if verified else 0,
+                                       "partial_identity": status["identity"]})
 
         def note_transfer_bytes(self, count, total, epoch, task_id, *, redraw=True):
             # Ignore callbacks from old work, not merely from another model.
