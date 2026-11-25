@@ -45,7 +45,7 @@ class BrowserFixture:
         if type(plan) is not Plan:
             raise Refused("invalid_browser_plan")
         self._g,self._ctx,self._plan=gateway,context.checked(),plan
-        self._req=Request(context,"research",plan.target(),"local","public")
+        self._req=Request(context,"browser",plan.target(),"local","public")
         self._g.claim(grant,self._req)
         self._grant=grant
         self._active=None
@@ -65,7 +65,7 @@ class BrowserFixture:
             target=canonical(url)
             if len(self._visited)>=len(pages) or target!=pages[len(self._visited)]:
                 raise Refused("unexpected_navigation")
-            req=Request(self._ctx,"research",action_target(self._plan,"navigate",url),"local","public")
+            req=Request(self._ctx,"browser",action_target(self._plan,"navigate",url),"local","public")
             self._g.claim(grant,req)
             self._visited.append((grant,req))
             self._active=target
@@ -88,7 +88,7 @@ class BrowserFixture:
                    or 0x202a<=ord(c)<=0x202e or 0x2066<=ord(c)<=0x2069 for c in text):
                 raise Refused("invalid_snapshot")
             digest=sha256(data).hexdigest()
-            req=Request(self._ctx,"research",action_target(self._plan,"snapshot",url,digest),"local","public")
+            req=Request(self._ctx,"browser",action_target(self._plan,"snapshot",url,digest),"local","public")
             self._g.checkpoint(grant,req)
             self._check()
             self._g.claim(grant,req)
