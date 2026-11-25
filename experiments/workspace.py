@@ -7,6 +7,7 @@ from gateway import Context, FixtureGateway, Request, Refused, token
 from conversation import Conversation, session_target
 from rich_chat import RichChat, Card, room_target, key
 from adapter_protocol import text_bytes
+from task_board import TaskBoard
 from voice_review import review, target as stt_target
 
 @dataclass(frozen=True)
@@ -43,7 +44,7 @@ class Workspace:
         self._id=token(identity)
         self._lock=RLock()
         self._state="ready"
-        self._chat=self._rich=None
+        self._chat=self._rich=self._tasks=None
         self._voice=None
         self._voice_checks=[]
         self._attachment=None
@@ -108,7 +109,11 @@ class Workspace:
                     if self._rich is not None:
                         self._rich.close()
                 finally:
-                    self._g.revoke(self._root[0].identity)
+                    try:
+                        if self._tasks is not None:
+                            self._tasks.close()
+                    finally:
+                        self._g.revoke(self._root[0].identity)
 
     def _live(self):
         if self._state in ("held","closed"):
@@ -128,6 +133,8 @@ class Workspace:
                     self._check_attachment(record)
                 if self._attachment is not None:
                     self._check_attachment(self._attachment)
+            if self._tasks is not None:
+                self._tasks.snapshot()
             if self._state in ("held","closed"):
                 raise Refused("workspace_unavailable")
         except Refused:
@@ -301,6 +308,54 @@ class Workspace:
             self._rich.read(identity)
             return data
 
+    def task_room(self):
+        return key("workspace-tasks",self._id,self._root[0].identity)
+
+    def enable_tasks(self,slots,memory,grant,*,confirmed=False):
+        with self._lock:
+            self._ready()
+            if confirmed is not True or self._tasks is not None:
+                raise Refused("explicit_task_board_required")
+            self._tasks=TaskBoard(self._g,self._ctx,self.task_room(),slots,memory,grant)
+            self._live()
+
+    def _board(self):
+        self._live()
+        if self._tasks is None:
+            raise Refused("task_board_disabled")
+        return self._tasks
+
+    def queue_task(self,identity,adapter,capability,payload,memory,priority,schedule_grant,connector_grant,*,confirmed=False):
+        with self._lock:
+            if confirmed is not True:
+                raise Refused("explicit_task_confirmation_required")
+            result=self._board().queue(identity,adapter,capability,payload,memory,priority,schedule_grant,connector_grant)
+            self._live()
+            self._append("task",identity)
+            return result
+
+    def dispatch_tasks(self):
+        with self._lock:
+            result=self._board().dispatch()
+            self._live()
+            return result
+
+    def task_event(self,identity,raw):
+        with self._lock:
+            result=self._board().receive(identity,raw)
+            self._live()
+            return result
+
+    def cancel_task(self,identity):
+        with self._lock:
+            result=self._board().cancel(identity)
+            self._live()
+            return result
+
+    def task_capacity(self):
+        with self._lock:
+            return self._board().capacity()
+
     def timeline(self):
         with self._lock:
             self._live()
@@ -309,14 +364,19 @@ class Workspace:
                             if item.kind!="card" or item.value in cards]
             self._live()
             current=[]
+            tasks={x.identity:x for x in self._tasks.snapshot()} if self._tasks is not None else {}
             for item in self._timeline:
                 if item.kind=="card":
                     try:
                         current.append(Item(item.sequence,item.kind,self._rich.read(item.value)))
                     except Refused:
                         self._live()
+                elif item.kind=="task":
+                    if item.value in tasks:
+                        current.append(Item(item.sequence,item.kind,tasks[item.value]))
                 else:
                     current.append(item)
+            self._live()
             return tuple(current)
 
     def poll(self):

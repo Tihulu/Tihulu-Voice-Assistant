@@ -15,7 +15,7 @@ from test_rich_chat import CSV
 class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.ctx=Context("task","session","profile",1,"route","LOCAL_ONLY")
-        self.g=FixtureGateway(self.ctx,(profiles.Rule("filesystem_read",(),"allow"),profiles.Rule("publish_artifact",(),"allow")),clock=profiles.PolicyClock())
+        self.g=FixtureGateway(self.ctx,(profiles.Rule("filesystem_read",(),"allow"),profiles.Rule("publish_artifact",(),"allow"),profiles.Rule("host_shell",(),"allow")),clock=profiles.PolicyClock())
         self.c=Candidate("jan","llm","local","jan",True,True,4,80)
         self.stt=Candidate("whisper","stt","local","whisper",True,True,2,80)
         self.url="http://127.0.0.1:1337/v1"
@@ -191,3 +191,90 @@ class WorkspaceTests(unittest.IsolatedAsyncioTestCase):
         with patch("conversation.replay",wraps=__import__("conversation").replay) as replay:
             await self.send(d,"ok")
             self.assertNotIn("PRIVATE-CANARY",repr(replay.call_args.args[6]))
+
+    def enable_board(self):
+        from task_board import board_scope,board_target
+        room=self.s.task_room()
+        root=self.grant("agent",board_target(room,2,10))
+        self.s.enable_tasks(2,10,root,confirmed=True)
+        return root,board_scope(room,root.identity)
+    def queue_task(self,scope,identity="job",payload=b"PRIVATE-TASK"):
+        from task_board import plan
+        job,spec=plan(scope,identity,"opencode","plan",payload,4,50)
+        sg=self.grant("agent",job.target())
+        cg=self.grant("agent",spec.target())
+        self.s.queue_task(identity,"opencode","plan",payload,4,50,sg,cg,confirmed=True)
+        return sg,cg
+    def task_frame(self,scope,identity,sequence,kind):
+        import json
+        from task_board import scoped
+        return json.dumps(dict(session=scope,job=scoped(scope,identity),sequence=sequence,kind=kind)).encode()
+    async def test_task_timeline_status_and_chat_context_isolation(self):
+        _,scope=self.enable_board()
+        self.queue_task(scope)
+        self.s.dispatch_tasks()
+        self.s.task_event("job",self.task_frame(scope,"job",1,"progress"))
+        d=self.s.draft("hello")
+        with patch("conversation.replay",wraps=__import__("conversation").replay) as replay:
+            await self.send(d,"hi")
+            self.assertNotIn("PRIVATE-TASK",repr(replay.call_args.args[6]))
+        self.s.task_event("job",self.task_frame(scope,"job",2,"completed"))
+        items=self.s.timeline()
+        self.assertEqual([i.kind for i in items],["task","user","assistant"])
+        self.assertEqual(items[0].value.state,"completed")
+        self.assertEqual(self.s.task_capacity(),(0,0,0))
+    async def test_task_cancel_while_chat_is_running(self):
+        _,scope=self.enable_board()
+        self.queue_task(scope)
+        self.s.dispatch_tasks()
+        d=self.s.draft("wait")
+        g=self.grant("engine",d.target)
+        entered,resume=asyncio.Event(),asyncio.Event()
+        async def blocked(*args):
+            entered.set()
+            await resume.wait()
+            return b"answer"
+        with patch("conversation.replay",side_effect=blocked):
+            task=asyncio.create_task(self.s.submit(d,g,b"fixture",confirmed=True))
+            try:
+                await asyncio.wait_for(entered.wait(),2)
+                self.assertEqual(self.s.cancel_task("job").state,"cancelled")
+                self.assertEqual(self.s.task_capacity(),(0,0,0))
+            finally:
+                resume.set()
+            self.assertEqual(await asyncio.wait_for(task,2),"answer")
+        self.assertEqual(self.s.timeline()[0].value.state,"cancelled")
+    async def test_board_revocation_closes_workspace_and_drains_tasks(self):
+        root,scope=self.enable_board()
+        grants=self.queue_task(scope)
+        self.s.dispatch_tasks()
+        self.g.revoke(root.identity)
+        self.assertEqual(self.s.poll(),"held")
+        self.assertEqual(self.s._tasks._scheduler.poll(),(0,0,0))
+        for grant in grants:
+            with self.assertRaises(Refused):
+                self.g.checkpoint(grant,grant.request)
+    async def test_workspace_close_drains_queued_and_running_tasks(self):
+        _,scope=self.enable_board()
+        grants=self.queue_task(scope)
+        self.s.dispatch_tasks()
+        more=self.queue_task(scope,"other")
+        self.s.close()
+        self.assertEqual(self.s._tasks._scheduler.poll(),(0,0,0))
+        for grant in (*grants,*more):
+            with self.assertRaises(Refused):
+                self.g.checkpoint(grant,grant.request)
+    async def test_explicit_board_and_task_confirmation(self):
+        from task_board import board_target,plan
+        root=self.grant("agent",board_target(self.s.task_room(),2,10))
+        with self.assertRaises(Refused):
+            self.s.enable_tasks(2,10,root)
+        self.assertIsNone(self.s._tasks)
+        self.s.enable_tasks(2,10,root,confirmed=True)
+        scope=self.s._tasks._room
+        job,spec=plan(scope,"job","opencode","plan",b"x",4,50)
+        sg=self.grant("agent",job.target())
+        cg=self.grant("agent",spec.target())
+        with self.assertRaises(Refused):
+            self.s.queue_task("job","opencode","plan",b"x",4,50,sg,cg)
+        self.assertEqual(self.s.timeline(),())
