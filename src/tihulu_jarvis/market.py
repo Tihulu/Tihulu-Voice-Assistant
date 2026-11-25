@@ -1805,6 +1805,9 @@ class Registry:
     @_registry_locked
     def partial_status(self, model_id):
         """Cheap metadata-only inspection. Resume verifies the actual prefix."""
+        return self._partial_status_for(model_id, self.lookup_card(model_id))
+
+    def _partial_status_for(self, model_id, card):
         payload, metadata = self._queue_partial_paths(model_id)
         identity = (_partial_file_identity(payload), _partial_file_identity(metadata))
         if identity == (None, None):
@@ -1812,7 +1815,8 @@ class Registry:
         size = identity[0][2] if identity[0] else 0
         state = "UNVERIFIED"
         try:
-            card = self.card(model_id)
+            if card is None:
+                raise Hold("model_not_registered")
             source = source_of(card)
             record = _read_partial_record(metadata)
             if (identity[0] is not None and 0 < size < DIGEST_LIMIT
@@ -1826,6 +1830,31 @@ class Registry:
         except Hold:
             pass
         return {"state": state, "size": size, "identity": identity}
+
+    @_registry_locked
+    def pending_partials(self):
+        """Inspect known registry IDs only, without enumerating the directory.
+
+        A registry snapshot bounds work and avoids re-reading it per card.
+        Untrusted entries are visible but cannot be resumed or removed.
+        """
+        folder = self.root / "transfers"
+        try:
+            folder.lstat()
+        except FileNotFoundError:
+            return ()
+        _directory_identity(folder)
+        out = []
+        for card in sorted(self.cards(), key=lambda card: card.model_id):
+            if card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
+                continue
+            try:
+                status = self._partial_status_for(card.model_id, card)
+            except (Hold, OSError):
+                status = {"state": "UNVERIFIED", "size": 0, "identity": None}
+            if status is not None:
+                out.append((card.model_id, card.source_size, status))
+        return tuple(out)
 
     @_model_leased
     @_registry_locked
