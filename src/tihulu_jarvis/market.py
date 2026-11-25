@@ -680,6 +680,15 @@ def _transfer_locked(method):
     return locked
 
 
+def _leased_transfer(method):
+    """Keep a per-model lease across await, not the global registry lock."""
+    @wraps(method)
+    async def leased(self, *args, **kwargs):
+        with self.registry.transfer_lease(self.card.model_id):
+            return await method(self, *args, **kwargs)
+    return leased
+
+
 class Transfer:
     """Cancellable, verified transfer into an isolated temporary directory.
 
@@ -857,6 +866,7 @@ class Transfer:
         except (Hold, OSError):
             pass
 
+    @_leased_transfer
     async def resume(self, progress=None, start=0, allow_installed=False):
         """Continue an interrupted transfer from a verified byte offset.
 
@@ -939,6 +949,7 @@ class Transfer:
             raise Hold("model_not_installed")
         return await self.resume(progress, start=0, allow_installed=True)
 
+    @_leased_transfer
     async def run(self, progress=None):
         if self.card.state != DISCOVERED:
             # Nothing already installed is ever overwritten by a transfer.
@@ -1547,6 +1558,50 @@ class Registry:
     def selection(self, profile):
         return dict(self.load()[1].get(profile, {}))
 
+    @contextmanager
+    def transfer_lease(self, model_id):
+        """Nonblocking, cooperative per-model lease, released on process exit.
+
+        Stable lock files are intentionally never removed. A registry lock
+        must not be held while awaiting network operations.
+        """
+        if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model_id):
+            raise Hold("invalid_model_id")
+        try:
+            import fcntl
+        except ImportError:
+            raise Hold("transfer_lock_unsupported") from None
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise Hold("transfer_lock_unsupported")
+        folder = self.root / ".transfer-locks"
+        fd = None
+        try:
+            folder.mkdir(mode=0o700, exist_ok=True)
+            info = folder.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_mode & 0o077):
+                raise Hold("transfer_lock_unavailable")
+            fd = os.open(folder / (model_id + ".lock"),
+                         os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK,
+                         0o600)
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                    or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+                raise Hold("transfer_lock_unavailable")
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            if fd is not None:
+                os.close(fd)
+            raise Hold("transfer_busy") from None
+        except (OSError, Hold):
+            if fd is not None:
+                os.close(fd)
+            raise Hold("transfer_lock_unavailable") from None
+        try:
+            yield
+        finally:
+            os.close(fd)
+
     def _queue_partial_paths(self, model_id):
         if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model_id):
             raise Hold("invalid_model_id")
@@ -1583,6 +1638,10 @@ class Registry:
     @_registry_locked
     def discard_partial(self, model_id, expected_identity):
         """Explicitly discard the two exact files observed by the owner."""
+        with self.transfer_lease(model_id):
+            self._discard_partial_locked(model_id, expected_identity)
+
+    def _discard_partial_locked(self, model_id, expected_identity):
         payload, metadata = self._queue_partial_paths(model_id)
         actual = (_partial_file_identity(payload), _partial_file_identity(metadata))
         if actual != expected_identity or actual == (None, None):

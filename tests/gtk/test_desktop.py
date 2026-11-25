@@ -1912,6 +1912,8 @@ class QueueRestoreTests(DownloadFixture):
         fresh.discard_download()
         self.assertFalse(Path(self.market_home, "transfers", "partial-fixture-legacy").exists())
         self.assertEqual(entry["state"], "CANCELLED")
+        fresh.win.close()
+        self.until(lambda: fresh.win.get_visible() is False)
 
     def test_an_installed_item_is_not_reported_as_pending(self):
         self.partial_on_disk("fixture-installed", b"leftover", state="ACTIVE")
