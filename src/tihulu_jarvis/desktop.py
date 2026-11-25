@@ -1817,7 +1817,11 @@ def create_window(app, loop, bridge=None):
             if key != "stt":
                 # A voice must match the locale it is offered for.
                 audio.voice_for(path, key)
-            self.market.save_card(card)
+            known = self.market.lookup_card(card.model_id)
+            if known is not None and (known.owned_by_jarvis or known.shared_storage_owner
+                                      or known.storage_ref != card.storage_ref):
+                raise Hold("registry_import_conflict")
+            card = self.market.save_card(card, expected=known)
             self.cfg.setdefault("market_refs", {})[card.storage_ref] = str(path)
             self.save()
             self.build_market_page()
@@ -1834,6 +1838,7 @@ def create_window(app, loop, bridge=None):
         def use_card(self, model_id):
             """Apply a registered card. Nothing is downloaded or started."""
             card = self.market.card(model_id)
+            expected = card
             if card.compatibility_status == "incompatible_format":
                 raise Hold("incompatible_model_format")
             if card.category == "llm":
@@ -1841,7 +1846,7 @@ def create_window(app, loop, bridge=None):
                 if model_id not in self.inventory:
                     raise Hold("model_not_in_inventory")
                 # The endpoint itself verifies that this model is installed.
-                card = self.market.save_card(market.register_installed(card))
+                card = self.market.save_card(market.register_installed(card), expected=expected)
                 self.cfg["llm"] = model_id
                 self.remember("llm", model_id)
                 self.models.set_active(self.inventory.index(model_id))
@@ -1853,7 +1858,7 @@ def create_window(app, loop, bridge=None):
                 card = market.advance(card, "TESTABLE")
             if card.state == "TESTABLE":
                 card = market.advance(card, market.ACTIVE)
-            card = self.market.save_card(card)
+            card = self.market.save_card(card, expected=expected)
             if card.category == "stt":
                 path = self.cfg.get("market_refs", {}).get(card.storage_ref)
                 if not path:
@@ -2057,7 +2062,7 @@ def create_window(app, loop, bridge=None):
                 if not self.catalog.verified:
                     # An unverified catalog may be inspected, never installed from.
                     raise Hold("catalog_not_verified")
-                self.market.save_card(entry.checked())
+                self.market.record_discovered(entry.checked())
                 self.build_market_page()
                 self.set_state("ready", tr("Added to registry.","Kayda eklendi.","Registriert."))
             except Hold as exc:
@@ -2068,18 +2073,9 @@ def create_window(app, loop, bridge=None):
             if entry is None or self.busy:
                 return
             try:
-                known = None
-                try:
-                    known = self.market.card(entry.model_id)
-                except Hold:
-                    pass
-                if known is None:
-                    known = self.market.save_card(entry.checked())
-                if known.state != "DISCOVERED":
-                    raise Hold("lifecycle_transition_rejected:" + known.state + "->REVIEWED")
-                approved = replace(known, network_approval="owner-approved-download",
-                                   approval_expires_at=1e12)
-                self.market.save_card(approved)
+                if not self.catalog.verified:
+                    raise Hold("catalog_not_verified")
+                self.market.approve_catalog_entry(entry, "owner-approved-download", 1e12)
                 self.build_market_page()
                 self.set_state("ready", tr("Download approved for this entry.",
                                            "Bu kayıt için indirme onaylandı.",
@@ -2952,7 +2948,10 @@ def create_window(app, loop, bridge=None):
                 return None
             try:
                 recorded = catalog_sources.registry_card(card, source)
-                self.market.save_card(recorded)
+                known = self.market.lookup_card(recorded.model_id)
+                if known is not None and replace(known, revision=0) != replace(recorded, revision=0):
+                    raise Hold("registry_discovery_conflict")
+                recorded = self.market.save_card(recorded if known is None else known, expected=known)
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return None
@@ -3071,14 +3070,12 @@ def create_window(app, loop, bridge=None):
                 cards = await market.from_models(client, languages=(), now=0.0)
                 checkpoint()
                 for card in cards:
-                    known = None
-                    try:
-                        known = self.market.card(card.model_id)
-                    except Hold:
-                        pass
-                    if known is None or known.state == "DISCOVERED":
+                    known = self.market.lookup_card(card.model_id)
+                    if known is None or (known.state == "DISCOVERED"
+                            and not known.registered and not known.owned_by_jarvis
+                            and not known.network_approval and not known.source_ref):
                         # Re-discovery refreshes a card, never silently upgrades it.
-                        self.market.save_card(card)
+                        self.market.save_card(card, expected=known)
                 checkpoint()
                 self.cfg["endpoint"] = route[3]
                 self.inventory = tuple(card.model_id for card in cards)
