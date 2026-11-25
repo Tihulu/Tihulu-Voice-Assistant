@@ -43,3 +43,9 @@ class ConnectorTests(unittest.TestCase):
         self.assertEqual(self.c.status,"closed")
         with self.assertRaises(Refused):
             self.c.begin(self.spec,self.grant,self.data)
+
+    def test_grant_cannot_start_duplicate_connector(self):
+        self.c.begin(self.spec,self.grant,self.data)
+        another=Connector(self.g,self.ctx,"opencode-fixture","s")
+        with self.assertRaisesRegex(Refused,"grant_already_claimed"):
+            another.begin(self.spec,self.grant,self.data)
