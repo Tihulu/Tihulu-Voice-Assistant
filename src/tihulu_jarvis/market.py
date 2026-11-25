@@ -889,6 +889,8 @@ class Transfer:
             raise Hold("transfer_resume_offset_unverified")
         if self.card.shared_storage_owner or self.card.loaded:
             raise Hold("artifact_not_replaceable")
+        # Resume copies the prefix into a separate full-size staging file.
+        _require_free_space(self.root, self.source.size)
         fd, name = tempfile.mkstemp(prefix="tihulu-transfer-", dir=str(self.root))
         os.close(fd)
         self.temp = Path(name)
@@ -966,6 +968,7 @@ class Transfer:
         self._persist("REVIEWED")
         try:
             self._check()
+            _require_free_space(self.root, self.source.size)
         except Hold:
             self._persist("HOLD")
             raise
@@ -999,6 +1002,25 @@ class Transfer:
 
     def cancel(self):
         raise Hold("transfer_cancelled_by_owner")
+
+
+def _require_free_space(directory, size):
+    """Advisory preflight for known allocation, never a reservation.
+
+    Concurrent writers and filesystem quotas can still cause ENOSPC.
+    Unknown sizes stay unknown; no eviction or deletion is attempted.
+    """
+    if type(size) is not int or not 0 <= size <= DIGEST_LIMIT:
+        raise Hold("invalid_size")
+    if size == 0:
+        return
+    try:
+        info = os.statvfs(directory)
+        available = info.f_bavail * info.f_frsize
+    except (OSError, AttributeError):
+        raise Hold("storage_capacity_unavailable") from None
+    if available < size:
+        raise Hold("insufficient_storage")
 
 
 def _artifact_hash_steps(path, size, *, checkpoint=lambda: None):
@@ -1519,6 +1541,7 @@ class Registry:
             total += info.st_size
             if count >= self.HISTORY_LIMIT or total + card.disk_size_bytes > 2 * DIGEST_LIMIT:
                 raise Hold("artifact_archive_limit")
+        _require_free_space(target.parent, card.disk_size_bytes)
         fd, name = tempfile.mkstemp(prefix=".archive-", dir=target.parent)
         os.close(fd)
         temp = Path(name)
@@ -1552,6 +1575,7 @@ class Registry:
         if _verified_artifact(archive, candidate.disk_size_bytes) != candidate.artifact_digest:
             raise Hold("rollback_artifact_unverified")
         self.retain_artifact(current, target)
+        _require_free_space(target.parent, candidate.disk_size_bytes)
         fd, name = tempfile.mkstemp(prefix=".rollback-", dir=target.parent)
         os.close(fd)
         temp = Path(name)
