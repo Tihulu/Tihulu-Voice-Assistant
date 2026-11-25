@@ -1836,9 +1836,11 @@ def create_window(app, loop, bridge=None):
             self.store.save(updated)
             self.activate_profile(updated.id, quiet=True)
 
-        def use_card(self, model_id):
-            """Apply a registered card. Nothing is downloaded or started."""
+        def use_card(self, model_id, *, expected=None):
+            """Validate selection before recording an activation; never start a model."""
             card = self.market.card(model_id)
+            if expected is not None and card != expected:
+                raise Hold("registry_card_changed")
             expected = card
             if card.compatibility_status == "incompatible_format":
                 raise Hold("incompatible_model_format")
@@ -1854,27 +1856,29 @@ def create_window(app, loop, bridge=None):
                 self.save()
                 self.refresh()
                 return
-            # Using a verified import is an explicit activation, not a silent one.
+            if card.state not in ("REGISTERED", "TESTABLE", "ACTIVE"):
+                raise Hold("model_not_selectable")
+            if card.category not in ("stt", "tts"):
+                raise Hold("model_category_not_selectable_here")
+            path = self.cfg.get("market_refs", {}).get(card.storage_ref)
+            if card.category == "tts":
+                if len(card.languages) != 1 or card.languages[0] not in ("tr", "en", "de"):
+                    raise Hold("voice_locale_unverified")
+                lang = card.languages[0]
+                audio.voice_for(path, lang)
+            else:
+                audio.selected_file(path, ".bin")
+            # No invalid selection may advance the lifecycle. This is a
+            # preflight, not a runtime model-load or full content verification.
             if card.state == "REGISTERED":
                 card = market.advance(card, "TESTABLE")
             if card.state == "TESTABLE":
                 card = market.advance(card, market.ACTIVE)
             card = self.market.save_card(card, expected=expected)
             if card.category == "stt":
-                path = self.cfg.get("market_refs", {}).get(card.storage_ref)
-                if not path:
-                    raise Hold("select_local_model")
                 self.cfg["stt"] = path
-            elif card.category == "tts":
-                if len(card.languages) != 1:
-                    raise Hold("voice_locale_unverified")
-                lang = card.languages[0]
-                path = self.cfg.get("market_refs", {}).get(card.storage_ref)
-                if not path:
-                    raise Hold("select_local_model")
-                self.cfg["voices"][lang] = path
             else:
-                raise Hold("model_category_not_selectable_here")
+                self.cfg["voices"][lang] = path
             self.save()
             self.update_labels()
             self.refresh()
@@ -3175,7 +3179,11 @@ def create_window(app, loop, bridge=None):
             if model_id is None or self.busy:
                 return
             try:
-                self.use_card(model_id)
+                expected = self.selected_card_snapshot()
+                if expected is None:
+                    raise Hold("registry_card_changed")
+                self.use_card(model_id, expected=expected)
+                self.build_market_page()
                 self.set_state("ready", tr("Model selected.","Model seçildi.","Modell ausgewählt."))
             except Hold as exc:
                 self.set_state("ready", str(exc))

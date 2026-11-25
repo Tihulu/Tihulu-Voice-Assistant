@@ -1862,6 +1862,52 @@ class UpdateUITests(DownloadFixture):
         self.assertEqual(self.ui.market.card("fixture-update").state, "ACTIVE")
         # The failed update replaced nothing; only the explicit rename revision exists.
         self.assertEqual(len(self.ui.market.history("fixture-update")), 1)
+class MarketSelectionPreflightUITests(MarketFixture):
+    def test_missing_local_file_does_not_advance_state(self):
+        path = self.weights("fixture-missing.bin")
+        card = self.ui.register_choice("stt", str(path))
+        before = self.ui.cfg.get("stt")
+        path.unlink()
+        self.pick_card(card.model_id)
+        self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "incompatible_model_file")
+        self.assertEqual(self.ui.market.card(card.model_id), card)
+        self.assertEqual(self.ui.cfg.get("stt"), before)
+
+    def test_changed_voice_locale_does_not_advance_state(self):
+        path = self.weights("fixture-tr.onnx")
+        config = path.with_name(path.name + ".json")
+        config.write_text('{"language":{"code":"tr_TR"}}')
+        card = self.ui.register_choice("tr", str(path))
+        before = dict(self.ui.cfg["voices"])
+        config.write_text('{"language":{"code":"de_DE"}}')
+        self.ui.market_filter.set_active(2)
+        self.pick_card(card.model_id)
+        self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "voice_locale_unverified")
+        self.assertEqual(self.ui.market.card(card.model_id), card)
+        self.assertEqual(self.ui.cfg["voices"], before)
+
+    def test_discovered_stt_cannot_be_activated(self):
+        card = self.ui.market.save_card(market.ModelCard(
+            model_id="fixture-discovered", display_name="Fixture", category="stt"))
+        self.ui.build_market_page()
+        self.pick_card(card.model_id)
+        self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "model_not_selectable")
+        self.assertEqual(self.ui.market.card(card.model_id), card)
+
+    def test_stale_row_cannot_activate_revised_model(self):
+        path = self.weights("fixture-stale.bin")
+        card = self.ui.register_choice("stt", str(path))
+        self.pick_card(card.model_id)
+        changed = self.ui.market.save_card(market.replace(card, display_name="Changed"))
+        before = self.ui.cfg.get("stt")
+        self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "registry_card_changed")
+        self.assertEqual(self.ui.market.card(card.model_id), changed)
+        self.assertEqual(self.ui.cfg.get("stt"), before)
+
 class StaleMarketActionUITests(MarketFixture):
     def setUp(self):
         super().setUp()
