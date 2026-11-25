@@ -4,6 +4,8 @@
 import json
 import os
 import tempfile
+import stat
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import catalog_sources, files, queries, resources, web
@@ -123,6 +125,34 @@ def load(path=None):
         raise Hold("settings_unreadable") from None
 
 
+@contextmanager
+def _write_guard(p):
+    """Serialize cooperating settings writers, without waiting on the GTK thread."""
+    try:
+        import fcntl
+        if not hasattr(os, "O_NOFOLLOW"):
+            raise Hold("settings_lock_unavailable")
+        p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd = os.open(p.with_name(p.name + ".lock"),
+                     os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    except (ImportError, OSError):
+        raise Hold("settings_lock_unavailable") from None
+    try:
+        info = os.fstat(fd)
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+            raise Hold("settings_lock_unavailable")
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            raise Hold("settings_busy") from None
+        except OSError:
+            raise Hold("settings_lock_unavailable") from None
+        yield
+    finally:
+        os.close(fd)
+
+
 def forget(path=None):
     """Remove the stored choices, and say what was left alone.
 
@@ -131,18 +161,73 @@ def forget(path=None):
     forgetting a preference can never erase a decision record.
     """
     p = config_path() if path is None else Path(path)
-    try:
-        p.unlink()
-    except FileNotFoundError:
+    if not p.parent.exists():
         return False
-    except OSError:
-        raise Hold("settings_unwritable") from None
-    return True
+    with _write_guard(p):
+        try:
+            p.unlink()
+        except FileNotFoundError:
+            return False
+        except OSError:
+            raise Hold("settings_unwritable") from None
+        return True
+
+
+def _serialize(obj):
+    text = json.dumps(checked(obj), ensure_ascii=False, sort_keys=True)
+    if len(text.encode("utf-8")) > 32768:
+        raise Hold("invalid_local_settings")
+    return text
 
 
 def save(obj, path=None):
     p = config_path() if path is None else Path(path)
-    text = json.dumps(checked(obj), ensure_ascii=False, sort_keys=True)
+    text = _serialize(obj)
+    with _write_guard(p):
+        _replace_text(p, text)
+
+
+@contextmanager
+def choice_transaction(obj, path=None):
+    """Stage settings during a synchronous registry commit.
+
+    Cooperating writers cannot interleave. Ordinary commit errors restore
+    the exact old text (or absence); a failed restoration is explicitly held.
+    This is compensation, not an atomic two-file crash-recovery protocol.
+    """
+    p = config_path() if path is None else Path(path)
+    text = _serialize(obj)
+    with _write_guard(p):
+        try:
+            info = p.lstat()
+            if not stat.S_ISREG(info.st_mode) or info.st_size > 32768:
+                raise Hold("invalid_local_settings")
+            previous = p.read_text(encoding="utf-8")
+            checked(json.loads(previous))
+        except FileNotFoundError:
+            previous = None
+        except (OSError, ValueError):
+            raise Hold("settings_unreadable") from None
+        try:
+            _replace_text(p, text)
+        except OSError:
+            raise Hold("settings_unwritable") from None
+        try:
+            yield
+        except BaseException:
+            try:
+                if p.read_text(encoding="utf-8") != text:
+                    raise Hold("settings_recovery_required")
+                if previous is None:
+                    p.unlink()
+                else:
+                    _replace_text(p, previous)
+            except (Hold, OSError, ValueError):
+                raise Hold("settings_recovery_required") from None
+            raise
+
+
+def _replace_text(p, text):
     p.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
     tmp = None
     try:
