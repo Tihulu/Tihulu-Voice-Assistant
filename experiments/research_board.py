@@ -97,8 +97,13 @@ class ResearchBoard:
             try:
                 self._g.claim(snapshot_grant,sreq)
                 claimed.append(snapshot_grant)
+                self._live()
+                self._g.checkpoint(snapshot_grant,sreq)
                 self._g.claim(network_grant,nreq)
                 claimed.append(network_grant)
+                self._live()
+                self._g.checkpoint(snapshot_grant,sreq)
+                self._g.checkpoint(network_grant,nreq)
                 identity=self._session.collect(network_grant,url,resolved,peer,headers,body)
                 self._live()
                 self._g.checkpoint(network_grant,nreq)
@@ -131,6 +136,7 @@ class ResearchBoard:
         with self._lock:
             self._live()
             token(identity)
+            self.cards()
             if self._pending is not None or identity in self._seen or len(self._seen)>=16 or len(self._cards)>=8:
                 raise Refused("report_limit_or_pending")
             builder=ReportBuilder(self._g,self._ctx,self._session,spans)
@@ -142,6 +148,7 @@ class ResearchBoard:
                 report=builder.preview()
                 card=Card(identity,report.digest,report.payload)
                 self._checks(ids)
+                self._live()
                 self._pending=(card,builder,ids,())
                 self._seen.add(identity)
                 return card
@@ -225,7 +232,26 @@ class ResearchBoard:
                     result.append(self.read(identity))
                 except Refused:
                     self._live()
-            return tuple(result)
+            # A later report rebuild can invalidate an earlier report.
+            # Recheck retained permissions without rebuilding reports again.
+            current=[]
+            for card in result:
+                record=self._cards.get(card.identity)
+                if record is None or record[0] is not card:
+                    continue
+                try:
+                    self._checks(record[2])
+                    for grant,req in record[3]:
+                        self._g.checkpoint(grant,req)
+                    self._live()
+                    if self._cards.get(card.identity) is record:
+                        current.append(card)
+                except Refused:
+                    if self._cards.pop(card.identity,None) is record:
+                        self._drop(record)
+                    self._live()
+            self._live()
+            return tuple(current)
 
     def export(self,identity,destination,grant,*,confirmed=False):
         with self._lock:
@@ -240,6 +266,8 @@ class ResearchBoard:
                 self._g.checkpoint(grant,req)
                 if self.read(identity) is not card:
                     raise Refused("stale_report")
+                self._g.checkpoint(grant,req)
+                self._live()
                 return card.payload
             except BaseException:
                 self._g.revoke(grant.identity)

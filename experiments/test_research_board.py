@@ -152,3 +152,60 @@ class ResearchBoardTests(unittest.TestCase):
             self.assertEqual(self.b.cards(),())
         with self.assertRaises(Refused):
             self.b.read(c.identity)
+
+    def test_export_revoked_during_final_report_rebuild(self):
+        c,p=self.report()
+        g=self.grant("publish",export_target(self.b.scope,c,"slot"))
+        builder=self.b._cards[c.identity][1]
+        original=builder.preview
+        calls=[]
+        def preview():
+            result=original()
+            calls.append(1)
+            if len(calls)==3:
+                self.g.revoke(g.identity)
+            return result
+        with patch.object(builder,"preview",side_effect=preview):
+            with self.assertRaises(Refused):
+                self.b.export(c.identity,"slot",g,confirmed=True)
+        self.assertEqual(len(calls),3)
+        self.assertEqual(self.b.read(c.identity),c)
+
+    def test_later_report_rebuild_revokes_earlier_snapshot(self):
+        a,n,s=self.collect()
+        b,_,_=self.collect("b")
+        first,p=self.report("one",(a,))
+        second,_=self.report("two",(b,))
+        builder=self.b._cards[second.identity][1]
+        original=builder.preview
+        def preview():
+            result=original()
+            self.g.revoke(p.identity)
+            return result
+        with patch.object(builder,"preview",side_effect=preview):
+            self.assertEqual(self.b.cards(),(second,))
+        self.assertNotIn(first.identity,self.b._cards)
+
+    def test_root_revoked_after_snapshot_claim_prevents_network_claim(self):
+        url=ROOT+"/a"
+        n,s=self.consents(url,BODY)
+        original=self.g.claim
+        def revoke(grant,req):
+            original(grant,req)
+            if grant is s:
+                self.g.revoke(self.root.identity)
+        with patch.object(self.g,"claim",side_effect=revoke),patch.object(self.b._session,"collect") as collect:
+            with self.assertRaises(Refused):
+                self.b.collect(url,("8.8.8.8",),"8.8.8.8",headers(BODY),BODY,n,s,confirmed=True)
+            collect.assert_not_called()
+        self.g.claim(n,n.request)
+
+    def test_revoked_pending_report_does_not_block_fresh_report(self):
+        a,n,s=self.collect()
+        b,_,_=self.collect("b")
+        self.b.prepare("old",(a,))
+        self.g.revoke(s.identity)
+        fresh=self.b.prepare("new",(b,))
+        p=self.grant("publish",publication_target(self.b.scope,fresh))
+        self.b.publish(fresh,p,confirmed=True)
+        self.assertEqual(self.b.cards(),(fresh,))
