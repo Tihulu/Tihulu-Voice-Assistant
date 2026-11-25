@@ -145,5 +145,6 @@ def approved_payload(gateway,grant,context,envelope):
     if context.mode!="SECURE_HYBRID":
         raise Refused("secure_hybrid_required")
     req=Request(context,"disclose",target,"local","minimized")
+    gateway.claim(grant,req)
     gateway.checkpoint(grant,req)
     return envelope.payload

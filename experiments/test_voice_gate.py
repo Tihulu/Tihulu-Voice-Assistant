@@ -78,3 +78,15 @@ class VoiceGateTests(unittest.TestCase):
         self.g.revoke("next")
         self.assertEqual(other.poll(),"held")
         self.assertEqual(other._frames,[])
+
+    def test_final_frame_crossing_wall_deadline_discards_review(self):
+        from unittest.mock import patch
+        with patch("voice_gate.monotonic",return_value=10):
+            self.v.arm(self.grant)
+            for f in (LOUD,LOUD,LOUD,QUIET):
+                self.v.feed(f)
+        with patch("voice_gate.monotonic",side_effect=[10.1,10.3]):
+            self.assertEqual(self.v.feed(QUIET),"timeout")
+        self.assertEqual(self.v._frames,[])
+        with self.assertRaises(Refused):
+            self.v.take()

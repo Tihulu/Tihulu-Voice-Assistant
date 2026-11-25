@@ -45,10 +45,43 @@ class Scheduler:
             self._seen.add(job.identity)
             self._queued.append((job,grant,req))
 
+    def _prune(self):
+        # Synthetic reservations only; no real process drain is implied.
+        kept=[]
+        for job,grant,req in self._queued:
+            try:
+                self._g.checkpoint(grant,req)
+            except Refused:
+                continue
+            kept.append((job,grant,req))
+        self._queued=kept
+        for handle,(_,grant,req) in tuple(self._running.items()):
+            try:
+                self._g.checkpoint(grant,req)
+            except Refused:
+                del self._running[handle]
+
+    def poll(self):
+        with self._lock:
+            self._prune()
+            return (len(self._queued),len(self._running),
+                    sum(j[0].memory for j in self._running.values()))
+
+    def cancel_queued(self, identity):
+        token(identity)
+        with self._lock:
+            for i,(job,grant,_) in enumerate(self._queued):
+                if job.identity==identity:
+                    self._g.revoke(grant.identity)
+                    del self._queued[i]
+                    return
+            raise Refused("not_owned")
+
     def dispatch(self):
         with self._lock:
             if self._closed:
                 return ()
+            self._prune()
             available=self._memory-sum(j[0].memory for j in self._running.values())
             selected=[]
             remaining=[]
@@ -79,10 +112,13 @@ class Scheduler:
         with self._lock:
             if type(handle) is not object or handle not in self._running:
                 raise Refused("not_owned")
-            self._running.pop(handle)
+            _,grant,_=self._running.pop(handle)
+            self._g.revoke(grant.identity)
 
     def close(self):
         with self._lock:
             self._closed=True
+            for _,grant,_ in (*self._queued,*self._running.values()):
+                self._g.revoke(grant.identity)
             self._queued.clear()
             self._running.clear()
