@@ -1858,5 +1858,77 @@ class TransferDirectoryBoundaryTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaisesRegex(Hold, "staging_scan_limit"):
                 self.registry.staging_candidates(self.card.model_id)
 
+class ArchiveDurabilityTests(unittest.TestCase):
+    def setUp(self):
+        from dataclasses import replace
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        digest = hashlib.sha256(OLD).hexdigest()
+        self.card = self.registry.save_card(replace(market.ModelCard(
+            model_id="fixture-model", display_name="Fixture", category="stt"),
+            state="REGISTERED", installed=True, registered=True, owned_by_jarvis=True,
+            artifact_digest=digest, storage_ref="sha256-" + digest[:32],
+            disk_size_bytes=len(OLD)))
+        self.target = self.root / "artifacts" / self.card.model_id
+        self.target.parent.mkdir(mode=0o700)
+        self.target.write_bytes(OLD)
+
+    def test_existing_archive_is_resynced_before_reuse(self):
+        archive = self.registry.retain_artifact(self.card, self.target)
+        with patch.object(market, "_sync_directory", wraps=market._sync_directory) as sync:
+            with patch.object(market.os, "fsync", wraps=market.os.fsync) as flush:
+                self.assertEqual(self.registry.retain_artifact(self.card, self.target), archive)
+                self.assertGreaterEqual(flush.call_count, 1)
+            for folder in (archive.parent, archive.parent.parent, self.root):
+                sync.assert_any_call(folder)
+        self.assertEqual(archive.read_bytes(), OLD)
+
+    def test_archive_alias_of_active_payload_refused(self):
+        import os
+        archive = self.registry._archive_path(self.card)
+        os.link(self.target, archive)
+        with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+            self.registry.retain_artifact(self.card, self.target)
+        self.assertEqual(self.target.read_bytes(), OLD)
+        self.assertEqual(archive.read_bytes(), OLD)
+
+    def test_archive_sync_failure_does_not_change_registry(self):
+        archive = self.registry.retain_artifact(self.card, self.target)
+        with patch.object(market, "_sync_directory", side_effect=OSError("fixture")):
+            with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+                self.registry.retain_artifact(self.card, self.target)
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+        self.assertEqual(archive.read_bytes(), OLD)
+        self.assertEqual(self.target.read_bytes(), OLD)
+
+    def test_shared_writable_archive_directory_refused(self):
+        archive = self.registry._archive_path(self.card)
+        archive.parent.chmod(0o777)
+        with self.assertRaisesRegex(Hold, "artifact_archive_unavailable"):
+            self.registry.retain_artifact(self.card, self.target)
+        self.assertFalse(archive.exists())
+        self.assertEqual(self.target.read_bytes(), OLD)
+
+    def test_rollback_same_digest_refuses_redirected_artifact_directory(self):
+        from dataclasses import replace
+        newer = self.registry.save_card(replace(self.card, display_name="Newer"))
+        outside = self.root / "outside"
+        self.target.parent.rename(outside)
+        self.target.parent.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+            self.registry.rollback(self.card.model_id, self.card.revision)
+        self.assertEqual(self.registry.card(self.card.model_id), newer)
+        self.assertEqual((outside / self.card.model_id).read_bytes(), OLD)
+
+    def test_uninstall_refuses_shared_writable_artifact_directory(self):
+        self.target.parent.chmod(0o777)
+        with self.assertRaisesRegex(Hold, "artifact_not_replaceable"):
+            self.registry.uninstall(self.card.model_id, approval="fixture")
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+        self.assertEqual(self.target.read_bytes(), OLD)
+        self.assertFalse(self.registry.removal_journal.exists())
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
