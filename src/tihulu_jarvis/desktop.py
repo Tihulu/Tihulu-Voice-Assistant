@@ -182,6 +182,7 @@ def create_window(app, loop, bridge=None):
             self.history_attachment_live = None
             self.leases = locks.Leases()
             self.search_matches = ()
+            self.search_recall_epoch = 0
             self.growing = {}
             self.transcribe_runner = None
             self.result_watch = None
@@ -1185,10 +1186,11 @@ def create_window(app, loop, bridge=None):
             # Rebuilding the list during GTK's row activation can invalidate
             # the row whose native activation is still being dispatched.
             if not self.busy and self.search_panel.get_expanded():
-                GLib.idle_add(self.recall_search, row.query)
+                GLib.idle_add(self.recall_search, row.query, self.search_recall_epoch)
 
-        def recall_search(self, query):
-            if not self.busy and not self.closing and self.search_panel.get_expanded():
+        def recall_search(self, query, epoch):
+            if (epoch == self.search_recall_epoch and query in self.cfg.get("search_history", [])
+                    and not self.busy and not self.closing and self.search_panel.get_expanded()):
                 self.search_entry.set_text(query)
                 self.run_search(remember=True)
 
@@ -1203,6 +1205,7 @@ def create_window(app, loop, bridge=None):
             self.refresh_search_history()
 
         def forget_searches(self):
+            self.search_recall_epoch += 1
             self.cfg["search_history"] = list(queries.clear())
             self.save()
             self.refresh_search_history()
@@ -1248,6 +1251,7 @@ def create_window(app, loop, bridge=None):
             return target
 
         def clear_search(self):
+            self.search_recall_epoch += 1
             self.search_entry.set_text("")
             self.run_search()
             if self.search_panel.get_expanded():
@@ -3979,6 +3983,7 @@ def create_window(app, loop, bridge=None):
             self.session.invalidate(clear=clear)
             if clear:
                 self.history_attachment_live = None
+                self.search_recall_epoch += 1
                 self.search_entry.set_text("")
                 self.run_search()
                 child=self.log.get_first_child()
@@ -4032,8 +4037,14 @@ def create_window(app, loop, bridge=None):
 
         def read_attachment(self, path):
             """Trusted chooser acceptance: recheck policy at the actual read."""
+            replacing = self.attachment is not None or self.attachment_invalidated
+            def failed_selection():
+                if replacing:
+                    self.invalidate_attachment()
+                else:
+                    self.clear_attachment()
             if self.require_attachment() is None:
-                self.clear_attachment()
+                failed_selection()
                 return None
             try:
                 route = self.attachment_route()
@@ -4065,11 +4076,11 @@ def create_window(app, loop, bridge=None):
                     }.get(str(exc), "attachment_unreadable")) from None
                 item = attachments.load(path, authorized=authorized, expected_identity=identity)
             except Hold as exc:
-                self.clear_attachment()
+                failed_selection()
                 self.set_state("ready", str(exc))
                 return None
             except Exception:
-                self.clear_attachment()
+                failed_selection()
                 self.set_state("ready", "local_operation_failed")
                 return None
             self.attachment = item
@@ -4327,6 +4338,7 @@ def create_window(app, loop, bridge=None):
             self.submit(run, label=tr("a spoken turn", "sesli tur", "eine gesprochene Runde"))
 
         def close(self,*_):
+            self.search_recall_epoch += 1
             self.dismiss_picker()
             self.clear_attachment()
             if hasattr(self, "file_read"):
