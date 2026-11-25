@@ -1,0 +1,33 @@
+name: Frozen chat-first boundary probes
+on:
+  pull_request:
+    branches: ['draft/chat-first-recovery']
+permissions:
+  contents: read
+jobs:
+  boundary-probes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Verify frozen source and fixture tree
+        run: |
+          git diff --exit-code 4d55f7ff6eccd97ce1a11b6323edd73382e088f4 HEAD -- src packaging tools tests pyproject.toml
+          git rev-parse 4d55f7ff6eccd97ce1a11b6323edd73382e088f4^{tree}
+          git diff --name-only 4d55f7ff6eccd97ce1a11b6323edd73382e088f4 HEAD
+      - name: Install disposable GTK test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+      - name: Execute focused maintainer probes
+        env:
+          PYTHONPATH: src:tests/gtk
+          PYTHONDONTWRITEBYTECODE: '1'
+          GDK_BACKEND: x11
+          GSK_RENDERER: cairo
+          GTK_A11Y: none
+          G_DEBUG: fatal-criticals
+        run: dbus-run-session -- xvfb-run -a /usr/bin/python3 qa/chat_first_boundary_probes.py
