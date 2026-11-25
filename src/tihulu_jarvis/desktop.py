@@ -1912,6 +1912,9 @@ def create_window(app, loop, bridge=None):
                 self.market_find = self.button(row, tr("Discover installed Jan models","Kurulu Jan modellerini bul","Installierte Jan-Modelle suchen"), self.discover_market)
                 self.market_rollback = self.button(row, tr("Roll back","Geri al","Zurücksetzen"), self.rollback_selected_card)
                 self.market_update = self.button(row, tr("Update","Güncelle","Aktualisieren"), self.update_selected_card)
+                self.market_retry = self.button(row, tr("Reset interrupted download",
+                    "Kesilen indirmeyi sıfırla", "Unterbrochenen Download zurücksetzen"),
+                    self.retry_selected_transfer)
                 cleanup = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
                 page.append(cleanup)
                 self.staging_note = Gtk.Label(xalign=0, wrap=True)
@@ -1951,6 +1954,7 @@ def create_window(app, loop, bridge=None):
                 # The row carries its card's id, so a keyboard activation and a
                 # test both reach the same model rather than the label text.
                 item.card_id = card.model_id
+                item.card_snapshot = card
             self.market_note.set_text(tr(
                 "Installed models and voices known to this computer. Unknown values stay unknown/not tested. Import happens in Installed models.",
                 "Bu bilgisayarda bilinen kurulu modeller ve sesler. Bilinmeyen değerler bilinmiyor/denenmedi olarak kalır. İçe alma Kurulu modeller bölümünde yapılır.",
@@ -3036,6 +3040,14 @@ def create_window(app, loop, bridge=None):
 
         def refresh_market_buttons(self):
             chosen = self.selected_card()
+            row = self.market_list.get_selected_row()
+            snapshot = getattr(row, "card_snapshot", None)
+            self.market_retry.set_sensitive(not self.busy and chosen is not None
+                and snapshot is not None and snapshot.state in market.RETRYABLE_TRANSFER
+                and not snapshot.registered and not snapshot.loaded and not snapshot.owned_by_jarvis
+                and not snapshot.shared_storage_owner and not snapshot.storage_ref
+                and not snapshot.artifact_digest and snapshot.local_or_cloud == "local"
+                and bool(snapshot.source_ref and snapshot.source_checksum))
             if getattr(self, "staging_scan", None) is not None:
                 if self.staging_model != chosen:
                     self.clear_staging_review()
@@ -3132,6 +3144,27 @@ def create_window(app, loop, bridge=None):
             except (Hold, OSError) as exc:
                 self.set_state("ready", str(exc))
             self.refresh_staging_buttons()
+
+        def retry_selected_transfer(self):
+            model_id = self.selected_card()
+            row = self.market_list.get_selected_row()
+            expected = getattr(row, "card_snapshot", None)
+            if self.busy or model_id is None or expected is None:
+                return
+            try:
+                self.market.retry_transfer(model_id, expected)
+            except (Hold, OSError) as exc:
+                self.set_state("ready", str(exc))
+            else:
+                for entry in self.downloads:
+                    if entry["id"] == model_id:
+                        self.refresh_partial_entry(entry)
+                self.build_downloads_page()
+                self.build_market_page()
+                self.set_state("ready", tr(
+                    "Reset to discovered. Existing temporary files preserved; start a new download explicitly.",
+                    "Keşfedildi durumuna sıfırlandı. Geçici dosyalar korundu; yeni indirmeyi açıkça başlatın.",
+                    "Auf entdeckt zurückgesetzt. Temporäre Dateien bleiben erhalten; neuen Download ausdrücklich starten."))
 
         def use_selected_card(self):
             model_id = self.selected_card()
