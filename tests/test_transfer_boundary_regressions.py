@@ -1998,5 +1998,146 @@ class StagingProofTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(Path(sync.call_args.args[0]), self.root / "artifacts" / card.model_id)
         self.assertFalse(self.registry.publication_journal.exists())
 
+class InterruptedRetryTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.other = market.Registry(self.root)
+
+    def card(self, state="DOWNLOADING", **kw):
+        fields = dict(model_id="fixture-model", display_name="Fixture", category="stt",
+                      state=state, installed=True, source_ref="catalog:fixture",
+                      source_checksum=hashlib.sha256(NEW).hexdigest(), source_size=len(NEW),
+                      network_approval="fixture", approval_expires_at=1.0)
+        fields.update(kw)
+        return self.registry.save_card(market.ModelCard(**fields))
+
+    def test_all_interrupted_states_reset_without_renewing_grant(self):
+        for state in market.RETRYABLE_TRANSFER:
+            with self.subTest(state=state):
+                original = self.card(state)
+                reset = self.registry.retry_transfer(original.model_id, original)
+                self.assertEqual(reset.state, "DISCOVERED")
+                self.assertFalse(reset.installed)
+                self.assertFalse(reset.registered)
+                self.assertEqual(reset.network_approval, original.network_approval)
+                self.assertEqual(reset.approval_expires_at, 1.0)
+                self.assertEqual(reset.source_checksum, original.source_checksum)
+                self.assertGreater(reset.revision, original.revision)
+
+    def test_active_lease_blocks_retry(self):
+        card = self.card()
+        with self.registry.transfer_lease(card.model_id):
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                self.other.retry_transfer(card.model_id, card)
+        self.assertEqual(self.registry.card(card.model_id), card)
+
+    def test_changed_card_blocks_stale_retry(self):
+        from dataclasses import replace
+        card = self.card()
+        changed = self.other.save_card(replace(card, display_name="Changed"))
+        with self.assertRaisesRegex(Hold, "registry_card_changed"):
+            self.registry.retry_transfer(card.model_id, card)
+        self.assertEqual(self.registry.card(card.model_id), changed)
+
+    def test_installed_shared_and_loaded_cards_are_refused(self):
+        for changes in ({"state": "ACTIVE"}, {"registered": True},
+                        {"loaded": True}, {"shared_storage_owner": "jan"},
+                        {"owned_by_jarvis": True}, {"storage_ref": "existing"},
+                        {"local_or_cloud": "cloud"}, {"source_ref": ""}):
+            with self.subTest(changes=changes):
+                card = self.card(**changes)
+                with self.assertRaisesRegex(Hold, "transfer_retry_not_available"):
+                    self.registry.retry_transfer(card.model_id, card)
+                self.assertEqual(self.registry.card(card.model_id), card)
+
+    def test_existing_artifact_refuses_retry(self):
+        card = self.card()
+        target = self.root / "artifacts" / card.model_id
+        target.parent.mkdir()
+        target.write_bytes(OLD)
+        with self.assertRaisesRegex(Hold, "transfer_retry_artifact_exists"):
+            self.registry.retry_transfer(card.model_id, card)
+        self.assertEqual(target.read_bytes(), OLD)
+        self.assertEqual(self.registry.card(card.model_id), card)
+
+    def test_temporary_and_partial_files_are_preserved(self):
+        card = self.card()
+        folder = self.root / "transfers"
+        folder.mkdir(mode=0o700)
+        for name in (market._staging_prefix(card.model_id) + "abcdefgh",
+                     "partial-" + card.model_id, ".partial-meta-" + card.model_id):
+            (folder / name).write_bytes(OLD)
+        self.registry.retry_transfer(card.model_id, card)
+        self.assertEqual(len(list(folder.iterdir())), 3)
+        self.assertTrue(all(path.read_bytes() == OLD for path in folder.iterdir()))
+
+class PendingPartialInventoryTests(unittest.TestCase):
+    def setUp(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        self.root = Path(tmp.name)
+        self.registry = market.Registry(self.root)
+        self.folder = self.root / "transfers"
+        self.folder.mkdir(mode=0o700)
+
+    def card(self, model_id, state="DISCOVERED"):
+        return self.registry.save_card(market.ModelCard(
+            model_id=model_id, display_name=model_id, category="stt", state=state,
+            source_ref="catalog:fixture", source_checksum=hashlib.sha256(NEW).hexdigest(),
+            source_size=len(NEW), network_approval="fixture", approval_expires_at=1e12))
+
+    def test_known_ids_only_without_directory_enumeration(self):
+        self.card("known")
+        self.card("installed", "ACTIVE")
+        for name in ("known", "installed", "orphan"):
+            (self.folder / ("partial-" + name)).write_bytes(OLD[:3])
+        with patch.object(market.os, "scandir", side_effect=AssertionError("enumerated")):
+            rows = self.registry.pending_partials()
+        self.assertEqual([row[0] for row in rows], ["known"])
+        self.assertEqual(rows[0][2]["state"], "UNVERIFIED")
+
+    def test_uses_single_card_snapshot(self):
+        for name in ("first", "second", "third"):
+            self.card(name)
+            (self.folder / ("partial-" + name)).write_bytes(b"x")
+        with patch.object(self.registry, "cards", wraps=self.registry.cards) as cards:
+            self.assertEqual(len(self.registry.pending_partials()), 3)
+            cards.assert_called_once()
+
+    def test_metadata_only_is_visible_but_not_resumable(self):
+        self.card("known")
+        (self.folder / ".partial-meta-known").write_text("{}")
+        rows = self.registry.pending_partials()
+        self.assertEqual(rows[0][2]["state"], "UNVERIFIED")
+        self.assertEqual(rows[0][2]["size"], 0)
+        self.assertIsNotNone(rows[0][2]["identity"])
+
+    def test_symlink_partial_is_visible_without_delete_identity(self):
+        self.card("known")
+        outside = self.root / "outside"
+        outside.write_bytes(OLD)
+        (self.folder / "partial-known").symlink_to(outside)
+        rows = self.registry.pending_partials()
+        self.assertEqual(rows[0][2]["state"], "UNVERIFIED")
+        self.assertIsNone(rows[0][2]["identity"])
+        self.assertEqual(outside.read_bytes(), OLD)
+
+    def test_missing_or_unsafe_transfer_directory(self):
+        self.card("known")
+        self.folder.rmdir()
+        self.assertEqual(self.registry.pending_partials(), ())
+        outside = self.root / "outside"
+        outside.mkdir()
+        self.folder.symlink_to(outside, target_is_directory=True)
+        with self.assertRaisesRegex(Hold, "transfer_directory_untrusted"):
+            self.registry.pending_partials()
+
+    def test_no_partial_returns_no_queue_entry(self):
+        self.card("known")
+        self.assertEqual(self.registry.pending_partials(), ())
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
