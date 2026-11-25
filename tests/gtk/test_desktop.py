@@ -2460,6 +2460,37 @@ class TranscribeFileUITests(DownloadFixture):
         self.ui.cfg["stt"] = ""
         self.ui.refresh()
         self.assertFalse(self.ui.transcribe_button.get_sensitive())
+        self.assertFalse(self.ui.chat_transcribe.get_sensitive())
+
+    def test_chat_recording_tool_works_offline_without_jan(self):
+        self.ui.forget_inventory()
+        self.jan.reset_mock()
+        self.assertFalse(self.ui.send.get_sensitive())
+        self.assertTrue(self.ui.chat_transcribe.get_sensitive())
+        self.assertTrue(self.ui.transcribe_button.get_sensitive())
+        clip = self.clip()
+        runner, calls = self.runner()
+        self.ui.transcribe_runner = runner
+        # Simulate the accepted native selection, not a model-generated path.
+        self.ui.run_transcribe(str(clip))
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(calls), 1)
+        self.assertIn("Merhaba!", self.bubbles()[-1])
+        self.assertEqual(self.ui.board.rows[-1].kind, "transcription")
+        self.jan.assert_not_called()
+
+    def test_chat_recording_tool_refuses_missing_model_or_backend(self):
+        with patch.object(desktop.audio, "tools_ready", return_value=False):
+            self.ui.refresh()
+            self.assertFalse(self.ui.chat_transcribe.get_sensitive())
+            self.assertFalse(self.ui.transcribe_button.get_sensitive())
+            self.ui.transcribe_recording()
+            self.assertEqual(self.ui.status.get_text(), "transcription_backend_missing")
+            self.assertIsNone(self.ui.owned_picker)
+        Path(self.ui.cfg["stt"]).unlink()
+        self.ui.refresh()
+        self.assertFalse(self.ui.chat_transcribe.get_sensitive())
+        self.assertFalse(self.ui.transcribe_button.get_sensitive())
 
 
 class RoutePolicyUITests(MarketFixture):

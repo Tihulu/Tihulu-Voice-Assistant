@@ -460,6 +460,11 @@ def create_window(app, loop, bridge=None):
             toolbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6)
             self.tool_panel.set_child(toolbox)
             chat.insert_child_after(self.tool_panel, self.search_panel)
+            self.chat_transcribe = self.button(toolbox, tr(
+                "Transcribe a recording", "Kayıttan yazıya çevir", "Aufnahme transkribieren"),
+                self.transcribe_recording)
+            self.chat_transcribe_note = Gtk.Label(xalign=0, wrap=True)
+            toolbox.append(self.chat_transcribe_note)
             self.analysis = AnalysisView(self, toolbox, Gtk, GLib, tr, lang,
                                          result_parent=self.result_actions_slot)
             self.refresh()
@@ -1443,9 +1448,23 @@ def create_window(app, loop, bridge=None):
             for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,
                       self.transcribe_button,*self.previews):
                 w.set_sensitive(not self.busy)
+            transcribe_ready = stt_present and audio.tools_ready("whisper-cli")
+            self.transcribe_button.set_sensitive(not self.busy and transcribe_ready)
+            if hasattr(self, "chat_transcribe"):
+                self.chat_transcribe.set_sensitive(not self.busy and transcribe_ready)
+                if not stt_present:
+                    note = tr("Select a local Whisper model in Installed models.",
+                              "Kurulu modellerden yerel Whisper modeli seç.",
+                              "Unter Installierte Modelle ein lokales Whisper-Modell wählen.")
+                elif not transcribe_ready:
+                    note = tr("Missing whisper-cli.", "whisper-cli eksik.", "whisper-cli fehlt.")
+                else:
+                    note = tr("Local WAV transcription; no chat model or microphone needed.",
+                              "Yerel WAV yazıya çevirme; sohbet modeli veya mikrofon gerekmez.",
+                              "Lokale WAV-Transkription; kein Chatmodell oder Mikrofon nötig.")
+                self.chat_transcribe_note.set_text(note)
             if not self.busy:
                 self.test_chat_button.set_sensitive(connected)
-                self.transcribe_button.set_sensitive(connected and bool(self.cfg["stt"]))
                 for widget, lang in self.previews.items():
                     # A preview speaks only the locale that is actually selected.
                     widget.set_sensitive(lang in voices_present and allowed
@@ -3346,8 +3365,15 @@ def create_window(app, loop, bridge=None):
                 raise Hold("no_active_profile") from None
 
         def transcribe_recording(self):
-            if self.busy or not self.cfg["stt"]:
-                self.set_state("ready", "select_local_model")
+            if self.busy or self.closing:
+                return
+            try:
+                audio.selected_file(self.cfg["stt"], ".bin")
+                if not audio.tools_ready("whisper-cli"):
+                    raise Hold("transcription_backend_missing")
+                self.require_tools(("filesystem_read", ("recording",)), selected=True)
+            except Hold as exc:
+                self.set_state("ready", str(exc))
                 return
             dialog=Gtk.FileChooserNative.new("Select a recording to transcribe", self.win,Gtk.FileChooserAction.OPEN,"Select","Cancel")
             filt=Gtk.FileFilter()
