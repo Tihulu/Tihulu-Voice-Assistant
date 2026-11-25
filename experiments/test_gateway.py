@@ -118,5 +118,43 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaises(Refused):
             replace(self.ctx, generation=True).checked()
 
+    def test_cloud_cannot_disclose_publish_or_initiate_egress(self):
+        for action in ("research", "catalog", "transfer", "provider", "disclose", "publish"):
+            for actor in ("cloud", "owner"):
+                with self.subTest(action=action, actor=actor), self.assertRaises(Refused):
+                    self.gateway().fixture_grant("x", Request(self.ctx, action, "target", actor, "public"), 1)
+
+    def test_provider_payload_classification_and_mode(self):
+        for mode in ("CLOUD_CHAT", "STANDARD_HYBRID", "SECURE_HYBRID"):
+            ctx = replace(self.ctx, mode=mode)
+            for kind in ("none", "private", "secret", "minimized", "public"):
+                g = self.gateway(ctx)
+                req = Request(ctx, "provider", "target", "local", kind)
+                if kind == "public" or mode == "SECURE_HYBRID" and kind == "minimized":
+                    self.assertEqual(g.checkpoint(g.fixture_grant("x", req, 5), req), "SIMULATED_ALLOW")
+                else:
+                    with self.assertRaises(Refused):
+                        g.fixture_grant("x", req, 5)
+
+    def test_invalid_rules_rejected_before_evaluation(self):
+        for rule in (profiles.Rule("unknown"), profiles.Rule("filesystem_read", (), "invalid"),
+                     profiles.Rule("filesystem_read", ("x", "x"), "allow"),
+                     profiles.Rule("filesystem_read", ["x"], "allow"),
+                     profiles.Rule("filesystem_read", ("x",), "allow", "", float("nan")),
+                     profiles.Rule("filesystem_read", ("x",), "allow", "approval", 0)):
+            with self.subTest(rule=rule), self.assertRaises(Refused):
+                self.gateway(rules=(rule,))
+
+    def test_timed_rule_expiry_latches_grant(self):
+        g = self.gateway(rules=(profiles.Rule("filesystem_read", ("target",), "allow", "fixture", 105),))
+        req = Request(self.ctx, "engine", "target", "local")
+        grant = g.fixture_grant("x", req, 30)
+        self.wall = 106
+        with self.assertRaises(Refused):
+            g.checkpoint(grant, req)
+        self.wall = 101
+        with self.assertRaises(Refused):
+            g.checkpoint(grant, req)
+
 if __name__ == "__main__":
     unittest.main()
