@@ -195,3 +195,80 @@ class IntegratedTests(unittest.TestCase):
         self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
         with self.assertRaises(Refused):
             self.w.result()
+
+    def test_close_during_cleanup_cannot_resurrect_report(self):
+        from research_session import ResearchSession
+        original = ResearchSession.close
+        def closing(session):
+            self.w.close()
+            return original(session)
+        with patch.object(ResearchSession,"close",closing):
+            with self.assertRaisesRegex(Refused,"workflow_closed_or_cancelled"):
+                self.run_fixture()
+        self.assertEqual(self.w.state,"closed")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_cleanup_failure_drains_remaining_resources_and_withholds_report(self):
+        with patch("integrated_workflow.Chain.cancel",side_effect=RuntimeError("fixture cleanup")):
+            with self.assertRaisesRegex(RuntimeError,"fixture cleanup"):
+                self.run_fixture()
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_publication_grant_is_single_use(self):
+        self.run_fixture()
+        grant=self.grants["publish"]
+        with self.assertRaisesRegex(Refused,"grant_already_claimed"):
+            self.g.claim(grant,Request(self.ctx,"publish","temperature-report","local"))
+
+    def test_revocation_during_cleanup_refuses_publication(self):
+        from research_session import ResearchSession
+        original=ResearchSession.close
+        def revoking(session):
+            self.g.revoke("publish")
+            return original(session)
+        with patch.object(ResearchSession,"close",revoking):
+            with self.assertRaises(Refused):
+                self.run_fixture()
+        self.assertEqual(self.w.state,"held")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()
+
+    def test_concurrent_start_and_close_are_fail_closed(self):
+        from threading import Event,Thread
+        from tihulu_jarvis.temperature_engine import analyze_temperature as actual
+        entered, resume = Event(), Event()
+        outcomes=[]
+        def blocked(*args,**kwargs):
+            entered.set()
+            if not resume.wait(5):
+                raise RuntimeError("fixture wait expired")
+            return actual(*args,**kwargs)
+        def worker():
+            try:
+                outcomes.append(self.run_fixture())
+            except Exception as exc:
+                outcomes.append(exc)
+        with patch("integrated_workflow.analyze_temperature",side_effect=blocked):
+            thread=Thread(target=worker,daemon=True)
+            thread.start()
+            try:
+                self.assertTrue(entered.wait(5))
+                with self.assertRaisesRegex(Refused,"workflow_not_ready"):
+                    self.run_fixture()
+                self.w.close()
+            finally:
+                resume.set()
+                thread.join(5)
+        self.assertFalse(thread.is_alive())
+        self.assertEqual(len(outcomes),1)
+        self.assertIsInstance(outcomes[0],(Refused,ValueError))
+        self.assertEqual(self.w.state,"closed")
+        self.assertEqual(self.i.removal_plan("jan"),"REFERENCE_ONLY")
+        with self.assertRaises(Refused):
+            self.w.result()

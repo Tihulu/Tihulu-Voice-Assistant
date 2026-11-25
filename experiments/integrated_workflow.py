@@ -6,6 +6,7 @@ Only trusted synthetic inputs and the existing deterministic R1 engine.
 """
 from dataclasses import dataclass
 from hashlib import sha256
+from threading import RLock
 import json
 from gateway import Request, Refused
 from research import canonical
@@ -44,30 +45,72 @@ class FixtureWorkflow:
         self._inventory, self._candidates = inventory, candidates
         self._state = "ready"
         self._report = None
+        self._checks = ()
+        self._lock = RLock()
 
     @property
     def state(self):
-        return self._state
+        with self._lock:
+            return self._state
 
     def result(self):
-        if self._state != "completed" or self._report is None:
-            raise Refused("no_current_result")
-        try:
-            for grant, req in self._checks:
-                self._g.checkpoint(grant, req)
-        except Refused:
-            self._report = None
-            self._state = "held"
-            raise
-        return self._report
+        with self._lock:
+            if self._state != "completed" or self._report is None:
+                raise Refused("no_current_result")
+            try:
+                for grant, req in self._checks:
+                    self._g.checkpoint(grant, req)
+                if self._state != "completed" or self._report is None:
+                    raise Refused("no_current_result")
+            except Refused:
+                self._report = None
+                self._checks = ()
+                if self._state != "closed":
+                    self._state = "held"
+                raise
+            return self._report
 
     def run(self, *, url, root, body, addresses, peer, headers, budget,
             destination, grants):
-        if self._state != "ready":
-            raise Refused("workflow_not_ready")
-        if type(grants) is not dict or set(grants) != {"research","engine","agent","disclose","payload","publish"}:
-            raise Refused("invalid_grant_set")
-        self._state = "running"
+        with self._lock:
+            if self._state != "ready":
+                raise Refused("workflow_not_ready")
+            if type(grants) is not dict:
+                raise Refused("invalid_grant_set")
+            grants = grants.copy()
+            if set(grants) != {"research","engine","agent","disclose","payload","publish"}:
+                raise Refused("invalid_grant_set")
+            self._state = "running"
+        try:
+            report, checks = self._execute(url=url, root=root, body=body, addresses=addresses,
+                peer=peer, headers=headers, budget=budget, destination=destination, grants=grants)
+            # Cleanup must succeed before any retained report is published.
+            # Serialize publication against close(), not the expensive work.
+            with self._lock:
+                if self._state != "running":
+                    raise Refused("workflow_closed_or_cancelled")
+                for grant, req in checks:
+                    self._g.checkpoint(grant, req)
+                publish_req = Request(self._ctx,"publish","temperature-report","local")
+                self._g.claim(grants["publish"],publish_req)
+                for grant, req in checks:
+                    self._g.checkpoint(grant, req)
+                if self._state != "running":
+                    raise Refused("workflow_closed_or_cancelled")
+                self._checks = checks
+                self._report = report
+                self._state = "completed"
+                return report
+        except BaseException:
+            with self._lock:
+                self._report = None
+                self._checks = ()
+                if self._state != "closed":
+                    self._state = "held"
+            raise
+
+    def _execute(self, *, url, root, body, addresses, peer, headers, budget,
+                 destination, grants):
         session = None
         scheduler = None
         lease = None
@@ -93,13 +136,14 @@ class FixtureWorkflow:
                 raise Refused("secure_hybrid_required")
 
             def checkpoint():
-                if self._state != "running":
-                    raise Refused("workflow_closed_or_cancelled")
-                for grant, req in checks:
-                    self._g.checkpoint(grant, req)
-                if self._state != "running":
-                    raise Refused("workflow_closed_or_cancelled")
-                return False
+                with self._lock:
+                    if self._state != "running":
+                        raise Refused("workflow_closed_or_cancelled")
+                    for grant, req in checks:
+                        self._g.checkpoint(grant, req)
+                    if self._state != "running":
+                        raise Refused("workflow_closed_or_cancelled")
+                    return False
 
             checkpoint()
             lease = self._inventory.lease_candidate(candidate)
@@ -144,26 +188,27 @@ class FixtureWorkflow:
             checks += ((grants["payload"],payload_req),)
             scheduler.finish(handle)
             checkpoint()
-            self._checks = checks
-            self._report = Report(source.url,digest,candidate.identity,table,svg,payload,
-                                  sha256(table).hexdigest(),sha256(svg).hexdigest(),receipt.digest)
-            self._state = "completed"
-            return self._report
-        except Exception:
-            self._report = None
-            if self._state != "closed":
-                self._state = "held"
-            raise
+            return Report(source.url,digest,candidate.identity,table,svg,payload,
+                          sha256(table).hexdigest(),sha256(svg).hexdigest(),receipt.digest), checks
         finally:
-            if chain is not None:
-                chain.cancel()
-            if session is not None:
-                session.close()
-            if scheduler is not None:
-                scheduler.close()
-            if lease is not None:
-                self._inventory.release(lease)
+            # Attempt every owned cleanup even if an earlier cleanup fails.
+            try:
+                if chain is not None:
+                    chain.cancel()
+            finally:
+                try:
+                    if session is not None:
+                        session.close()
+                finally:
+                    try:
+                        if scheduler is not None:
+                            scheduler.close()
+                    finally:
+                        if lease is not None:
+                            self._inventory.release(lease)
 
     def close(self):
-        self._report = None
-        self._state = "closed"
+        with self._lock:
+            self._report = None
+            self._checks = ()
+            self._state = "closed"
