@@ -38,9 +38,10 @@ class ComplaintSweep(f.DesktopFixture):
 
     def test_empty_search_drops_cached_matches(self):
         self.connect_model()
-        self.text("SYNTHETIC-SEARCH-CANARY")
+        self.text("Merhaba! Benim kelimem mavi.")
+        self.assert_no_failed_turn()
         self.ui.search_panel.set_expanded(True)
-        self.ui.search_entry.set_text("SYNTHETIC-SEARCH-CANARY")
+        self.ui.search_entry.set_text("mavi")
         self.assertTrue(self.ui.search_matches)
         self.ui.clear_search()
         self.assertEqual(self.ui.search_matches,())
@@ -48,16 +49,17 @@ class ComplaintSweep(f.DesktopFixture):
 
     def test_end_closed_search_panel_drops_retained_snippets(self):
         self.connect_model()
-        self.text("SYNTHETIC-SEARCH-CANARY")
+        self.text("Merhaba! Benim kelimem mavi.")
+        self.assert_no_failed_turn()
         self.ui.search_panel.set_expanded(True)
-        self.ui.search_entry.set_text("SYNTHETIC-SEARCH-CANARY")
+        self.ui.search_entry.set_text("mavi")
         self.assertTrue(self.ui.search_matches)
         self.ui.search_panel.set_expanded(False)
         self.ui.interrupt(True)
         self.assertEqual(self.ui.session.history,())
         self.assertEqual(self.ui.search_matches,())
         self.assertIsNone(self.ui.search_results.get_first_child())
-        self.assertNotIn("CANARY",self.ui.search_note.get_text())
+        self.assertNotIn("mavi",self.ui.search_note.get_text())
 
 if __name__=="__main__":
     unittest.main(verbosity=2)
