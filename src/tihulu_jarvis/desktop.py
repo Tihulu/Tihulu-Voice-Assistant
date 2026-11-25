@@ -3039,6 +3039,9 @@ def create_window(app, loop, bridge=None):
             row = self.market_list.get_selected_row()
             return self.market_row_ids.get(row) if row is not None else None
 
+        def selected_card_snapshot(self):
+            return getattr(self.market_list.get_selected_row(), "card_snapshot", None)
+
         def refresh_market_buttons(self):
             chosen = self.selected_card()
             row = self.market_list.get_selected_row()
@@ -3211,7 +3214,10 @@ def create_window(app, loop, bridge=None):
             model_id = self.selected_card()
             if model_id is None or self.busy:
                 return
-            self.submit(lambda epoch: self.download(epoch, model_id), kind="download",
+            expected = self.selected_card_snapshot()
+            if expected is None:
+                return
+            self.submit(lambda epoch: self.download(epoch, model_id, expected=expected), kind="download",
                         label=tr("Model download", "Model indirme", "Modelldownload"))
 
         def transfer_checkpoint(self, epoch):
@@ -3223,13 +3229,13 @@ def create_window(app, loop, bridge=None):
             check()
             return check
 
-        def bound_transfer(self, epoch, model_id):
+        def bound_transfer(self, epoch, model_id, *, expected=None):
             return market.Transfer.from_registry(
                 self.market, model_id, transport=self.transport,
-                checkpoint=self.transfer_checkpoint(epoch))
+                checkpoint=self.transfer_checkpoint(epoch), expected=expected)
 
-        async def download(self, epoch, model_id):
-            transfer = self.bound_transfer(epoch, model_id)
+        async def download(self, epoch, model_id, *, expected=None):
+            transfer = self.bound_transfer(epoch, model_id, expected=expected)
             source = transfer.source
             entry = {"id": model_id, "state": "QUEUED", "received": 0, "total": source.size,
                      "note": "", "resume": 0}
@@ -3488,7 +3494,10 @@ def create_window(app, loop, bridge=None):
                 revisions = self.market.history(model_id)
                 if not revisions:
                     raise Hold("revision_not_found")
-                self.market.rollback(model_id, revisions[-1].revision)
+                expected = self.selected_card_snapshot()
+                if expected is None:
+                    raise Hold("registry_card_changed")
+                self.market.rollback(model_id, revisions[-1].revision, expected=expected)
                 self.build_market_page()
                 self.set_state("ready", tr("Previous revision restored.",
                                            "Önceki sürüm geri yüklendi.",
@@ -3502,8 +3511,12 @@ def create_window(app, loop, bridge=None):
             if model_id is None or self.busy:
                 return
 
+            expected = self.selected_card_snapshot()
+            if expected is None:
+                return
+
             async def run(epoch):
-                transfer = self.bound_transfer(epoch, model_id)
+                transfer = self.bound_transfer(epoch, model_id, expected=expected)
                 source = transfer.source
                 entry = {"id": model_id, "state": "DOWNLOADING", "received": 0,
                          "total": source.size, "note": "", "resume": 0}
@@ -3530,7 +3543,10 @@ def create_window(app, loop, bridge=None):
             if model_id is None or self.busy:
                 return
             try:
-                self.market.unregister(model_id)
+                expected = self.selected_card_snapshot()
+                if expected is None:
+                    raise Hold("registry_card_changed")
+                self.market.unregister(model_id, expected=expected)
                 self.cfg["market_refs"] = {k: v for k, v in self.cfg.get("market_refs", {}).items()
                                            if self.ref_still_registered(k)}
                 self.save()
