@@ -3112,6 +3112,9 @@ def create_window(app, loop, bridge=None):
                     current = self.picker_context() == self.model_scan_context
                 except Hold:
                     pass
+                if not current:
+                    self.clear_model_scan()
+                    result = None
             index = self.model_candidates.get_active()
             kind = self.model_kind.get_active_id()
             candidate = result.candidates[index] if current and 0 <= index < len(result.candidates) else None

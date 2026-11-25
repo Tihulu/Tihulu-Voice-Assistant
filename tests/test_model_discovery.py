@@ -39,7 +39,7 @@ class DiscoveryTests(unittest.TestCase):
     def test_rejects_symlink_root_and_relative_path(self):
         alias = self.root / "alias"
         alias.symlink_to(self.root, target_is_directory=True)
-        for root in (str(alias), "relative"):
+        for root in (str(alias), str(alias) + "/", "relative"):
             with self.assertRaises(Hold):
                 discovery.scan(root)
 

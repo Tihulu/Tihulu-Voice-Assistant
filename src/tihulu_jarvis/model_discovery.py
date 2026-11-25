@@ -35,6 +35,9 @@ def scan(root, checkpoint=lambda: None):
     """
     if not isinstance(root, str) or len(root) > 4096 or not Path(root).is_absolute():
         raise Hold("model_folder_invalid")
+    # Strip a trailing slash before O_NOFOLLOW; a trailing slash can make
+    # the kernel resolve a directory symlink before applying that flag.
+    root = str(Path(root))
     try:
         root.encode("utf-8")
         checkpoint()
