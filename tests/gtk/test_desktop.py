@@ -1112,7 +1112,9 @@ class PreviewTests(MarketFixture):
 
     def test_model_probe_result_is_cleared_when_selection_or_endpoint_changes(self):
         self.backend.inventory = ("fixture-chat", "other-model")
-        self.connect_model()
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.inventory, ("fixture-chat", "other-model"))
         self.backend.answers.append("Kısa bir test yanıtı.")
         self.click(self.ui.test_chat_button)
         self.until(lambda: not self.ui.busy)
