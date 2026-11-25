@@ -1869,6 +1869,18 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         self.pick_card(card.model_id)
         return card, path
 
+    def test_external_settings_change_refuses_stale_local_choice(self):
+        card, path = self.prepare_stt()
+        before = self.ui.cfg["stt"]
+        changed = settings.load()
+        changed["text_scale"] = "large"
+        settings.save(changed)
+        self.ui.use_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "settings_changed")
+        self.assertEqual(settings.load(), changed)
+        self.assertEqual(self.ui.market.card(card.model_id), card)
+        self.assertEqual(self.ui.cfg["stt"], before)
+
     def test_settings_failure_preserves_registry_and_choice(self):
         card, path = self.prepare_stt()
         old = settings.load()
