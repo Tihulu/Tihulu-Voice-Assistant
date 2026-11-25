@@ -397,8 +397,10 @@ class TransferTests(unittest.IsolatedAsyncioTestCase):
         async def lying(path, note):
             note(0)
             return 0
+        # Use a fresh card: the first failure is terminal, not reusable consent.
+        second = self.store.save_card(card(model_id="fixture-second", category="llm"))
         with self.assertRaisesRegex(Hold, "transfer_reported_invalid_length"):
-            asyncio.get_event_loop().run_until_complete(Transfer(self.store, item, self.source(), lying, root=self.tmp).run())
+            asyncio.get_event_loop().run_until_complete(Transfer(self.store, second, self.source(), lying, root=self.tmp).run())
 
     def test_without_authorization_the_transfer_holds_before_writing(self):
         item = card(category="llm", state="DISCOVERED")

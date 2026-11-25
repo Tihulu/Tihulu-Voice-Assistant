@@ -637,10 +637,15 @@ class Transfer:
         self.received = 0
         self.state = card.state
 
+    def _assert_current(self):
+        if self.registry.card(self.card.model_id) != self.card:
+            raise Hold("transfer_card_changed")
+
     def _check(self):
         self._checkpoint()
         if not self.source.authorized(self._clock()):
             raise Hold("network_not_authorized")
+        self._assert_current()
 
     async def _fetch(self, progress, start=None):
         self._check()
@@ -721,9 +726,25 @@ class Transfer:
                     pass
 
     def _persist(self, state):
+        self._assert_current()
         saved = self.registry.save_card(advance(self.card, state))
         self.card, self.state = saved, saved.state
         return saved
+
+    def _terminal(self, state):
+        # A stale operation must never overwrite a newer registry entry.
+        try:
+            if self.state not in TERMINAL:
+                self._persist(state)
+        except (Hold, OSError):
+            self.state = state
+
+    def _current_for_partial(self):
+        try:
+            self._assert_current()
+            return True
+        except (Hold, OSError):
+            return False
 
     async def resume(self, progress=None, start=0, allow_installed=False):
         """Continue an interrupted transfer from a verified byte offset.
@@ -752,6 +773,8 @@ class Transfer:
                     self._check()
                     return True
                 identity = selection_identity(str(partial.absolute()), authorized=authorized, max_bytes=start)
+                if identity[2] != start:
+                    raise Hold("transfer_resume_offset_unverified")
                 self.temp.unlink()
                 await copy_selected_to(str(partial.absolute()), self.temp, authorized=authorized,
                                        expected_identity=identity, max_bytes=start)
@@ -783,7 +806,8 @@ class Transfer:
         finally:
             if self.temp is not None:
                 # Keep a cancelled partial so a later resume can continue from it.
-                if self.state == "CANCELLED" and self.temp.is_file() and self.temp.stat().st_size > 0:
+                if (self.state == "CANCELLED" and not allow_installed and self._current_for_partial()
+                        and self.temp.is_file() and not self.temp.is_symlink() and self.temp.stat().st_size > 0):
                     self.temp.replace(self.root / ("partial-" + self.card.model_id))
                 else:
                     Path(self.temp).unlink(missing_ok=True)
@@ -827,16 +851,15 @@ class Transfer:
                                   license_id=self.source.license_id)
             return self._publish(registered, replacing=False)
         except asyncio.CancelledError:
-            if self.state not in TERMINAL:
-                self._persist("CANCELLED")
+            self._terminal("CANCELLED")
             raise
         except (Hold, OSError, asyncio.TimeoutError):
-            if self.state not in TERMINAL:
-                self._persist("FAILED")
+            self._terminal("FAILED")
             raise
         finally:
             if self.temp is not None:
-                if self.state == "CANCELLED" and self.temp.is_file() and self.temp.stat().st_size > 0:
+                if (self.state == "CANCELLED" and self._current_for_partial()
+                        and self.temp.is_file() and not self.temp.is_symlink() and self.temp.stat().st_size > 0):
                     # Keep the partial so a later resume can continue from it.
                     self.temp.replace(self.root / ("partial-" + self.card.model_id))
                 else:

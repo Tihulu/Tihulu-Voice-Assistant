@@ -169,5 +169,45 @@ class TransferBoundaryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.storage_ref,"sha256-"+hashlib.sha256(NEW).hexdigest()[:32])
         self.assertEqual(self.target.read_bytes(),NEW)
 
+    async def test_stale_initial_card_refused_before_fetch(self):
+        from dataclasses import replace
+        card=self.card()
+        newer=self.store.save_card(replace(card,display_name="Newer edit"))
+        with self.assertRaisesRegex(Hold,"transfer_card_changed"):
+            await self.transfer(card,self.source()).run()
+        self.assertFalse(self.calls)
+        self.assertEqual(self.store.card(card.model_id),newer)
+
+    async def test_initial_fetch_cannot_overwrite_newer_card(self):
+        from dataclasses import replace
+        card=self.card()
+        edits=[]
+        async def changed(path,note,start=0):
+            Path(path).write_bytes(NEW)
+            edits.append(self.store.save_card(replace(self.store.card(card.model_id),
+                                                      display_name="Newer edit")))
+            return len(NEW)
+        with self.assertRaisesRegex(Hold,"transfer_card_changed"):
+            await self.transfer(card,self.source(),changed).run()
+        self.assertEqual(self.store.card(card.model_id),edits[0])
+        self.assertFalse(self.target.exists())
+
+    async def test_cancelled_stale_transfer_discards_partial(self):
+        from dataclasses import replace
+        card=self.card()
+        entered=asyncio.Event()
+        async def delayed(path,note,start=0):
+            Path(path).write_bytes(NEW[:3])
+            entered.set()
+            await asyncio.Future()
+        task=asyncio.create_task(self.transfer(card,self.source(),delayed).run())
+        await asyncio.wait_for(entered.wait(),2)
+        newer=self.store.save_card(replace(self.store.card(card.model_id),display_name="Newer edit"))
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual(self.store.card(card.model_id),newer)
+        self.assertFalse((self.root/"transfers"/"partial-fixture-model").exists())
+
 if __name__=="__main__":
     unittest.main(verbosity=2)
