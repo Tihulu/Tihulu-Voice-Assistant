@@ -1029,6 +1029,9 @@ class Transfer:
                             return
                         metadata.unlink()
                         _sync_directory(self.root)
+                    self._check_directory()
+                    if _partial_file_identity(partial) != identity:
+                        return
                     partial.unlink()
                     _sync_directory(self.root)
         except (Hold, OSError):
@@ -2082,8 +2085,15 @@ class Registry:
         if not isinstance(model_id, str) or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", model_id):
             raise Hold("invalid_model_id")
         folder = self.root / "transfers"
-        if folder.is_symlink() or (folder.exists() and not folder.is_dir()):
-            raise Hold("partial_file_untrusted")
+        try:
+            folder.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            try:
+                _directory_identity(folder)
+            except Hold:
+                raise Hold("partial_file_untrusted") from None
         return folder / ("partial-" + model_id), folder / (".partial-meta-" + model_id)
 
     @_registry_locked
@@ -2113,6 +2123,10 @@ class Registry:
                 state = "RESUMABLE"
         except Hold:
             pass
+        # A metadata read is not a stable snapshot if either name changed.
+        self._queue_partial_paths(model_id)
+        if identity != (_partial_file_identity(payload), _partial_file_identity(metadata)):
+            raise Hold("partial_changed")
         return {"state": state, "size": size, "identity": identity}
 
     @_registry_locked
@@ -2172,11 +2186,15 @@ class Registry:
         actual = (_partial_file_identity(payload), _partial_file_identity(metadata))
         if actual != expected_identity or actual == (None, None):
             raise Hold("partial_changed")
+        directory = _directory_identity(payload.parent)
         # Remove the binding first: interruption cannot leave trusted bytes.
         if actual[1] is not None:
             metadata.unlink()
             _sync_directory(metadata.parent)
         if actual[0] is not None:
+            if (directory != _directory_identity(payload.parent)
+                    or actual[0] != _partial_file_identity(payload)):
+                raise Hold("partial_changed")
             payload.unlink()
             _sync_directory(payload.parent)
 
