@@ -232,3 +232,45 @@ class NativeVoiceTransportTests(unittest.TestCase):
         with self.assertRaises(Refused):
             LocalAdapter(self.g,self.ctx,self.c,"turn","llm",bad,grant,
                          dependencies=((self.stt._grant,self.stt._req),),response_language="en")
+
+    def test_forged_self_consistent_transcript_denied(self):
+        import json
+        from adapter_protocol import native_voice_payload
+        _,envelope,_=self.stt._turn_input(self.c,"turn","en",native_completion=True)
+        obj=json.loads(envelope)
+        obj["transcript"]="Changed text"
+        obj["transcript_digest"]=sha256(b"Changed text").hexdigest()
+        obj["native_wire_digest"]=sha256(native_voice_payload("Changed text")).hexdigest()
+        bad=json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
+        req=local_request(self.ctx,prepare(self.c,"turn","llm",bad),dependent=True)
+        grant=self.g.fixture_grant("bad-text",req,60)
+        with self.assertRaisesRegex(Refused,"voice_transcript_receipt_mismatch"):
+            LocalAdapter(self.g,self.ctx,self.c,"turn","llm",bad,grant,
+                         dependencies=((self.stt._grant,self.stt._req),),response_language="en")
+
+    def test_forged_provenance_even_with_exact_parent_denied(self):
+        import json
+        _,envelope,_=self.stt._turn_input(self.c,"turn","en",native_completion=True)
+        for i,key in enumerate(("artifact","source_digest","model_digest")):
+            obj=json.loads(envelope)
+            obj[key]="other" if key=="artifact" else "c"*64
+            bad=json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
+            req=local_request(self.ctx,prepare(self.c,"turn","llm",bad),dependent=True)
+            grant=self.g.fixture_grant("bad-provenance"+str(i),req,60)
+            with self.assertRaisesRegex(Refused,"voice_transcript_receipt_mismatch"):
+                LocalAdapter(self.g,self.ctx,self.c,"turn","llm",bad,grant,
+                             dependencies=((self.stt._grant,self.stt._req),),response_language="en")
+
+    def test_uncompleted_transcript_grant_cannot_act_as_receipt(self):
+        import json
+        _,envelope,_=self.stt._turn_input(self.c,"turn","en",native_completion=True)
+        obj=json.loads(envelope)
+        other=self.g.fixture_grant("uncompleted",self.stt._req,60)
+        self.g.claim(other,self.stt._req)
+        obj["transcript_grant"]=other.identity
+        bad=json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
+        req=local_request(self.ctx,prepare(self.c,"turn","llm",bad),dependent=True)
+        grant=self.g.fixture_grant("bad-parent",req,60)
+        with self.assertRaisesRegex(Refused,"voice_transcript_receipt_mismatch"):
+            LocalAdapter(self.g,self.ctx,self.c,"turn","llm",bad,grant,
+                         dependencies=((other,self.stt._req),),response_language="en")

@@ -24,6 +24,7 @@ class TranscriptFixture:
         self._g,self._grant=gateway,grant
         self._req=call.request(context)
         self._args=dict(call.args)
+        self._call=call
         if type(dependencies) is not tuple:
             raise Refused("invalid_transcript_dependencies")
         if dependencies:
@@ -54,7 +55,9 @@ class TranscriptFixture:
                 if not value.text.strip():
                     raise Refused("transcript_empty")
                 self._g.checkpoint(self._grant,self._req)
-                self._result=(value,sha256(data).hexdigest())
+                digest=sha256(data).hexdigest()
+                self._g.record_transcript(self._grant,self._req,self._call,digest)
+                self._result=(value,digest)
                 self._state="completed"
             except Refused:
                 self._result=None
