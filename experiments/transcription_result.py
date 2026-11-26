@@ -110,13 +110,19 @@ class TranscriptFixture:
             req,_,_=self._turn_input(candidate,identity,response_language,native_completion=native_completion)
             return req
 
-    def start_local_turn(self,candidate,identity,response_language,grant,*,native_completion=False):
+    def prepare_review(self,candidate,identity,response_language,*,native_completion=False):
+        from gateway import voice_review_request
+        with self._lock:
+            req,_,_=self._turn_input(candidate,identity,response_language,native_completion=native_completion)
+            return voice_review_request(req,self._grant,self._req)
+
+    def start_local_turn(self,candidate,identity,response_language,grant,*,native_completion=False,review_grant=None):
         from adapter_protocol import LocalAdapter
         with self._lock:
             _,payload,wire=self._turn_input(candidate,identity,response_language,native_completion=native_completion)
             job=LocalAdapter(self._g,self._req.context,candidate,identity,"llm",
                              payload,grant,dependencies=((self._grant,self._req),),
-                             response_language=response_language)
+                             response_language=response_language,review_grant=review_grant)
             return job,payload if wire is None else wire
 
     def cancel(self):
