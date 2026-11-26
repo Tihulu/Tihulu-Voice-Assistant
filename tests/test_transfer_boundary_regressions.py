@@ -2444,6 +2444,72 @@ class ArchiveDurabilityTests(unittest.TestCase):
         self.assertTrue(temporary.exists())
         self.assertEqual(archive.stat().st_nlink, 2)
 
+    def test_archive_staging_review_does_not_create_directory(self):
+        self.assertEqual(self.registry.archive_staging_candidates(self.card.model_id), ())
+        self.assertFalse((self.root / "artifact-revisions").exists())
+
+    def test_archive_staging_review_and_explicit_discard(self):
+        archive = self.registry._archive_path(self.card)
+        temporary = archive.parent / ".archive-abcdefgh"
+        temporary.write_bytes(b"incomplete")
+        temporary.chmod(0o600)
+        with self.assertRaisesRegex(Hold, "artifact_archive_unavailable"):
+            self.registry.retain_artifact(self.card, self.target)
+        rows = self.registry.archive_staging_candidates(self.card.model_id)
+        self.assertEqual(len(rows), 1)
+        self.registry.discard_archive_staging(self.card.model_id, *rows[0])
+        self.assertFalse(temporary.exists())
+        self.assertEqual(self.registry.retain_artifact(self.card, self.target), archive)
+        self.assertEqual(archive.read_bytes(), OLD)
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    def test_archive_staging_excludes_digest_and_linked_alias(self):
+        archive = self.registry._archive_path(self.card)
+        temporary = archive.parent / ".archive-abcdefgh"
+        temporary.write_bytes(OLD)
+        temporary.chmod(0o600)
+        market.os.link(temporary, archive)
+        self.assertEqual(self.registry.archive_staging_candidates(self.card.model_id), ())
+        with self.assertRaisesRegex(Hold, "staging_name_untrusted"):
+            self.registry.discard_archive_staging(self.card.model_id, archive.name, (), ())
+        self.assertTrue(archive.exists())
+        self.assertTrue(temporary.exists())
+
+    def test_archive_staging_refuses_replacement_inode(self):
+        archive = self.registry._archive_path(self.card)
+        temporary = archive.parent / ".archive-abcdefgh"
+        temporary.write_bytes(b"old")
+        temporary.chmod(0o600)
+        row = self.registry.archive_staging_candidates(self.card.model_id)[0]
+        replacement = temporary.with_name("replacement")
+        replacement.write_bytes(b"new")
+        replacement.chmod(0o600)
+        replacement.replace(temporary)
+        with self.assertRaisesRegex(Hold, "staging_changed"):
+            self.registry.discard_archive_staging(self.card.model_id, *row)
+        self.assertEqual(temporary.read_bytes(), b"new")
+
+    def test_archive_staging_refuses_replaced_directory(self):
+        archive = self.registry._archive_path(self.card)
+        temporary = archive.parent / ".archive-abcdefgh"
+        temporary.write_bytes(b"old")
+        temporary.chmod(0o600)
+        row = self.registry.archive_staging_candidates(self.card.model_id)[0]
+        moved = archive.parent.with_name("moved")
+        archive.parent.rename(moved)
+        archive.parent.mkdir(mode=0o700)
+        temporary.write_bytes(b"new")
+        temporary.chmod(0o600)
+        with self.assertRaisesRegex(Hold, "staging_changed"):
+            self.registry.discard_archive_staging(self.card.model_id, *row)
+        self.assertEqual(temporary.read_bytes(), b"new")
+        self.assertEqual((moved / temporary.name).read_bytes(), b"old")
+
+    def test_archive_staging_refuses_active_model_lease(self):
+        with self.registry.transfer_lease(self.card.model_id):
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                self.registry.archive_staging_candidates(self.card.model_id)
+
     def test_existing_archive_is_resynced_before_reuse(self):
         archive = self.registry.retain_artifact(self.card, self.target)
         with patch.object(market, "_sync_directory", wraps=market._sync_directory) as sync:

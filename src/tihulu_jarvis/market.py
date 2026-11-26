@@ -1783,6 +1783,71 @@ class Registry:
                 raise Hold("artifact_archive_unavailable") from None
         return folder / card.artifact_digest
 
+    def _archive_staging_directory(self, model_id):
+        _staging_prefix(model_id)  # Validate the model ID before building a path.
+        base = self.root / "artifact-revisions"
+        folder = base / model_id
+        for path in (base, folder):
+            try:
+                info = path.lstat()
+            except FileNotFoundError:
+                return None
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != os.geteuid()
+                    or info.st_mode & 0o077):
+                raise Hold("artifact_archive_unavailable")
+        return folder
+
+    @_model_leased
+    @_registry_locked
+    def archive_staging_candidates(self, model_id):
+        """Review only single-link, private, pre-publication archive staging.
+
+        Digest-named revisions and interrupted post-link pairs are excluded.
+        No directory is created by inspection; no bytes are changed.
+        """
+        self.card(model_id)
+        folder = self._archive_staging_directory(model_id)
+        if folder is None:
+            return ()
+        directory = _directory_identity(folder)
+        candidates = []
+        with os.scandir(folder) as entries:
+            for count, entry in enumerate(entries, 1):
+                if count > 4096:
+                    raise Hold("staging_scan_limit")
+                if not re.fullmatch(r"\.archive-[a-z0-9_]{8}", entry.name):
+                    continue
+                try:
+                    identity = _staging_identity(Path(entry.path))
+                except (Hold, OSError):
+                    continue
+                candidates.append((entry.name, identity, directory))
+                if len(candidates) > 128:
+                    raise Hold("staging_candidate_limit")
+        if directory != _directory_identity(folder):
+            raise Hold("staging_changed")
+        return tuple(sorted(candidates))
+
+    @_model_leased
+    @_registry_locked
+    def discard_archive_staging(self, model_id, name, expected_identity, expected_directory):
+        """Explicitly delete only the reviewed archive temporary inode."""
+        self.card(model_id)
+        if not isinstance(name, str) or not re.fullmatch(r"\.archive-[a-z0-9_]{8}", name):
+            raise Hold("staging_name_untrusted")
+        folder = self._archive_staging_directory(model_id)
+        if folder is None or _directory_identity(folder) != expected_directory:
+            raise Hold("staging_changed")
+        path = folder / name
+        try:
+            actual = _staging_identity(path)
+        except (Hold, OSError):
+            raise Hold("staging_changed") from None
+        if actual != expected_identity:
+            raise Hold("staging_changed")
+        path.unlink()
+        _sync_directory(folder)
+
     def _recover_archive_link(self, card, source, target, archive_info, *, checkpoint):
         """Finish only an exact, verified post-link interrupted archive copy.
 
