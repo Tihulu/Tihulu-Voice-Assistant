@@ -68,9 +68,9 @@ class TranscriptFixture:
                 raise
             return self._result
 
-    def _turn_input(self,candidate,identity,response_language):
+    def _turn_input(self,candidate,identity,response_language,*,native_completion=False):
         from inference import Candidate
-        from adapter_protocol import prepare,local_request
+        from adapter_protocol import prepare,local_request,native_voice_payload,VOICE_NATIVE_MODEL,VOICE_NATIVE_PROVIDER
         if self._state!="completed" or self._result is None:
             raise Refused("transcript_no_result")
         self._g.checkpoint(self._grant,self._req)
@@ -79,27 +79,36 @@ class TranscriptFixture:
         if type(response_language) is not str or response_language not in ("tr","en","de"):
             raise Refused("invalid_response_language")
         value,result_digest=self._result
-        payload=json.dumps({"kind":"voice_turn","artifact":value.output,
+        envelope={"kind":"voice_turn","artifact":value.output,
                    "source_digest":value.source_digest,"model_digest":value.model_digest,
                    "transcript_digest":result_digest,"input_language":value.language,
-                   "response_language":response_language,"transcript":value.text},
-                   ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")
+                   "response_language":response_language,"transcript":value.text}
+        if type(native_completion) is not bool:
+            raise Refused("invalid_native_voice_flag")
+        wire=None
+        if native_completion:
+            if (value.language!="en" or response_language!="en"
+                    or candidate.identity!=VOICE_NATIVE_MODEL or candidate.provider!=VOICE_NATIVE_PROVIDER):
+                raise Refused("native_voice_profile_denied")
+            wire=native_voice_payload(value.text)
+            envelope["native_wire_digest"]=sha256(wire).hexdigest()
+        payload=json.dumps(envelope,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")
         call=prepare(candidate,identity,"llm",payload)
-        return local_request(self._req.context,call,dependent=True),payload
+        return local_request(self._req.context,call,dependent=True),payload,wire
 
-    def prepare_local_turn(self,candidate,identity,response_language):
+    def prepare_local_turn(self,candidate,identity,response_language,*,native_completion=False):
         with self._lock:
-            req,_=self._turn_input(candidate,identity,response_language)
+            req,_,_=self._turn_input(candidate,identity,response_language,native_completion=native_completion)
             return req
 
-    def start_local_turn(self,candidate,identity,response_language,grant):
+    def start_local_turn(self,candidate,identity,response_language,grant,*,native_completion=False):
         from adapter_protocol import LocalAdapter
         with self._lock:
-            _,payload=self._turn_input(candidate,identity,response_language)
+            _,payload,wire=self._turn_input(candidate,identity,response_language,native_completion=native_completion)
             job=LocalAdapter(self._g,self._req.context,candidate,identity,"llm",
                              payload,grant,dependencies=((self._grant,self._req),),
                              response_language=response_language)
-            return job,payload
+            return job,payload if wire is None else wire
 
     def cancel(self):
         with self._lock:
