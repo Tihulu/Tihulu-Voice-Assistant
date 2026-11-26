@@ -11,6 +11,11 @@ class OwnedWorker:
     worker: str
     attempt: str
 
+@dataclass(frozen=True,eq=False)
+class OwnedMember:
+    worker: str
+    identity: str
+
 class ManagedWave:
     """Separate authorization cancellation from reservation release.
 
@@ -30,6 +35,8 @@ class ManagedWave:
                           attempt=attempt)
         self._assignments={a.worker:a for wave in plan.waves for a in wave}
         self._owned={}
+        self._families={}
+        self._root_exits={}
         self._stopping=False
 
     def _thread(self):
@@ -63,6 +70,7 @@ class ManagedWave:
             raise
         handle=OwnedWorker(worker,self._attempt)
         self._owned[worker]=(handle,grant,reservation)
+        self._families[worker]={}
         return handle
 
     def stop(self):
@@ -94,6 +102,36 @@ class ManagedWave:
             self.stop()
             raise
 
+    def register_member(self,handle,identity,context,candidates):
+        """Trusted fixture registration before a descendant is started.
+        No PID or process discovery; the caller owns the observed family.
+        """
+        self.checkpoint(handle,context,candidates)
+        if type(identity) is not str:
+            raise Refused("managed_member_invalid")
+        token(identity)
+        family=self._families[handle.worker]
+        if handle.worker in self._root_exits or identity in family or len(family)>=16:
+            raise Refused("managed_member_unavailable")
+        member=OwnedMember(handle.worker,identity)
+        family[identity]=(member,False)
+        return member
+
+    def observe_member_exit(self,member,context,candidates):
+        self._thread()
+        if type(member) is not OwnedMember or type(member.worker) is not str or type(member.identity) is not str:
+            raise Refused("managed_member_unknown")
+        family=self._families.get(member.worker,{})
+        entry=family.get(member.identity)
+        if entry is None or entry[0] is not member or entry[1]:
+            raise Refused("managed_member_unknown")
+        family[member.identity]=(member,True)
+        root=self._root_exits.get(member.worker)
+        if root is None or any(not done for _,done in family.values()):
+            return "PENDING"
+        handle,code,payload=root
+        return self._finish_exit(handle,code,context,candidates,payload)
+
     def observe_exit(self,handle,exit_code,context,candidates,*,payload=None):
         self._thread()
         if type(handle) is not OwnedWorker or type(handle.worker) is not str:
@@ -103,13 +141,29 @@ class ManagedWave:
             raise Refused("managed_exit_unknown")
         if type(exit_code) is not int or not -255<=exit_code<=255:
             raise Refused("managed_exit_invalid")
-        _,grant,reservation=entry
+        if handle.worker in self._root_exits:
+            raise Refused("managed_exit_duplicate")
+        # A root exit is not a family exit. Keep the reservation and stop
+        # on root failure even if members still require terminal observation.
+        if exit_code!=0:
+            self.stop()
+        if any(not done for _,done in self._families[handle.worker].values()):
+            # Bound retained results before waiting for descendants.
+            if payload is not None and (type(payload) is not bytes or not 0<len(payload)<=16384):
+                self.stop()
+                payload=None
+            self._root_exits[handle.worker]=(handle,exit_code,payload)
+            return "PENDING"
+        return self._finish_exit(handle,exit_code,context,candidates,payload)
+
+    def _finish_exit(self,handle,exit_code,context,candidates,payload):
+        _,grant,reservation=self._owned[handle.worker]
         try:
-            if self._stopping:
-                return "DRAINED"
             if exit_code!=0:
                 self.stop()
                 return "FAILED"
+            if self._stopping:
+                return "DRAINED"
             try:
                 self._run.complete(handle.worker,context,candidates,payload=payload,
                                    completion_grant=grant)
@@ -121,6 +175,8 @@ class ManagedWave:
             # Only the trusted terminal observation releases this reservation.
             self._ledger.release(reservation)
             del self._owned[handle.worker]
+            del self._families[handle.worker]
+            self._root_exits.pop(handle.worker,None)
 
     def output(self,worker,context,candidates):
         self._thread()
