@@ -500,7 +500,40 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
         if not config_count:
             print(json.dumps({"case":"sandbox-office-config","status":"HOLD"}),flush=True)
             return 1
+        # No host identity database. Provide only a generated fixture user and
+        # group matching the real unprivileged numeric IDs inside the sandbox.
+        identity_dir=root/"office-identity"
+        identity_dir.mkdir(mode=0o700)
+        uid,gid=os.getuid(),os.getgid()
+        (identity_dir/"passwd").write_text(
+            f"fixture:x:{uid}:{gid}:Disposable fixture:/tmp:/usr/sbin/nologin\n",encoding="ascii")
+        (identity_dir/"group").write_text(f"fixture:x:{gid}:\n",encoding="ascii")
+        (identity_dir/"nsswitch.conf").write_text(
+            "passwd: files\ngroup: files\nhosts: files\n",encoding="ascii")
+        # Stock CI package post-install generated registry files may not be
+        # listed by dpkg -L. Copy only direct regular .xcd files from the fixed
+        # package subtree, not arbitrary configuration or symlink targets.
+        registry=Path("/etc/libreoffice/registry")
+        if registry.is_dir() and not registry.is_symlink():
+            for src in sorted(registry.glob("*.xcd")):
+                if src.is_symlink():
+                    continue
+                info=src.stat()
+                if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0
+                        or not 0<info.st_size<=MAX_OUTPUT or config_count>=64):
+                    raise RuntimeError("unexpected generated registry")
+                dst=config/"registry"/src.name
+                dst.parent.mkdir(parents=True,exist_ok=True)
+                if not dst.exists():
+                    dst.write_bytes(src.read_bytes())
+                    config_count+=1
+        print(json.dumps({"office_config_count":config_count,
+                          "registry_files":sorted(p.name for p in (config/"registry").glob("*.xcd"))}),flush=True)
         prefix[-2:-2]=["--dir","/etc","--ro-bind",str(config),"/etc/libreoffice",
+                        "--ro-bind",str(identity_dir/"passwd"),"/etc/passwd",
+                        "--ro-bind",str(identity_dir/"group"),"/etc/group",
+                        "--ro-bind",str(identity_dir/"nsswitch.conf"),"/etc/nsswitch.conf",
+                        "--setenv","USER","fixture","--setenv","LOGNAME","fixture",
                         "--setenv","SAL_USE_VCLPLUGIN","svp"]
         office_version = run(["/usr/bin/libreoffice","-env:UserInstallation=file:///tmp/office-profile",
                               "--headless","--version"])
