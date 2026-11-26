@@ -24,3 +24,7 @@ Separate disposable runner, fixed self-generated public documents, no user paths
 ## CAP-04 exact browser operation binding (fixture only)
 
 Firefox and Brave navigate/snapshot operations bind task-owned profile, tab, canonical restricted HTTPS URL, and snapshot content digest. Distinct grants; no navigation grant reuse for snapshot or cross-browser/profile/page. Reject ambiguous authority, private literal/alternate address forms, paths with percent escapes/traversal, queries/fragments, noncanonical typed inputs. DNS, actual profile ownership, peer enforcement and transport remain unimplemented. No real browser or UI control. Three new tests. Legacy origin-only receipts are fixture-only and never authorize real I/O.
+
+## CAP-03 search result contract (fixture only)
+
+Exact public query UTF-8 bytes and provider version bound to the shared one-use grant. Bounded query/hit counts/snippets, strict restricted URL and display text, duplicate refusal, separate empty outcome, no navigation rights from result metadata, live cancellation/revocation. Search snippets remain untrusted and are not verified page citations. Five tests; no network/provider/API credentials or runtime activation. Classification is trusted-fixture-only, not a private-query disclosure detector.
