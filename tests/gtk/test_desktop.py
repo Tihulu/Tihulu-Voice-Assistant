@@ -2676,6 +2676,23 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         self.assertEqual(self.ui.market.card(card.model_id), card)
         self.assertEqual(settings.load(), old)
 
+    def test_audio_recovery_can_retry_exact_committed_choice_without_restart(self):
+        card, path = self.prepare_stt()
+        original = self.ui.market.save_card
+        def changed(*args, **kwargs):
+            original(*args, **kwargs)
+            raise OSError("fixture")
+        with patch.object(self.ui.market, "save_card", side_effect=changed):
+            self.ui.use_selected_card()
+        self.assertTrue(settings.audio_choice_pending())
+        self.assertEqual(self.ui.inspect_audio_recovery(), "already_aligned")
+        self.ui.retry_audio_recovery()
+        self.until(lambda: not self.ui.busy)
+        self.assertFalse(settings.audio_choice_pending())
+        self.assertEqual(self.ui.cfg["stt"], str(path))
+        self.assertEqual(self.ui.saved_cfg, settings.load())
+        self.assertEqual(self.ui.market.card(card.model_id).state, "ACTIVE")
+
     def test_audio_choice_uncertain_commit_blocks_voice_until_restart(self):
         card, path = self.prepare_stt()
         original = self.ui.market.save_card
