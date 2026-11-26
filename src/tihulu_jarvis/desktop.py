@@ -4310,9 +4310,21 @@ def create_window(app, loop, bridge=None):
                             if not proposed.get(field):
                                 proposed.pop(field, None)
                     text = settings._serialize(proposed)
+                    stamp = settings._choice_identity(p.lstat())
+                    old_generation = self.market.snapshot()[0]
+                    cards, choices = self.market._without_card(model_id)
+                    new_generation = market._text_digest(self.market._serialized(cards, choices))
+                    if (self.market.snapshot()[0] != old_generation or settings.load(p) != current
+                            or settings._choice_identity(p.lstat()) != stamp):
+                        raise Hold("settings_changed")
                     self.market._unregister_locked(model_id, expected=expected)
-                    # If publication fails, retaining an old reference is safer
-                    # than silently removing the verification requirement.
+                    # The registry removal must be durable before deleting
+                    # any reference proof. An uncertain write retains metadata.
+                    market._sync_directory(self.market.root)
+                    if (self.market.snapshot()[0] != new_generation
+                            or settings.load(p) != current
+                            or settings._choice_identity(p.lstat()) != stamp):
+                        raise Hold("unregister_recovery_required")
                     if proposed != current:
                         settings._replace_text(p, text)
                 self.cfg = proposed

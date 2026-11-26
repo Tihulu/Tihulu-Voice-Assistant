@@ -2536,6 +2536,32 @@ class LocalSelectionConsistencyUITests(MarketFixture):
                          hashlib.sha256(path.read_bytes()).hexdigest())
         self.assertIn("Full hash recorded", self.ui.labels["stt"].get_text())
 
+    def test_unregister_sync_failure_retains_reference_proof(self):
+        path = self.weights("uncertain-removal.bin")
+        card = self.ui.register_choice("stt", str(path))
+        self.pick_card(card.model_id)
+        before = settings.load()
+        with patch.object(market, "_sync_directory", side_effect=OSError("fixture")):
+            self.ui.forget_selected_card()
+        self.assertEqual(settings.load(), before)
+        self.assertIn(card.storage_ref, before["audio_digests"])
+        self.assertTrue(path.is_file())
+
+    def test_unregister_does_not_overwrite_replaced_settings(self):
+        path = self.weights("removal-race.bin")
+        card = self.ui.register_choice("stt", str(path))
+        self.pick_card(card.model_id)
+        before = settings.load()
+        original = market._sync_directory
+        def changed(folder):
+            original(folder)
+            settings._replace_text(settings.config_path(), settings._serialize(before))
+        with patch.object(market, "_sync_directory", side_effect=changed):
+            self.ui.forget_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "unregister_recovery_required")
+        self.assertEqual(settings.load(), before)
+        self.assertIn(card.storage_ref, before["audio_digests"])
+
     def test_unregister_unselected_audio_removes_only_its_integrity_metadata(self):
         first = self.weights("selected-keep.bin")
         second = self.weights("unselected-remove.bin")
