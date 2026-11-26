@@ -1891,19 +1891,46 @@ def create_window(app, loop, bridge=None):
                 p = self.cfg["stt"] if key=="stt" else self.cfg["voices"].get(key)
                 label.set_text(Path(p).name if p else "—")
 
-        def register_choice(self, key, path):
-            """Register a truthful card, then remember the local reference."""
+        @staticmethod
+        def inspect_audio_import(key, path, *, checkpoint=lambda: None):
+            """Disk-only inspection, with no GTK or registry effects."""
             if key not in ("stt", "tr", "en", "de"):
                 raise Hold("invalid_audio_choice_transition")
-            settings._require_no_choice(settings.config_path())
+            checkpoint()
             category = "stt" if key == "stt" else "tts"
             engine = "whisper.cpp" if key == "stt" else "piper"
-            card = market.from_file(str(audio.selected_file(path, ".bin" if key == "stt" else ".onnx")),
-                                    category, engine=engine,
-                                    languages=(() if key == "stt" else (key,)))
+            card, proof = market.inspect_file(
+                str(audio.selected_file(path, ".bin" if key == "stt" else ".onnx")),
+                category, engine=engine, languages=(() if key == "stt" else (key,)),
+                checkpoint=checkpoint)
+            voice_proof = None
             if key != "stt":
-                # A voice must match the locale it is offered for.
-                audio.voice_for(path, key)
+                _, voice_proof = audio.inspect_voice(path, key, checkpoint=checkpoint)
+            market.require_import_proof(proof, checkpoint=checkpoint)
+            return card, proof, voice_proof
+
+        @staticmethod
+        def check_import_inspection(key, path, inspected, *, checkpoint=lambda: None):
+            card, proof, voice_proof = inspected
+            if (proof.path != Path(path)
+                    or card.category != ("stt" if key == "stt" else "tts")
+                    or card.languages != (() if key == "stt" else (key,))
+                    or card.storage_ref != "sha256-" + proof.digest[:32]
+                    or card.disk_size_bytes != proof.identity[2]
+                    or (key != "stt" and (voice_proof is None or
+                        voice_proof[0] != Path(path).with_name(Path(path).name + ".json")))):
+                raise Hold("model_file_changed")
+            market.require_import_proof(proof, checkpoint=checkpoint)
+            if voice_proof is not None:
+                audio.require_voice_proof(voice_proof, checkpoint=checkpoint)
+
+        def register_choice(self, key, path, *, inspected=None, checkpoint=lambda: None):
+            """Register a truthful card, then remember the local reference."""
+            settings._require_no_choice(settings.config_path())
+            if inspected is None:
+                inspected = self.inspect_audio_import(key, path, checkpoint=checkpoint)
+            self.check_import_inspection(key, path, inspected, checkpoint=checkpoint)
+            card = inspected[0]
             known = self.market.lookup_card(card.model_id)
             if known is not None:
                 if (known.owned_by_jarvis or known.shared_storage_owner
@@ -1921,17 +1948,70 @@ def create_window(app, loop, bridge=None):
                 if self.market.lookup_card(card.model_id) != known:
                     raise Hold("registry_card_changed")
                 with settings.choice_transaction(proposed, expected=self.cfg):
+                    self.check_import_inspection(key, path, inspected, checkpoint=checkpoint)
                     if known is None:
                         card = self.market.save_card(card, expected=None)
             self.cfg = proposed
             self.build_market_page()
             return card
 
-        def select_imported_audio(self, key, path):
+        def select_imported_audio(self, key, path, *, inspected=None, checkpoint=lambda: None):
             """One picker selection uses the same durable preference as AI Market."""
-            card = self.register_choice(key, path)
+            if inspected is None:
+                inspected = self.inspect_audio_import(key, path, checkpoint=checkpoint)
+            card = self.register_choice(key, path, inspected=inspected, checkpoint=checkpoint)
+            self.check_import_inspection(key, path, inspected, checkpoint=checkpoint)
             self.use_card(card.model_id, expected=card)
             self.build_market_page()
+
+        def start_audio_import(self, key, path):
+            if self.busy or self.closing:
+                return
+            try:
+                settings._require_no_choice(settings.config_path())
+                profile, stamp = self.store.snapshot(self.cfg["profile"])
+                if profile.state != "active":
+                    raise Hold("profile_not_active")
+                original_cfg = settings.checked(self.cfg)
+                if key not in ("stt", "tr", "en", "de"):
+                    raise Hold("invalid_audio_choice_transition")
+                path = str(audio.selected_file(path, ".bin" if key == "stt" else ".onnx"))
+            except (Hold, OSError) as exc:
+                self.set_state("ready", str(exc))
+                return
+            stop = Event()
+
+            def checkpoint():
+                if stop.is_set():
+                    raise Hold("turn_cancelled")
+                if not self.store.is_current(profile.id, stamp):
+                    raise Hold("profile_changed")
+                settings._require_no_choice(settings.config_path())
+
+            async def run(epoch):
+                self.session.check(epoch)
+                checkpoint()
+                self.registry_worker_stop = stop.set
+                worker = asyncio.create_task(asyncio.to_thread(
+                    self.inspect_audio_import, key, path, checkpoint=checkpoint))
+                try:
+                    try:
+                        inspected = await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        stop.set()
+                        await finish_owned(asyncio.gather(worker, return_exceptions=True))
+                        raise
+                    self.session.check(epoch)
+                    checkpoint()
+                    if self.cfg != original_cfg:
+                        raise Hold("settings_changed")
+                    self.select_imported_audio(key, path, inspected=inspected, checkpoint=checkpoint)
+                    self.turn_outcome = tr("Model selected.", "Model seçildi.", "Modell ausgewählt.")
+                finally:
+                    self.registry_worker_stop = None
+
+            self.submit(run, label=tr("Verify local model file", "Yerel model dosyasını doğrula",
+                                      "Lokale Modelldatei prüfen"))
 
         def persist_jan_choice(self, card, expected):
             """Commit a local Jan selection without publishing a premature UI choice.
@@ -4152,7 +4232,7 @@ def create_window(app, loop, bridge=None):
                     p=file.get_path() if file else None
                     # A card is registered before the choice is applied, so an
                     # unsupported or unreadable file never becomes the active model.
-                    self.select_imported_audio(key, p)
+                    self.start_audio_import(key, p)
                 except (Hold, OSError) as exc:
                     self.set_state("ready", str(exc) if isinstance(exc, Hold)
                                    else "model_selection_write_failed")
@@ -5058,6 +5138,7 @@ def main():
         owners = set()
         for window in state:
             active, playback = window.session.active, window.playback
+            window.signal_registry_stop()
             window.session.invalidate()
             window.stop_speaking()
             owners.update(task for task in (active, playback)
