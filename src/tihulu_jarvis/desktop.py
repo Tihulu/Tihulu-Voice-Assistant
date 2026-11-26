@@ -214,6 +214,7 @@ def create_window(app, loop, bridge=None):
                 self.cfg = settings.load()
             except Hold as e:
                 read_error = (read_error + " " if read_error else "") + str(e)
+            self.saved_cfg = json.loads(settings._serialize(self.cfg))
             self.look = LOOK
             self.scale_provider = None
             self.apply_text_scale()
@@ -1831,9 +1832,13 @@ def create_window(app, loop, bridge=None):
 
         def save(self):
             try:
-                settings.save(self.cfg)
-            except (Hold,OSError):
-                self.status.set_text("Could not save local choices")
+                snapshot = json.loads(settings._serialize(self.cfg))
+                settings.save(snapshot, expected=self.saved_cfg)
+                self.saved_cfg = snapshot
+                return True
+            except (Hold,OSError) as exc:
+                self.status.set_text(str(exc) if isinstance(exc, Hold) else "Could not save local choices")
+                return False
 
         def clear_model_probe(self):
             self.test_probe_route = None
@@ -1954,6 +1959,7 @@ def create_window(app, loop, bridge=None):
                     if known is None:
                         card = self.market.save_card(card, expected=None)
             self.cfg = proposed
+            self.saved_cfg = json.loads(settings._serialize(proposed))
             self.build_market_page()
             return card
 
@@ -2054,6 +2060,7 @@ def create_window(app, loop, bridge=None):
                                 raise Hold("llm_choice_recovery_required") from None
                             raise
             self.cfg = proposed
+            self.saved_cfg = json.loads(settings._serialize(proposed))
             self.activate_profile(updated.id, quiet=True, persist=False)
             self.models.set_active(self.inventory.index(card.model_id))
             self.refresh()
@@ -2108,6 +2115,7 @@ def create_window(app, loop, bridge=None):
                                 "stt" if card.category == "stt" else lang,
                                 checkpoint=checkpoint)
             self.cfg = proposed
+            self.saved_cfg = json.loads(settings._serialize(proposed))
             self.update_labels()
             self.refresh()
 
@@ -3074,6 +3082,7 @@ def create_window(app, loop, bridge=None):
                     raise Hold("settings_changed_restart_required")
                 proposed = settings.resolve_committed_jan_choice(self.store, self.market, expected=review)
                 self.cfg = proposed
+                self.saved_cfg = json.loads(settings._serialize(proposed))
                 self.forget_inventory()
                 self.activate_profile(proposed["profile"], quiet=True, persist=False)
                 self.settings_choice_note.set_text(tr(
@@ -3089,15 +3098,18 @@ def create_window(app, loop, bridge=None):
         def forget_choices(self):
             """Erase the stored choices, and state what it did not erase."""
             try:
-                removed = settings.forget()
+                removed = settings.forget(expected=self.saved_cfg)
             except Hold as exc:
                 self.settings_note.set_text(str(exc))
                 return
             # The active profile is kept: it is a policy, not a preference.
             profile = self.store_active_profile_id()
             self.cfg = settings.empty()
+            self.saved_cfg = settings.empty()
             self.cfg["profile"] = profile
-            self.save()
+            if not self.save():
+                self.settings_note.set_text(self.status.get_text())
+                return
             self.settings_scale.set_active(0)
             self.settings_spoken.set_active(False)
             self.apply_text_scale()

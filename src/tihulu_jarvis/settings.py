@@ -428,7 +428,7 @@ def resolve_committed_jan_choice(store, registry, *, expected, path=None):
             return proposed
 
 
-def forget(path=None):
+def forget(path=None, *, expected=None):
     """Remove the stored choices, and say what was left alone.
 
     Only the local choices file is removed. Profiles, the audit trail and the
@@ -436,10 +436,12 @@ def forget(path=None):
     forgetting a preference can never erase a decision record.
     """
     p = config_path() if path is None else Path(path)
-    if not p.parent.exists():
+    if not p.parent.exists() and expected is None:
         return False
     with _write_guard(p):
         _require_no_choice(p)
+        if expected is not None and load(p) != checked(expected):
+            raise Hold("settings_changed")
         try:
             p.unlink()
         except FileNotFoundError:
@@ -460,11 +462,13 @@ def _serialize(obj):
     return text
 
 
-def save(obj, path=None):
+def save(obj, path=None, *, expected=None):
     p = config_path() if path is None else Path(path)
     text = _serialize(obj)
     with _write_guard(p):
         _require_no_choice(p)
+        if expected is not None and load(p) != checked(expected):
+            raise Hold("settings_changed")
         _replace_text(p, text)
 
 
