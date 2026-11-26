@@ -5,6 +5,10 @@ on:
     paths:
       - 'experiments/engine_isolation_acceptance.py'
       - 'experiments/gateway.py'
+      - 'experiments/document_result.py'
+      - 'experiments/document_geometry.py'
+      - 'experiments/document_engine_acceptance.py'
+      - 'experiments/adapter_protocol.py'
       - 'experiments/capabilities.py'
       - 'experiments/conversion_result.py'
       - '.github/workflows/engine-isolation-evidence.yml'
@@ -29,7 +33,7 @@ jobs:
       - name: Prepare disposable tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y bubblewrap ffmpeg
+          sudo apt-get install --no-install-recommends -y bubblewrap ffmpeg poppler-utils tesseract-ocr tesseract-ocr-tur tesseract-ocr-deu tesseract-ocr-eng python3-pil python3-reportlab fonts-dejavu-core
           bwrap --version
           uname -r
           test "$(id -u)" -ne 0

@@ -105,6 +105,31 @@ def main():
             out.setparams((1,2,16000,0,"NONE","not compressed"))
             out.writeframes(pcm)
         before = hashlib.sha256(source.read_bytes()).hexdigest()
+        # Fixed public fixtures generated outside the sandbox; only these exact
+        # files are mounted. Imports stay inside main for dependency-free tests.
+        from PIL import Image, ImageDraw, ImageFont
+        from reportlab.pdfgen import canvas
+        from reportlab.pdfbase import pdfmetrics
+        from reportlab.pdfbase.ttfonts import TTFont
+        from document_geometry import ocr_blocks, pdf_blocks
+        from document_result import DocumentFixture, DocumentResult
+        from document_engine_acceptance import FONT, TEXT, norm
+        pdfmetrics.registerFont(TTFont("IsolatedFixtureFont",FONT))
+        pdf = root/"document.pdf"
+        doc = canvas.Canvas(str(pdf),pagesize=(900,300),invariant=True)
+        for text in TEXT.values():
+            doc.setFont("IsolatedFixtureFont",23)
+            doc.drawString(30,180,text)
+            doc.showPage()
+        doc.save()
+        images = {}
+        for lang,text in TEXT.items():
+            image = Image.new("RGB",(1800,320),"white")
+            ImageDraw.Draw(image).text((55,100),text,font=ImageFont.truetype(FONT,52),fill="black")
+            path = root/(lang+".png")
+            image.save(path)
+            images[lang] = path
+        source_hashes = {p:hashlib.sha256(p.read_bytes()).hexdigest() for p in (pdf,*images.values())}
         prefix = ["/usr/bin/bwrap","--unshare-all","--die-with-parent","--new-session",
                   "--cap-drop","ALL","--clearenv","--ro-bind","/usr","/usr"]
         # Ubuntu merged-/usr layout. Refuse rather than mount an unreviewed
@@ -120,6 +145,7 @@ def main():
                 raise RuntimeError("non-merged system layout")
         prefix += ["--proc","/proc","--dev","/dev","--tmpfs","/tmp",
                    "--dir","/work","--ro-bind",str(source),"/work/input.wav",
+                   "--ro-bind",str(pdf),"/work/document.pdf",
                    "--bind",str(output),"/work/out","--chdir","/work",
                    "--setenv","PATH","/usr/bin","--setenv","HOME","/tmp",
                    "--setenv","LC_ALL","C.UTF-8",
@@ -129,6 +155,9 @@ def main():
                    "--setenv","LD_LIBRARY_PATH",
                    "/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack",
                    "--remount-ro","/"]
+        # Insert explicit read-only image mounts before final root remount.
+        for lang,path in images.items():
+            prefix[-2:-2] = ["--ro-bind",str(path),"/work/"+lang+".png"]
         def run(args, timeout=20):
             argv = prefix+["--","/usr/bin/python3","-I","-c",LIMIT_WRAPPER]+args
             # Regular files avoid unbounded PIPE buffering in the host.
@@ -269,7 +298,53 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
         else:
             job.cancel()
             record("sandbox-typed-conversion-receipt",False,reason="conversion_or_roundtrip_failed")
-    return 0 if len(results)==16 and all(r["status"]=="PASS" for r in results) else 1
+        if not all(row["status"]=="PASS" for row in results):
+            return 1
+        # Claim typed document grants before fixed isolated engine calls.
+        # This is CI fixture policy, not a runtime authorization mechanism.
+        def checked_doc(adapter,version,operation,args,page,argv,parse,expected):
+            call = CapabilityCall(adapter,version,operation,args)
+            ctx = Context("isolated-document","session","profile",1,"local","LOCAL_ONLY")
+            req = call.request(ctx)
+            gate = FixtureGateway(ctx,tuple(profiles.Rule(x,(req.target,),"allow")
+                                  for x in ("filesystem_read","host_shell")),
+                                  clock=profiles.PolicyClock())
+            grant = gate.fixture_grant("document",req,60)
+            job = DocumentFixture(gate,grant,ctx,call)
+            gate.checkpoint(grant,req)
+            proc = run(argv)
+            if proc.returncode:
+                job.cancel()
+                return False, "", ""
+            blocks = parse(proc.stdout)
+            job.complete(DocumentResult(req.target,dict(args)["digest"],page,blocks))
+            receipt = job.result()
+            text = " ".join(b.text for b in receipt[3].blocks)
+            return norm(text)==norm(expected),text,receipt[4]
+        pv = run(["/usr/bin/pdftotext","-v"])
+        tv = run(["/usr/bin/tesseract","--version"])
+        if pv.returncode or tv.returncode:
+            print(json.dumps({"case":"sandbox-document-versions","status":"HOLD",
+                              "pdf":pv.stderr.decode("utf-8","replace")[:1000],
+                              "ocr":tv.stderr.decode("utf-8","replace")[:1000]}),flush=True)
+            return 1
+        pdf_version = pv.stderr.decode().splitlines()[0].split()[2]
+        ocr_version = tv.stdout.decode().splitlines()[0].split()[1]
+        for page,(lang,expected) in enumerate(TEXT.items(),1):
+            passed,text,receipt = checked_doc("poppler",pdf_version,"pdf_extract",
+                (("artifact","fixture-pdf"),("digest",source_hashes[pdf]),("page",page)),
+                page,["/usr/bin/pdftotext","-f",str(page),"-l",str(page),"-bbox",
+                      "-enc","UTF-8","/work/document.pdf","-"],pdf_blocks,expected)
+            record("sandbox-pdf-"+lang,passed,actual=text,result_sha256=receipt)
+            passed,text,receipt = checked_doc("tesseract",ocr_version,"ocr_image",
+                (("artifact",lang+"-image"),("digest",source_hashes[images[lang]]),
+                 ("language",{"tur":"tr","eng":"en","deu":"de"}[lang])),
+                1,["/usr/bin/tesseract","/work/"+lang+".png","stdout","-l",lang,
+                   "--psm","6","tsv"],lambda raw:ocr_blocks(raw.decode("utf-8"),1800,320),expected)
+            record("sandbox-ocr-"+lang,passed,actual=text,result_sha256=receipt)
+        record("sandbox-document-sources-unchanged",all(
+               hashlib.sha256(p.read_bytes()).hexdigest()==h for p,h in source_hashes.items()))
+    return 0 if len(results)==23 and all(r["status"]=="PASS" for r in results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main())
