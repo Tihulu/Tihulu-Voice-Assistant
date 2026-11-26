@@ -1439,6 +1439,64 @@ class PartialQueueIdentityTests(unittest.TestCase):
         self.assertEqual((self.transfer.root / "fixture-temp").read_bytes(), b"replacement")
         self.assertFalse(self.metadata.exists())
 
+    def test_partial_status_and_discard_refuse_shared_writable_directory(self):
+        status = self.bound_partial()
+        self.transfer.root.chmod(0o777)
+        try:
+            with self.assertRaisesRegex(Hold, "partial_file_untrusted"):
+                self.registry.partial_status(self.card.model_id)
+            with self.assertRaisesRegex(Hold, "partial_file_untrusted"):
+                self.registry.discard_partial(self.card.model_id, status["identity"])
+            self.assertTrue(self.payload.exists())
+            self.assertTrue(self.metadata.exists())
+        finally:
+            self.transfer.root.chmod(0o700)
+
+    def test_partial_status_refuses_metadata_replaced_during_read(self):
+        self.bound_partial()
+        original = market._read_partial_record
+        def changed(path):
+            record = original(path)
+            replacement = path.with_name("replacement-meta")
+            replacement.write_text("{}")
+            replacement.replace(path)
+            return record
+        with patch.object(market, "_read_partial_record", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "partial_changed"):
+                self.registry.partial_status(self.card.model_id)
+        self.assertEqual(self.metadata.read_text(), "{}")
+
+    def test_discard_preserves_payload_replaced_after_metadata_sync(self):
+        status = self.bound_partial()
+        original = market._sync_directory
+        def changed(path):
+            original(path)
+            if path == self.transfer.root and not self.metadata.exists():
+                replacement = self.payload.with_name("replacement")
+                replacement.write_bytes(b"replacement")
+                replacement.replace(self.payload)
+        with patch.object(market, "_sync_directory", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "partial_changed"):
+                self.registry.discard_partial(self.card.model_id, status["identity"])
+        self.assertEqual(self.payload.read_bytes(), b"replacement")
+        self.assertFalse(self.metadata.exists())
+
+    def test_consume_preserves_payload_replaced_after_metadata_sync(self):
+        status = self.bound_partial()
+        record = self.transfer._read_partial_record()
+        original = market._sync_directory
+        def changed(path):
+            original(path)
+            if path == self.transfer.root and not self.metadata.exists():
+                replacement = self.payload.with_name("replacement")
+                replacement.write_bytes(b"replacement")
+                replacement.replace(self.payload)
+        with patch.object(market, "_sync_directory", side_effect=changed):
+            self.transfer._consume_partial(status["identity"][0], record,
+                                           pair=status["identity"])
+        self.assertEqual(self.payload.read_bytes(), b"replacement")
+        self.assertFalse(self.metadata.exists())
+
     def test_bound_candidate_is_resumable_and_discard_removes_pair(self):
         status = self.bound_partial()
         self.assertEqual(status["state"], "RESUMABLE")
