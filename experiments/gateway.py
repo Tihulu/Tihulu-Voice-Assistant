@@ -134,6 +134,7 @@ class FixtureGateway:
                 raise Refused("invalid_rules")
         self._clock = clock
         self._grants = {}
+        self._agent_attempts = set()
         self._revoked = set()
         self._claimed = set()
         self._dependencies = {}
@@ -189,6 +190,16 @@ class FixtureGateway:
             decision, reason = profiles.decide(self._rules, action, (req.target,), now)
             if decision != profiles.ALLOW:
                 raise Refused(reason)
+
+    def register_agent_attempt(self, identity):
+        """Bounded trusted fixture identity registry, not an effect grant."""
+        if type(identity) is not str:
+            raise Refused("agent_attempt_invalid")
+        token(identity)
+        with self._lock:
+            if self._closed or identity in self._agent_attempts or len(self._agent_attempts)>=MAX_GRANTS:
+                raise Refused("agent_attempt_unavailable")
+            self._agent_attempts.add(identity)
 
     def fixture_grant(self, identity, req, seconds):
         """Trusted fixture setup only. Not callable from model output in runtime."""
