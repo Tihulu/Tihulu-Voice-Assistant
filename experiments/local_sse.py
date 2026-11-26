@@ -6,7 +6,7 @@ compatibility. The trusted fixture binds response identity independently.
 """
 import json
 from gateway import Refused
-from adapter_protocol import LocalAdapter, MAX_TEXT
+from adapter_protocol import LocalAdapter
 
 MAX_STREAM=131072
 MAX_LINE=32768
@@ -32,6 +32,7 @@ class LocalSSE:
         self._buffer=bytearray()
         self._total=0
         self._sequence=0
+        self._pending=None
         self._finish=False
         self._done=False
         self._closed=False
@@ -41,11 +42,19 @@ class LocalSSE:
         self._adapter.event(self._adapter.call.identity,self._sequence,kind,value)
 
     def _line(self,line):
+        # Closed subset: exactly one data line per SSE event, followed by
+        # the blank separator. Do not act on an unterminated data line.
         if not line:
+            if self._pending is not None:
+                raw=self._pending
+                self._pending=None
+                self._dispatch(raw)
             return
-        if self._done or not line.startswith(b"data: "):
+        if self._done or self._pending is not None or not line.startswith(b"data: "):
             raise Refused("invalid_sse_line")
-        raw=line[6:]
+        self._pending=line[6:]
+
+    def _dispatch(self,raw):
         if raw==b"[DONE]":
             if not self._finish:
                 raise Refused("missing_finish")
@@ -99,7 +108,7 @@ class LocalSSE:
         if self._closed:
             raise Refused("terminal_sse")
         try:
-            if self._buffer or not self._done or not self._finish:
+            if self._buffer or self._pending is not None or not self._done or not self._finish:
                 raise Refused("truncated_sse")
             self._event("completed",None)
             result=self._adapter.result()
@@ -111,5 +120,6 @@ class LocalSSE:
 
     def abort(self):
         self._buffer.clear()
+        self._pending=None
         self._closed=True
         self._adapter.cancel()

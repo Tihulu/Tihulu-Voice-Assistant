@@ -49,7 +49,7 @@ class LocalSSETests(unittest.TestCase):
                 s.feed(data)
             self.assertEqual(a.state,"cancelled")
     def test_duplicate_fields_and_extra_data_after_done(self):
-        for data in (b'data: {"id":"a","id":"b"}\n',self.event({"content":"x"})+self.complete()+self.event({"content":"late"})):
+        for data in (b'data: {"id":"a","id":"b"}\n\n',self.event({"content":"x"})+self.complete()+self.event({"content":"late"})):
             _,a,s=self.make()
             with self.assertRaises(Refused):
                 s.feed(data)
@@ -67,5 +67,15 @@ class LocalSSETests(unittest.TestCase):
             else:
                 with self.assertRaises(Refused):
                     s.feed(b"x"*32769)
+            with self.assertRaises(Refused):
+                a.result()
+
+    def test_missing_blank_separator_and_multiple_data_lines_denied(self):
+        for data in (self.event({"content":"x"})+self.complete().rstrip(b"\n")+b"\n",
+                     self.event({"content":"x"}).rstrip(b"\r\n")+b"\n"+self.event({},"stop")):
+            _,a,s=self.make()
+            with self.assertRaises(Refused):
+                s.feed(data)
+                s.finish()
             with self.assertRaises(Refused):
                 a.result()
