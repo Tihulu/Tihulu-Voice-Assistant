@@ -1931,6 +1931,46 @@ class ArchiveDurabilityTests(unittest.TestCase):
         self.target.parent.mkdir(mode=0o700)
         self.target.write_bytes(OLD)
 
+    def test_copy_returns_exact_verified_identity(self):
+        copied = self.root / "copy"
+        proof = market._copy_verified_artifact(self.target, copied, self.card)
+        self.assertEqual(proof.path, copied)
+        self.assertEqual(proof.digest, self.card.artifact_digest)
+        self.assertEqual(proof.identity, market._artifact_identity(copied.lstat()))
+        with patch.object(market, "_verified_artifact", side_effect=AssertionError("duplicate hash")):
+            self.assertEqual(self.registry._payload_record(copied, proof=proof),
+                             {"size": len(OLD), "digest": self.card.artifact_digest})
+
+    def test_copy_rejects_source_changed_at_final_checkpoint(self):
+        copied = self.root / "copy"
+        def checkpoint():
+            if copied.exists() and copied.stat().st_size == len(OLD):
+                self.target.write_bytes(b"x" * len(OLD))
+        with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+            market._copy_verified_artifact(self.target, copied, self.card, checkpoint=checkpoint)
+
+    def test_copy_rejects_destination_changed_at_final_checkpoint(self):
+        copied = self.root / "copy"
+        def checkpoint():
+            if copied.exists() and copied.stat().st_size == len(OLD):
+                copied.write_bytes(b"x" * len(OLD))
+        with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+            market._copy_verified_artifact(self.target, copied, self.card, checkpoint=checkpoint)
+
+    def test_retention_refuses_change_after_copy_before_link(self):
+        archive = self.registry._archive_path(self.card)
+        original = market._copy_verified_artifact
+        def changed(source, target, card, **kwargs):
+            proof = original(source, target, card, **kwargs)
+            Path(target).write_bytes(b"x" * len(OLD))
+            return proof
+        with patch.object(market, "_copy_verified_artifact", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+                self.registry.retain_artifact(self.card, self.target)
+        self.assertFalse(archive.exists())
+        self.assertEqual(self.target.read_bytes(), OLD)
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
     def test_existing_archive_is_resynced_before_reuse(self):
         archive = self.registry.retain_artifact(self.card, self.target)
         with patch.object(market, "_sync_directory", wraps=market._sync_directory) as sync:
