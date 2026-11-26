@@ -131,6 +131,15 @@ class TranscribeFileTests(unittest.IsolatedAsyncioTestCase):
             await audio.transcribe(self.model, str(clip), runner, checkpoint=lambda: None)
         self.assertEqual(calls, [])
 
+    async def test_engine_output_preserves_universal_newline_semantics(self):
+        clip = self.recording()
+
+        async def runner(model, wav, stem):
+            stem.with_suffix(".txt").write_bytes(b"first\r\nsecond\rthird\n")
+
+        result = await audio.transcribe(self.model, str(clip), runner, checkpoint=lambda: None)
+        self.assertEqual(result, "first\nsecond\nthird")
+
     async def test_invalid_engine_output_is_reported_precisely(self):
         clip = self.recording()
         for payload in (b"\xff", b"a" * (audio.MAX_TRANSCRIPT + 1)):
