@@ -392,7 +392,11 @@ def _clear_choice(p, raw, stamp):
     journal = _choice_journal(p)
     try:
         _, current, identity = _read_choice(p)
-        if current != raw or identity != stamp:
+        if current != raw or identity != stamp or audio_choice_pending(p):
+            raise Hold("llm_choice_recovery_required")
+        _sync_parent(p)
+        _, current, identity = _read_choice(p)
+        if current != raw or identity != stamp or audio_choice_pending(p):
             raise Hold("llm_choice_recovery_required")
         journal.unlink()
         _sync_parent(journal)
@@ -437,6 +441,7 @@ def recover_jan_choice(store, path=None):
                             or _choice_identity(p.lstat()) != settings_stamp):
                         raise Hold("llm_choice_recovery_required")
                     _replace_text(p, _serialize(old))
+                    settings_stamp = _choice_identity(p.lstat())
             elif generation == record["new_profile"] and current == new:
                 # Repair only missing history of this exact active generation.
                 if (not store.is_current(profile.id, stamp)
@@ -450,7 +455,7 @@ def recover_jan_choice(store, path=None):
                 raise Hold("llm_choice_recovery_required")
             expected = old if generation == record["old_profile"] else new
             if (load(p) != expected
-                    or (current == expected and _choice_identity(p.lstat()) != settings_stamp)):
+                    or _choice_identity(p.lstat()) != settings_stamp):
                 raise Hold("llm_choice_recovery_required")
             _clear_choice(p, raw, journal_stamp)
             return True
