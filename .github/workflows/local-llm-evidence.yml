@@ -8,6 +8,7 @@ on:
       - 'experiments/adapter_protocol.py'
       - 'experiments/capabilities.py'
       - 'experiments/speech_result.py'
+      - 'experiments/transcription_result.py'
       - 'experiments/inference.py'
       - '.github/workflows/local-llm-evidence.yml'
 permissions:
@@ -15,7 +16,7 @@ permissions:
 jobs:
   cpu-llm:
     runs-on: ubuntu-22.04
-    timeout-minutes: 18
+    timeout-minutes: 22
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -44,6 +45,18 @@ jobs:
         run: |
           cmake -S "$RUNNER_TEMP/llama-fixture/source" -B "$RUNNER_TEMP/llama-fixture/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_SERVER=ON
           cmake --build "$RUNNER_TEMP/llama-fixture/build" --target llama-server -j 2
+      - name: Prepare pinned public STT dependency for integrated voice fixture
+        run: |
+          mkdir "$RUNNER_TEMP/voice-stt"
+          git init "$RUNNER_TEMP/voice-stt/source"
+          git -C "$RUNNER_TEMP/voice-stt/source" -c credential.helper= fetch --depth 1 https://github.com/ggml-org/whisper.cpp.git 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          git -C "$RUNNER_TEMP/voice-stt/source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/voice-stt/source" rev-parse HEAD)" = 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          test "$(git hash-object "$RUNNER_TEMP/voice-stt/source/samples/jfk.wav")" = 3184d372cd2f8b804d3a540c70ec50d927b335d2
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 120 --max-filesize 85000000 -o "$RUNNER_TEMP/voice-stt/model.bin" 'https://huggingface.co/ggerganov/whisper.cpp/resolve/fb5ed9369c26eaf08392504d8446da431e0fffb9/ggml-tiny.bin'
+          echo "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21  $RUNNER_TEMP/voice-stt/model.bin" | sha256sum -c -
+          cmake -S "$RUNNER_TEMP/voice-stt/source" -B "$RUNNER_TEMP/voice-stt/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build "$RUNNER_TEMP/voice-stt/build" --target whisper-cli -j 2
       - name: Actual offline CPU inference with public prompts only
         run: |
-          /usr/bin/python3 experiments/llama_engine_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf"
+          /usr/bin/python3 experiments/llama_engine_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" "$RUNNER_TEMP/voice-stt/build/bin/whisper-cli" "$RUNNER_TEMP/voice-stt/model.bin" "$RUNNER_TEMP/voice-stt/source/samples/jfk.wav"
