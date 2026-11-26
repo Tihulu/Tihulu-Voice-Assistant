@@ -80,3 +80,10 @@ class VoiceQualityTests(unittest.TestCase):
         for name in ("mixed-auto-piper-short-reviewed","mixed-auto-piper-short-turbo","mixed-auto-piper-short "):
             with self.assertRaises(RuntimeError):
                 speech_corpus_profile(name,"small",True)
+
+    def test_expanded_small_short_requires_exact_model_and_stt(self):
+        from voice_quality import speech_corpus_profile
+        self.assertEqual(speech_corpus_profile("expanded-small-short","small",True),(False,False,0))
+        for model,available in (("small",False),("turbo-q5",True),("tiny",True)):
+            with self.assertRaises(RuntimeError):
+                speech_corpus_profile("expanded-small-short",model,available)
