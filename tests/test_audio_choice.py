@@ -206,6 +206,24 @@ sys.exit(99)
         self.assertEqual(self.registry.card(self.card.model_id), self.card)
         self.assertFalse(settings.audio_choice_pending(self.path))
 
+    def test_diagnosis_is_read_only_for_recoverable_interrupted_choice(self):
+        self.interrupt_child("settings")
+        journal = audio_choice._journal(self.path)
+        before = (self.path.read_bytes(), journal.read_bytes(), self.registry.path.read_bytes())
+        self.assertEqual(audio_choice.diagnose(self.registry, self.path), "restore_previous_selection")
+        self.assertEqual((self.path.read_bytes(), journal.read_bytes(), self.registry.path.read_bytes()), before)
+
+    def test_diagnosis_distinguishes_conflicts_without_repairing(self):
+        self.interrupt_child("settings")
+        self.registry.save_card(market.ModelCard(model_id="other", display_name="Other", category="llm"))
+        self.assertEqual(audio_choice.diagnose(self.registry, self.path), "registry_generation_conflict")
+        self.registry.publication_journal.write_text("{}")
+        self.assertEqual(audio_choice.diagnose(self.registry, self.path), "registry_recovery_pending")
+        settings._choice_journal(self.path).write_text("{}")
+        self.assertEqual(audio_choice.diagnose(self.registry, self.path), "conflicting_choice_journals")
+        self.assertTrue(settings.audio_choice_pending(self.path))
+        self.assertEqual(self.registry.publication_journal.read_text(), "{}")
+
     def test_audio_recovery_never_runs_pending_registry_recovery(self):
         self.interrupt_child("settings")
         self.registry.publication_journal.write_text("{}")

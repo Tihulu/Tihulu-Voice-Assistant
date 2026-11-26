@@ -85,6 +85,47 @@ def _pair(p, rec):
     return current, old, new, stamp
 
 
+def diagnose(registry, path=None):
+    """Read-only recovery diagnosis, containing no private paths or hashes.
+
+    Never implicitly recover another journal, acquire locks nonblocking,
+    and do not report a recoverable generation on uncertain evidence.
+    """
+    p = settings.config_path() if path is None else Path(path)
+    try:
+        if not settings.audio_choice_pending(p):
+            return "no_pending"
+        if settings.choice_pending(p):
+            return "conflicting_choice_journals"
+        if registry.recovery_pending():
+            return "registry_recovery_pending"
+        try:
+            proof = _read(p)
+        except Hold:
+            return "invalid_audio_journal"
+        rec = proof[0]
+        with registry.transfer_lease(rec["model"]), registry._write_guard(require_clean=True), settings._write_guard(p):
+            if settings.choice_pending(p) or _read(p) != proof:
+                return "recovery_context_changed"
+            try:
+                current, old, new, stamp = _pair(p, rec)
+            except (Hold, OSError):
+                return "settings_generation_conflict"
+            generation = registry.snapshot()[0]
+            if (registry.snapshot()[0] != generation or _read(p) != proof
+                    or settings._choice_identity(p.lstat()) != stamp):
+                return "recovery_context_changed"
+            if generation == rec["old_registry"] == rec["new_registry"]:
+                return "already_aligned"
+            if generation == rec["old_registry"]:
+                return "already_aligned" if current == old else "restore_previous_selection"
+            if generation == rec["new_registry"]:
+                return "already_aligned" if current == new else "restore_committed_selection"
+            return "registry_generation_conflict"
+    except (Hold, OSError, ValueError, TypeError, RecursionError):
+        return "recovery_check_unavailable"
+
+
 def recover(registry, path=None):
     p = settings.config_path() if path is None else Path(path)
     if not settings.audio_choice_pending(p):
