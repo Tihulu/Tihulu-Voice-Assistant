@@ -2468,6 +2468,20 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         settings.save(newer)
         self.ui.require_audio_choice()
 
+    def test_explicit_reselection_upgrades_legacy_audio_reference(self):
+        path = self.weights("legacy-upgrade.bin")
+        card = market.from_file(str(path), "stt", engine="whisper.cpp")
+        self.ui.market.save_card(card)
+        self.ui.cfg["stt"] = str(path)
+        self.ui.cfg["market_refs"][card.storage_ref] = str(path)
+        self.assertTrue(self.ui.save())
+        self.ui.update_labels()
+        self.assertIn("Partial hash recorded", self.ui.labels["stt"].get_text())
+        self.ui.select_imported_audio("stt", str(path))
+        self.assertEqual(settings.load()["audio_digests"][card.storage_ref],
+                         hashlib.sha256(path.read_bytes()).hexdigest())
+        self.assertIn("Full hash recorded", self.ui.labels["stt"].get_text())
+
     def test_unregister_refuses_selected_audio_without_dropping_integrity(self):
         path = self.weights("runtime-selected.bin")
         self.ui.select_imported_audio("stt", str(path))

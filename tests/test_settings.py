@@ -262,6 +262,25 @@ class SettingsSnapshotBoundaryTests(unittest.TestCase):
                 settings.save(bad, self.path)
         self.assertEqual(settings.load(self.path), cfg)
 
+    def test_integrity_levels_distinguish_recorded_metadata_from_legacy(self):
+        cfg = settings.empty()
+        self.assertEqual(settings.audio_integrity_level(cfg, "stt"), "unselected")
+        cfg["stt"] = "/fixture/old.bin"
+        self.assertEqual(settings.audio_integrity_level(cfg, "stt"), "legacy")
+        digest = "a" * 64
+        ref = "sha256-" + digest[:32]
+        cfg["market_refs"][ref] = cfg["stt"]
+        self.assertEqual(settings.audio_integrity_level(cfg, "stt"), "prefix")
+        cfg["audio_digests"] = {ref: digest}
+        self.assertEqual(settings.audio_integrity_level(cfg, "stt"), "full")
+        cfg["voices"]["tr"] = "/fixture/voice.onnx"
+        cfg["market_refs"][ref] = cfg["voices"]["tr"]
+        self.assertEqual(settings.audio_integrity_level(cfg, "tr"), "weights_only")
+        cfg["voice_digests"] = {ref: "b" * 64}
+        self.assertEqual(settings.audio_integrity_level(cfg, "tr"), "full")
+        cfg["market_refs"]["sha256-" + "c" * 32] = cfg["voices"]["tr"]
+        self.assertEqual(settings.audio_integrity_level(cfg, "tr"), "ambiguous")
+
     def test_reset_of_already_absent_file_is_idempotent(self):
         before = settings.empty()
         before["stt"] = "/fixture/old.bin"

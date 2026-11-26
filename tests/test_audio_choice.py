@@ -34,6 +34,20 @@ class AudioChoiceTests(unittest.TestCase):
         self.assertEqual(settings.load(self.path), self.new)
         self.assertFalse(settings.audio_choice_pending(self.path))
 
+    def test_recovery_preserves_full_integrity_metadata(self):
+        digest = "a" * 64
+        ref = "sha256-" + digest[:32]
+        self.old["market_refs"][ref] = "/fixture/other.onnx"
+        self.old["audio_digests"] = {ref: digest}
+        self.old["voice_digests"] = {ref: "b" * 64}
+        self.new = {**self.old, "stt": "/fixture/new.bin"}
+        settings.save(self.old, self.path)
+        with patch.object(self.registry, "save_card", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                self.commit()
+        self.assertTrue(audio_choice.recover(self.registry, self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+
     def test_registry_failure_compensates_old_choice(self):
         with patch.object(self.registry, "save_card", side_effect=OSError("fixture")):
             with self.assertRaises(OSError):

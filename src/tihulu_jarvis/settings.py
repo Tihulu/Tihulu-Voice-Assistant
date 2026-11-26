@@ -192,6 +192,24 @@ def load(path=None):
         raise Hold("settings_unreadable") from None
 
 
+def audio_integrity_level(cfg, slot):
+    """Report recorded verification metadata, not runtime file health."""
+    path = cfg["stt"] if slot == "stt" else cfg["voices"].get(slot)
+    if not path:
+        return "unselected"
+    matches = [ref for ref, value in cfg["market_refs"].items() if value == path]
+    if not matches:
+        return "legacy"
+    if len(matches) != 1 or not re.fullmatch(r"sha256-[0-9a-f]{32}", matches[0]):
+        return "ambiguous"
+    ref = matches[0]
+    if ref not in cfg.get("audio_digests", {}):
+        return "prefix"
+    if slot != "stt" and ref not in cfg.get("voice_digests", {}):
+        return "weights_only"
+    return "full"
+
+
 def require_current_audio_selection(expected, path=None):
     """Refuse an old window after another writer changes persisted audio context.
 
