@@ -5747,6 +5747,34 @@ class SettingsPageTests(DesktopTests):
         self.until(lambda: self.ui.cfg.get("text_scale") == "large")
         self.assertIsNotNone(self.ui.scale_provider)
 
+    def test_reload_display_and_audio_preferences_without_writing_back(self):
+        newer = settings.load()
+        newer["text_scale"] = "large"
+        newer["show_spoken_text"] = True
+        newer["stt"] = ""
+        newer["resources"] = {"profile": "resource_optimized"}
+        settings.save(newer)
+        with patch.object(settings, "save", wraps=settings.save) as save:
+            self.ui.reload_local_preferences()
+            save.assert_not_called()
+        self.assertEqual(self.ui.cfg, newer)
+        self.assertEqual(self.ui.saved_cfg, newer)
+        self.assertEqual(self.ui.settings_scale.get_active(), 1)
+        self.assertTrue(self.ui.settings_spoken.get_active())
+        self.assertEqual(self.ui.labels["stt"].get_text(), "—")
+        self.assertEqual(self.ui.effective_resource().id, "resource_optimized")
+        self.assertEqual(settings.load(), newer)
+
+    def test_reload_refuses_changed_profile_without_adopting_it(self):
+        old = self.ui.cfg["profile"]
+        newer = settings.load()
+        newer["profile"] = "strict"
+        settings.save(newer)
+        self.ui.reload_local_preferences()
+        self.assertEqual(self.ui.settings_note.get_text(), "settings_changed_restart_required")
+        self.assertEqual(self.ui.cfg["profile"], old)
+        self.assertEqual(settings.load(), newer)
+
     def test_the_text_scale_applies_without_a_restart(self):
         self.ui.settings_scale.set_active(1)
         self.until(lambda: self.ui.cfg["text_scale"] == "large")

@@ -210,6 +210,24 @@ def audio_integrity_level(cfg, slot):
     return "full"
 
 
+# A partial in-place reload must never implicitly change routing, permissions,
+# profile selection, approved sites, or research roots.
+RELOADABLE = frozenset(("text_scale", "show_spoken_text", "stt", "voices",
+                        "market_refs", "audio_digests", "voice_digests", "resources"))
+
+
+def reload_preferences(expected, path=None):
+    p = config_path() if path is None else Path(path)
+    with _write_guard(p):
+        _require_no_choice(p)
+        current = load(p)
+        previous = checked(expected)
+        if any(current.get(k) != previous.get(k)
+               for k in (current.keys() | previous.keys()) - RELOADABLE):
+            raise Hold("settings_changed_restart_required")
+        return current
+
+
 class ProfileSelectionGuard:
     """Cache only a profile selection read from an unchanged settings inode.
 
