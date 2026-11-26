@@ -2366,6 +2366,27 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         self.assertEqual(self.ui.market.card(card.model_id), card)
         self.assertEqual(settings.load(), old)
 
+    def test_audio_choice_uncertain_commit_blocks_voice_until_restart(self):
+        card, path = self.prepare_stt()
+        original = self.ui.market.save_card
+        def changed(*args, **kwargs):
+            original(*args, **kwargs)
+            raise OSError("fixture")
+        with patch.object(self.ui.market, "save_card", side_effect=changed):
+            self.ui.use_selected_card()
+        self.assertTrue(settings.audio_choice_pending())
+        self.assertEqual(self.ui.status.get_text(), "audio_choice_recovery_required")
+        self.assertFalse(self.ui.transcribe_button.get_sensitive())
+        self.ui.preview("tr")
+        self.assertEqual(self.ui.status.get_text(), "audio_choice_recovery_required")
+        fresh = desktop.create_window(self.app, self.loop, self.bridge)
+        self.addCleanup(fresh.win.close)
+        self.assertFalse(settings.audio_choice_pending())
+        self.assertEqual(fresh.cfg["stt"], str(path))
+        self.assertEqual(fresh.market.card(card.model_id).state, "ACTIVE")
+        fresh.win.close()
+        self.until(lambda: not fresh.win.get_visible())
+
     def test_success_updates_both_stores_and_visible_choice(self):
         card, path = self.prepare_stt()
         self.ui.use_selected_card()
