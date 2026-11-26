@@ -3138,6 +3138,9 @@ def create_window(app, loop, bridge=None):
             self.settings_choice_confirm = self.button(recovery, tr(
                 "Confirm recovered preference", "Kurtarılan seçimi onayla",
                 "Wiederhergestellte Auswahl bestätigen"), self.confirm_choice_recovery)
+            self.settings_audio_diagnose = self.button(recovery, tr(
+                "Inspect audio recovery", "Ses seçimi kurtarmasını incele",
+                "Audiowiederherstellung prüfen"), self.inspect_audio_recovery)
             self.settings_choice_note = Gtk.Label(xalign=0, wrap=True)
             page.append(self.settings_choice_note)
             self.refresh_choice_recovery()
@@ -3146,12 +3149,34 @@ def create_window(app, loop, bridge=None):
             pending = self.jan_choice_blocked()
             available = pending and not self.busy and not self.closing
             self.settings_choice_inspect.set_sensitive(available)
+            self.settings_audio_diagnose.set_sensitive(self.audio_choice_blocked()
+                                                       and not self.busy and not self.closing)
             self.settings_choice_confirm.set_sensitive(available and self.settings_choice_review is not None)
             self.settings_forget.set_sensitive(not self.busy and not pending and not self.audio_choice_blocked())
             self.settings_reload.set_sensitive(not self.busy and not self.closing
                                                and not pending and not self.audio_choice_blocked())
             if not pending:
                 self.settings_choice_review = None
+
+        def inspect_audio_recovery(self):
+            if self.busy or self.closing or not self.audio_choice_blocked():
+                return
+            state = audio_choice.diagnose(self.market)
+            descriptions = {
+                "no_pending": tr("No interrupted audio selection.", "Kesilmiş ses seçimi yok.", "Keine unterbrochene Audioauswahl."),
+                "conflicting_choice_journals": tr("Conflicting model choice journals; no automatic repair.", "Model seçim günlükleri çakışıyor; otomatik onarım yok.", "Konflikt zwischen Modellauswahljournalen; keine automatische Reparatur."),
+                "registry_recovery_pending": tr("Registry recovery is pending; audio repair is blocked.", "Model kaydı kurtarması bekliyor; ses onarımı engelli.", "Registry-Wiederherstellung ausstehend; Audioreparatur gesperrt."),
+                "invalid_audio_journal": tr("Audio journal is unreadable or invalid.", "Ses günlüğü okunamıyor veya geçersiz.", "Audiojournal unlesbar oder ungültig."),
+                "settings_generation_conflict": tr("Settings differ from both recorded generations.", "Ayarlar kaydedilen iki sürümle de eşleşmiyor.", "Einstellungen weichen von beiden gespeicherten Generationen ab."),
+                "registry_generation_conflict": tr("Registry differs from both recorded generations.", "Model kaydı iki kayıtlı sürümle de eşleşmiyor.", "Registry weicht von beiden gespeicherten Generationen ab."),
+                "restore_previous_selection": tr("Previous audio selection can be restored.", "Önceki ses seçimi kurtarılabilir.", "Vorherige Audioauswahl wiederherstellbar."),
+                "restore_committed_selection": tr("Committed audio selection can be restored.", "Kaydedilmiş ses seçimi kurtarılabilir.", "Gespeicherte Audioauswahl wiederherstellbar."),
+                "already_aligned": tr("Recorded generations agree.", "Kayıtlı sürümler uyumlu.", "Gespeicherte Generationen stimmen überein."),
+            }
+            message = descriptions.get(state, tr("Recovery check unavailable; no change made.", "Kurtarma kontrolü yapılamadı; değişiklik yok.", "Wiederherstellungsprüfung nicht verfügbar; keine Änderung."))
+            self.settings_choice_note.set_text(message + " " + tr(
+                "Inspection only. No journal or preference changed.", "Yalnızca inceleme. Günlük veya tercih değiştirilmedi.", "Nur Prüfung. Kein Journal und keine Auswahl geändert."))
+            return state
 
         def inspect_choice_recovery(self):
             if self.busy or self.closing or not self.jan_choice_blocked():
