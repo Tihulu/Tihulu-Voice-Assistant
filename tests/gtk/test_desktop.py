@@ -2585,6 +2585,37 @@ class QueueRestoreTests(DownloadFixture):
         fresh.win.close()
         self.until(lambda: fresh.win.get_visible() is False)
 
+    def test_invalid_publication_journal_does_not_prevent_window_open(self):
+        journal = self.ui.market.publication_journal
+        journal.write_text("{}")
+        fresh = desktop.create_window(self.app, self.loop, self.bridge)
+        self.addCleanup(fresh.win.close)
+        self.assertIn("publication_recovery_required", fresh.market_note.get_text())
+        self.assertIn("publication_recovery_required", fresh.status.get_text())
+        self.assertFalse(fresh.market_fetch.get_sensitive())
+        self.assertFalse(fresh.market_rollback.get_sensitive())
+        self.assertEqual(journal.read_text(), "{}")
+        fresh.win.close()
+        self.until(lambda: fresh.win.get_visible() is False)
+
+    def test_market_refresh_refuses_stale_rows_and_recovers_after_external_repair(self):
+        card = self.partial_on_disk("fixture-restore", b"wei")
+        self.ui.build_market_page()
+        self.pick_card(card.model_id)
+        journal = self.ui.market.publication_journal
+        journal.write_text("{}")
+        self.click(self.ui.market_refresh)
+        self.assertEqual(self.ui.market_row_ids, {})
+        self.assertFalse(self.ui.market_use.get_sensitive())
+        self.assertFalse(self.ui.market_forget.get_sensitive())
+        self.assertIn("publication_recovery_required", self.ui.market_note.get_text())
+        # Simulate an external, explicitly reviewed repair; UI never deletes it.
+        journal.unlink()
+        self.click(self.ui.market_refresh)
+        self.pick_card(card.model_id)
+        self.assertEqual(self.ui.selected_card_snapshot(), card)
+        self.assertNotIn("Registry unavailable", self.ui.market_note.get_text())
+
     def test_an_orphan_partial_is_ignored(self):
         transfers = Path(self.market_home, "transfers")
         transfers.mkdir(parents=True, exist_ok=True)

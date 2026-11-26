@@ -444,7 +444,10 @@ def create_window(app, loop, bridge=None):
             self.build_downloads_page()
             self.build_profiles_page()
             self.build_catalog_page()
-            self.build_market_page()
+            try:
+                self.build_market_page()
+            except (Hold, OSError) as exc:
+                read_error = (read_error + " " if read_error else "") + str(exc)
             try:
                 profiles.ensure_default(self.store)
                 active = self.store.startup_profile(self.cfg.get("profile"))
@@ -1965,8 +1968,11 @@ def create_window(app, loop, bridge=None):
                 for category in market.CATEGORIES:
                     self.market_filter.append_text(category)
                 self.market_filter.set_active(0)
-                self.market_filter.connect("changed", lambda *_: self.build_market_page())
+                self.market_filter.connect("changed", lambda *_: self.refresh_market_view())
                 page.append(self.market_filter)
+                self.market_refresh = self.button(page, tr(
+                    "Refresh registry", "Model kaydını yenile", "Registry aktualisieren"),
+                    self.refresh_market_view)
                 self.market_list = Gtk.ListBox()
                 self.market_list.connect("row-selected", lambda *_: self.refresh_market_buttons())
                 page.append(self.market_list)
@@ -2003,7 +2009,18 @@ def create_window(app, loop, bridge=None):
 
             self.clear_staging_review()
             wanted = self.market_filter.get_active_text() or "stt"
-            rows = [c for c in self.market.cards() if c.category == wanted]
+            try:
+                cards = self.market.cards()
+            except (Hold, OSError) as exc:
+                self.market_note.set_text(tr(
+                    "Registry unavailable: ", "Model kaydı kullanılamıyor: ",
+                    "Registry nicht verfügbar: ") + str(exc))
+                self.storage_note.set_text(tr(
+                    "Storage unknown until recovery.", "Kurtarmaya kadar depolama bilinmiyor.",
+                    "Speicher bis zur Wiederherstellung unbekannt."))
+                self.refresh_market_buttons()
+                raise
+            rows = [c for c in cards if c.category == wanted]
             for card in sorted(rows, key=lambda c: (c.state, c.model_id)):
                 extra = ""
                 if card.approved_source() and market.transport_for(card.source_ref) is None:
@@ -2029,12 +2046,20 @@ def create_window(app, loop, bridge=None):
                 "Installed models and voices known to this computer. Unknown values stay unknown/not tested. Import happens in Installed models.",
                 "Bu bilgisayarda bilinen kurulu modeller ve sesler. Bilinmeyen değerler bilinmiyor/denenmedi olarak kalır. İçe alma Kurulu modeller bölümünde yapılır.",
                 "Bekannte installierte Modelle und Stimmen. Unbekannte Werte bleiben unbekannt/nicht getestet. Import unter Installierte Modelle."))
-            self.storage_note.set_text(self.storage_report())
+            self.storage_note.set_text(self.storage_report(cards))
             self.refresh_market_buttons()
 
-        def storage_report(self):
-            """Aggregate only what the registry knows; nothing is estimated."""
-            summary = market.usage(self.market.cards())
+        def refresh_market_view(self):
+            if self.busy or self.closing:
+                return
+            try:
+                self.build_market_page()
+            except (Hold, OSError) as exc:
+                self.set_state("ready", str(exc))
+
+        def storage_report(self, cards=None):
+            """Aggregate one validated registry snapshot, not a second read."""
+            summary = market.usage(self.market.cards() if cards is None else cards)
             if not summary.cards:
                 return tr("No registered models yet.","Henüz kayıtlı model yok.",
                           "Noch keine registrierten Modelle.")
@@ -3133,6 +3158,7 @@ def create_window(app, loop, bridge=None):
             for w in (self.market_use, self.market_forget):
                 w.set_sensitive(not self.busy and chosen is not None)
             self.market_list.set_sensitive(not self.busy)
+            self.market_refresh.set_sensitive(not self.busy)
             if self.busy:
                 for widget in (self.market_fetch, self.market_rollback, self.market_update):
                     widget.set_sensitive(False)
