@@ -67,6 +67,7 @@ def speech_corpus_profile(corpus,stt_profile,has_stt):
     profiles={
         "original":(False,False,0,None),
         "expanded":(False,False,0,"small"),
+        "expanded-small-short":(False,False,0,"small"),
         "targeted":(False,False,0,"turbo-q5"),
         "turbo-expanded":(False,False,0,"turbo-q5"),
         "mixed-preview":(True,False,8,"small"),
