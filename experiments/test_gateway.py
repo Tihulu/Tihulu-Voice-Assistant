@@ -276,5 +276,56 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused,"expired"):
             g.checkpoint_claimed_group(((b,r),(a,r)))
 
+    def test_dependent_checkpoint_follows_revoked_parent(self):
+        g = self.gateway()
+        r = Request(self.ctx,"engine","target","local")
+        parent = g.fixture_grant("parent",r,20)
+        child = g.fixture_grant("child",r,20)
+        g.claim(parent,r)
+        g.claim_dependent(child,r,parent,r)
+        self.assertEqual(g.checkpoint(child,r),"SIMULATED_ALLOW")
+        g.revoke("parent")
+        with self.assertRaises(Refused):
+            g.checkpoint(child,r)
+
+    def test_transitive_dependency_expiry_blocks_leaf(self):
+        g = self.gateway()
+        r = Request(self.ctx,"engine","target","local")
+        a = g.fixture_grant("a",r,5)
+        b = g.fixture_grant("b",r,20)
+        c = g.fixture_grant("c",r,20)
+        g.claim(a,r)
+        g.claim_dependent(b,r,a,r)
+        g.claim_dependent(c,r,b,r)
+        self.wall = 106
+        with self.assertRaisesRegex(Refused,"expired"):
+            g.checkpoint(c,r)
+
+    def test_invalidated_ancestor_blocks_new_child_claim(self):
+        g = self.gateway()
+        r = Request(self.ctx,"engine","target","local")
+        a,b,c = [g.fixture_grant(n,r,20) for n in ("a","b","c")]
+        g.claim(a,r)
+        g.claim_dependent(b,r,a,r)
+        g.revoke("a")
+        with self.assertRaises(Refused):
+            g.claim_dependent(c,r,b,r)
+        self.assertEqual(g.claim(c,r),"SIMULATED_ALLOW")
+
+    def test_shared_ancestor_and_unrelated_grant(self):
+        g = self.gateway()
+        r = Request(self.ctx,"engine","target","local")
+        a,b,c,d,independent = [g.fixture_grant(n,r,20) for n in ("a","b","c","d","other")]
+        g.claim(a,r)
+        g.claim_dependent(b,r,a,r)
+        g.claim_dependent(c,r,a,r)
+        g.claim_with_dependencies(d,r,((b,r),(c,r)))
+        g.claim(independent,r)
+        self.assertEqual(g.checkpoint(d,r),"SIMULATED_ALLOW")
+        g.revoke("a")
+        with self.assertRaises(Refused):
+            g.checkpoint(d,r)
+        self.assertEqual(g.checkpoint(independent,r),"SIMULATED_ALLOW")
+
 if __name__ == "__main__":
     unittest.main()

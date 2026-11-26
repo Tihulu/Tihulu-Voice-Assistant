@@ -123,6 +123,7 @@ class FixtureGateway:
         self._grants = {}
         self._revoked = set()
         self._claimed = set()
+        self._dependencies = {}
         self._closed = False
         self._lock = Lock()
 
@@ -184,7 +185,7 @@ class FixtureGateway:
             self._grants[identity] = grant
             return grant
 
-    def _validate_locked(self, grant, req, now):
+    def _validate_one_locked(self, grant, req, now):
         if type(grant) is not Grant:
             raise Refused("invalid_grant")
         token(grant.identity)
@@ -200,6 +201,23 @@ class FixtureGateway:
         except Refused:
             self._revoked.add(grant.identity)
             raise
+
+    def _validate_locked(self, grant, req, now):
+        # Persist trusted edges at claim. Every later check follows them,
+        # including ordinary checkpoint() calls. Edges point only to
+        # already-claimed grants; the bounded grant set prevents cycles and
+        # visited identities prevent repeated expansion of a shared ancestor.
+        self._validate_one_locked(grant, req, now)
+        visited = {grant.identity}
+        pending = list(self._dependencies.get(grant.identity, ()))
+        while pending:
+            parent, parent_req = pending.pop()
+            self._validate_one_locked(parent, parent_req, now)
+            if parent.identity not in self._claimed:
+                raise Refused("dependency_not_claimed")
+            if parent.identity not in visited:
+                visited.add(parent.identity)
+                pending.extend(self._dependencies.get(parent.identity, ()))
 
     def _validate_grant(self, grant, req, *, claim=False):
         """Validate or atomically claim a fixture initiation, not an OS effect."""
@@ -241,6 +259,7 @@ class FixtureGateway:
                 raise Refused("dependency_not_claimed")
             if grant.identity in self._claimed:
                 raise Refused("grant_already_claimed")
+            self._dependencies[grant.identity] = dependencies
             self._claimed.add(grant.identity)
             return "SIMULATED_ALLOW"
 
