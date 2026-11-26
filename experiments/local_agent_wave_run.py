@@ -131,6 +131,17 @@ class WaveRun:
                     or worker in self._done or completion_grant is not self._claims[worker][0]):
                 raise Refused("agent_completion_attempt_mismatch")
 
+    def checkpoint_worker(self,worker,context,candidates,*,completion_grant):
+        """Trusted coordinator liveness observation, not effect authorization."""
+        self._event_owner(worker,completion_grant)
+        self._check(context,candidates)
+        if type(worker) is not str or worker not in self._claims or worker in self._done:
+            raise Refused("agent_worker_not_running")
+        grant,req=self._claims[worker]
+        if completion_grant is not grant:
+            raise Refused("agent_completion_attempt_mismatch")
+        self._gateway.checkpoint_claimed_group(((grant,req),))
+
     def complete(self,worker,context,candidates,*,payload=None,completion_grant=None):
         # A foreign/late event must not invalidate a newer attempt with a
         # stale context before its exact ownership has been established.
