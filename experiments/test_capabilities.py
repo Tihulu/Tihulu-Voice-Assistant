@@ -109,3 +109,45 @@ class CapabilityTests(unittest.TestCase):
             g.revoke(given.identity)
         with patch.object(g, "claim", side_effect=revoke), self.assertRaises(Refused):
             simulate(g, grant, self.ctx, self.ocr)
+
+
+    def test_browser_navigation_snapshot_require_exact_profile_page_and_content(self):
+        nav = CapabilityCall("firefox", "fixture", "navigate",
+                             (("profile", "owned1"), ("tab", "tab1"),
+                              ("url", "https://example.org/docs")))
+        g = self.gateway(nav)
+        grant = g.fixture_grant("one", nav.request(self.ctx), 60)
+        for changed in (
+            replace(nav, adapter="brave"),
+            replace(nav, args=(("profile", "owned2"), ("tab", "tab1"), nav.args[2])),
+            replace(nav, args=(nav.args[0], nav.args[1], ("url", "https://example.org/other"))),
+            replace(nav, operation="snapshot", args=nav.args+(("digest", "a"*64),)),
+        ):
+            with self.assertRaisesRegex(Refused, "request_mismatch"):
+                simulate(g, grant, self.ctx, changed)
+        self.assertEqual(simulate(g, grant, self.ctx, nav)[0], "SIMULATED_ONLY")
+
+    def test_browser_rejects_ambiguous_and_private_authorities_before_grant(self):
+        for raw in ("http://example.org/x", "https://127.0.0.1/x",
+                    "https://localhost.local/x", "https://example.org:443/x",
+                    "https://user@example.org/x", "https://example.org/../x",
+                    "https://example.org/%2e%2e/x", "https://example.org/x?q=1",
+                    "https://example.org/x#anchor", "https://example.org./x",
+                    "https://example.org//x"):
+            call = CapabilityCall("brave", "fixture", "navigate",
+                                  (("profile", "owned"), ("tab", "tab1"), ("url", raw)))
+            with self.subTest(raw=raw), self.assertRaises(Refused):
+                call.request(self.ctx)
+        for host in ("127.0.0.1", "127.1", "100.64.0.1", "-bad.org"):
+            call = replace(self.browser, args=(("origin", host), ("tab", "tab1")))
+            with self.assertRaises(Refused):
+                call.request(self.ctx)
+
+    def test_capability_identity_rejects_str_subclass_and_noncanonical_args(self):
+        class Fake(str):
+            pass
+        for call in (replace(self.ocr, adapter=Fake("tesseract")),
+                     replace(self.ocr, args=((Fake("artifact"), "image1"), *self.ocr.args[1:])),
+                     replace(self.ocr, args=(("artifact", Fake("image1")), *self.ocr.args[1:]))):
+            with self.assertRaises(Refused):
+                call.request(self.ctx)
