@@ -34,3 +34,12 @@ class VoiceQualityTests(unittest.TestCase):
         for identity,lang,text in samples:
             self.assertTrue(identity.startswith(lang+"-"))
             self.assertGreaterEqual(len(words(text,lang)),3)
+
+    def test_corpus_filename_uses_sample_not_language(self):
+        from voice_quality import speech_filename,expanded_corpus
+        for identity,lang,_ in expanded_corpus():
+            self.assertNotEqual(speech_filename(identity),speech_filename(lang))
+            self.assertEqual(speech_filename(identity),identity+".wav")
+        for bad in ("../tr","tr/2","tr-4","TR",None):
+            with self.assertRaises(Refused):
+                speech_filename(bad)
