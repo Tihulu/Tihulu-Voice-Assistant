@@ -33,17 +33,24 @@ def denied_navigation(error,target):
         return False
     if error.error not in ("unknown error","timeout"):
         return False
-    if any(code in error.message for code in ("NS_ERROR_CONNECTION_REFUSED","NS_ERROR_NET_TIMEOUT")):
-        return True
     # Gecko reports the privileged about:neterror URL in an unknown error.
+    # A bare error string is insufficient: bind the exact attempted address.
     # Require a closed network error code and the exact attempted destination.
     marker="about:neterror?"
-    if marker not in error.message:
+    prefix="Reached error page: "
+    if not error.message.startswith(prefix+marker) or len(error.message)>4096:
         return False
-    raw=marker+error.message.split(marker,1)[1].split()[0].rstrip('"')
-    parts=urlsplit(raw)
-    params=parse_qs(parts.query)
-    return params.get("e") in (["connectionFailure"],["netTimeout"]) and params.get("u")==[target]
+    raw=error.message[len(prefix):]
+    if any(c.isspace() for c in raw):
+        return False
+    try:
+        parts=urlsplit(raw)
+        params=parse_qs(parts.query,keep_blank_values=True,max_num_fields=16)
+    except ValueError:
+        return False
+    return (parts.scheme=="about" and parts.path=="neterror" and not parts.fragment
+            and params.get("e") in (["connectionFailure"],["netTimeout"])
+            and params.get("u")==[target])
 
 def child(browser,driver,host_net,host_port):
     sys.path.insert(0,"/work/fixture-code")
