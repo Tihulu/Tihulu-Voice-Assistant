@@ -1897,7 +1897,25 @@ def create_window(app, loop, bridge=None):
         def update_labels(self):
             for key,label in self.labels.items():
                 p = self.cfg["stt"] if key=="stt" else self.cfg["voices"].get(key)
-                label.set_text(Path(p).name if p else "—")
+                level = settings.audio_integrity_level(self.cfg, key)
+                messages = {
+                    "legacy": tr("Legacy selection; reselect to record hashes.",
+                                 "Eski seçim; hash kaydı için yeniden seçin.",
+                                 "Alte Auswahl; für Hashwerte erneut auswählen."),
+                    "prefix": tr("Partial hash recorded; reselect for full hash.",
+                                 "Kısmi hash kayıtlı; tam hash için yeniden seçin.",
+                                 "Teilhash gespeichert; für vollständigen Hash erneut auswählen."),
+                    "weights_only": tr("Weights hash recorded; reselect for voice config hash.",
+                                       "Model hash kayıtlı; ses yapılandırması için yeniden seçin.",
+                                       "Modellhash gespeichert; für Konfigurationshash erneut auswählen."),
+                    "full": tr("Full hash recorded; checked at use.",
+                               "Tam hash kayıtlı; kullanımda kontrol edilir.",
+                               "Vollständiger Hash gespeichert; Prüfung bei Nutzung."),
+                    "ambiguous": tr("Conflicting model references; review required.",
+                                    "Çakışan model referansları; inceleme gerekli.",
+                                    "Widersprüchliche Modellreferenzen; Prüfung erforderlich.")
+                }
+                label.set_text(Path(p).name + " · " + messages[level] if p else "—")
 
         @staticmethod
         def inspect_audio_import(key, path, *, checkpoint=lambda: None,
