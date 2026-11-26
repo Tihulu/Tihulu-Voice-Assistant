@@ -14,7 +14,17 @@ permissions:
 jobs:
   multilingual:
     runs-on: ubuntu-22.04
-    timeout-minutes: 14
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: base
+            sha: 60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe
+            max_bytes: 160000000
+          - profile: small
+            sha: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b
+            max_bytes: 500000000
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -28,6 +38,10 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           git diff --exit-code d4b756351b1552aa5806c89e39eda3b5b82aa337 HEAD -- src packaging tools tests pyproject.toml data
       - name: Prepare disposable pinned public dependencies
+        env:
+          STT_PROFILE: ${{ matrix.profile }}
+          STT_SHA: ${{ matrix.sha }}
+          STT_MAX: ${{ matrix.max_bytes }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install --no-install-recommends -y bubblewrap cmake build-essential curl espeak-ng ffmpeg
@@ -37,13 +51,14 @@ jobs:
           git -C "$RUNNER_TEMP/multilingual-stt/source" -c credential.helper= fetch --depth 1 https://github.com/ggml-org/whisper.cpp.git 4979e04f5dcaccb36057e059bbaed8a2f5288315
           git -C "$RUNNER_TEMP/multilingual-stt/source" checkout --detach FETCH_HEAD
           test "$(git -C "$RUNNER_TEMP/multilingual-stt/source" rev-parse HEAD)" = 4979e04f5dcaccb36057e059bbaed8a2f5288315
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 120 --max-filesize 85000000 -o "$RUNNER_TEMP/multilingual-stt/model.bin" 'https://huggingface.co/ggerganov/whisper.cpp/resolve/fb5ed9369c26eaf08392504d8446da431e0fffb9/ggml-tiny.bin'
-          echo "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21  $RUNNER_TEMP/multilingual-stt/model.bin" | sha256sum -c -
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 180 --max-filesize "$STT_MAX" -o "$RUNNER_TEMP/multilingual-stt/model.bin" "https://huggingface.co/ggerganov/whisper.cpp/resolve/fb5ed9369c26eaf08392504d8446da431e0fffb9/ggml-$STT_PROFILE.bin"
+          echo "$STT_SHA  $RUNNER_TEMP/multilingual-stt/model.bin" | sha256sum -c -
           cmake -S "$RUNNER_TEMP/multilingual-stt/source" -B "$RUNNER_TEMP/multilingual-stt/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
           cmake --build "$RUNNER_TEMP/multilingual-stt/build" --target whisper-cli -j 2
       - name: Actual TR EN DE generated speech recognition
         env:
           PYTHONPATH: src:experiments
           PYTHONDONTWRITEBYTECODE: '1'
+          STT_PROFILE: ${{ matrix.profile }}
         run: |
-          /usr/bin/python3 experiments/speech_engine_acceptance.py "$RUNNER_TEMP/multilingual-stt/build/bin/whisper-cli" "$RUNNER_TEMP/multilingual-stt/model.bin"
+          /usr/bin/python3 experiments/speech_engine_acceptance.py "$RUNNER_TEMP/multilingual-stt/build/bin/whisper-cli" "$RUNNER_TEMP/multilingual-stt/model.bin" "$STT_PROFILE"
