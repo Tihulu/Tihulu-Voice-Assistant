@@ -1063,6 +1063,28 @@ class Store:
                 raise Hold("profile_history_write_failed") from None
         except OSError:
             raise Hold("profile_unreadable") from None
+        # An existing archive is evidence, not a replaceable cache. Never
+        # silently accept a conflicting generation or overwrite its bytes.
+        try:
+            if self._read_profile(archived) != current:
+                raise Hold("profile_history_conflict")
+        except (Hold, OSError, ValueError, KeyError, TypeError, RecursionError):
+            raise Hold("profile_history_conflict") from None
+
+    def repair_current_history(self, profile_id, *, expected):
+        """Explicitly repair only the current generation's missing archive.
+
+        The caller supplies the reviewed profile and exact file stamp.
+        No active policy, grants, settings or older history are changed.
+        """
+        with self._mutation_lock():
+            current, stamp = self.snapshot(profile_id)
+            if (current, stamp) != expected:
+                raise Hold("profile_changed")
+            self._ensure_current_archive_locked(current)
+            if not self.is_current(profile_id, stamp):
+                raise Hold("profile_changed")
+            return current
 
     def _save_locked(self, profile, *, create_only=False):
         profile = profile.checked()

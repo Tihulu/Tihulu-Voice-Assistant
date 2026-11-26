@@ -312,6 +312,48 @@ class StoreMutationTests(unittest.TestCase):
         self.assertEqual(self.store.load("local-only").name, "active")
         self.assertFalse((self.store.history / "local-only-v3.json").exists())
 
+    def test_conflicting_current_history_blocks_save_and_delete(self):
+        current = self.store.load("local-only")
+        archive = self.store.history / "local-only-v1.json"
+        wrong = Store._dump(base(name="conflicting archived generation"))
+        archive.write_text(wrong)
+        with self.assertRaisesRegex(Hold, "profile_history_conflict"):
+            self.other.save(base(version=2, name="new"))
+        with self.assertRaisesRegex(Hold, "profile_history_conflict"):
+            self.other.delete("local-only", expected=current)
+        self.assertEqual(self.store.load("local-only"), current)
+        self.assertEqual(archive.read_text(), wrong)
+
+    def test_explicit_history_repair_preserves_active_generation_and_older_history(self):
+        current = self.store.save(base(version=2, name="active"))
+        expected = self.store.snapshot(current.id)
+        archive = self.store.history / "local-only-v2.json"
+        older = self.store.history / "local-only-v1.json"
+        old_text = older.read_bytes()
+        archive.unlink()
+        self.assertEqual(self.other.repair_current_history(current.id, expected=expected), current)
+        self.assertEqual(self.store.snapshot(current.id), expected)
+        self.assertEqual(self.store.versions(current.id), (base().checked(), current))
+        self.assertEqual(older.read_bytes(), old_text)
+
+    def test_history_repair_refuses_stale_snapshot(self):
+        expected = self.store.snapshot("local-only")
+        self.store.save(base(version=2, name="new"))
+        archive = self.store.history / "local-only-v2.json"
+        archive.unlink()
+        with self.assertRaisesRegex(Hold, "profile_changed"):
+            self.other.repair_current_history("local-only", expected=expected)
+        self.assertFalse(archive.exists())
+
+    def test_history_repair_refuses_conflicting_or_unreadable_archive(self):
+        expected = self.store.snapshot("local-only")
+        archive = self.store.history / "local-only-v1.json"
+        archive.write_text("{}")
+        with self.assertRaisesRegex(Hold, "profile_history_conflict"):
+            self.other.repair_current_history("local-only", expected=expected)
+        self.assertEqual(archive.read_text(), "{}")
+        self.assertEqual(self.store.snapshot("local-only"), expected)
+
     def test_recovery_never_replays_historical_grants(self):
         granted = base(version=2, tool_rules=(Rule("local_audio_device", (), ALLOW),))
         self.store.save(granted)
