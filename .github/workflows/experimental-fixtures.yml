@@ -1,7 +1,7 @@
 name: Isolated R2-R5 experimental fixtures
 on:
   pull_request:
-    branches: ['fix/chat-first-result-lifetime', 'experiment/r3-shared-boundary', 'experiment/r3-typed-application-capabilities', 'experiment/r3-document-result-provenance', 'experiment/real-document-engine-fixtures', 'experiment/browser-exact-navigation-contract', 'experiment/search-query-result-provenance', 'experiment/application-engine-readiness', 'experiment/document-real-output-contract-evidence', 'experiment/fix-poppler-namespace-geometry', 'experiment/pdf-page-ocr-provenance', 'experiment/mixed-pdf-real-page-fallback', 'experiment/owned-browser-task-lifecycle', 'experiment/local-document-summary-chain', 'experiment/real-installed-application-engine-fixtures', 'experiment/typed-engine-output-contract', 'experiment/real-engine-conversion-receipts']
+    branches: ['fix/chat-first-result-lifetime', 'experiment/r3-shared-boundary', 'experiment/r3-typed-application-capabilities', 'experiment/r3-document-result-provenance', 'experiment/real-document-engine-fixtures', 'experiment/browser-exact-navigation-contract', 'experiment/search-query-result-provenance', 'experiment/application-engine-readiness', 'experiment/document-real-output-contract-evidence', 'experiment/fix-poppler-namespace-geometry', 'experiment/pdf-page-ocr-provenance', 'experiment/mixed-pdf-real-page-fallback', 'experiment/owned-browser-task-lifecycle', 'experiment/local-document-summary-chain', 'experiment/real-installed-application-engine-fixtures', 'experiment/typed-engine-output-contract', 'experiment/real-engine-conversion-receipts', 'experiment/bounded-engine-isolation-evidence']
 permissions:
   contents: read
 jobs:
