@@ -1089,7 +1089,7 @@ class Transfer:
                                  threaded_publication=threaded_publication)
 
     @_leased_transfer
-    async def run(self, progress=None):
+    async def run(self, progress=None, *, threaded_publication=False):
         if self.card.state != DISCOVERED:
             # Nothing already installed is ever overwritten by a transfer.
             raise Hold("model_already_registered")
@@ -1118,7 +1118,8 @@ class Transfer:
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
                                  source_version=self.source.version,
                                   license_id=self.source.license_id)
-            return self._publish(registered, replacing=False)
+            return await self._publish_async(registered, replacing=False,
+                                             threaded=threaded_publication)
         except asyncio.CancelledError:
             self._terminal("CANCELLED")
             raise

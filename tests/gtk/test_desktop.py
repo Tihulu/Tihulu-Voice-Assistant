@@ -1525,6 +1525,35 @@ class DownloadFlowTests(DownloadFixture):
         rows = self.rows()
         self.assertTrue(any("REGISTERED" in row for row in rows))
 
+    def test_initial_publication_late_stop_reports_registered_result(self):
+        from threading import Event, get_ident
+        url, payload = self.loopback_server()
+        self.begin_download(url, hashlib.sha256(payload).hexdigest(), len(payload))
+        entered, release = Event(), Event()
+        original = market.Transfer._publish
+        owner = get_ident()
+        def delayed(transfer, *args, **kwargs):
+            if get_ident() == owner:
+                raise AssertionError("publication ran on GTK thread")
+            result = original(transfer, *args, **kwargs)
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("fixture deadline")
+            return result
+        with patch.object(market.Transfer, "_publish", delayed):
+            try:
+                self.click(self.ui.market_fetch)
+                self.until(entered.is_set)
+                self.assertFalse(self.ui.market_filter.get_sensitive())
+                self.ui.interrupt(False)
+                release.set()
+                self.until(lambda: not self.ui.busy)
+            finally:
+                release.set()
+        self.assertEqual(self.ui.market.card("fixture-download").state, "REGISTERED")
+        self.assertEqual(self.ui.downloads[-1]["state"], "REGISTERED")
+        self.assertEqual(self.ui.status.get_text(), "Registered.")
+
     def test_a_failed_download_leaves_no_artifact(self):
         self.discovered()
 
