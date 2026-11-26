@@ -510,25 +510,33 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
         (identity_dir/"group").write_text(f"fixture:x:{gid}:\n",encoding="ascii")
         (identity_dir/"nsswitch.conf").write_text(
             "passwd: files\ngroup: files\nhosts: files\n",encoding="ascii")
-        # Stock CI package post-install generated registry files may not be
-        # listed by dpkg -L. Copy only direct regular .xcd files from the fixed
-        # package subtree, not arbitrary configuration or symlink targets.
+        # Exact generated registry names from the Ubuntu 22.04 package
+        # installation log, including the resource subdirectory. The main
+        # registry is larger than an artifact; use a separate bounded config
+        # budget, never alter engine output limits.
         registry=Path("/etc/libreoffice/registry")
-        if registry.is_dir() and not registry.is_symlink():
-            for src in sorted(registry.glob("*.xcd")):
-                if src.is_symlink():
-                    continue
-                info=src.stat()
-                if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0
-                        or not 0<info.st_size<=MAX_OUTPUT or config_count>=64):
-                    raise RuntimeError("unexpected generated registry")
-                dst=config/"registry"/src.name
-                dst.parent.mkdir(parents=True,exist_ok=True)
-                if not dst.exists():
-                    dst.write_bytes(src.read_bytes())
-                    config_count+=1
-        print(json.dumps({"office_config_count":config_count,
-                          "registry_files":sorted(p.name for p in (config/"registry").glob("*.xcd"))}),flush=True)
+        registry_names=("main.xcd","pdfimport.xcd","xsltfilter.xcd",
+                        "lingucomponent.xcd","Langpack-en-US.xcd","writer.xcd",
+                        "res/fcfg_langpack_en-US.xcd")
+        config_total=0
+        for name in registry_names:
+            src=registry/name
+            if src.resolve()!=src or not src.is_file():
+                raise RuntimeError("missing or redirected stock registry: "+name)
+            info=src.stat()
+            print(json.dumps({"office_registry":name,"size":info.st_size}),flush=True)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid!=0
+                    or not 0<info.st_size<=32*1024*1024
+                    or config_total+info.st_size>64*1024*1024):
+                raise RuntimeError("stock registry outside config budget: "+name)
+            data=src.read_bytes()
+            if len(data)!=info.st_size:
+                raise RuntimeError("stock registry changed")
+            config_total+=len(data)
+            dst=config/"registry"/name
+            dst.parent.mkdir(parents=True,exist_ok=True)
+            dst.write_bytes(data)
+        print(json.dumps({"office_registry_total":config_total}),flush=True)
         prefix[-2:-2]=["--dir","/etc","--ro-bind",str(config),"/etc/libreoffice",
                         "--ro-bind",str(identity_dir/"passwd"),"/etc/passwd",
                         "--ro-bind",str(identity_dir/"group"),"/etc/group",
