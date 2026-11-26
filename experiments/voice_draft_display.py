@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Trusted UI-thread lifecycle for a displayed, inert voice draft."""
 from dataclasses import dataclass
-from threading import get_ident
+from threading import current_thread
 from gateway import Refused
 from voice_composer_handoff import prepare_handoff,confirmed_draft,HandoffPreview
 
@@ -15,11 +15,11 @@ class DraftDisplay:
     fresh context capture and invalidation events belong to the UI caller.
     """
     def __init__(self):
-        self._thread=get_ident()
+        self._thread=current_thread()
         self._display=None
 
     def _check_thread(self):
-        if get_ident()!=self._thread:
+        if current_thread() is not self._thread:
             raise Refused("draft_display_thread")
 
     def invalidate(self):
@@ -31,6 +31,20 @@ class DraftDisplay:
         preview=prepare_handoff(context,*args,edits)
         self._display=Display(preview)
         return self._display
+
+    def refresh(self,current,display,*args,edits=()):
+        """Recheck an open display without consuming its confirmation."""
+        self._check_thread()
+        if self._display is None or display is not self._display:
+            raise Refused("draft_display_stale")
+        try:
+            fresh=prepare_handoff(current,*args,edits)
+            if fresh!=display.preview:
+                raise Refused("draft_display_changed")
+        except Refused:
+            self._display=None
+            raise
+        return display
 
     def accept(self,current,display,confirmation,*args,edits=()):
         self._check_thread()
