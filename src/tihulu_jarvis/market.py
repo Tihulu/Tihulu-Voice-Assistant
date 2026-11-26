@@ -1222,13 +1222,18 @@ def _copy_verified_artifact(source, target, card, *, checkpoint=lambda: None):
                 remaining -= len(block)
             out.flush()
             os.fsync(out.fileno())
-        after = os.fstat(fd)
-        identity = lambda x: (x.st_dev,x.st_ino,x.st_size,x.st_mtime_ns,x.st_ctime_ns,x.st_mode)
-        if (identity(before) != identity(after)
-                or identity(before) != identity(os.stat(source, follow_symlinks=False))
-                or h.hexdigest() != card.artifact_digest):
-            raise Hold("rollback_artifact_unverified")
+            copied = os.fstat(out.fileno())
+            copied_identity = _artifact_identity(copied)
         checkpoint()
+        after = os.fstat(fd)
+        if (_artifact_identity(before) != _artifact_identity(after)
+                or _artifact_identity(before) != _artifact_identity(os.stat(source, follow_symlinks=False))
+                or h.hexdigest() != card.artifact_digest
+                or not stat.S_ISREG(copied.st_mode) or copied.st_nlink != 1
+                or copied.st_size != before.st_size
+                or copied_identity != _artifact_identity(Path(target).lstat())):
+            raise Hold("rollback_artifact_unverified")
+        return _ArtifactProof(Path(target), copied_identity, h.hexdigest())
     except OSError:
         raise Hold("rollback_artifact_unverified") from None
     finally:
@@ -1709,8 +1714,10 @@ class Registry:
         temp = Path(name)
         temp.unlink()
         try:
-            _copy_verified_artifact(source, temp, card, checkpoint=checkpoint)
+            proof = _copy_verified_artifact(source, temp, card, checkpoint=checkpoint)
             checkpoint()
+            if proof.identity != _artifact_identity(temp.lstat()):
+                raise Hold("rollback_artifact_unverified")
             # No overwrite, even if another operation published the same digest.
             os.link(temp, target, follow_symlinks=False)
             _sync_directory(target.parent)
@@ -1753,8 +1760,8 @@ class Registry:
         temp = Path(name)
         temp.unlink()
         try:
-            _copy_verified_artifact(archive, temp, candidate)
-            return self._publish_owned(current, restored, temp)
+            proof = _copy_verified_artifact(archive, temp, candidate)
+            return self._publish_owned(current, restored, temp, staging_proof=proof)
         finally:
             temp.unlink(missing_ok=True)
 
