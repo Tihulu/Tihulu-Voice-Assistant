@@ -117,6 +117,9 @@ async def run(args):
                 out.writeframes(clip.readframes(clip.getnframes()))
         await transcribe("mixed-tr-en-de", mixed,
                          " ".join(CASES[lang] for lang in ("tr", "en", "de")), .5)
+        await transcribe("mixed-segmented-tr-en-de", mixed,
+                         " ".join(CASES[lang] for lang in ("tr", "en", "de")), .5,
+                         language="segmented")
         await transcribe("speech-after-32s", delayed, CASES["en"], .5)
 
         silence = root / "silence.wav"
@@ -214,7 +217,7 @@ def main():
         setattr(args, attr, getattr(args, attr).resolve(strict=True))
     results = asyncio.run(run(args))
     args.report.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return 0 if len(results) == 19 and all(x["status"] == "PASS" for x in results) else 1
+    return 0 if len(results) == 20 and all(x["status"] == "PASS" for x in results) else 1
 
 
 if __name__ == "__main__":

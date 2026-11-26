@@ -438,7 +438,7 @@ def has_signal(path, *, checkpoint=lambda: None):
 AUTH_POLL = .25
 
 
-async def validate_signal(path, *, checkpoint):
+async def _audio_worker(work_fn, *, checkpoint):
     """Retain the private WAV and task ownership until the worker drains.
 
     The owner checks live authorization on the event loop; the worker only
@@ -452,7 +452,7 @@ async def validate_signal(path, *, checkpoint):
             raise Hold("turn_cancelled")
     def work():
         worker_check()
-        result = has_signal(path, checkpoint=worker_check)
+        result = work_fn(worker_check)
         worker_check()
         return result
     worker = asyncio.create_task(asyncio.to_thread(work))
@@ -469,6 +469,11 @@ async def validate_signal(path, *, checkpoint):
         stop.set()
         # Never cancel the to_thread task: doing so would hide a live thread.
         await finish_owned(asyncio.gather(worker, return_exceptions=True))
+
+
+async def validate_signal(path, *, checkpoint):
+    return await _audio_worker(lambda check: has_signal(path, checkpoint=check),
+                               checkpoint=checkpoint)
 
 
 async def await_authorized(factory, timeout, checkpoint):
@@ -524,7 +529,65 @@ async def _capture(wav, finish, publish, *, checkpoint):
         raise Hold("capture_timeout") from None
 
 
-STT_LANGUAGES = ("auto", "tr", "en", "de")
+STT_LANGUAGES = ("auto", "tr", "en", "de", "segmented")
+MAX_SEGMENTED_FRAMES = 60 * 16000
+MAX_SEGMENTS = 8
+
+
+def split_speech_wav(path, stem, *, checkpoint):
+    """Experimental pause-based partition; preserve every sample in order.
+
+    Only private, verified mono PCM is accepted. No language inference occurs
+    here. Split at >=600ms quiet gaps, with >=1s between cuts; refuse excess
+    size/segment counts rather than dropping audio. Ordinary auto is unchanged.
+    """
+    checkpoint()
+    try:
+        with wave.open(str(path), "rb") as w:
+            frames = w.getnframes()
+            if (w.getnchannels(), w.getsampwidth(), w.getframerate()) != (1, 2, 16000):
+                raise Hold("unsupported_recording")
+            if not 0 < frames <= MAX_SEGMENTED_FRAMES:
+                raise Hold("segmented_recording_too_long")
+            data = w.readframes(frames)
+        if len(data) != frames * 2:
+            raise Hold("unsupported_recording")
+        cuts = [0]
+        quiet_start = None
+        heard = False
+        for pos in range(0, frames, 320):
+            checkpoint()
+            chunk = data[pos * 2:(pos + 320) * 2]
+            voiced = (any(chunk) and
+                      sum(v*v for (v,) in struct.iter_unpack("<h", chunk))
+                      >= (len(chunk) // 2) * 90**2)
+            if not voiced:
+                if quiet_start is None:
+                    quiet_start = pos
+                continue
+            if heard and quiet_start is not None and pos - quiet_start >= 9600:
+                cut = (quiet_start + pos) // 2
+                if cut - cuts[-1] >= 16000 and frames - cut >= 16000:
+                    if len(cuts) >= MAX_SEGMENTS:
+                        raise Hold("too_many_speech_segments")
+                    cuts.append(cut)
+            heard = True
+            quiet_start = None
+        if len(cuts) == 1:
+            return (path,)
+        cuts.append(frames)
+        output = []
+        for index, (left, right) in enumerate(zip(cuts, cuts[1:])):
+            checkpoint()
+            target = stem.with_name(stem.name + "-segment-%d.wav" % index)
+            with wave.open(str(target), "wb") as w:
+                w.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+                w.writeframes(data[left * 2:right * 2])
+            output.append(target)
+        checkpoint()
+        return tuple(output)
+    except (OSError, EOFError, wave.Error, struct.error):
+        raise Hold("unsupported_recording") from None
 
 
 def checked_stt_language(language):
@@ -619,13 +682,26 @@ async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint,
         if publish:
             publish("transcribing")
         deadline.check()
+        if language == "segmented":
+            sources = await _audio_worker(lambda check: split_speech_wav(wav, stem, checkpoint=check),
+                                          checkpoint=deadline.check)
+            parts = []
+            for index, source in enumerate(sources):
+                deadline.check()
+                parts.append(await one(source, stem.with_name(stem.name + "-part-%d" % index), "auto"))
+                if sum(map(len, parts)) + len(parts) - 1 > 16000:
+                    raise Hold("response_too_long")
+            return "\n".join(parts)
+        return await one(wav, stem, language)
+
+    async def one(source, output_stem, selected_language):
         if runner is None:
-            await _whisper(model, wav, stem, checkpoint=deadline.check,
-                           model_identity=model_identity, language=language)
+            await _whisper(model, source, output_stem, checkpoint=deadline.check,
+                           model_identity=model_identity, language=selected_language)
         else:
             await runner(model, wav, stem)
         deadline.check()
-        output = stem.with_suffix(".txt")
+        output = output_stem.with_suffix(".txt")
         try:
             if not output.is_file():
                 raise Hold("invalid_transcript")
@@ -662,6 +738,8 @@ def whisper_resource_args(profile, cores_count=None):
 async def _whisper(model, wav, stem, *, checkpoint, model_identity=None, language="auto"):
     checkpoint()
     language = checked_stt_language(language)
+    if language == "segmented":
+        raise Hold("invalid_stt_language")
     if not tools_ready("whisper-cli"):
         raise Hold("transcription_backend_missing")
     options = whisper_resource_args(PROFILE)

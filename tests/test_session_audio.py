@@ -157,6 +157,48 @@ class TranscribeFileTests(unittest.IsolatedAsyncioTestCase):
             await audio.transcribe(self.model, str(clip), runner, checkpoint=lambda: None)
         self.assertEqual(calls, [])
 
+    async def test_segmented_transcription_preserves_all_samples_and_order(self):
+        speech = struct.pack("<hh", 1250, -1250) * 16000
+        payload = speech + bytes(32000) + speech + bytes(32000) + speech
+        clip = self.recording(payload)
+        parts, seen = [], []
+
+        async def runner(model, wav, stem):
+            with wave.open(str(wav), "rb") as w:
+                parts.append(w.readframes(w.getnframes()))
+            stem.with_suffix(".txt").write_text(str(len(parts)), encoding="utf-8")
+
+        result = await audio.transcribe(self.model, str(clip), runner, publish=seen.append,
+                                        checkpoint=lambda: None, language="segmented")
+        self.assertEqual(result, "1\n2\n3")
+        self.assertEqual(b"".join(parts), payload)
+        self.assertEqual(seen, ["transcribing"])
+
+    async def test_segmented_mode_refuses_over_limit_without_decoding(self):
+        clip = self.recording(struct.pack("<hh", 1250, -1250) * (31 * 16000))
+        calls = []
+
+        async def runner(*args):
+            calls.append(args)
+
+        with self.assertRaisesRegex(Hold, "segmented_recording_too_long"):
+            await audio.transcribe(self.model, str(clip), runner,
+                                   checkpoint=lambda: None, language="segmented")
+        self.assertEqual(calls, [])
+
+    async def test_segmented_mode_refuses_excess_segments_without_decoding(self):
+        speech = struct.pack("<hh", 1250, -1250) * 16000
+        clip = self.recording((speech + bytes(32000)) * 9)
+        calls = []
+
+        async def runner(*args):
+            calls.append(args)
+
+        with self.assertRaisesRegex(Hold, "too_many_speech_segments"):
+            await audio.transcribe(self.model, str(clip), runner,
+                                   checkpoint=lambda: None, language="segmented")
+        self.assertEqual(calls, [])
+
     async def test_long_silent_recording_still_refused(self):
         clip = self.recording(bytes(32 * 16000 * 2))
         calls = []
