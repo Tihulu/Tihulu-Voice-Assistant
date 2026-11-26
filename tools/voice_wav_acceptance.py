@@ -11,6 +11,9 @@ import json
 import os
 from pathlib import Path
 import re
+import math
+import random
+import struct
 import shutil
 import subprocess
 import tempfile
@@ -30,6 +33,11 @@ CASES = {
     "tr": "Merhaba, bugün nasılsın? Gökyüzü mavi ve güneş parlıyor.",
 }
 HUMAN = "And so my fellow Americans ask not what your country can do for you ask what you can do for your country"
+COMMANDS = {
+    "tr": "Tarayıcıyı aç ve hava durumunu göster.",
+    "en": "Open the browser and show the weather.",
+    "de": "Öffne den Browser und zeige das Wetter.",
+}
 
 
 def words(text):
@@ -93,6 +101,32 @@ def concatenate_clips(paths, target):
             out.writeframes(bytes(16000))
 
 
+def noisy_pcm(data, *, snr_db=15, seed=270):
+    """Add reproducible uniform noise at the requested pre-clipping SNR."""
+    if not data or len(data) % 2 or not 0 <= snr_db <= 60:
+        raise ValueError("invalid PCM or SNR")
+    samples = [v for (v,) in struct.iter_unpack("<h", data)]
+    rms = math.sqrt(sum(v*v for v in samples) / len(samples))
+    if rms == 0:
+        raise ValueError("silent PCM")
+    rng = random.Random(seed)
+    noise = [rng.uniform(-1, 1) for _ in samples]
+    noise_rms = math.sqrt(sum(v*v for v in noise) / len(noise))
+    gain = rms / (10 ** (snr_db / 20) * noise_rms)
+    values = [max(-32768, min(32767, round(v+n*gain))) for v,n in zip(samples, noise)]
+    return struct.pack("<%dh" % len(values), *values)
+
+
+def noise_clip(src, dst):
+    with wave.open(str(src), "rb") as inp:
+        if (inp.getnchannels(), inp.getsampwidth(), inp.getframerate()) != (1, 2, 16000):
+            raise ValueError("incompatible fixture")
+        payload = inp.readframes(inp.getnframes())
+    with wave.open(str(dst), "wb") as out:
+        out.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        out.writeframes(noisy_pcm(payload))
+
+
 def convert(src, dst):
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
                     "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(dst)],
@@ -147,6 +181,21 @@ async def run(args):
             clips[lang] = wav
             await transcribe("espeak-" + lang, wav, expected, .5)
             await transcribe("espeak-forced-" + lang, wav, expected, .5, language=lang)
+            noisy = root / (lang + "-noise.wav")
+            noise_clip(wav, noisy)
+            await transcribe("noise-15db-" + lang, noisy, expected, .5)
+            fast_raw, fast = root / (lang + "-fast-raw.wav"), root / (lang + "-fast.wav")
+            subprocess.run(["espeak-ng", "-v", lang, "-s", "190", "-w", str(fast_raw), expected],
+                           check=True, timeout=30)
+            convert(fast_raw, fast)
+            await transcribe("fast-190-" + lang, fast, expected, .5)
+            command_raw = root / (lang + "-command-raw.wav")
+            command = root / (lang + "-command.wav")
+            subprocess.run(["espeak-ng", "-v", lang, "-s", "145", "-w", str(command_raw), COMMANDS[lang]],
+                           check=True, timeout=30)
+            convert(command_raw, command)
+            # Only recognition: no command dispatch or browser action.
+            await transcribe("command-" + lang, command, COMMANDS[lang], .25)
 
         # These are deliberately separate stress criteria, not claims that
         # automatic single-language detection handles code switching.
@@ -271,7 +320,7 @@ def main():
         setattr(args, attr, getattr(args, attr).resolve(strict=True))
     results = asyncio.run(run(args))
     args.report.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return 0 if len(results) == 22 and all(x["status"] == "PASS" for x in results) else 1
+    return 0 if len(results) == 31 and all(x["status"] == "PASS" for x in results) else 1
 
 
 if __name__ == "__main__":

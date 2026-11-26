@@ -1,7 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """The acceptance scoring must not hide missing or extra words."""
 import unittest
-from tools.voice_wav_acceptance import wer, words, language_recall
+from tools.voice_wav_acceptance import wer, words, language_recall, noisy_pcm
 
 
 class VoiceWavScoringTests(unittest.TestCase):
@@ -33,3 +33,22 @@ class VoiceWavScoringTests(unittest.TestCase):
         self.assertEqual(sum(language_recall(refs, "test").values()), .5)
         with self.assertRaises(ValueError):
             language_recall([("tr", "")], "merhaba")
+
+
+    def test_seeded_noise_is_reproducible_bounded_and_preserves_length(self):
+        import math
+        import struct
+        source = struct.pack("<hh", 1000, -1000) * 8000
+        a = noisy_pcm(source)
+        self.assertEqual(a, noisy_pcm(source))
+        self.assertNotEqual(a, noisy_pcm(source, seed=271))
+        self.assertEqual(len(a), len(source))
+        noise = [v[0]-orig[0] for v, orig in zip(struct.iter_unpack("<h", a),
+                                                 struct.iter_unpack("<h", source))]
+        rms = math.sqrt(sum(v*v for v in noise) / len(noise))
+        self.assertAlmostEqual(20 * math.log10(1000/rms), 15, delta=.05)
+
+    def test_noise_rejects_invalid_pcm_and_silence(self):
+        for data in (b"", b"x", bytes(320)):
+            with self.subTest(data_len=len(data)), self.assertRaises(ValueError):
+                noisy_pcm(data)
