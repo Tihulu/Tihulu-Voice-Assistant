@@ -4,6 +4,9 @@ on:
     branches: ['**']
     paths:
       - 'experiments/engine_isolation_acceptance.py'
+      - 'experiments/gateway.py'
+      - 'experiments/capabilities.py'
+      - 'experiments/conversion_result.py'
       - '.github/workflows/engine-isolation-evidence.yml'
 permissions:
   contents: read
@@ -31,4 +34,7 @@ jobs:
           uname -r
           test "$(id -u)" -ne 0
       - name: Verify unprivileged fixture isolation without weakening runner security
+        env:
+          PYTHONPATH: src:experiments
+          PYTHONDONTWRITEBYTECODE: '1'
         run: /usr/bin/python3 experiments/engine_isolation_acceptance.py

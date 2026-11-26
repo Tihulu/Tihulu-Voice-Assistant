@@ -9,6 +9,10 @@ import struct
 import subprocess
 import tempfile
 import wave
+from tihulu_jarvis import profiles
+from gateway import Context, FixtureGateway
+from capabilities import CapabilityCall
+from conversion_result import ConversionFixture, ConversionResult, MAX_OUTPUT
 
 PROBE = """
 import json, os, socket, sys
@@ -22,6 +26,10 @@ try:
 except OSError:
     data['readonly'] = True
 data['netns'] = os.readlink('/proc/self/ns/net')
+status = dict(line.split(':',1) for line in open('/proc/self/status') if ':' in line)
+data['caps_dropped'] = all(int(status[key].strip(),16)==0
+                           for key in ('CapEff','CapPrm','CapAmb'))
+data['host_env_hidden'] = 'JARVIS_FIXTURE_HOST_MARKER' not in os.environ
 try:
     with socket.create_connection(('127.0.0.1',int(sys.argv[2])),timeout=1):
         data['host_loopback_denied'] = False
@@ -76,7 +84,8 @@ def main():
         def run(args):
             return subprocess.run(prefix+["--"]+args,stdin=subprocess.DEVNULL,
                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                                  timeout=20,check=False)
+                                  timeout=20,check=False,
+                                  env={**os.environ,"JARVIS_FIXTURE_HOST_MARKER":"synthetic-only"})
         # Listening only on the disposable host's loopback; no external traffic.
         with socket.socket() as listener:
             listener.bind(("127.0.0.1",0))
@@ -94,14 +103,40 @@ def main():
         record("sandbox-input-readonly",data["readonly"] and hashlib.sha256(source.read_bytes()).hexdigest()==before)
         record("sandbox-network-namespace",data["netns"]!=host_ns and data["host_loopback_denied"])
         record("sandbox-output-scope",(output/"probe.txt").read_text()=="fixture")
+        record("sandbox-capabilities-dropped",data["caps_dropped"])
+        record("sandbox-host-environment-hidden",data["host_env_hidden"])
+        # The version and conversion both execute in the same fixed mount/network
+        # boundary. The host owns the synthetic path; no model or owner input.
+        version_probe = run(["/usr/bin/ffmpeg","-version"])
+        if version_probe.returncode:
+            record("sandbox-ffmpeg-version",False,exit=version_probe.returncode)
+            return 1
+        version = version_probe.stdout.decode("utf-8").splitlines()[0].split()[2]
+        context = Context("isolated-engine","session","profile",1,"local","LOCAL_ONLY")
+        call = CapabilityCall("ffmpeg",version,"wav_to_flac",
+                              (("artifact","fixture-source"),("digest",before),
+                               ("output","fixture-output")))
+        request = call.request(context)
+        gateway = FixtureGateway(context,tuple(profiles.Rule(x,(request.target,),"allow")
+                                 for x in ("host_shell","filesystem_read","filesystem_write")),
+                                 clock=profiles.PolicyClock())
+        grant = gateway.fixture_grant("convert",request,60)
+        job = ConversionFixture(gateway,grant,context,call)
+        target = output/"converted.flac"
+        if target.exists() or target.is_symlink() or hashlib.sha256(source.read_bytes()).hexdigest()!=before:
+            job.cancel()
+            record("sandbox-preflight",False)
+            return 1
+        gateway.checkpoint(grant,request)
         conversion = run(["/usr/bin/ffmpeg","-nostdin","-v","error","-n","-i","/work/input.wav",
                           "-map","0:a:0","-c:a","flac","/work/out/converted.flac"])
-        target = output/"converted.flac"
-        record("sandbox-ffmpeg-conversion",conversion.returncode==0 and target.is_file()
+        valid = (conversion.returncode==0 and not target.is_symlink() and target.is_file()
+                 and 0 < target.stat().st_size <= MAX_OUTPUT)
+        record("sandbox-ffmpeg-conversion",valid
                and target.read_bytes().startswith(b"fLaC")
                and hashlib.sha256(source.read_bytes()).hexdigest()==before,
                exit=conversion.returncode,stderr=conversion.stderr.decode("utf-8","replace")[:1000])
-        if conversion.returncode == 0 and target.is_file():
+        if valid:
             decoded = run(["/usr/bin/ffmpeg","-nostdin","-v","error","-i","/work/out/converted.flac",
                            "-map","0:a:0","-f","s16le","-acodec","pcm_s16le","-"])
             record("sandbox-ffmpeg-lossless-roundtrip",decoded.returncode==0 and decoded.stdout==pcm
@@ -109,7 +144,16 @@ def main():
                    exit=decoded.returncode)
         else:
             record("sandbox-ffmpeg-lossless-roundtrip",False,reason="conversion_failed")
-    return 0 if len(results)==6 and all(r["status"]=="PASS" for r in results) else 1
+        if valid:
+            result = ConversionResult(request.target,before,"fixture-output","flac",target.read_bytes())
+            job.complete(result)
+            record("sandbox-typed-conversion-receipt",job.result()[4]==hashlib.sha256(target.read_bytes()).hexdigest()
+                   and hashlib.sha256(source.read_bytes()).hexdigest()==before,
+                   engine_version=version)
+        else:
+            job.cancel()
+            record("sandbox-typed-conversion-receipt",False,reason="conversion_failed")
+    return 0 if len(results)==9 and all(r["status"]=="PASS" for r in results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main())
