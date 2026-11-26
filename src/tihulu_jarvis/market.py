@@ -1671,6 +1671,48 @@ class Registry:
                 raise Hold("artifact_archive_unavailable") from None
         return folder / card.artifact_digest
 
+    def _recover_archive_link(self, card, source, target, archive_info, *, checkpoint):
+        """Finish only an exact, verified post-link interrupted archive copy.
+
+        The registry lock excludes cooperating writers. Unknown or incomplete
+        staging files are preserved for explicit review, not guessed at.
+        """
+        identity = _artifact_identity(archive_info)
+        source_identity = _artifact_identity(Path(source).lstat())
+        if (archive_info.st_nlink != 2 or archive_info.st_uid != os.geteuid()
+                or archive_info.st_mode & 0o077
+                or source_identity[:2] == identity[:2]):
+            raise Hold("rollback_artifact_unverified")
+        matches = []
+        with os.scandir(target.parent) as entries:
+            for count, entry in enumerate(entries, 1):
+                checkpoint()
+                if count > 4096:
+                    raise Hold("artifact_archive_unavailable")
+                if not re.fullmatch(r"\.archive-[a-z0-9_]{8}", entry.name):
+                    continue
+                candidate = Path(entry.path)
+                info = candidate.lstat()
+                if _artifact_identity(info) == identity:
+                    matches.append(candidate)
+        if len(matches) != 1:
+            raise Hold("rollback_artifact_unverified")
+        temporary = matches[0]
+        if _verified_artifact(target, card.disk_size_bytes,
+                              checkpoint=checkpoint) != card.artifact_digest:
+            raise Hold("rollback_artifact_unverified")
+        # Establish durable publication before removing the redundant name.
+        _sync_directory(target.parent)
+        _sync_directory(target.parent.parent)
+        _sync_directory(self.root)
+        checkpoint()
+        if (identity != _artifact_identity(target.lstat())
+                or identity != _artifact_identity(temporary.lstat())
+                or source_identity != _artifact_identity(Path(source).lstat())):
+            raise Hold("rollback_artifact_unverified")
+        temporary.unlink()
+        _sync_directory(target.parent)
+
     @_registry_locked
     def retain_artifact(self, card, source, *, checkpoint=lambda: None):
         if card.shared_storage_owner or card.loaded:
@@ -1681,9 +1723,15 @@ class Registry:
             # after checking both contents and making the archive durable.
             try:
                 source_info, archive_info = Path(source).lstat(), target.lstat()
-                if (not stat.S_ISREG(archive_info.st_mode) or archive_info.st_nlink != 1
+                if (not stat.S_ISREG(archive_info.st_mode)
                         or (source_info.st_dev, source_info.st_ino)
                         == (archive_info.st_dev, archive_info.st_ino)):
+                    raise Hold("rollback_artifact_unverified")
+                if archive_info.st_nlink == 2:
+                    self._recover_archive_link(card, source, target, archive_info,
+                                               checkpoint=checkpoint)
+                    archive_info = target.lstat()
+                if archive_info.st_nlink != 1:
                     raise Hold("rollback_artifact_unverified")
                 expected = {"size": card.disk_size_bytes, "digest": card.artifact_digest}
                 if self._payload_record(target, checkpoint=checkpoint) != expected:
@@ -1723,6 +1771,8 @@ class Registry:
             _sync_directory(target.parent)
             _sync_directory(target.parent.parent)
             _sync_directory(self.root)
+            temp.unlink()
+            _sync_directory(target.parent)
             return target
         except FileExistsError:
             raise Hold("artifact_archive_changed") from None
