@@ -44,6 +44,13 @@ class ManagedWave:
         self._thread()
         if self._stopping or type(worker) is not str or worker not in self._assignments or worker in self._owned:
             raise Refused("managed_worker_unavailable")
+        # A stale snapshot must stop an active run even when capacity is
+        # exhausted. Do not let the resource refusal mask context invalidation.
+        try:
+            self._run.validate_plan(context,candidates)
+        except Refused:
+            self.stop()
+            raise
         reservation=self._ledger.reserve(self._attempt,worker,self._assignments[worker].memory_mib)
         try:
             self._run.start(worker,grant,context,candidates)
@@ -67,6 +74,10 @@ class ManagedWave:
     def pending(self):
         self._thread()
         return tuple(entry[0] for entry in self._owned.values())
+
+    def drained(self):
+        self._thread()
+        return self._stopping and not self._owned
 
     def checkpoint(self,handle,context,candidates):
         self._thread()
