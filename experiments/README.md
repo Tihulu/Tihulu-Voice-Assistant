@@ -32,3 +32,7 @@ Exact public query UTF-8 bytes and provider version bound to the shared one-use 
 ## CAP-05/06 engine inventory readiness (fixture only)
 
 Separate detected, compatible, tested evidence per exact adapter/version/function. Unknown and contradictory evidence refused or explicitly unavailable; a tested observation never means authorized or available. No scanner, subprocess, desktop window lookup or grant creation. Four tests. Real engine discovery, signed/verified executable identity, live permission, installation ownership and OS isolation remain open. Settings must render these states separately.
+
+## Actual engine output mapped to shared fixture result contract
+
+#291 ten raw engine smoke cases passed. Add six separate actual TSV/XHTML bbox cases: three OCR languages with real per-word confidence and geometry; three per-page Poppler word geometry results. Map into existing DocumentFixture with exact engine version, source SHA-256, page and immutable block output digest; compare normalized recognized text exactly and source bytes unchanged. The real document workflow now verifies unchanged shipped paths against frozen experimental base. 16 cases total; no private document or actual runtime authorization. This is not a sandbox/host adapter or acceptance of arbitrary PDF/TSV/XHTML input.
