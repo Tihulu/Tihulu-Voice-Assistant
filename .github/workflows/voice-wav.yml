@@ -16,6 +16,11 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify exact candidate
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
       - name: Prepare disposable CPU audio engines
         run: |
           set -eu
@@ -41,7 +46,15 @@ jobs:
           curl --fail --location --retry 2 --max-time 180 -o "$root/en_US-lessac-low.onnx" "$url"
           printf '%s  %s\n' f7d01dde371555732c4c314111ac79672b1a5ce2fc19266ab42178fd8df7f375 "$root/en_US-lessac-low.onnx" | sha256sum -c -
           curl --fail --location --retry 2 --max-time 60 -o "$root/en_US-lessac-low.onnx.json" "$url.json"
-          sha256sum "$root/en_US-lessac-low.onnx.json" "$root/whisper/samples/jfk.wav"
+          url='https://huggingface.co/rhasspy/piper-voices/resolve/0f820d155f56c1eff931a0089e248431b2194181/tr/tr_TR/dfki/medium/tr_TR-dfki-medium.onnx'
+          curl --fail --location --retry 2 --max-time 180 -o "$root/tr_TR-dfki-medium.onnx" "$url"
+          printf '%s  %s\n' 2844717f524ab965d3fe86e60562cbb601d3e456836efcc2196cc3a14112a8fb "$root/tr_TR-dfki-medium.onnx" | sha256sum -c -
+          curl --fail --location --retry 2 --max-time 60 -o "$root/tr_TR-dfki-medium.onnx.json" "$url.json"
+          url='https://huggingface.co/rhasspy/piper-voices/resolve/v1.0.0/de/de_DE/thorsten/low/de_DE-thorsten-low.onnx'
+          curl --fail --location --retry 2 --max-time 180 -o "$root/de_DE-thorsten-low.onnx" "$url"
+          printf '%s  %s\n' 9ac27fad17cec5c1a791161976a64f026f16fc058b400b1fea62565b8b2cf375 "$root/de_DE-thorsten-low.onnx" | sha256sum -c -
+          curl --fail --location --retry 2 --max-time 60 -o "$root/de_DE-thorsten-low.onnx.json" "$url.json"
+          sha256sum "$root/"*.onnx.json "$root/whisper/samples/jfk.wav"
       - name: Run known-speech WAV acceptance with real engines
         env:
           PYTHONPATH: src
@@ -50,7 +63,7 @@ jobs:
           root="$RUNNER_TEMP/jarvis-voice-qa"
           python3 --version
           espeak-ng --version
-          python3 tools/voice_wav_acceptance.py --model "$root/ggml-base.bin" --voice "$root/en_US-lessac-low.onnx" --human-wav "$root/whisper/samples/jfk.wav" --report "$root/report.json"
+          python3 tools/voice_wav_acceptance.py --model "$root/ggml-base.bin" --voice "$root/en_US-lessac-low.onnx" --voice-tr "$root/tr_TR-dfki-medium.onnx" --voice-de "$root/de_DE-thorsten-low.onnx" --human-wav "$root/whisper/samples/jfk.wav" --report "$root/report.json"
       - name: Print bounded synthetic/public evidence
         if: always()
         run: |
