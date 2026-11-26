@@ -3,6 +3,7 @@
 """Settings tests: local preferences only, no device or network."""
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 
 from tihulu_jarvis import settings
