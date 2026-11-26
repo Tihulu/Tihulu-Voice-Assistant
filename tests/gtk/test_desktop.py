@@ -341,6 +341,56 @@ class FreshStartTests(DesktopFixture):
         self.assertEqual(self.ui.cfg, before)
         self.assertEqual(settings.load(), changed)
         self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.jan.assert_not_called()
+
+    def test_discovery_refuses_unsaved_memory_preferences_before_transport(self):
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        before = settings.load()
+        self.ui.cfg["show_spoken_text"] = True
+        self.ui.reload.emit("clicked")
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "settings_changed")
+        self.assertEqual(self.ui.inventory, ())
+        self.assertEqual(settings.load(), before)
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.jan.assert_not_called()
+
+    def test_discovery_refuses_settings_changed_during_request(self):
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        before = settings.load()
+        changed = {**before, "text_scale": "large"}
+
+        async def models():
+            settings.save(changed, expected=before)
+            return ("fixture-chat",)
+
+        with patch.object(self.backend, "models", side_effect=models):
+            self.ui.reload.emit("clicked")
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "settings_changed")
+        self.assertEqual(self.ui.inventory, ())
+        self.assertEqual(self.ui.cfg, before)
+        self.assertEqual(settings.load(), changed)
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+        self.jan.assert_called_once()
+
+    def test_discovery_refuses_superseded_commit_before_publication(self):
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        before = settings.load()
+        save = settings.save
+
+        def supersede(proposed, **kwargs):
+            save(proposed, **kwargs)
+            save({**proposed, "text_scale": "large"}, expected=proposed)
+
+        with patch.object(settings, "save", side_effect=supersede):
+            self.ui.reload.emit("clicked")
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "settings_changed")
+        self.assertEqual(self.ui.inventory, ())
+        self.assertEqual(self.ui.cfg, before)
+        self.assertEqual(settings.load()["text_scale"], "large")
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
 
     def test_discovery_failure_invalidates_previously_ready_inventory(self):
         self.ui.url.set_text("http://127.0.0.1:9876")
@@ -4973,7 +5023,8 @@ class SpokenTextUITests(DesktopTests):
         self.assertIn("JARVIS\nMerhaba!", self.labels_of(self.ui.log)[-1].get_text())
 
     def test_asking_for_it_shows_the_exact_spoken_text(self):
-        self.ui.cfg["show_spoken_text"] = True
+        self.ui.settings_spoken.set_active(True)
+        self.assertTrue(settings.load()["show_spoken_text"])
         self.voice_turn()
         rows = self.spoken_rows()
         self.assertEqual(len(rows), 1)
