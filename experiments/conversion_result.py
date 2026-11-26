@@ -47,6 +47,7 @@ class ConversionFixture:
         self._state = "ready"
         self._result = None
         self._published = False
+        self._publication = None
 
     def complete(self,result):
         with self._lock:
@@ -102,7 +103,15 @@ class ConversionFixture:
             request = call.request(self._request.context)
             self._g.claim_dependent(grant,request,self._grant,self._request)
             self._published = True
+            self._publication = (grant,request)
             return ("SIMULATED_ONLY",call.adapter,call.operation,request.target)
+
+    def check_publication(self, grant):
+        """Recheck the exact claimed fixture publication and its live parent."""
+        with self._lock:
+            if self._state!="completed" or self._publication is None or self._publication[0] is not grant:
+                raise Refused("publication_not_claimed")
+            self._g.checkpoint_claimed_group(((self._grant,self._request),self._publication))
 
     def cancel(self):
         with self._lock:
