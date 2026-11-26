@@ -30,6 +30,16 @@ def child(browser,driver,host_net):
     record("browser-private-home",os.environ.get("HOME")=="/tmp" and not Path("/work/not-approved").exists())
     if not all(results):
         return 1
+    version=subprocess.run([browser,"--version"],stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=8,check=False)
+    print(json.dumps({"firefox_version_exit":version.returncode,
+                      "stdout":version.stdout.decode("utf-8","replace")[:1000],
+                      "stderr":version.stderr.decode("utf-8","replace")[:2000]}),flush=True)
+    if version.returncode:
+        print(json.dumps({"case":"browser-loader","status":"HOLD"}),flush=True)
+        return 1
+    Path("/tmp/browser-runtime").mkdir(mode=0o700)
+    os.environ["XDG_RUNTIME_DIR"]="/tmp/browser-runtime"
     def command(method,path,payload=None):
         conn=http.client.HTTPConnection("127.0.0.1",4444,timeout=8)
         try:
@@ -95,6 +105,12 @@ def child(browser,driver,host_net):
             command("DELETE",base)
             session=None
             record("browser-session-closed",True)
+        except (RuntimeError,OSError,http.client.HTTPException) as exc:
+            print(json.dumps({"case":"browser-webdriver-session","status":"HOLD",
+                              "reason":str(exc)[:1000]}),flush=True)
+            with open("/tmp/geckodriver.log","rb") as detail:
+                print(detail.read(4096).decode("utf-8","replace"),flush=True)
+            return 1
         finally:
             if session:
                 try:
@@ -157,6 +173,7 @@ def main():
                  "--setenv","HOME","/tmp","--setenv","PATH","/usr/bin:/usr/local/bin",
                  "--setenv","LC_ALL","C.UTF-8","--setenv","FONTCONFIG_FILE","/work/fonts.conf",
                  "--setenv","MOZ_HEADLESS","1","--setenv","USER","fixture",
+                 "--setenv","LD_LIBRARY_PATH","/usr/lib/firefox:/usr/lib/x86_64-linux-gnu/pulseaudio",
                  "--chdir","/work","--remount-ro","/"]
         host_net=os.readlink("/proc/self/ns/net")
         result=subprocess.run(prefix+["--","/usr/bin/python3","-I","/work/runner.py","--child",*tools,host_net],
