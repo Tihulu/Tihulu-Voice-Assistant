@@ -92,3 +92,5 @@ CAP-01/02/06: actual Poppler per-page bbox and Tesseract TSV OCR inside existing
 CAP-08: strict normalized offline model response frame binds exact grant invocation, target, model-call identity and sequence; closed JSON fields, duplicate/malformed/oversize rejection, immutable public call property, stale/revoked frame denial. Five regressions. Not actual Jan/OpenAI SSE or model inference, no network/transport.
 
 CAP-06/08 private fixture publication phase evidence: recheck exact claimed publication and source immediately before link; explicit uncertain outcome after successful link but fsync/cleanup failure, never retry automatically or delete final name. Four injected real-filesystem phase tests. Not proof of atomic revoke/effect, malicious same-UID mutation, or power-loss recovery.
+
+CAP-06 actual isolated LibreOffice text-to-PDF with disposable profile and explicit fontconfig file, no host /etc or home mount. Validate output and extract exact text inside sandbox before typed receipt, source unchanged. Three additional cases (26 planned), no owner files or runtime activation.
