@@ -2441,8 +2441,10 @@ class StagingCleanupUITests(MarketFixture):
         self.assertFalse(self.ui.staging_discard.get_sensitive())
 
     def archive_stage(self, model="fixture-staging"):
-        folder = Path(self.market_home, "artifact-revisions", model)
-        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        base = Path(self.market_home, "artifact-revisions")
+        base.mkdir(mode=0o700, exist_ok=True)
+        folder = base / model
+        folder.mkdir(mode=0o700, exist_ok=True)
         fd, name = tempfile.mkstemp(prefix=".archive-", dir=folder)
         os.close(fd)
         path = Path(name)
@@ -2463,6 +2465,16 @@ class StagingCleanupUITests(MarketFixture):
         self.click(self.ui.staging_discard)
         self.assertFalse(candidate.exists())
         self.assertTrue(revision.exists() and other.exists() and linked.exists())
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+
+    def test_archive_discard_refuses_unreadable_profile_context(self):
+        archive = self.archive_stage()
+        self.click(self.ui.archive_staging_scan)
+        self.ui.staging_choice.set_active(0)
+        with patch.object(self.ui, "picker_context", side_effect=Hold("profile_unreadable")):
+            self.click(self.ui.staging_discard)
+        self.assertTrue(archive.exists())
+        self.assertEqual(self.ui.status.get_text(), "profile_unreadable")
         self.assertFalse(self.ui.staging_discard.get_sensitive())
 
     def test_switching_staging_scope_invalidates_archive_selection(self):
