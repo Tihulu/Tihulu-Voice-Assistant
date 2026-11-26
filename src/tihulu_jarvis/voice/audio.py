@@ -578,7 +578,8 @@ async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint,
                 payload = stream.read(MAX_TRANSCRIPT + 1)
             if len(payload) > MAX_TRANSCRIPT:
                 raise Hold("invalid_transcript")
-            text = payload.decode("utf-8").strip()
+            # Match the universal-newline behavior of the former text read.
+            text = payload.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").strip()
         except (OSError, UnicodeError):
             raise Hold("invalid_transcript") from None
         if not text or len(text) > 16000 or not any(ch.isalnum() for ch in text):
