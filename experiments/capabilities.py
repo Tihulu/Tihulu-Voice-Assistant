@@ -30,6 +30,10 @@ CAPABILITIES = MappingProxyType({
     ("poppler", "pdf_merge"): ("application_engine", "private",
                                ("artifact","digest","page_order","part_digests","output")),
     ("search_provider", "web_search"): ("research", "public", ("query_digest",)),
+    # No arbitrary file URL or public navigation in offline fixture operations.
+    ("firefox", "offline_open"): ("offline_browser", "private", ("profile","tab","artifact","digest")),
+    ("firefox", "offline_read"): ("offline_browser", "private", ("profile","tab","artifact","digest","element")),
+    ("firefox", "offline_click"): ("offline_browser", "private", ("profile","tab","artifact","digest","element")),
     ("firefox", "browser_read"): ("browser_read", "public", ("origin", "tab")),
     ("brave", "browser_read"): ("browser_read", "public", ("origin", "tab")),
     # Explicit task-owned profile and immutable page/document bindings.
@@ -96,6 +100,9 @@ def checked_value(key, value):
     elif key == "page":
         if type(value) is not int or not 1 <= value <= 500:
             raise Refused("invalid_page")
+    elif key == "element":
+        if type(value) is not str or value not in ("message","change"):
+            raise Refused("invalid_fixture_element")
     elif key == "url":
         public_fixture_url(value)
     elif key == "origin":

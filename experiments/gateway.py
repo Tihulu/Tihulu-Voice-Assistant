@@ -18,15 +18,17 @@ ACTIONS = {
     "document_engine": "filesystem_read", "document_export": "filesystem_write",
     "application_ui": "host_shell", "application_engine": "host_shell",
     "browser_read": "browser_navigate",
+    "offline_browser": "browser_navigate",
     "conversion_publish": "publish_artifact",
 }
 HOST = frozenset(("engine", "agent", "local_plan", "publish", "capture",
                   "document_engine", "document_export", "application_ui",
-                  "application_engine", "browser_read", "conversion_publish"))
+                  "application_engine", "browser_read", "offline_browser", "conversion_publish"))
 EXTERNAL = frozenset(("research", "provider", "disclose", "catalog", "transfer", "browser", "browser_read"))
 EXTRA_CEILINGS = {
     "browser": ("external_network",),
     "browser_read": ("external_network", "host_shell"),
+    "offline_browser": ("filesystem_read", "host_shell"),
     "document_engine": ("host_shell",),
     "document_export": ("filesystem_read", "host_shell"),
     "application_engine": ("filesystem_read", "filesystem_write"),
@@ -159,6 +161,8 @@ class FixtureGateway:
             raise Refused("disclosure_classification_denied")
         if req.action in ("research", "catalog", "transfer", "browser", "browser_read") and req.classification != "public":
             raise Refused("public_data_required")
+        if req.action == "offline_browser" and req.classification != "private":
+            raise Refused("private_offline_browser_required")
         if req.action == "capture" and req.classification != "private":
             raise Refused("private_capture_required")
         # A browser operation requires both the browser-specific and the
