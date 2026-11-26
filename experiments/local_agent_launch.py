@@ -46,6 +46,12 @@ class LaunchBoundary:
     def state(self,ticket):
         return self._entry(ticket)[2]
 
+    def before_start(self,ticket,context,candidates):
+        _,handle,state=self._entry(ticket)
+        if state!="PREPARED":
+            raise Refused("launch_state_invalid")
+        self._wave.checkpoint(handle,context,candidates)
+
     def started(self,ticket,context,candidates):
         t,handle,state=self._entry(ticket)
         if state!="PREPARED":
