@@ -231,6 +231,30 @@ class TransferBoundaryTests(unittest.IsolatedAsyncioTestCase):
         registry.rollback(new.model_id,new.revision)
         self.assertEqual(self.target.read_bytes(),NEW)
 
+    async def test_rollback_recovers_interrupted_historical_archive_link(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        archive=self.root/"artifact-revisions"/old.model_id/old.artifact_digest
+        temporary=archive.parent/".archive-abcdefgh"
+        market.os.link(archive, temporary)
+        restored=market.Registry(self.root).rollback(old.model_id, old.revision, expected=new)
+        self.assertFalse(temporary.exists())
+        self.assertEqual(archive.stat().st_nlink, 1)
+        self.assertEqual(self.target.read_bytes(), OLD)
+        self.assertEqual(restored.artifact_digest, old.artifact_digest)
+
+    async def test_rollback_preserves_unrecognized_historical_alias(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        archive=self.root/"artifact-revisions"/old.model_id/old.artifact_digest
+        temporary=archive.parent/"unknown"
+        market.os.link(archive, temporary)
+        with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+            self.store.rollback(old.model_id, old.revision, expected=new)
+        self.assertTrue(temporary.exists())
+        self.assertEqual(self.target.read_bytes(), NEW)
+        self.assertEqual(self.store.card(old.model_id), new)
+
     async def test_corrupt_archive_refuses_without_changing_current(self):
         old=await self.install_verified()
         new=await self.transfer(old,self.source()).update()
@@ -1968,6 +1992,33 @@ class ArchiveDurabilityTests(unittest.TestCase):
             with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
                 self.registry.retain_artifact(self.card, self.target)
         self.assertFalse(archive.exists())
+        self.assertEqual(self.target.read_bytes(), OLD)
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    def test_retention_refuses_source_change_after_copy_before_link(self):
+        archive = self.registry._archive_path(self.card)
+        original = market._copy_verified_artifact
+        def changed(source, target, card, **kwargs):
+            proof = original(source, target, card, **kwargs)
+            Path(source).write_bytes(b"x" * len(OLD))
+            return proof
+        with patch.object(market, "_copy_verified_artifact", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+                self.registry.retain_artifact(self.card, self.target)
+        self.assertFalse(archive.exists())
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    def test_archive_reuse_refuses_change_during_source_verification(self):
+        archive = self.registry.retain_artifact(self.card, self.target)
+        original = market._verified_artifact
+        def changed(path, size, **kwargs):
+            digest = original(path, size, **kwargs)
+            if Path(path) == self.target:
+                archive.write_bytes(b"x" * len(OLD))
+            return digest
+        with patch.object(market, "_verified_artifact", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+                self.registry.retain_artifact(self.card, self.target)
         self.assertEqual(self.target.read_bytes(), OLD)
         self.assertEqual(self.registry.card(self.card.model_id), self.card)
 

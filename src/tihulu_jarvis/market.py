@@ -1741,6 +1741,9 @@ class Registry:
                 _sync_directory(target.parent)
                 _sync_directory(target.parent.parent)
                 _sync_directory(self.root)
+                if (_artifact_identity(archive_info) != _artifact_identity(target.lstat())
+                        or _artifact_identity(source_info) != _artifact_identity(Path(source).lstat())):
+                    raise Hold("rollback_artifact_unverified")
                 return target
             except OSError:
                 raise Hold("rollback_artifact_unverified") from None
@@ -1762,9 +1765,11 @@ class Registry:
         temp = Path(name)
         temp.unlink()
         try:
+            source_identity = _artifact_identity(Path(source).lstat())
             proof = _copy_verified_artifact(source, temp, card, checkpoint=checkpoint)
             checkpoint()
-            if proof.identity != _artifact_identity(temp.lstat()):
+            if (proof.identity != _artifact_identity(temp.lstat())
+                    or source_identity != _artifact_identity(Path(source).lstat())):
                 raise Hold("rollback_artifact_unverified")
             # No overwrite, even if another operation published the same digest.
             os.link(temp, target, follow_symlinks=False)
@@ -1797,7 +1802,13 @@ class Registry:
         archive = self._archive_path(candidate)
         try:
             info = archive.lstat()
-            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            if not stat.S_ISREG(info.st_mode):
+                raise Hold("rollback_artifact_unverified")
+            if info.st_nlink == 2:
+                self._recover_archive_link(candidate, target, archive, info,
+                                           checkpoint=lambda: None)
+                info = archive.lstat()
+            if info.st_nlink != 1:
                 raise Hold("rollback_artifact_unverified")
         except OSError:
             raise Hold("rollback_artifact_unverified") from None
