@@ -115,3 +115,26 @@ class DetectionTests(unittest.TestCase):
         self.job.cancel()
         with self.assertRaises(Refused):
             self.job.start_override("tr","text",grant,approved)
+
+
+    def test_held_detection_cannot_use_generic_dependency_claim(self):
+        from transcription_result import TranscriptFixture
+        self.job.hold_observation(b"whisper_full_with_state: auto-detected language: ko (p = 0.107022)")
+        call,review=self.job.prepare_override("tr","text")
+        req=call.request(self.ctx)
+        grant=self.g.fixture_grant("exact",req,60)
+        with self.assertRaisesRegex(Refused,"held_detection_requires_owner_review"):
+            TranscriptFixture(self.g,self.ctx,call,grant,dependencies=((self.grant,self.req),))
+        self.job.start_override("tr","text",grant,self.g.fixture_grant("owner",review,60))
+
+    def test_manual_review_forged_observation_denied(self):
+        from transcription_result import TranscriptFixture
+        hold=self.job.hold_observation(b"whisper_full_with_state: auto-detected language: ko (p = 0.107022)")
+        call,review=self.job.prepare_override("tr","text")
+        req=call.request(self.ctx)
+        grant=self.g.fixture_grant("exact",req,60)
+        owner=self.g.fixture_grant("owner",review,60)
+        with self.assertRaisesRegex(Refused,"language_hold_receipt_mismatch"):
+            TranscriptFixture(self.g,self.ctx,call,grant,dependencies=((self.grant,self.req),),
+                              language_review=((hold[0],hold[1],"f"*64),owner))
+        self.job.start_override("tr","text",grant,owner)

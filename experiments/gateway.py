@@ -283,6 +283,8 @@ class FixtureGateway:
             now = self._clock.now()
             self._validate_locked(grant, req, now)
             identities = self._check_claimed_group_locked(dependencies, now)
+            if identities.intersection(self._detection_holds):
+                raise Refused("held_detection_requires_owner_review")
             if grant.identity in identities:
                 raise Refused("dependency_not_claimed")
             if grant.identity in self._claimed:
