@@ -43,6 +43,8 @@ CAPABILITIES = MappingProxyType({
     ("brave", "snapshot"): ("browser_read", "public", ("profile", "tab", "url", "digest")),
     ("libreoffice", "window_inspect"): ("application_ui", "private", ("window",)),
     ("gimp", "window_inspect"): ("application_ui", "private", ("window",)),
+    ("whisper_cpp", "transcribe_wav"): ("application_engine","private",
+                                        ("artifact","digest","model_digest","language","output")),
     ("espeak_ng", "text_to_wav"): ("application_engine", "private",
                                 ("artifact","digest","language","output")),
     ("ffmpeg", "audio_convert"): ("application_engine", "private", ("artifact", "digest", "output")),
@@ -84,7 +86,7 @@ def public_fixture_url(raw):
 
 
 def checked_value(key, value):
-    if key in ("digest", "query_digest", "render_digest", "result_digest"):
+    if key in ("digest", "query_digest", "render_digest", "result_digest", "model_digest"):
         if type(value) is not str or not _DIGEST.fullmatch(value):
             raise Refused("invalid_digest")
     elif key == "language":
@@ -145,7 +147,7 @@ class CapabilityCall:
             checked_value(key, pair[1])
         if "output" in spec[2] and dict(self.args)["output"] == dict(self.args)["artifact"]:
             raise Refused("source_overwrite_denied")
-        if self.operation=="text_to_wav" and dict(self.args)["language"] not in ("tr","en","de"):
+        if self.operation in ("text_to_wav","transcribe_wav") and dict(self.args)["language"] not in ("tr","en","de"):
             raise Refused("invalid_speech_language")
         if self.operation=="pdf_merge":
             args=dict(self.args)
