@@ -18,6 +18,8 @@ from gateway import Context, Request, FixtureGateway, Refused, token
 # Fields: gateway action, classification, input schema.
 CAPABILITIES = MappingProxyType({
     ("tesseract", "ocr_image"): ("document_engine", "private", ("artifact", "digest", "language")),
+    ("tesseract", "pdf_page_ocr"): ("document_engine", "private",
+                                   ("artifact", "digest", "page", "render_digest", "language")),
     ("poppler", "pdf_extract"): ("document_engine", "private", ("artifact", "digest", "page")),
     ("poppler", "pdf_render"): ("document_engine", "private", ("artifact", "digest", "page")),
     ("pdf_engine", "pdf_export"): ("document_export", "private", ("artifact", "digest", "output")),
@@ -66,7 +68,7 @@ def public_fixture_url(raw):
 
 
 def checked_value(key, value):
-    if key in ("digest", "query_digest"):
+    if key in ("digest", "query_digest", "render_digest"):
         if type(value) is not str or not _DIGEST.fullmatch(value):
             raise Refused("invalid_digest")
     elif key == "language":

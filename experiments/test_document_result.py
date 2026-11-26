@@ -97,3 +97,24 @@ class DocumentResultTests(unittest.TestCase):
             job.complete(self.result_for(self.pdf))
         with self.assertRaises(Refused):
             job.result()
+
+
+    def test_pdf_page_ocr_binds_original_and_raster_and_page(self):
+        call = CapabilityCall("tesseract", "fixture", "pdf_page_ocr",
+                              (("artifact","pdf1"), ("digest","b"*64), ("page",3),
+                               ("render_digest","c"*64), ("language","tr")))
+        result = DocumentResult(call.request(self.ctx).target, "b"*64, 3,
+                                (TextBlock("Merhaba",(1,2,100,200),95),), "c"*64)
+        for bad in (replace(result, render_digest=None), replace(result, render_digest="d"*64),
+                    replace(result, page=1), replace(result, source_digest="c"*64)):
+            _, job = self.fixture(call)
+            with self.assertRaisesRegex(Refused, "result_provenance_mismatch"):
+                job.complete(bad)
+        _, job = self.fixture(call)
+        job.complete(result)
+        self.assertEqual(job.result()[3],result)
+
+    def test_ordinary_pdf_extract_cannot_claim_ocr_render_provenance(self):
+        _, job = self.fixture(self.pdf)
+        with self.assertRaisesRegex(Refused,"result_provenance_mismatch"):
+            job.complete(replace(self.result_for(self.pdf),render_digest="c"*64))
