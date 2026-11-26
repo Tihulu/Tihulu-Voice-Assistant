@@ -120,3 +120,5 @@ CAP-04 #334 actual Firefox smoke: namespace/private home/source unchanged PASS; 
 CAP-06 after successful #331 Office startup/export, recheck the changed Office-specific mount/environment before launch: generated config/identity and host marker/shadow scope, read-only config and input, caps plus PID/IPC/network namespaces. Three actual cases (36 planned), refuse Office if any fail. Existing 1 MiB output limit remains. No runtime activation.
 
 CAP-04 #336 loader diagnostics identify stock firefox.sh failing because which is unavailable inside minimal namespace. Install stock debianutils only in disposable CI and explicitly check which; retain no host alternatives mount or sandbox disable. Browser actual session still requires CI evidence.
+
+CAP-04 alternative package-wrapper remediation: verify fixed stock /usr/lib/firefox/firefox ELF, root ownership and exact resolved wrapper/binary identity; execute actual package binary inside existing /usr read-only mount, no which or /etc/alternatives dependency, no sandbox disable. Hosted Ubuntu22.04 only, actual browser acceptance pending.
