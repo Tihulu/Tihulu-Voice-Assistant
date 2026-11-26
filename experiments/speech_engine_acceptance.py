@@ -9,6 +9,8 @@ import signal
 import socket
 import subprocess
 import tempfile
+import sys
+from voice_quality import word_errors, acceptable
 from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
@@ -42,10 +44,23 @@ print(json.dumps({"namespace":os.readlink("/proc/self/ns/net"),"denied":denied,
     "no_device":not Path("/dev/snd").exists()}))
 """
 
-def main():
+def main(stt_binary=None,stt_model=None):
     if os.getuid()==0:
         raise RuntimeError("root fixture prohibited")
+    stt_paths=None
+    if stt_binary is not None or stt_model is not None:
+        from whisper_engine_acceptance import MODEL_SHA,digest as model_digest
+        if not stt_binary or not stt_model:
+            raise RuntimeError("incomplete STT fixture input")
+        stt_paths=tuple(Path(p).resolve() for p in (stt_binary,stt_model))
+        if (not all(p.is_file() for p in stt_paths) or not 0<stt_paths[1].stat().st_size<=85000000
+                or model_digest(stt_paths[1])!=MODEL_SHA):
+            raise RuntimeError("invalid pinned STT model")
     results=[]
+    quality=[]
+    def qrecord(case,ok,**extra):
+        quality.append(bool(ok))
+        print(json.dumps(dict(case=case,status="PASS" if ok else "FAIL",**extra)),flush=True)
     def record(case,ok,**extra):
         results.append(bool(ok))
         print(json.dumps(dict(case=case,status="PASS" if ok else "FAIL",**extra)),flush=True)
@@ -200,7 +215,74 @@ def main():
             flac_data=flac.read_bytes()
             conversion.complete(ConversionResult(req.target,result_digest,"fixture-flac-"+lang,"flac",flac_data))
             record("speech-flac-dependent-receipt-"+lang,conversion.result()[4]==hashlib.sha256(flac_data).hexdigest())
+            transcript=None
+            if stt_paths:
+                from whisper_engine_acceptance import MODEL_SHA,ENGINE_REV,digest as model_digest
+                from transcription_result import Transcript
+                stt_out=root/("stt-"+lang)
+                stt_out.mkdir(mode=0o700)
+                stt_scope=prefix.copy()
+                i=stt_scope.index(str(source))
+                stt_scope[i:i+2]=[str(dest),"/work/sample.wav"]
+                stt_scope[stt_scope.index(str(output))]=str(stt_out)
+                for path,target in zip(stt_paths,("/work/whisper-cli","/work/model.bin")):
+                    stt_scope[-2:-2]=["--ro-bind",str(path),target]
+                probe_code="""import hashlib,json
+from pathlib import Path
+h=hashlib.sha256()
+with open('/work/model.bin','rb') as handle:
+    for block in iter(lambda:handle.read(1048576),b''):
+        h.update(block)
+print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sample.wav').read_bytes()).hexdigest(),
+                  'work':sorted(p.name for p in Path('/work').iterdir()),'out':list(Path('/work/out').iterdir()),
+                  'no_devices':not Path('/dev/snd').exists() and not Path('/dev/dri').exists()}))
+"""
+                probe=json.loads(run(["/usr/bin/python3","-I","-c",probe_code],stt_scope))
+                scoped=probe=={"model":MODEL_SHA,"audio":result_digest,
+                    "work":["model.bin","out","sample.wav","whisper-cli"],"out":[],"no_devices":True}
+                qrecord("multilingual-stt-scope-"+lang,scoped)
+                if not scoped:
+                    job.cancel()
+                    return 1
+                stt_call=job.prepare_transcription(ENGINE_REV,MODEL_SHA,"transcript-"+lang)
+                stt_req=stt_call.request(ctx)
+                stt_grant=gate.fixture_grant("stt-"+lang,stt_req,60)
+                transcript=job.start_transcription(ENGINE_REV,MODEL_SHA,"transcript-"+lang,stt_grant)
+                transcript.checkpoint()
+                run(["/work/whisper-cli","-m","/work/model.bin","-f","/work/sample.wav",
+                     "-l",lang,"-t","2","-ng","-nt","-otxt","-of","/work/out/transcript"],stt_scope)
+                path=stt_out/"transcript.txt"
+                if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=16384:
+                    transcript.cancel()
+                    return 1
+                recognized=path.read_text(encoding="utf-8").strip()
+                errors,count=word_errors(text,recognized,lang)
+                ok=acceptable(errors,count)
+                qrecord("multilingual-stt-semantic-"+lang,ok,errors=errors,reference_words=count,
+                        recognized=recognized[:200])
+                unchanged=(model_digest(stt_paths[1])==MODEL_SHA and dest.read_bytes()==data
+                           and sorted(p.name for p in stt_out.iterdir())==["transcript.txt"])
+                qrecord("multilingual-stt-inputs-unchanged-"+lang,unchanged)
+                if not unchanged:
+                    transcript.cancel()
+                    return 1
+                if ok:
+                    transcript.complete(Transcript(stt_req.target,result_digest,MODEL_SHA,lang,
+                                                   "transcript-"+lang,recognized))
+                    qrecord("multilingual-stt-typed-receipt-"+lang,
+                            transcript.result()[1]==hashlib.sha256(recognized.encode()).hexdigest())
+                else:
+                    transcript.cancel()
+                    qrecord("multilingual-stt-typed-receipt-"+lang,False,reason="quality_gate_failed")
             job.cancel()
+            if transcript is not None:
+                try:
+                    transcript.result()
+                except Refused:
+                    stt_denied=True
+                else:
+                    stt_denied=False
+                qrecord("multilingual-stt-revoked-result-"+lang,stt_denied)
             try:
                 conversion.result()
             except Refused:
@@ -212,7 +294,7 @@ def main():
                 return 1
         record("speech-distinct-multilingual-output",len(digests)==3)
         record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+lang)).iterdir())==[lang+".wav"] for lang in TEXT) and not list(output.iterdir()))
-    return 0 if len(results)==26 and all(results) else 1
+    return 0 if len(results)==26 and all(results) and (not stt_paths or (len(quality)==15 and all(quality))) else 1
 
 if __name__=="__main__":
-    raise SystemExit(main())
+    raise SystemExit(main(*sys.argv[1:]))
