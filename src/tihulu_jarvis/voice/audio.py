@@ -12,7 +12,7 @@ import struct
 import tempfile
 import wave
 from collections.abc import Mapping
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from pathlib import Path
 from threading import Event
 
@@ -201,6 +201,59 @@ async def terminate(p):
         await p.wait()
 
 
+@contextmanager
+def _pinned_model_arguments(name, args, checkpoint):
+    """Hand inherited read-only model descriptors to Linux audio engines.
+
+    This pins the inode across pathname replacement, not against writes to
+    the same inode. Existing identity/authorization checkpoints still apply.
+    No original-path fallback is permitted if descriptor handoff is unavailable.
+    """
+    argv = list(map(str, args))
+    descriptors = []
+    originals = []
+    try:
+        if name in ("whisper-cli", "piper"):
+            flag = "-m" if name == "whisper-cli" else "--model"
+            if argv.count(flag) != 1 or argv.index(flag) + 1 >= len(argv):
+                raise Hold("invalid_audio_model_arguments")
+            index = argv.index(flag) + 1
+            model = Path(argv[index])
+            if not model.is_absolute():
+                raise Hold("invalid_audio_model_arguments")
+
+            def pin(path):
+                checkpoint()
+                identity = _runtime_identity(path)
+                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                descriptors.append(fd)
+                alias = "/proc/self/fd/%d" % fd
+                if (_voice_identity(os.fstat(fd)) != identity
+                        or _voice_identity(os.stat(alias)) != identity
+                        or _runtime_identity(path) != identity):
+                    raise Hold("model_file_changed")
+                originals.append((path, identity))
+                checkpoint()
+                return alias
+
+            argv[index] = pin(model)
+            if name == "piper":
+                if "--config" in argv or "-c" in argv:
+                    raise Hold("invalid_audio_model_arguments")
+                config = model.with_name(model.name + ".json")
+                argv[index + 1:index + 1] = ["--config", pin(config)]
+            checkpoint()
+            for path, identity in originals:
+                if _runtime_identity(path) != identity:
+                    raise Hold("model_file_changed")
+        yield tuple(argv), tuple(descriptors)
+    except OSError:
+        raise Hold("audio_model_descriptor_unavailable") from None
+    finally:
+        for fd in descriptors:
+            os.close(fd)
+
+
 @asynccontextmanager
 async def child(name, *args, stdin=False, checkpoint=lambda: None):
     # A desktop user chooses model data only. Executable names below are fixed;
@@ -213,13 +266,15 @@ async def child(name, *args, stdin=False, checkpoint=lambda: None):
     checkpoint()
     async def start():
         # This runs in the scheduled spawn task, not merely before queuing it.
-        argv = tuple(map(str, args))
         env = {**os.environ, **spawn_environment()}
         checkpoint()
-        return await asyncio.create_subprocess_exec(binary, *argv,
-            stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            env=env)
+        with _pinned_model_arguments(name, args, checkpoint) as (argv, descriptors):
+            checkpoint()
+            extra = {"pass_fds": descriptors} if descriptors else {}
+            return await asyncio.create_subprocess_exec(binary, *argv,
+                stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                env=env, **extra)
     spawn = asyncio.create_task(start())
     try:
         p = await asyncio.shield(spawn)
