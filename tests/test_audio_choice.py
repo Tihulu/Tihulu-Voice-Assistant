@@ -191,3 +191,14 @@ sys.exit(99)
         self.assertEqual(settings.load(self.path), self.old)
         self.assertEqual(self.registry.card(self.card.model_id), self.card)
         self.assertFalse(settings.audio_choice_pending(self.path))
+
+    def test_audio_recovery_never_runs_pending_registry_recovery(self):
+        self.interrupt_child("settings")
+        self.registry.publication_journal.write_text("{}")
+        with patch.object(self.registry, "_recover_publication") as recover:
+            with self.assertRaisesRegex(Hold, audio_choice.REASON):
+                audio_choice.recover(self.registry, self.path)
+            recover.assert_not_called()
+        self.assertTrue(settings.audio_choice_pending(self.path))
+        self.assertEqual(self.registry.publication_journal.read_text(), "{}")
+        self.assertEqual(settings.load(self.path), self.new)

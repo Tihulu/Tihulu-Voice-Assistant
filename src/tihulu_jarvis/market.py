@@ -1491,14 +1491,19 @@ class Registry:
         return cards, rows, ""
 
     @contextmanager
-    def _write_guard(self):
+    def _write_guard(self, *, require_clean=False):
         """Cooperative nonblocking lock on a stable private inode.
+
+        Cross-store recovery callers can require a clean registry rather
+        than implicitly running a different pending recovery protocol.
 
         Never remove the lock file. This protects cooperating instances only,
         not an attacker with write access to the registry directory.
         """
         pid = os.getpid()
         if getattr(self._guard_state, "pid", None) == pid:
+            if require_clean and self.recovery_pending():
+                raise Hold("registry_recovery_required")
             yield
             return
         try:
@@ -1527,6 +1532,8 @@ class Registry:
             raise Hold("registry_lock_unavailable") from None
         self._guard_state.pid = pid
         try:
+            if require_clean and self.recovery_pending():
+                raise Hold("registry_recovery_required")
             if _exists_entry(self.removal_journal) and _exists_entry(self.publication_journal):
                 raise Hold("registry_recovery_conflict")
             self._recover_removal()

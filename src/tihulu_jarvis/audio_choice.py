@@ -92,7 +92,7 @@ def recover(registry, path=None):
     proof = _read(p)
     rec = proof[0]
     try:
-        with registry.transfer_lease(rec["model"]), registry._write_guard(), settings._write_guard(p):
+        with registry.transfer_lease(rec["model"]), registry._write_guard(require_clean=True), settings._write_guard(p):
             if settings.choice_pending(p) or _read(p) != proof:
                 raise Hold(REASON)
             current, old, new, stamp = _pair(p, rec)
