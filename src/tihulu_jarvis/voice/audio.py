@@ -63,7 +63,18 @@ def _voice_identity(info):
             info.st_ctime_ns, info.st_mode, info.st_nlink)
 
 
-def inspect_voice(value, lang, *, checkpoint=lambda: None):
+def voice_config_identity(value):
+    p = selected_file(value, ".onnx")
+    try:
+        info = p.with_name(p.name + ".json").lstat()
+        if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= 1048576:
+            raise ValueError
+        return _voice_identity(info)
+    except (OSError, ValueError):
+        raise Hold("voice_locale_unverified") from None
+
+
+def inspect_voice(value, lang, *, checkpoint=lambda: None, expected_identity=None):
     """Pin and bound the Piper sidecar; never wait on a FIFO or follow a symlink."""
     p = selected_file(value, ".onnx")
     config = p.with_name(p.name + ".json")
@@ -72,7 +83,8 @@ def inspect_voice(value, lang, *, checkpoint=lambda: None):
         checkpoint()
         fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
         before = os.fstat(fd)
-        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 1048576:
+        if (not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 1048576
+                or (expected_identity is not None and _voice_identity(before) != expected_identity)):
             raise ValueError
         raw = bytearray()
         while len(raw) <= before.st_size:
