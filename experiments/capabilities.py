@@ -36,6 +36,8 @@ CAPABILITIES = MappingProxyType({
     ("libreoffice", "window_inspect"): ("application_ui", "private", ("window",)),
     ("gimp", "window_inspect"): ("application_ui", "private", ("window",)),
     ("ffmpeg", "audio_convert"): ("application_engine", "private", ("artifact", "digest", "output")),
+    ("ffmpeg", "wav_to_flac"): ("application_engine", "private", ("artifact", "digest", "output")),
+    ("libreoffice", "text_to_pdf"): ("application_engine", "private", ("artifact", "digest", "output")),
 })
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 # A fixture origin identity, not a URL or DNS proof. A real adapter must
