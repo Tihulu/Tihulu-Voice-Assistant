@@ -14,6 +14,7 @@ from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
 from speech_result import SpeechFixture,SpeechResult,MAX_WAV
+from fixture_lifetime import FixtureLifetime
 
 MODEL_SHA="2844717f524ab965d3fe86e60562cbb601d3e456836efcc2196cc3a14112a8fb"
 CONFIG_SHA="13ebd7810f1b61b5027583cf3131a0a233b6ea81c38f2200ebc4ff41c3cca039"
@@ -109,7 +110,7 @@ def main(site,model,config,language="tr",*stt_inputs):
     def record(case,ok,**extra):
         results.append(bool(ok))
         print(json.dumps(dict(case=case,language=language,status="PASS" if ok else "FAIL",**extra)),flush=True)
-    with tempfile.TemporaryDirectory(prefix="jarvis-piper-") as temp:
+    with tempfile.TemporaryDirectory(prefix="jarvis-piper-") as temp, FixtureLifetime() as lifetime:
         root=Path(temp)
         out=root/"out"
         out.mkdir(mode=0o700)
@@ -165,7 +166,7 @@ def main(site,model,config,language="tr",*stt_inputs):
             return 1
         ctx=Context("piper-fixture","session","profile",1,"local","LOCAL_ONLY")
         rules=tuple(profiles.Rule(a,(),"allow") for a in ("host_shell","filesystem_read","filesystem_write"))
-        gate=FixtureGateway(ctx,rules,clock=profiles.PolicyClock())
+        gate=lifetime.track(FixtureGateway(ctx,rules,clock=profiles.PolicyClock()))
         call=CapabilityCall("piper",VERSION,"neural_text_to_wav",
                   (("artifact","public-text"),("digest",source_sha),("model_digest",model_sha),
                    ("config_digest",config_sha),("language",language),("output","fixture-wav")))
