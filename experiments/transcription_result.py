@@ -2,6 +2,7 @@
 """Private typed transcription receipt for fixed local fixtures."""
 from dataclasses import dataclass
 from hashlib import sha256
+import json
 from threading import Lock
 from gateway import FixtureGateway, Refused
 from capabilities import CapabilityCall
@@ -66,6 +67,38 @@ class TranscriptFixture:
                 self._state="held"
                 raise
             return self._result
+
+    def _turn_input(self,candidate,identity,response_language):
+        from inference import Candidate
+        from adapter_protocol import prepare,local_request
+        if self._state!="completed" or self._result is None:
+            raise Refused("transcript_no_result")
+        self._g.checkpoint(self._grant,self._req)
+        if type(candidate) is not Candidate or candidate.locality!="local" or candidate.task!="llm":
+            raise Refused("local_llm_required")
+        if type(response_language) is not str or response_language not in ("tr","en","de"):
+            raise Refused("invalid_response_language")
+        value,result_digest=self._result
+        payload=json.dumps({"kind":"voice_turn","artifact":value.output,
+                   "source_digest":value.source_digest,"model_digest":value.model_digest,
+                   "transcript_digest":result_digest,"input_language":value.language,
+                   "response_language":response_language,"transcript":value.text},
+                   ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")
+        call=prepare(candidate,identity,"llm",payload)
+        return local_request(self._req.context,call,dependent=True),payload
+
+    def prepare_local_turn(self,candidate,identity,response_language):
+        with self._lock:
+            req,_=self._turn_input(candidate,identity,response_language)
+            return req
+
+    def start_local_turn(self,candidate,identity,response_language,grant):
+        from adapter_protocol import LocalAdapter
+        with self._lock:
+            _,payload=self._turn_input(candidate,identity,response_language)
+            job=LocalAdapter(self._g,self._req.context,candidate,identity,"llm",
+                             payload,grant,dependencies=((self._grant,self._req),))
+            return job,payload
 
     def cancel(self):
         with self._lock:

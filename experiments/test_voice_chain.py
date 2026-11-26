@@ -62,3 +62,76 @@ class VoiceChainTests(unittest.TestCase):
         other=FixtureGateway(self.ctx,(profiles.Rule("filesystem_read",(),"allow"),),clock=profiles.PolicyClock())
         with self.assertRaises(Refused):
             other.fixture_grant("speech",call.request(self.ctx),60)
+
+class TranscriptVoiceChainTests(unittest.TestCase):
+    def setUp(self):
+        from capabilities import CapabilityCall
+        from transcription_result import TranscriptFixture,Transcript
+        self.ctx=Context("task","session","profile",1,"local","LOCAL_ONLY")
+        self.rules=tuple(profiles.Rule(x,(),"allow") for x in ("host_shell","filesystem_read","filesystem_write"))
+        self.g=FixtureGateway(self.ctx,self.rules,clock=profiles.PolicyClock())
+        self.c=Candidate("fixture-model","llm","local","jan",True,True,100,50)
+        call=CapabilityCall("whisper_cpp","fixture","transcribe_wav",
+                   (("artifact","audio"),("digest","a"*64),("model_digest","b"*64),
+                    ("language","tr"),("output","transcript")))
+        req=call.request(self.ctx)
+        self.grant=self.g.fixture_grant("transcribe",req,60)
+        self.stt=TranscriptFixture(self.g,self.ctx,call,self.grant)
+        self.value=Transcript(req.target,"a"*64,"b"*64,"tr","transcript","Merhaba")
+
+    def start_turn(self):
+        self.stt.complete(self.value)
+        req=self.stt.prepare_local_turn(self.c,"turn","de")
+        grant=self.g.fixture_grant("turn",req,60)
+        return self.stt.start_local_turn(self.c,"turn","de",grant)
+
+    def test_exact_transcript_turn_payload(self):
+        import json
+        turn,payload=self.start_turn()
+        obj=json.loads(payload)
+        self.assertEqual(obj["transcript"],"Merhaba")
+        self.assertEqual(obj["transcript_digest"],sha256(b"Merhaba").hexdigest())
+        self.assertEqual(obj["source_digest"],"a"*64)
+        self.assertEqual(obj["model_digest"],"b"*64)
+        self.assertEqual(obj["input_language"],"tr")
+        self.assertEqual(obj["response_language"],"de")
+        self.assertEqual(turn.call.input_digest,sha256(payload).hexdigest())
+
+    def test_incomplete_cloud_invalid_language_denied(self):
+        with self.assertRaises(Refused):
+            self.stt.prepare_local_turn(self.c,"turn","de")
+        self.stt.complete(self.value)
+        with self.assertRaises(Refused):
+            self.stt.prepare_local_turn(replace(self.c,locality="cloud"),"turn","de")
+        with self.assertRaises(Refused):
+            self.stt.prepare_local_turn(self.c,"turn","auto")
+
+    def test_changed_language_cannot_reuse_grant(self):
+        self.stt.complete(self.value)
+        req=self.stt.prepare_local_turn(self.c,"turn","de")
+        grant=self.g.fixture_grant("turn",req,60)
+        with self.assertRaises(Refused):
+            self.stt.start_local_turn(self.c,"turn","en",grant)
+
+    def test_three_stage_chain_revoked_transcript_invalidates_all(self):
+        turn,_=self.start_turn()
+        turn.event("turn",1,"text","Guten Tag")
+        turn.event("turn",2,"completed",None)
+        call=turn.prepare_speech("1.50","de","turn-text","turn-audio")
+        req=call.request(self.ctx)
+        grant=self.g.fixture_grant("speech",req,60)
+        voice,payload=turn.start_speech("1.50","de","turn-text","turn-audio",grant)
+        voice.complete(SpeechResult(req.target,sha256(payload).hexdigest(),"de","turn-audio",wav()))
+        self.assertEqual(voice.result()[2],"de")
+        self.stt.cancel()
+        for result in (turn.result,voice.result):
+            with self.assertRaises(Refused):
+                result()
+
+    def test_revoked_transcript_before_local_turn_denied(self):
+        self.stt.complete(self.value)
+        req=self.stt.prepare_local_turn(self.c,"turn","de")
+        grant=self.g.fixture_grant("turn",req,60)
+        self.g.revoke("transcribe")
+        with self.assertRaises(Refused):
+            self.stt.start_local_turn(self.c,"turn","de",grant)
