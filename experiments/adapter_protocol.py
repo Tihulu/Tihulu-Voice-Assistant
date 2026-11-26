@@ -311,6 +311,32 @@ class LocalAdapter:
                      ("language",language),("output",output))).checked()
         return call,payload
 
+    def _neural_speech_call(self,version,language,artifact,output,model_digest,config_digest):
+        from capabilities import CapabilityCall
+        if self.call.operation!="llm":
+            raise Refused("local_llm_required")
+        if self._response_language is not None and language!=self._response_language:
+            raise Refused("voice_language_mismatch")
+        payload=self._completed_result()
+        call=CapabilityCall("piper",version,"neural_text_to_wav",
+                    (("artifact",artifact),("digest",sha256(payload).hexdigest()),
+                     ("model_digest",model_digest),("config_digest",config_digest),
+                     ("language",language),("output",output))).checked()
+        return call,payload
+
+    def prepare_neural_speech(self,version,language,artifact,output,model_digest,config_digest):
+        with self._lock:
+            call,_=self._neural_speech_call(version,language,artifact,output,model_digest,config_digest)
+            return call
+
+    def start_neural_speech(self,version,language,artifact,output,model_digest,config_digest,grant):
+        from speech_result import SpeechFixture
+        with self._lock:
+            call,payload=self._neural_speech_call(version,language,artifact,output,model_digest,config_digest)
+            job=SpeechFixture(self._g,self._req.context,call,grant,
+                              dependencies=((self._grant,self._req),))
+            return job,payload
+
     def prepare_speech(self,version,language,artifact,output):
         with self._lock:
             call,_=self._speech_call(version,language,artifact,output)
