@@ -1439,6 +1439,25 @@ class Registry:
         self.revisions = self.root / "revisions"
         self.revisions.mkdir(mode=0o700, parents=True, exist_ok=True)
 
+    def recovery_pending(self):
+        """Cheap presence check only; the locked recovery still validates everything."""
+        return (_exists_entry(self.removal_journal)
+                or _exists_entry(self.publication_journal))
+
+    @_registry_locked
+    def recovery_snapshot(self):
+        """Recover and return local market/queue views under one registry guard.
+
+        Suitable for an owned disk worker; never calls UI or network code.
+        A queue-specific error must not hide an otherwise valid registry.
+        """
+        cards = self.cards()
+        try:
+            rows = self._pending_partials_for(cards)
+        except (Hold, OSError) as exc:
+            return cards, (), str(exc)
+        return cards, rows, ""
+
     @contextmanager
     def _write_guard(self):
         """Cooperative nonblocking lock on a stable private inode.
@@ -2220,6 +2239,9 @@ class Registry:
         A registry snapshot bounds work and avoids re-reading it per card.
         Untrusted entries are visible but cannot be resumed or removed.
         """
+        return self._pending_partials_for(self.cards())
+
+    def _pending_partials_for(self, cards):
         folder = self.root / "transfers"
         try:
             folder.lstat()
@@ -2227,7 +2249,7 @@ class Registry:
             return ()
         _directory_identity(folder)
         out = []
-        for card in sorted(self.cards(), key=lambda card: card.model_id):
+        for card in sorted(cards, key=lambda card: card.model_id):
             if card.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
                 continue
             try:
