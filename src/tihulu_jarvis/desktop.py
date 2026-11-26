@@ -1962,7 +1962,8 @@ def create_window(app, loop, bridge=None):
             known = self.market.lookup_card(card.model_id)
             if known is not None:
                 if (known.owned_by_jarvis or known.shared_storage_owner
-                        or known.storage_ref != card.storage_ref
+                        or known.storage_ref not in (card.storage_ref,
+                            market.audio_refs.scoped(inspected[1].digest, card.model_id))
                         or known.category != card.category or known.engine != card.engine
                         or known.languages != card.languages or known.disk_size_bytes != card.disk_size_bytes
                         or known.local_or_cloud != "local"
@@ -1971,7 +1972,14 @@ def create_window(app, loop, bridge=None):
                 # Re-import is not a downgrade of a previously selected card.
                 card = known
             proposed = settings.checked(self.cfg)
-            proposed["market_refs"][card.storage_ref] = str(path)
+            refs = proposed["market_refs"]
+            if known is None and card.storage_ref in refs and refs[card.storage_ref] != str(path):
+                card = replace(card, storage_ref=market.audio_refs.scoped(inspected[1].digest, card.model_id))
+            if card.storage_ref in refs and refs[card.storage_ref] != str(path):
+                raise Hold("model_reference_conflict")
+            if any(ref != card.storage_ref and value == str(path) for ref, value in refs.items()):
+                raise Hold("model_reference_conflict")
+            refs[card.storage_ref] = str(path)
             digests = proposed.setdefault("audio_digests", {})
             previous_digest = digests.get(card.storage_ref)
             if previous_digest is not None and previous_digest != inspected[1].digest:

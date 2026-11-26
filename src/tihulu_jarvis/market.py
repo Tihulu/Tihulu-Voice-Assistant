@@ -25,6 +25,7 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from .voice.m1 import Hold
+from . import audio_refs
 
 CATEGORIES = ("stt", "llm", "tts")
 STATES = ("DISCOVERED", "REVIEWED", "APPROVED", "QUEUED", "DOWNLOADING", "VERIFIED",
@@ -340,14 +341,14 @@ class RuntimeModelProofs:
         matching = tuple(ref for ref, value in refs.items() if value == path)
         if not matching:
             return checkpoint
-        if len(matching) != 1 or not re.fullmatch(r"sha256-[0-9a-f]{32}", matching[0]):
+        if len(matching) != 1 or not audio_refs.valid(matching[0]):
             raise Hold("model_reference_unverified")
         ref = matching[0]
         identity = import_file_identity(path)
         expected_digest = (digests or {}).get(ref)
         if expected_digest is not None and (not isinstance(expected_digest, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
-                or ref != "sha256-" + expected_digest[:32]):
+                or not audio_refs.matches(ref, expected_digest)):
             raise Hold("model_reference_unverified")
         key = (path, ref, expected_digest)
         proof = self._proofs.get(key)
@@ -361,7 +362,7 @@ class RuntimeModelProofs:
             def work():
                 _, verified = inspect_file(path, "stt", model_id="runtime-verification",
                                            checkpoint=worker_check, expected_identity=identity)
-                if (not hmac.compare_digest(ref, "sha256-" + verified.digest[:32])
+                if (not hmac.compare_digest(ref[:39], "sha256-" + verified.digest[:32])
                         or (expected_digest is not None and
                             not hmac.compare_digest(expected_digest, verified.digest))):
                     raise Hold("model_digest_mismatch")
