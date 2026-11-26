@@ -131,6 +131,10 @@ class WaveRun:
                     or worker in self._done or completion_grant is not self._claims[worker][0]):
                 raise Refused("agent_completion_attempt_mismatch")
 
+    def validate_plan(self,context,candidates):
+        """Trusted coordinator checks snapshot before reserving resources."""
+        self._check(context,candidates)
+
     def checkpoint_worker(self,worker,context,candidates,*,completion_grant):
         """Trusted coordinator liveness observation, not effect authorization."""
         self._event_owner(worker,completion_grant)
