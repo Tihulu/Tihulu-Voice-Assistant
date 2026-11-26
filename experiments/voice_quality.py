@@ -74,6 +74,7 @@ def speech_corpus_profile(corpus,stt_profile,has_stt):
         "mixed-auto-turbo":(True,True,22,"turbo-q5"),
         "mixed-auto-piper":(True,True,22,"small"),
         "mixed-auto-reviewed":(True,True,24,"small"),
+        "mixed-auto-reviewed-short":(True,True,24,"small"),
     }
     if type(corpus) is not str or corpus not in profiles or type(has_stt) is not bool:
         raise RuntimeError("invalid corpus profile")
