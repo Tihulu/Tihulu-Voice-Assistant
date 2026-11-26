@@ -24,7 +24,7 @@ class WaveRun:
     No caller-supplied callbacks, executor, subprocess or provider transport.
     A wave barrier prevents concurrent reservations from crossing waves.
     """
-    def __init__(self,gateway,plan,workers,candidates,budget,limit=6,preference="balanced",*,ledger=None,run_id=None):
+    def __init__(self,gateway,plan,workers,candidates,budget,limit=6,preference="balanced",*,ledger=None,run_id=None,attempt=None):
         if type(gateway) is not FixtureGateway or type(plan) is not AgentPlan:
             raise Refused("agent_run_invalid")
         self._gateway=gateway
@@ -38,6 +38,11 @@ class WaveRun:
             raise Refused("agent_resource_ledger_invalid")
         if ledger is None and run_id is not None:
             raise Refused("agent_resource_ledger_invalid")
+        if attempt is not None:
+            if type(attempt) is not str:
+                raise Refused("agent_attempt_invalid")
+            token(attempt)
+        self._attempt=attempt
         self._ledger=ledger
         self._run_id=run_id
         self._reservations={}
@@ -72,17 +77,23 @@ class WaveRun:
 
     def request(self,worker):
         self._thread()
+        if type(worker) is not str:
+            raise Refused("agent_worker_unknown")
+        token(worker)
         for wave in self._plan.waves:
             for a in wave:
                 if a.worker==worker:
-                    target=sha256(repr(("agent-wave-v1",self._plan.digest,a.worker,a.model,
-                                       a.provider,a.memory_mib)).encode("ascii")).hexdigest()
+                    fields=("agent-wave-v1",self._plan.digest,a.worker,a.model,
+                            a.provider,a.memory_mib)
+                    if self._attempt is not None:
+                        fields=("agent-wave-attempt-v1",self._attempt,self._run_id)+fields[1:]
+                    target=sha256(repr(fields).encode("ascii")).hexdigest()
                     return Request(self._plan.context,"agent",target,"local","private").checked()
         raise Refused("agent_worker_unknown")
 
     def start(self,worker,grant,context,candidates):
         self._check(context,candidates)
-        if worker in self._claims or not any(a.worker==worker for a in self._wave()):
+        if type(worker) is not str or worker in self._claims or not any(a.worker==worker for a in self._wave()):
             raise Refused("agent_wave_not_ready")
         req=self.request(worker)
         # Prior waves are complete. Bind the entire earlier wave barrier
@@ -111,13 +122,15 @@ class WaveRun:
         if reservation is not None:
             self._reservations[worker]=reservation
 
-    def complete(self,worker,context,candidates,*,payload=None):
+    def complete(self,worker,context,candidates,*,payload=None,completion_grant=None):
         self._check(context,candidates)
-        if worker not in self._claims or worker in self._done:
+        if type(worker) is not str or worker not in self._claims or worker in self._done:
             raise Refused("agent_worker_not_running")
         if payload is not None and (type(payload) is not bytes or not 0<len(payload)<=MAX_RESULT_BYTES):
             raise Refused("agent_result_invalid")
         grant,req=self._claims[worker]
+        if self._attempt is not None and completion_grant is not grant:
+            raise Refused("agent_completion_attempt_mismatch")
         self._gateway.checkpoint_claimed_group(((grant,req),))
         # In this synthetic API completion means the simulated worker ended.
         self._release(worker)
@@ -154,11 +167,13 @@ class WaveRun:
             self._ledger.release(reservation)
             del self._reservations[worker]
 
-    def fail(self,worker,context,candidates):
+    def fail(self,worker,context,candidates,*,completion_grant=None):
         """Trusted simulated terminal failure; no automatic fallback/retry."""
         self._check(context,candidates)
-        if worker not in self._claims or worker in self._done:
+        if type(worker) is not str or worker not in self._claims or worker in self._done:
             raise Refused("agent_worker_not_running")
+        if self._attempt is not None and completion_grant is not self._claims[worker][0]:
+            raise Refused("agent_completion_attempt_mismatch")
         self.cancel()
 
     def result(self,context,candidates):
