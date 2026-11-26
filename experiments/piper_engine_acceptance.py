@@ -9,6 +9,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+from types import MappingProxyType
 from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
@@ -17,7 +18,16 @@ from speech_result import SpeechFixture,SpeechResult,MAX_WAV
 MODEL_SHA="2844717f524ab965d3fe86e60562cbb601d3e456836efcc2196cc3a14112a8fb"
 CONFIG_SHA="13ebd7810f1b61b5027583cf3131a0a233b6ea81c38f2200ebc4ff41c3cca039"
 VERSION="1.8.0"
-TEXT="Merhaba. Bugün güzel bir gün."
+VOICES=MappingProxyType({
+    "tr":("2844717f524ab965d3fe86e60562cbb601d3e456836efcc2196cc3a14112a8fb","13ebd7810f1b61b5027583cf3131a0a233b6ea81c38f2200ebc4ff41c3cca039","tr","Merhaba. Bugün güzel bir gün."),
+    "en":("5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",None,"en-us","Hello. Today is a beautiful day."),
+    "de":("7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819",None,"de","Guten Tag. Heute ist ein schöner Tag."),
+})
+
+def voice_profile(language):
+    if type(language) is not str or language not in VOICES:
+        raise Refused("unknown_piper_voice")
+    return VOICES[language]
 PROBE="""import hashlib,json,os,socket,sys
 from pathlib import Path
 h=hashlib.sha256()
@@ -72,28 +82,29 @@ def digest(path):
             h.update(block)
     return h.hexdigest()
 
-def main(site,model,config):
+def main(site,model,config,language="tr"):
+    model_sha,config_pin,phoneme_voice,text=voice_profile(language)
     site,model,config=map(lambda p:Path(p).resolve(),(site,model,config))
     if (os.getuid()==0 or not site.is_dir() or not model.is_file() or not config.is_file()
-            or not 0<model.stat().st_size<=70000000 or digest(model)!=MODEL_SHA
-            or not 0<config.stat().st_size<=16384 or digest(config)!=CONFIG_SHA):
+            or not 0<model.stat().st_size<=70000000 or digest(model)!=model_sha
+            or not 0<config.stat().st_size<=16384 or (config_pin is not None and digest(config)!=config_pin)):
         raise RuntimeError("invalid pinned voice inputs")
     cfg=json.loads(config.read_text(encoding="utf-8"))
-    if (cfg["audio"]["sample_rate"]!=22050 or cfg["espeak"]["voice"]!="tr"
+    if (cfg["audio"]["sample_rate"]!=22050 or cfg["espeak"]["voice"]!=phoneme_voice
             or cfg["phoneme_type"]!="espeak"):
         raise RuntimeError("voice config mismatch")
     config_sha=digest(config)
-    source_sha=hashlib.sha256(TEXT.encode()).hexdigest()
+    source_sha=hashlib.sha256(text.encode()).hexdigest()
     results=[]
     def record(case,ok,**extra):
         results.append(bool(ok))
-        print(json.dumps(dict(case=case,status="PASS" if ok else "FAIL",**extra)),flush=True)
+        print(json.dumps(dict(case=case,language=language,status="PASS" if ok else "FAIL",**extra)),flush=True)
     with tempfile.TemporaryDirectory(prefix="jarvis-piper-") as temp:
         root=Path(temp)
         out=root/"out"
         out.mkdir(mode=0o700)
         source=root/"text.txt"
-        source.write_text(TEXT,encoding="utf-8")
+        source.write_text(text,encoding="utf-8")
         (root/"not-approved").write_text("public fixture marker")
         prefix=["/usr/bin/bwrap","--unshare-all","--die-with-parent","--new-session","--cap-drop","ALL",
                 "--clearenv","--ro-bind","/usr","/usr"]
@@ -137,7 +148,7 @@ def main(site,model,config):
         record("piper-private-network",probe["network"]!=host and probe["denied"])
         record("piper-private-readonly-inputs",probe["readonly"] and probe["hidden"])
         record("piper-no-device-or-capabilities",probe["devices"] and probe["caps"])
-        record("piper-exact-pinned-inputs",probe["model"]==MODEL_SHA and probe["config"]==config_sha
+        record("piper-exact-pinned-inputs",probe["model"]==model_sha and probe["config"]==config_sha
                and probe["text"]==source_sha,config_digest=config_sha)
         if not all(results):
             return 1
@@ -145,8 +156,8 @@ def main(site,model,config):
         rules=tuple(profiles.Rule(a,(),"allow") for a in ("host_shell","filesystem_read","filesystem_write"))
         gate=FixtureGateway(ctx,rules,clock=profiles.PolicyClock())
         call=CapabilityCall("piper",VERSION,"neural_text_to_wav",
-                  (("artifact","public-text"),("digest",source_sha),("model_digest",MODEL_SHA),
-                   ("config_digest",config_sha),("language","tr"),("output","fixture-wav")))
+                  (("artifact","public-text"),("digest",source_sha),("model_digest",model_sha),
+                   ("config_digest",config_sha),("language",language),("output","fixture-wav")))
         req=call.request(ctx)
         grant=gate.fixture_grant("piper-voice",req,180)
         job=SpeechFixture(gate,ctx,call,grant)
@@ -158,13 +169,13 @@ def main(site,model,config):
             job.cancel()
             return 1
         data=path.read_bytes()
-        record("piper-inputs-unchanged",digest(model)==MODEL_SHA and digest(config)==config_sha
+        record("piper-inputs-unchanged",digest(model)==model_sha and digest(config)==config_sha
                and digest(source)==source_sha)
         record("piper-exact-output-set",sorted(p.name for p in out.iterdir())==["voice.wav"])
         if not all(results):
             job.cancel()
             return 1
-        job.complete(SpeechResult(req.target,source_sha,"tr","fixture-wav",data,MODEL_SHA,config_sha))
+        job.complete(SpeechResult(req.target,source_sha,language,"fixture-wav",data,model_sha,config_sha))
         receipt=job.result()
         record("piper-real-typed-pcm-receipt",receipt[4]==hashlib.sha256(data).hexdigest() and receipt[5]==22050,
                rate=receipt[5],frames=receipt[6])
