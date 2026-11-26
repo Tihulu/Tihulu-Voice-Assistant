@@ -94,3 +94,44 @@ class SpeechResultTests(unittest.TestCase):
         self.g.revoke("voice")
         with self.assertRaises(Refused):
             self.job.start_conversion("4.4","flac",exact)
+
+    def test_speech_to_transcript_exact_source_model_and_language(self):
+        from transcription_result import Transcript
+        self.job.complete(self.value)
+        call=self.job.prepare_transcription("fixture","b"*64,"text-out")
+        args=dict(call.args)
+        self.assertEqual(args,{"artifact":"audio","digest":sha256(self.value.data).hexdigest(),
+                               "model_digest":"b"*64,"language":"tr","output":"text-out"})
+        req=call.request(self.ctx)
+        grant=self.g.fixture_grant("stt",req,60)
+        child=self.job.start_transcription("fixture","b"*64,"text-out",grant)
+        child.complete(Transcript(req.target,args["digest"],"b"*64,"tr","text-out","Merhaba"))
+        self.assertEqual(child.result()[0].text,"Merhaba")
+        self.job.cancel()
+        with self.assertRaises(Refused):
+            child.result()
+
+    def test_speech_to_transcript_alias_and_incomplete_denied(self):
+        with self.assertRaises(Refused):
+            self.job.prepare_transcription("fixture","b"*64,"text-out")
+        self.job.complete(self.value)
+        for out in ("text","audio"):
+            with self.assertRaises(Refused):
+                self.job.prepare_transcription("fixture","b"*64,out)
+
+    def test_speech_to_transcript_changed_model_or_language_grant_denied(self):
+        self.job.complete(self.value)
+        call=self.job.prepare_transcription("fixture","b"*64,"text-out")
+        for i,key in enumerate(("model_digest","language")):
+            args=tuple((k,("c"*64 if key=="model_digest" else "de") if k==key else v) for k,v in call.args)
+            wrong=replace(call,args=args)
+            grant=self.g.fixture_grant("bad"+str(i),wrong.request(self.ctx),60)
+            with self.assertRaises(Refused):
+                self.job.start_transcription("fixture","b"*64,"text-out",grant)
+    def test_speech_to_transcript_revoked_before_start(self):
+        self.job.complete(self.value)
+        call=self.job.prepare_transcription("fixture","b"*64,"text-out")
+        grant=self.g.fixture_grant("stt",call.request(self.ctx),60)
+        self.job.cancel()
+        with self.assertRaises(Refused):
+            self.job.start_transcription("fixture","b"*64,"text-out",grant)
