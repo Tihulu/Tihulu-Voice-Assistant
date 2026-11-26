@@ -69,12 +69,12 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
                 or model_digest(stt_paths[1])!=MODEL_SHA):
             raise RuntimeError("invalid pinned STT model")
         print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
-    if (corpus not in ("original","expanded","targeted")
+    if (corpus not in ("original","expanded","targeted","turbo-expanded")
             or (corpus=="expanded" and (not stt_paths or stt_profile!="small"))
-            or (corpus=="targeted" and (not stt_paths or stt_profile!="turbo-q5"))):
+            or (corpus in ("targeted","turbo-expanded") and (not stt_paths or stt_profile!="turbo-q5"))):
         raise RuntimeError("invalid corpus profile")
     samples=tuple((lang,lang,text) for lang,text in TEXT.items())
-    if corpus=="expanded":
+    if corpus in ("expanded","turbo-expanded"):
         samples+=expanded_corpus()
     elif corpus=="targeted":
         samples=targeted_corpus()

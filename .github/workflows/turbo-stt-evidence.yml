@@ -1,4 +1,4 @@
-name: Disposable targeted Whisper Large v3 Turbo Q5 quality evidence
+name: Disposable expanded Whisper Large v3 Turbo Q5 quality evidence
 on:
   pull_request:
     branches: ['**']
@@ -42,9 +42,9 @@ jobs:
           echo "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2  $RUNNER_TEMP/turbo-stt/model.bin" | sha256sum -c -
           cmake -S "$RUNNER_TEMP/turbo-stt/source" -B "$RUNNER_TEMP/turbo-stt/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
           cmake --build "$RUNNER_TEMP/turbo-stt/build" --target whisper-cli -j 2
-      - name: Actual targeted Turbo CPU comparison with unchanged quality gate
+      - name: Actual full nine-sample Turbo CPU comparison with unchanged quality gate
         env:
           PYTHONPATH: src:experiments
           PYTHONDONTWRITEBYTECODE: '1'
         run: |
-          /usr/bin/python3 experiments/speech_engine_acceptance.py "$RUNNER_TEMP/turbo-stt/build/bin/whisper-cli" "$RUNNER_TEMP/turbo-stt/model.bin" turbo-q5 targeted
+          /usr/bin/python3 experiments/speech_engine_acceptance.py "$RUNNER_TEMP/turbo-stt/build/bin/whisper-cli" "$RUNNER_TEMP/turbo-stt/model.bin" turbo-q5 turbo-expanded
