@@ -149,3 +149,13 @@ class VoiceQualityTests(unittest.TestCase):
         for model,available in (("small",False),("turbo-q5",True)):
             with self.assertRaises(RuntimeError):
                 speech_corpus_profile(name,model,available)
+
+    def test_real_gtk_profile_is_closed_and_has_five_additional_checks(self):
+        from voice_quality import speech_corpus_profile,neural_sample_allowed
+        name="mixed-manual-piper-gtk"
+        self.assertEqual(speech_corpus_profile(name,"small",True),(True,True,36))
+        self.assertTrue(neural_sample_allowed(name,"tr","tr","original","original"))
+        self.assertFalse(neural_sample_allowed(name,"tr-2","tr","Lütfen bu metni Türkçe olarak oku.","original"))
+        for model,available in (("small",False),("turbo-q5",True)):
+            with self.assertRaises(RuntimeError):
+                speech_corpus_profile(name,model,available)
