@@ -156,3 +156,5 @@ CAP-08 first real pinned CPU LLM experiment: llama.cpp b6000 exact source 4762ad
 CAP-08/06 speech→audio conversion chain: completed exact WAV receipt derives a distinct FFmpeg grant bound to actual speech output/digest and distinct staging output. Persist live ancestor edges in ConversionFixture; revoke speech invalidates downstream result, wrong digest and aliases denied. Three new synthetic regressions. No audio device or real conversion in this contract.
 
 CAP-08/06 real eSpeak→FFmpeg chain: per-language WAV-only read mount and fresh output, separate live dependent grant, real lossless FLAC and exact raw PCM roundtrip, source preservation, typed receipt then ancestor revoke invalidates it. Twelve added actual checks (23 planned). No user audio, playback or production activation.
+
+CAP-08 narrow each real TTS invocation to its own read-only fixed text and fresh private output; preflight exact digest and empty output/work mount set for each language, prior languages not visible. Three additional real cases (26 planned), preserve exact FLAC chain. Same-UID hostile mutation and aggregate quotas remain outside fixture claims.
