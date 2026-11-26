@@ -10,7 +10,7 @@ import socket
 import subprocess
 import tempfile
 import sys
-from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename
+from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus
 from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
@@ -50,6 +50,7 @@ STT_MODELS={
     "tiny":("be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",85000000),
     "base":("60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",160000000),
     "small":("1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",500000000),
+    "turbo-q5":("394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",574041195),
 }
 
 def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
@@ -68,11 +69,15 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
                 or model_digest(stt_paths[1])!=MODEL_SHA):
             raise RuntimeError("invalid pinned STT model")
         print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
-    if corpus not in ("original","expanded") or (corpus=="expanded" and (not stt_paths or stt_profile!="small")):
+    if (corpus not in ("original","expanded","targeted")
+            or (corpus=="expanded" and (not stt_paths or stt_profile!="small"))
+            or (corpus=="targeted" and (not stt_paths or stt_profile!="turbo-q5"))):
         raise RuntimeError("invalid corpus profile")
     samples=tuple((lang,lang,text) for lang,text in TEXT.items())
     if corpus=="expanded":
         samples+=expanded_corpus()
+    elif corpus=="targeted":
+        samples=targeted_corpus()
     print(json.dumps({"corpus":corpus,"sample_count":len(samples)}),flush=True)
     results=[]
     quality=[]
