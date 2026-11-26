@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from hashlib import sha256
 import struct
+import json
 from gateway import Refused
 from speech_result import pcm_info
 from transcription_result import TranscriptFixture
@@ -52,6 +53,22 @@ class MixedPreview:
     text: str
     text_digest: str
 
+@dataclass(frozen=True)
+class EditedSegment:
+    original: SegmentReview
+    submitted_text: str
+    submitted_digest: str
+    edited: bool
+
+@dataclass(frozen=True)
+class EditedMixedPreview:
+    audio_digest: str
+    sample_rate: int
+    segments: tuple
+    text: str
+    text_digest: str
+    review_digest: str
+
 class MixedVoiceReview:
     """Build a fresh review from live typed transcript fixtures only.
 
@@ -94,6 +111,42 @@ class MixedVoiceReview:
         digest=sha256(text_bytes(text)).hexdigest()
         gateway.checkpoint_claimed_group(tuple((grant,req) for _,grant,req,_,_ in bindings))
         return MixedPreview(self._digest,self._rate,tuple(rows),text,digest)
+
+
+    def edit_preview(self,edits=()):
+        """Exact UI-facing segment edits; not a submission or permission API."""
+        original=self.preview()
+        if type(edits) is not tuple or len(edits)>len(original.segments):
+            raise Refused("invalid_mixed_edits")
+        choices={}
+        previous=-1
+        for entry in edits:
+            if type(entry) is not tuple or len(entry)!=3:
+                raise Refused("invalid_mixed_edit")
+            index,digest,text=entry
+            if (type(index) is not int or not previous<index<len(original.segments)
+                    or digest!=original.segments[index].transcript_digest):
+                raise Refused("mixed_edit_stale_or_order")
+            text_bytes(text)
+            if not text.strip():
+                raise Refused("mixed_edit_empty")
+            choices[index]=text
+            previous=index
+        rows=[]
+        for index,row in enumerate(original.segments):
+            text=choices.get(index,row.text)
+            digest=sha256(text_bytes(text)).hexdigest()
+            rows.append(EditedSegment(row,text,digest,digest!=row.transcript_digest))
+        text="\n".join(row.submitted_text for row in rows)
+        digest=sha256(text_bytes(text)).hexdigest()
+        # Hash ordered, explicit provenance, not merely concatenated text.
+        envelope=("mixed-review-v1",original.audio_digest,original.sample_rate,self._model,
+            tuple((r.original.start_frame,r.original.end_frame,r.original.source_digest,
+                   r.original.language,r.original.transcript_digest,r.submitted_digest) for r in rows))
+        target=sha256(json.dumps(envelope,separators=(",",":")).encode("ascii")).hexdigest()
+        if self.preview()!=original:
+            raise Refused("mixed_edit_snapshot_changed")
+        return EditedMixedPreview(original.audio_digest,original.sample_rate,tuple(rows),text,digest,target)
 
 
 def silence_boundaries(data):
