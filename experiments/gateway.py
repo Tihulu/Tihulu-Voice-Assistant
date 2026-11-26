@@ -18,10 +18,11 @@ ACTIONS = {
     "document_engine": "filesystem_read", "document_export": "filesystem_write",
     "application_ui": "host_shell", "application_engine": "host_shell",
     "browser_read": "browser_navigate",
+    "conversion_publish": "publish_artifact",
 }
 HOST = frozenset(("engine", "agent", "local_plan", "publish", "capture",
                   "document_engine", "document_export", "application_ui",
-                  "application_engine", "browser_read"))
+                  "application_engine", "browser_read", "conversion_publish"))
 EXTERNAL = frozenset(("research", "provider", "disclose", "catalog", "transfer", "browser", "browser_read"))
 EXTRA_CEILINGS = {
     "browser": ("external_network",),
@@ -29,6 +30,7 @@ EXTRA_CEILINGS = {
     "document_engine": ("host_shell",),
     "document_export": ("filesystem_read", "host_shell"),
     "application_engine": ("filesystem_read", "filesystem_write"),
+    "conversion_publish": ("filesystem_read", "filesystem_write"),
 }
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 MAX_GRANTS = 64
