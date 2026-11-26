@@ -172,3 +172,22 @@ sys.exit(99)
                 audio_choice.recover(self.registry, self.path)
         self.assertTrue(settings.audio_choice_pending(self.path))
         self.assertEqual(settings.load(self.path), self.new)
+
+    def test_checkpoint_refusal_after_settings_stage_compensates(self):
+        original = settings._replace_text
+        staged = []
+        def observe(path, text):
+            original(path, text)
+            if path == self.path and settings.load(path) == self.new:
+                staged.append(True)
+        def checkpoint():
+            if staged:
+                raise Hold("model_file_changed")
+        with patch.object(settings, "_replace_text", side_effect=observe):
+            with self.assertRaisesRegex(Hold, "model_file_changed"):
+                audio_choice.commit(self.registry, self.card, self.active,
+                                    self.old, self.new, "stt", self.path,
+                                    checkpoint=checkpoint)
+        self.assertEqual(settings.load(self.path), self.old)
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+        self.assertFalse(settings.audio_choice_pending(self.path))
