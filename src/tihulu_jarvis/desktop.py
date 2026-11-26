@@ -4369,47 +4369,9 @@ def create_window(app, loop, bridge=None):
                 expected = self.selected_card_snapshot()
                 if expected is None:
                     raise Hold("registry_card_changed")
-                p = settings.config_path()
-                with self.market.transfer_lease(model_id), self.market._write_guard(), settings._write_guard(p):
-                    settings._require_no_choice(p)
-                    if self.market.card(model_id) != expected:
-                        raise Hold("registry_card_changed")
-                    current = settings.load(p)
-                    if current != self.saved_cfg or current != settings.checked(self.cfg):
-                        raise Hold("settings_changed")
-                    selected = {current["stt"], *current["voices"].values()} - {""}
-                    ref = expected.storage_ref
-                    if ref and current["market_refs"].get(ref) in selected:
-                        raise Hold("audio_model_selected")
-                    proposed = settings.checked(current)
-                    # Only remove this card's reference, never unrelated orphan
-                    # references (which may still protect a selected model).
-                    other_refs = {c.storage_ref for c in self.market.cards()
-                                  if c.model_id != model_id}
-                    if ref and ref not in other_refs:
-                        proposed["market_refs"].pop(ref, None)
-                        for field in ("audio_digests", "voice_digests"):
-                            proposed.get(field, {}).pop(ref, None)
-                            if not proposed.get(field):
-                                proposed.pop(field, None)
-                    text = settings._serialize(proposed)
-                    stamp = settings._choice_identity(p.lstat())
-                    old_generation = self.market.snapshot()[0]
-                    cards, choices = self.market._without_card(model_id)
-                    new_generation = market._text_digest(self.market._serialized(cards, choices))
-                    if (self.market.snapshot()[0] != old_generation or settings.load(p) != current
-                            or settings._choice_identity(p.lstat()) != stamp):
-                        raise Hold("settings_changed")
-                    self.market._unregister_locked(model_id, expected=expected)
-                    # The registry removal must be durable before deleting
-                    # any reference proof. An uncertain write retains metadata.
-                    market._sync_directory(self.market.root)
-                    if (self.market.snapshot()[0] != new_generation
-                            or settings.load(p) != current
-                            or settings._choice_identity(p.lstat()) != stamp):
-                        raise Hold("unregister_recovery_required")
-                    if proposed != current:
-                        settings._replace_text(p, text)
+                if self.saved_cfg != settings.checked(self.cfg):
+                    raise Hold("settings_changed")
+                proposed = audio_choice.unregister(self.market, expected, self.saved_cfg)
                 self.cfg = proposed
                 self.saved_cfg = deepcopy(proposed)
                 self.build_market_page()
