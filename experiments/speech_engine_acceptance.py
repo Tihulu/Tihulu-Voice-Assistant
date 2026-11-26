@@ -70,9 +70,9 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
                 or model_digest(stt_paths[1])!=MODEL_SHA):
             raise RuntimeError("invalid pinned STT model")
         print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
-    if (corpus not in ("original","expanded","targeted","turbo-expanded","mixed-preview","mixed-auto")
+    if (corpus not in ("original","expanded","targeted","turbo-expanded","mixed-preview","mixed-auto","mixed-auto-turbo")
             or (corpus in ("expanded","mixed-preview","mixed-auto") and (not stt_paths or stt_profile!="small"))
-            or (corpus in ("targeted","turbo-expanded") and (not stt_paths or stt_profile!="turbo-q5"))):
+            or (corpus in ("targeted","turbo-expanded","mixed-auto-turbo") and (not stt_paths or stt_profile!="turbo-q5"))):
         raise RuntimeError("invalid corpus profile")
     samples=tuple((lang,lang,text) for lang,text in TEXT.items())
     if corpus in ("expanded","turbo-expanded"):
@@ -311,7 +311,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 else:
                     transcript.cancel()
                     qrecord("multilingual-stt-typed-receipt-"+case_id,False,reason="quality_gate_failed")
-            if corpus in ("mixed-preview","mixed-auto"):
+            if corpus in ("mixed-preview","mixed-auto","mixed-auto-turbo"):
                 if transcript is None or not all(quality):
                     job.cancel()
                     return 1
@@ -335,7 +335,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
             record("speech-revoke-invalidates-conversion-"+case_id,denied)
             if not all(results):
                 return 1
-        if corpus in ("mixed-preview","mixed-auto"):
+        if corpus in ("mixed-preview","mixed-auto","mixed-auto-turbo"):
             import io,wave
             from mixed_voice_review import MixedVoiceReview,split_pcm
             # All original short WAVs are real engine outputs, with known
@@ -421,7 +421,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 else:
                     denied=False
                 record("speech-revoke-invalidates-conversion-"+case_id,denied)
-        if corpus=="mixed-auto":
+        if corpus in ("mixed-auto","mixed-auto-turbo"):
             # A fresh public fixture review session for the changed PCM bytes.
             # Do not revive or inherit the revoked original segment receipts.
             from language_detection import Detection,DetectionFixture,parse_detection,detection_observation
@@ -480,7 +480,11 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     trans=detector.start_transcription(target,auto_gate.fixture_grant("transcribe-"+str(i),req,60))
                     transcripts.append(trans)
                     trans.checkpoint()
-                    run(common+["-l",dict(call.args)["language"],"-otxt","-of","/work/out/transcript"],scope,wrapper=STT_WRAPPER,timeout=120)
+                    decode=common+["-l",dict(call.args)["language"],"-otxt","-of","/work/out/transcript"]
+                    if stt_profile=="turbo-q5":
+                        from speech_result import pcm_info
+                        decode+=turbo_short_args(*pcm_info(piece.data))
+                    run(decode,scope,wrapper=STT_WRAPPER,timeout=120)
                     path=out/"transcript.txt"
                     if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=16384:
                         return 1
@@ -519,7 +523,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     detector.cancel()
         record("speech-distinct-multilingual-output",len(digests)==len(samples))
         record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+case_id)).iterdir())==[speech_filename(case_id)] for case_id,_,_ in samples) and not list(output.iterdir()))
-    return 0 if len(results)==5+7*len(samples)+(22 if corpus=="mixed-auto" else 8 if corpus=="mixed-preview" else 0) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
+    return 0 if len(results)==5+7*len(samples)+(22 if corpus in ("mixed-auto","mixed-auto-turbo") else 8 if corpus=="mixed-preview" else 0) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
 
 if __name__=="__main__":
     raise SystemExit(main(*sys.argv[1:]))
