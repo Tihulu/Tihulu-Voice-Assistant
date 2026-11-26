@@ -79,6 +79,7 @@ def speech_corpus_profile(corpus,stt_profile,has_stt):
         "mixed-auto-piper":(True,True,22,"small"),
         "mixed-auto-piper-short":(True,True,22,"small"),
         "mixed-manual-piper-short":(True,True,27,"small"),
+        "mixed-manual-piper-handoff":(True,True,31,"small"),
         "mixed-auto-reviewed":(True,True,24,"small"),
         "mixed-auto-reviewed-short":(True,True,24,"small"),
     }
@@ -96,7 +97,7 @@ def neural_sample_allowed(corpus,case_id,language,text,reference):
         return False
     if language not in ("tr","en","de"):
         return False
-    if corpus not in ("mixed-auto-piper","mixed-auto-piper-short","expanded-piper-small","mixed-manual-piper-short"):
+    if corpus not in ("mixed-auto-piper","mixed-auto-piper-short","expanded-piper-small","mixed-manual-piper-short","mixed-manual-piper-handoff"):
         return False
     if case_id==language and text==reference:
         return True
