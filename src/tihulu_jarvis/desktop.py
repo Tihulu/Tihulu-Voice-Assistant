@@ -1455,6 +1455,8 @@ def create_window(app, loop, bridge=None):
             self.refresh_attachment_scope()
             self.refresh_model_probe(connected)
             self.setup_connect.set_sensitive(not self.busy and not blocked)
+            if hasattr(self, "settings_choice_inspect"):
+                self.refresh_choice_recovery()
             if not self.url.get_text().strip():
                 self.setup_note.set_text(tr(
                     "Start with your local model. Open Jan, enter its local API URL, discover models and choose one. No download is needed.",
@@ -1486,7 +1488,7 @@ def create_window(app, loop, bridge=None):
             self.search_history.set_sensitive(not self.busy)
             # An export needs something to export; an empty log offers nothing.
             self.export_chat.set_sensitive(not self.busy and bool(self.session.history))
-            self.attach.set_sensitive(not self.busy and self.cfg["llm"] in self.inventory)
+            self.attach.set_sensitive(not self.busy and connected)
             self.entry.set_sensitive(not self.busy)
             self.refresh_send()
             now = self.store.policy_now()
@@ -2889,6 +2891,66 @@ def create_window(app, loop, bridge=None):
                 "Forgetting removes the stored choices only. Profiles, the audit trail and the market registry are never touched.",
                 "Unutma yalnızca saklı seçimleri kaldırır. Profiller, denetim kaydı ve pazar kaydı asla dokunulmaz.",
                 "Vergessen entfernt nur die gespeicherte Auswahl. Profile, das Audit-Protokoll und die Markt-Registry werden nie berührt."))
+            recovery = Gtk.Box(spacing=8)
+            page.append(recovery)
+            self.settings_choice_review = None
+            self.settings_choice_inspect = self.button(recovery, tr(
+                "Review interrupted model choice", "Kesilen model seçimini incele",
+                "Unterbrochene Modellauswahl prüfen"), self.inspect_choice_recovery)
+            self.settings_choice_confirm = self.button(recovery, tr(
+                "Confirm recovered preference", "Kurtarılan seçimi onayla",
+                "Wiederhergestellte Auswahl bestätigen"), self.confirm_choice_recovery)
+            self.settings_choice_note = Gtk.Label(xalign=0, wrap=True)
+            page.append(self.settings_choice_note)
+            self.refresh_choice_recovery()
+
+        def refresh_choice_recovery(self):
+            pending = self.jan_choice_blocked()
+            available = pending and not self.busy and not self.closing
+            self.settings_choice_inspect.set_sensitive(available)
+            self.settings_choice_confirm.set_sensitive(available and self.settings_choice_review is not None)
+            self.settings_forget.set_sensitive(not self.busy and not pending)
+            if not pending:
+                self.settings_choice_review = None
+
+        def inspect_choice_recovery(self):
+            if self.busy or self.closing or not self.jan_choice_blocked():
+                return
+            self.settings_choice_review = None
+            try:
+                if settings.load() != settings.checked(self.cfg):
+                    raise Hold("settings_changed_restart_required")
+                review = settings.review_committed_jan_choice(self.store, self.market)
+                self.settings_choice_review = review
+                self.settings_choice_note.set_text(tr(
+                    "The active profile already records local Jan model %s. Confirm to align local preferences only; no model is loaded and no permission changes." % review[0].model_id,
+                    "Etkin profil yerel Jan modeli %s kaydını içeriyor. Yalnızca yerel seçimi eşitlemek için onayla; model yüklenmez ve izinler değişmez." % review[0].model_id,
+                    "Das aktive Profil enthält das lokale Jan-Modell %s. Nur die lokale Auswahl abgleichen; kein Modell wird geladen und keine Berechtigung geändert." % review[0].model_id))
+            except (Hold, OSError) as exc:
+                self.settings_choice_note.set_text(str(exc))
+            self.refresh_choice_recovery()
+
+        def confirm_choice_recovery(self):
+            if self.busy or self.closing or self.settings_choice_review is None:
+                return
+            review = self.settings_choice_review
+            self.settings_choice_review = None
+            try:
+                if settings.load() != settings.checked(self.cfg):
+                    raise Hold("settings_changed_restart_required")
+                proposed = settings.resolve_committed_jan_choice(self.store, self.market, expected=review)
+                self.cfg = proposed
+                self.forget_inventory()
+                self.activate_profile(proposed["profile"], quiet=True, persist=False)
+                self.settings_choice_note.set_text(tr(
+                    "Local preference recovered. Discover models again before connecting.",
+                    "Yerel seçim kurtarıldı. Bağlanmadan önce modelleri yeniden keşfet.",
+                    "Lokale Auswahl wiederhergestellt. Vor dem Verbinden Modelle erneut suchen."))
+                self.set_state("ready", self.settings_choice_note.get_text())
+            except (Hold, OSError) as exc:
+                self.settings_choice_note.set_text(str(exc))
+                self.set_state("ready", str(exc))
+            self.refresh_choice_recovery()
 
         def forget_choices(self):
             """Erase the stored choices, and state what it did not erase."""
