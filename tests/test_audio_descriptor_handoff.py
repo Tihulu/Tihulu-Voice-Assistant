@@ -70,15 +70,15 @@ class AudioDescriptorHandoffTests(unittest.IsolatedAsyncioTestCase):
                 with open(config_alias, "r+b") as stream:
                     stream.write(b"tamper")
             return await real_spawn(*args, **kwargs)
-        with patch.object(audio.shutil, "which", return_value=str(self.fixture)), \\
+        with patch.object(audio.shutil, "which", return_value=str(self.fixture)), \
              patch.object(audio.asyncio, "create_subprocess_exec", side_effect=spawn):
             async with audio.child("piper", "--model", self.model, self.output) as p:
                 self.assertEqual(await p.wait(), 0)
         self.assertEqual(self.output.read_bytes(), b"originalconfig-original")
 
     async def test_sidecar_sealing_failure_refuses_spawn(self):
-        with patch.object(audio.shutil, "which", return_value=str(self.fixture)), \\
-             patch.object(audio.os, "memfd_create", side_effect=OSError("fixture")), \\
+        with patch.object(audio.shutil, "which", return_value=str(self.fixture)), \
+             patch.object(audio.os, "memfd_create", side_effect=OSError("fixture")), \
              patch.object(audio.asyncio, "create_subprocess_exec") as spawn:
             with self.assertRaisesRegex(Hold, "audio_model_descriptor_unavailable"):
                 async with audio.child("piper", "--model", self.model, self.output):
