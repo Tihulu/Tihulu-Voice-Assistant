@@ -48,6 +48,7 @@ def child(host_net,host_port):
     from gateway import Context,FixtureGateway,Refused
     from inference import Candidate
     from adapter_protocol import LocalAdapter,prepare,local_request
+    from speech_result import SpeechResult,MAX_WAV
     import resource
     results=[]
     def record(case,ok,**extra):
@@ -101,7 +102,15 @@ def child(host_net,host_port):
                 time.sleep(.1)
             record("llm-real-server-ready",True)
             ctx=Context("llm-fixture","session","profile",1,"local","LOCAL_ONLY")
-            gate=FixtureGateway(ctx,(profiles.Rule("filesystem_read",(),"allow"),),clock=profiles.PolicyClock())
+            rules=tuple(profiles.Rule(x,(),"allow") for x in
+                        ("filesystem_read","filesystem_write","host_shell"))
+            gate=FixtureGateway(ctx,rules,clock=profiles.PolicyClock())
+            voice_version=subprocess.run(["/usr/bin/espeak-ng","--version"],stdin=subprocess.DEVNULL,
+                                         stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=8,check=True)
+            version=re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b",voice_version.stdout.decode("utf-8"))
+            if not version:
+                raise RuntimeError("speech version unavailable")
+            version=version.group(1)
             candidate=Candidate(MODEL,"llm","local","llama-"+ENGINE_REV,True,True,16,80)
             digests=[]
             for i,prompt in enumerate(PROMPTS):
@@ -126,7 +135,43 @@ def child(host_net,host_port):
                 record("llm-real-inference-"+str(i),result==content.encode("utf-8"),
                        tokens=len(tokens),result_digest=digest)
                 digests.append(digest)
+                # Explicit additional fixture permission, never auto-play
+                # or an inherited write grant from the text response.
+                artifact=identity+"-text"
+                output=identity+"-wav"
+                speech_call=adapter.prepare_speech(version,"en",artifact,output)
+                speech_req=speech_call.request(ctx)
+                speech_grant=gate.fixture_grant(identity+"-speech",speech_req,60)
+                voice,text=adapter.start_speech(version,"en",artifact,output,speech_grant)
+                source=Path("/tmp/"+artifact+".txt")
+                dest=Path("/tmp/"+output+".wav")
+                with source.open("xb") as handle:
+                    handle.write(text)
+                if dest.exists() or dest.is_symlink():
+                    raise RuntimeError("speech destination already exists")
+                voice.checkpoint()
+                subprocess.run(["/usr/bin/espeak-ng","-v","en","-s","150","-f",str(source),
+                                "-w",str(dest)],stdin=subprocess.DEVNULL,stdout=log,stderr=log,
+                               timeout=12,check=True)
+                if dest.is_symlink() or not dest.is_file() or not 44<dest.stat().st_size<=MAX_WAV:
+                    voice.cancel()
+                    raise RuntimeError("speech output invalid")
+                data=dest.read_bytes()
+                if source.read_bytes()!=result or hashlib.sha256(text).hexdigest()!=digest:
+                    voice.cancel()
+                    raise RuntimeError("speech source mismatch")
+                voice.complete(SpeechResult(speech_req.target,digest,"en",output,data))
+                receipt=voice.result()
+                record("llm-real-dependent-speech-"+str(i),receipt[4]==hashlib.sha256(data).hexdigest(),
+                       rate=receipt[5],frames=receipt[6])
                 gate.revoke(identity)
+                try:
+                    voice.result()
+                except Refused:
+                    speech_denied=True
+                else:
+                    speech_denied=False
+                record("llm-revoked-dependent-speech-"+str(i),speech_denied)
                 try:
                     adapter.result()
                 except Refused:
@@ -135,7 +180,7 @@ def child(host_net,host_port):
                     revoked=False
                 record("llm-revoked-result-"+str(i),revoked)
             record("llm-distinct-real-results",len(set(digests))==2)
-        except (ValueError,RuntimeError,OSError,http.client.HTTPException) as exc:
+        except (ValueError,RuntimeError,OSError,http.client.HTTPException,subprocess.SubprocessError) as exc:
             print(json.dumps({"case":"llm-runtime","status":"HOLD","reason":str(exc)[:1000]}),flush=True)
             with open("/tmp/llama.log","rb") as detail:
                 print(detail.read(4096).decode("utf-8","replace"),flush=True)
@@ -148,7 +193,7 @@ def child(host_net,host_port):
                 proc.kill()
                 proc.wait(timeout=3)
     record("llm-server-stopped",proc.poll() is not None)
-    return 0 if len(results)==11 and all(results) else 1
+    return 0 if len(results)==15 and all(results) else 1
 
 def main(binary,model):
     binary,model=Path(binary).resolve(),Path(model).resolve()
@@ -163,7 +208,7 @@ def main(binary,model):
         repo=Path(__file__).resolve().parents[1]
         code=root/"code"
         import shutil
-        for name in ("gateway.py","inference.py","adapter_protocol.py"):
+        for name in ("gateway.py","inference.py","adapter_protocol.py","capabilities.py","speech_result.py"):
             dst=code/name
             dst.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(repo/"experiments"/name,dst)
