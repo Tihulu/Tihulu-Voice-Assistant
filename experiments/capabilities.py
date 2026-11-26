@@ -21,6 +21,8 @@ CAPABILITIES = MappingProxyType({
     ("tesseract", "pdf_page_ocr"): ("document_engine", "private",
                                    ("artifact", "digest", "page", "render_digest", "language")),
     ("poppler", "pdf_extract"): ("document_engine", "private", ("artifact", "digest", "page")),
+    ("jan_local", "summarize_document"): ("document_engine", "private",
+                                         ("artifact", "digest", "page", "result_digest", "language")),
     ("poppler", "pdf_render"): ("document_engine", "private", ("artifact", "digest", "page")),
     ("pdf_engine", "pdf_export"): ("document_export", "private", ("artifact", "digest", "output")),
     ("search_provider", "web_search"): ("research", "public", ("query_digest",)),
@@ -68,7 +70,7 @@ def public_fixture_url(raw):
 
 
 def checked_value(key, value):
-    if key in ("digest", "query_digest", "render_digest"):
+    if key in ("digest", "query_digest", "render_digest", "result_digest"):
         if type(value) is not str or not _DIGEST.fullmatch(value):
             raise Refused("invalid_digest")
     elif key == "language":
