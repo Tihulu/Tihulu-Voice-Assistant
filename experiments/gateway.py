@@ -206,22 +206,30 @@ class FixtureGateway:
             self._revoked.add(grant.identity)
             raise
 
-    def _validate_locked(self, grant, req, now):
-        # Persist trusted edges at claim. Every later check follows them,
-        # including ordinary checkpoint() calls. Edges point only to
-        # already-claimed grants; the bounded grant set prevents cycles and
-        # visited identities prevent repeated expansion of a shared ancestor.
-        self._validate_one_locked(grant, req, now)
-        visited = {grant.identity}
-        pending = list(self._dependencies.get(grant.identity, ()))
+    def _validate_locked(self, grant, req, now, validated=None):
+        # One lock and one policy-clock observation: evaluate each exact grant
+        # once even if a dense dependency DAG shares many ancestors. Repeated
+        # references must still carry the identical registered grant and exact
+        # request; never skip the dependency-claimed check.
+        if validated is None:
+            validated = {}
+        pending = [(grant,req,False)]
         while pending:
-            parent, parent_req = pending.pop()
-            self._validate_one_locked(parent, parent_req, now)
-            if parent.identity not in self._claimed:
+            current,current_req,is_parent = pending.pop()
+            if type(current) is not Grant or type(current_req) is not Request:
+                raise Refused("invalid_grant")
+            token(current.identity)
+            if is_parent and current.identity not in self._claimed:
                 raise Refused("dependency_not_claimed")
-            if parent.identity not in visited:
-                visited.add(parent.identity)
-                pending.extend(self._dependencies.get(parent.identity, ()))
+            previous=validated.get(current.identity)
+            if previous is not None:
+                if previous[0] is not current or previous[1]!=current_req:
+                    raise Refused("request_mismatch")
+                continue
+            self._validate_one_locked(current,current_req,now)
+            validated[current.identity]=(current,current_req)
+            pending.extend((parent,parent_req,True)
+                           for parent,parent_req in self._dependencies.get(current.identity,()))
 
     def _validate_grant(self, grant, req, *, claim=False):
         """Validate or atomically claim a fixture initiation, not an OS effect."""
@@ -237,11 +245,12 @@ class FixtureGateway:
         if type(dependencies) is not tuple or not 1 <= len(dependencies) <= MAX_GRANTS:
             raise Refused("invalid_dependency_group")
         identities = set()
+        validated = {}
         for pair in dependencies:
             if type(pair) is not tuple or len(pair) != 2:
                 raise Refused("invalid_dependency_group")
             grant, req = pair
-            self._validate_locked(grant, req, now)
+            self._validate_locked(grant, req, now, validated)
             if grant.identity in identities or grant.identity not in self._claimed:
                 raise Refused("dependency_not_claimed")
             identities.add(grant.identity)
