@@ -1954,6 +1954,11 @@ def create_window(app, loop, bridge=None):
                 card = known
             proposed = settings.checked(self.cfg)
             proposed["market_refs"][card.storage_ref] = str(path)
+            digests = proposed.setdefault("audio_digests", {})
+            previous_digest = digests.get(card.storage_ref)
+            if previous_digest is not None and previous_digest != inspected[1].digest:
+                raise Hold("model_digest_mismatch")
+            digests[card.storage_ref] = inspected[1].digest
             with self.market.transfer_lease(card.model_id), self.market._write_guard():
                 if self.market.lookup_card(card.model_id) != known:
                     raise Hold("registry_card_changed")
@@ -4088,6 +4093,10 @@ def create_window(app, loop, bridge=None):
                 self.market.unregister(model_id, expected=expected)
                 self.cfg["market_refs"] = {k: v for k, v in self.cfg.get("market_refs", {}).items()
                                            if self.ref_still_registered(k)}
+                self.cfg["audio_digests"] = {k: v for k, v in self.cfg.get("audio_digests", {}).items()
+                                             if k in self.cfg["market_refs"]}
+                if not self.cfg["audio_digests"]:
+                    self.cfg.pop("audio_digests")
                 self.save()
                 self.build_market_page()
             except Hold as exc:
@@ -4289,7 +4298,8 @@ def create_window(app, loop, bridge=None):
                                                      epoch, selection=lambda: self.cfg["voices"].get(lang),
                                                      expected=speech.voice_id)
                     checked_model = await self.runtime_model_proofs.bind(
-                        speech.voice_id, self.saved_cfg["market_refs"], checkpoint=checkpoint)
+                        speech.voice_id, self.saved_cfg["market_refs"], digests=self.saved_cfg.get("audio_digests", {}),
+                        checkpoint=checkpoint)
                     await audio.speak(speech, progress, checkpoint=checked_model)
             self.submit(run, label=tr("Voice preview", "Ses önizlemesi", "Stimmprobe"))
 
@@ -4380,7 +4390,8 @@ def create_window(app, loop, bridge=None):
                                                  expected_generation=(context[0], context[4]))
                 checkpoint()
                 checked_model = await self.runtime_model_proofs.bind(
-                    model, self.saved_cfg["market_refs"], checkpoint=checkpoint)
+                    model, self.saved_cfg["market_refs"], digests=self.saved_cfg.get("audio_digests", {}),
+                        checkpoint=checkpoint)
                 self.set_state("transcribing")
                 raw = await audio.transcribe(model, path, runner=self.transcribe_runner,
                                              checkpoint=checked_model, expected_identity=identity)
@@ -5051,7 +5062,8 @@ def create_window(app, loop, bridge=None):
                     self.note_leases()
                     check_voice_grant()
                     checked_model = await self.runtime_model_proofs.bind(
-                        stt_choice, self.saved_cfg["market_refs"], checkpoint=check_voice_grant)
+                        stt_choice, self.saved_cfg["market_refs"], digests=self.saved_cfg.get("audio_digests", {}),
+                        checkpoint=check_voice_grant)
                     text=await audio.listen(stt_choice,self.finish,progress, checkpoint=checked_model)
                     checked_model()
                 # Already captured samples cannot be undone. Refuse to display
@@ -5098,7 +5110,8 @@ def create_window(app, loop, bridge=None):
                     self.note_leases()
                     check_voice_grant()
                     checked_voice = await self.runtime_model_proofs.bind(
-                        speech.voice_id, self.saved_cfg["market_refs"], checkpoint=check_voice_grant)
+                        speech.voice_id, self.saved_cfg["market_refs"], digests=self.saved_cfg.get("audio_digests", {}),
+                        checkpoint=check_voice_grant)
                     playback = loop.create_task(audio.speak(speech, progress, checkpoint=checked_voice))
                     self.playback = playback
                     try:
