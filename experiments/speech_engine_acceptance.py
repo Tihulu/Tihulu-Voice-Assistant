@@ -10,7 +10,7 @@ import socket
 import subprocess
 import tempfile
 import sys
-from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus
+from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus, turbo_short_args
 from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
@@ -126,7 +126,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
                 if len(stdout)>65536 or len(stderr)>65536:
                     raise RuntimeError("speech capture limit")
                 if proc.returncode:
-                    raise RuntimeError("speech child failed: "+stderr.decode("utf-8","replace")[:1000])
+                    raise RuntimeError("speech child failed exit="+str(proc.returncode)+": "+stderr.decode("utf-8","replace")[-2000:])
                 return stdout
         source.write_text(TEXT["en"],encoding="utf-8")
         host=os.readlink("/proc/self/ns/net")
@@ -272,8 +272,20 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 stt_grant=gate.fixture_grant("stt-"+case_id,stt_req,60)
                 transcript=job.start_transcription(ENGINE_REV,MODEL_SHA,"transcript-"+case_id,stt_grant)
                 transcript.checkpoint()
-                run(["/work/whisper-cli","-m","/work/model.bin","-f","/work/sample.wav",
-                     "-l",lang,"-t","2","-ng","-nt","-otxt","-of","/work/out/transcript"],stt_scope,wrapper=STT_WRAPPER,timeout=120)
+                args=["/work/whisper-cli","-m","/work/model.bin","-f","/work/sample.wav",
+                     "-l",lang,"-t","2","-ng","-nt","-otxt","-of","/work/out/transcript"]
+                if stt_profile=="turbo-q5":
+                    # Separate explicitly labeled short-audio decoder profile.
+                    # Preserve CPU, wall, grant and output ceilings.
+                    args+=turbo_short_args(receipt[5],receipt[6])
+                    print(json.dumps({"case_id":case_id,"decoder":"turbo-short-greedy","extra_args":args[-6:]}),flush=True)
+                try:
+                    run(args,stt_scope,wrapper=STT_WRAPPER,timeout=120)
+                except RuntimeError as exc:
+                    transcript.cancel()
+                    qrecord("multilingual-stt-engine-"+case_id,False,reason=str(exc)[:2500])
+                    job.cancel()
+                    return 1
                 path=stt_out/"transcript.txt"
                 if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=16384:
                     transcript.cancel()
