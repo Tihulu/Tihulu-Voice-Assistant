@@ -76,6 +76,14 @@ class TranscriptFixture:
                 raise
             return self._result
 
+    def review_binding(self):
+        """Trusted fixture review snapshot; no transport or execution authority."""
+        with self._lock:
+            if self._state!="completed" or self._result is None:
+                raise Refused("transcript_no_result")
+            self._g.checkpoint(self._grant,self._req)
+            return (self._g,self._grant,self._req,*self._result)
+
     def _turn_input(self,candidate,identity,response_language,*,native_completion=False,edited_text=None):
         from inference import Candidate
         from adapter_protocol import prepare,local_request,native_voice_payload,VOICE_NATIVE_MODEL,VOICE_NATIVE_PROVIDER
