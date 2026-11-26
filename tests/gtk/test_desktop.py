@@ -4927,6 +4927,14 @@ class ApprovedSitesTests(DesktopTests):
         self.ui.web_targets.select_row(self.rows()[0])
         self.assertTrue(self.ui.web_read.get_sensitive())
 
+    def test_submit_path_does_not_grant_submission_without_checkbox(self):
+        self.ui.web_target.set_text("https://example.com/form/submit")
+        self.ui.web_submit.set_active(False)
+        self.click(self.ui.web_add)
+        self.assertEqual(settings.load()["web_targets"],
+                         [{"url": "https://example.com/form/submit", "submit": False}])
+        self.assertNotIn("submits allowed", self.rows()[0].get_child().get_label())
+
     def test_a_submit_right_is_asked_for_separately_and_shown(self):
         self.register("https://example.test/form", submit=True)
         self.assertIn("submits allowed", self.rows()[0].get_child().get_label())

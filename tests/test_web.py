@@ -5,7 +5,7 @@ import unittest
 
 from tihulu_jarvis.voice.m1 import Hold
 from tihulu_jarvis.web import (MAX_TARGETS, Target, forget, parse, plan,
-                               register, text_preview)
+                               register, text_preview, from_entry)
 
 
 class TargetTests(unittest.TestCase):
@@ -25,10 +25,25 @@ class TargetTests(unittest.TestCase):
                     parse(raw)
 
     def test_a_submit_target_is_a_separate_right(self):
-        approved = parse("https://example.test/form/submit")
-        self.assertTrue(approved.submit)
-        plain = parse("https://example.test/form")
+        plain = parse("https://example.test/form/submit")
         self.assertFalse(plain.submit)
+        approved = from_entry({"url": plain.url, "submit": True})
+        self.assertTrue(approved.submit)
+        for bad in ("false", 1, None, [], {}):
+            with self.subTest(bad=bad), self.assertRaises(Hold):
+                from_entry({"url": plain.url, "submit": bad})
+
+    def test_ambiguous_authority_and_nonpublic_literals_are_refused(self):
+        for raw in ("https://example.test:8443/x", "https://example.test:443/x",
+                    "https://example.test:/x", "https://example.test./x",
+                    "https://example.test\t/x", "https://[::1]/x",
+                    "https://[broken/x", "https://224.0.0.1/x",
+                    "https://100.64.0.1/x", "https://127.1/x",
+                    "https://0177.0.0.1/x", "https://-bad.test/x",
+                    "https://example.test\n/x"):
+            with self.subTest(raw=raw), self.assertRaises(Hold):
+                parse(raw)
+        self.assertEqual(parse("https://EXAMPLE.TEST/x").url, "https://example.test/x")
 
 
 class PlanTests(unittest.TestCase):
@@ -39,7 +54,7 @@ class PlanTests(unittest.TestCase):
     def test_submitting_needs_the_separate_right(self):
         with self.assertRaisesRegex(Hold, "submission_not_approved"):
             plan(parse("https://example.test/form"), submit=True)
-        approved = parse("https://example.test/form/submit")
+        approved = from_entry({"url": "https://example.test/form/submit", "submit": True})
         self.assertEqual(plan(approved, submit=True),
                          ("POST", "https://example.test/form/submit", "submission_approved"))
 
