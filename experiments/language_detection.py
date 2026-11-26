@@ -9,7 +9,8 @@ from capabilities import CapabilityCall
 MIN_CONFIDENCE_PPM=500000
 _LINE=re.compile(rb"whisper_full_with_state: auto-detected language: ([a-z]{2,3}) \(p = ([01])\.([0-9]{6})\)\Z")
 
-def parse_detection(raw):
+def detection_observation(raw):
+    """Parse a bounded observation, never grant authority or select a language."""
     if type(raw) is not bytes or not 0<len(raw)<=65536:
         raise Refused("language_detection_log_limit")
     candidates=[line for line in raw.splitlines() if b"auto-detected language:" in line]
@@ -20,6 +21,12 @@ def parse_detection(raw):
         raise Refused("language_detection_invalid")
     lang=match[1].decode("ascii")
     ppm=int(match[2])*1000000+int(match[3])
+    if not 0<=ppm<=1000000:
+        raise Refused("language_detection_invalid")
+    return lang,ppm
+
+def parse_detection(raw):
+    lang,ppm=detection_observation(raw)
     if lang not in ("tr","en","de") or not MIN_CONFIDENCE_PPM<=ppm<=1000000:
         raise Refused("language_detection_hold")
     return lang,ppm

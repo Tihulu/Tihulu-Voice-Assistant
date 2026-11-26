@@ -58,3 +58,12 @@ class DetectionTests(unittest.TestCase):
         grant=self.g.fixture_grant("bad",bad.request(self.ctx),60)
         with self.assertRaises(Refused):
             self.job.start_transcription("text",grant)
+
+
+    def test_observation_does_not_authorize_low_or_unsupported_language(self):
+        from language_detection import detection_observation
+        for lang,score in (("tr",499999),("fr",990000)):
+            raw=("whisper_full_with_state: auto-detected language: "+lang+" (p = "+format(score/1000000,".6f")+")").encode()
+            self.assertEqual(detection_observation(raw),(lang,score))
+            with self.assertRaisesRegex(Refused,"language_detection_hold"):
+                parse_detection(raw)
