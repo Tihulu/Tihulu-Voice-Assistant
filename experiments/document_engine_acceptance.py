@@ -177,6 +177,35 @@ def main():
         record("mixed-pdf-scan-page-contract", passed and digest(mixed)==mixed_digest
                and digest(rendered)==rendered_digest, page=2, actual=actual,
                source_sha256=mixed_digest, render_sha256=rendered_digest, result_sha256=result_digest)
+        # Fixed selected pages; output files never replace the input.
+        split_source = digest(pdf)
+        split_dir = root / "split"
+        split_dir.mkdir(mode=0o700)
+        run(["pdfseparate","-f","1","-l","3",str(pdf),str(split_dir/"page-%d.pdf")],root)
+        split_paths = [split_dir/("page-"+str(page)+".pdf") for page in (1,2,3)]
+        record("pdf-split-exact-output-set",
+               sorted(p.name for p in split_dir.iterdir())==["page-1.pdf","page-2.pdf","page-3.pdf"]
+               and all(p.is_file() for p in split_paths) and digest(pdf)==split_source)
+        def page_count(path):
+            info = run(["pdfinfo",str(path)],root).stdout.decode("utf-8")
+            return [line.split(":",1)[1].strip() for line in info.splitlines()
+                    if line.startswith("Pages:")]
+        def page_text(path,page):
+            return run(["pdftotext","-f",str(page),"-l",str(page),"-enc","UTF-8",
+                        str(path),"-"],root).stdout.decode("utf-8")
+        expected = list(TEXT.values())
+        record("pdf-split-text-and-page-count",
+               all(page_count(p)==["1"] and norm(page_text(p,1))==norm(t)
+                   for p,t in zip(split_paths,expected)))
+        before = [digest(p) for p in split_paths]
+        merged = root/"reordered.pdf"
+        run(["pdfunite",str(split_paths[2]),str(split_paths[0]),str(split_paths[1]),str(merged)],root)
+        record("pdf-merge-page-order",page_count(merged)==["3"]
+               and all(norm(page_text(merged,page))==norm(expected[index])
+                       for page,index in enumerate((2,0,1),1)),
+               output_sha256=digest(merged))
+        record("pdf-merge-sources-unchanged",before==[digest(p) for p in split_paths]
+               and digest(pdf)==split_source,source_sha256=split_source)
         corrupt = root / "bad.pdf"
         corrupt.write_bytes(b"%PDF-1.4\nnot a PDF\n")
         bad = run(["pdftotext", str(corrupt), "-"], root, success=False)
@@ -189,7 +218,7 @@ def main():
         out.save()
         locked = run(["pdftotext", str(encrypted), "-"], root, success=False)
         record("encrypted-pdf-without-password-refused", locked.returncode != 0 and not locked.stdout)
-    return 0 if len(rows) == 21 and all(row["status"] == "PASS" for row in rows) else 1
+    return 0 if len(rows) == 25 and all(row["status"] == "PASS" for row in rows) else 1
 
 
 if __name__ == "__main__":
