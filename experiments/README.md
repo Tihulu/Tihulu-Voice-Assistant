@@ -168,3 +168,5 @@ CAP-08 actual llama.cpp→eSpeak NG in isolated CPU LLM fixture: each real compl
 CAP-08 typed transcript→local LLM→speech chain: exact completed live transcript, source/model/result digests and explicit response language derive distinct local turn grant, then distinct voice output grant. Five new regressions for immutable payload, wrong language, cloud denial, and ancestor revoke across all three stages. No auto-submit, automatic playback or actual end-to-end inference claim.
 
 CAP-08 #360 HOLD: espeak --version died SIGXFSZ before first inference, 7 earlier/host checks passed; cause not proven. Successor disables unnecessary PulseAudio autospawn/shared memory via private config and nonexistent private socket, moves version probe before server and bounds capture; no resource-limit increase or security relaxation. Real 17-case rerun required.
+
+CAP-08 bind transcript-selected response language to the LocalAdapter voice-turn input and reject mismatched downstream speech language, before granting any effect. Two regression methods. This is selected-language consistency, not automatic language identification or semantic language quality.
