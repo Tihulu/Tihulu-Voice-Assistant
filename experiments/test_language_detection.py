@@ -67,3 +67,51 @@ class DetectionTests(unittest.TestCase):
             self.assertEqual(detection_observation(raw),(lang,score))
             with self.assertRaisesRegex(Refused,"language_detection_hold"):
                 parse_detection(raw)
+
+
+    def test_owner_override_is_distinct_from_auto_detection(self):
+        raw=b"whisper_full_with_state: auto-detected language: ko (p = 0.107022)"
+        self.assertEqual(self.job.hold_observation(raw)[:2],("ko",107022))
+        with self.assertRaises(Refused):
+            self.job.result()
+        with self.assertRaises(Refused):
+            self.job.prepare_transcription("text")
+        call,review=self.job.prepare_override("tr","text")
+        req=call.request(self.ctx)
+        grant=self.g.fixture_grant("corrected",req,60)
+        with self.assertRaises(Refused):
+            self.job.start_override("tr","text",grant,None)
+        approved=self.g.fixture_grant("owner-choice",review,60)
+        trans=self.job.start_override("tr","text",grant,approved)
+        trans.complete(Transcript(req.target,"a"*64,"b"*64,"tr","text","Merhaba"))
+        self.assertEqual(trans.result()[0].language,"tr")
+        self.g.revoke("owner-choice")
+        with self.assertRaises(Refused):
+            trans.result()
+
+    def test_override_binds_exact_language_output_and_single_use(self):
+        self.job.hold_observation(b"whisper_full_with_state: auto-detected language: ko (p = 0.107022)")
+        call,review=self.job.prepare_override("tr","text")
+        approved=self.g.fixture_grant("owner-choice",review,60)
+        for lang,out in (("en","text"),("tr","other")):
+            changed,_=self.job.prepare_override(lang,out)
+            grant=self.g.fixture_grant("changed-"+lang+"-"+out,changed.request(self.ctx),60)
+            with self.assertRaises(Refused):
+                self.job.start_override(lang,out,grant,approved)
+        grant=self.g.fixture_grant("exact",call.request(self.ctx),60)
+        self.job.start_override("tr","text",grant,approved)
+        with self.assertRaises(Refused):
+            self.job.start_override("tr","text",self.g.fixture_grant("again",call.request(self.ctx),60),approved)
+
+    def test_override_requires_real_hold_and_live_parent(self):
+        with self.assertRaises(Refused):
+            self.job.prepare_override("tr","text")
+        with self.assertRaises(Refused):
+            self.job.hold_observation(b"whisper_full_with_state: auto-detected language: tr (p = 0.990000)")
+        self.job.hold_observation(b"whisper_full_with_state: auto-detected language: ko (p = 0.107022)")
+        call,review=self.job.prepare_override("tr","text")
+        grant=self.g.fixture_grant("exact",call.request(self.ctx),60)
+        approved=self.g.fixture_grant("owner-choice",review,60)
+        self.job.cancel()
+        with self.assertRaises(Refused):
+            self.job.start_override("tr","text",grant,approved)

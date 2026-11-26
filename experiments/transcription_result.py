@@ -18,7 +18,7 @@ class Transcript:
     text: str
 
 class TranscriptFixture:
-    def __init__(self,gateway,context,call,grant,*,dependencies=()):
+    def __init__(self,gateway,context,call,grant,*,dependencies=(),language_review=None):
         if type(gateway) is not FixtureGateway or type(call) is not CapabilityCall or (call.adapter,call.operation)!=("whisper_cpp","transcribe_wav"):
             raise Refused("transcript_fixture")
         self._g,self._grant=gateway,grant
@@ -27,7 +27,11 @@ class TranscriptFixture:
         self._call=call
         if type(dependencies) is not tuple:
             raise Refused("invalid_transcript_dependencies")
-        if dependencies:
+        if language_review is not None:
+            if type(language_review) is not tuple or len(language_review)!=2:
+                raise Refused("invalid_language_review")
+            gateway.claim_language_override(grant,self._req,call,dependencies,*language_review)
+        elif dependencies:
             gateway.claim_with_dependencies(grant,self._req,dependencies)
         else:
             gateway.claim(grant,self._req)
