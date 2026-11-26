@@ -5,7 +5,7 @@ from hashlib import sha256
 import json
 from gateway import Refused
 from speech_result import pcm_info
-from mixed_voice_review import split_pcm
+from mixed_voice_review import split_pcm,MixedVoiceReview,EditedMixedPreview
 
 @dataclass(frozen=True)
 class BoundaryRow:
@@ -45,3 +45,19 @@ def verify_boundary_preview(data,cuts,shown):
     if fresh!=shown:
         raise Refused("manual_boundary_preview_stale")
     return split_pcm(data,fresh.cuts)
+
+
+@dataclass(frozen=True)
+class ManualReviewOutcome:
+    status: str
+    reason: str | None
+    preview: EditedMixedPreview | None
+
+def inspect_manual_review(data,cuts,shown,transcripts,model_digest,edits=()):
+    """Fresh boundary and transcript checks for a UI; no submission authority."""
+    try:
+        verify_boundary_preview(data,cuts,shown)
+        preview=MixedVoiceReview(data,cuts,transcripts,model_digest).edit_preview(edits)
+    except Refused as exc:
+        return ManualReviewOutcome("HOLD",str(exc),None)
+    return ManualReviewOutcome("READY",None,preview)
