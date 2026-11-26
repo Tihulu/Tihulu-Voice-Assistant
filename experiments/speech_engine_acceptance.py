@@ -44,18 +44,30 @@ print(json.dumps({"namespace":os.readlink("/proc/self/ns/net"),"denied":denied,
     "no_device":not Path("/dev/snd").exists()}))
 """
 
-def main(stt_binary=None,stt_model=None):
+# Pinned public model SHA-256 values from the upstream HF revision
+# fb5ed9369c26eaf08392504d8446da431e0fffb9. No automatic fallback.
+STT_MODELS={
+    "tiny":("be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21",85000000),
+    "base":("60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe",160000000),
+    "small":("1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",500000000),
+}
+
+def main(stt_binary=None,stt_model=None,stt_profile="tiny"):
     if os.getuid()==0:
         raise RuntimeError("root fixture prohibited")
     stt_paths=None
     if stt_binary is not None or stt_model is not None:
-        from whisper_engine_acceptance import MODEL_SHA,digest as model_digest
+        from whisper_engine_acceptance import digest as model_digest
+        if stt_profile not in STT_MODELS:
+            raise RuntimeError("unknown pinned STT profile")
+        MODEL_SHA,model_limit=STT_MODELS[stt_profile]
         if not stt_binary or not stt_model:
             raise RuntimeError("incomplete STT fixture input")
         stt_paths=tuple(Path(p).resolve() for p in (stt_binary,stt_model))
-        if (not all(p.is_file() for p in stt_paths) or not 0<stt_paths[1].stat().st_size<=85000000
+        if (not all(p.is_file() for p in stt_paths) or not 0<stt_paths[1].stat().st_size<=model_limit
                 or model_digest(stt_paths[1])!=MODEL_SHA):
             raise RuntimeError("invalid pinned STT model")
+        print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
     results=[]
     quality=[]
     def qrecord(case,ok,**extra):
@@ -86,13 +98,13 @@ def main(stt_binary=None,stt_model=None):
                  "--ro-bind",str(source),"/work/text.txt","--bind",str(output),"/work/out",
                  "--setenv","HOME","/tmp","--setenv","PATH","/usr/bin",
                  "--setenv","LC_ALL","C.UTF-8","--chdir","/work","--remount-ro","/"]
-        def run(args,active_prefix=None):
+        def run(args,active_prefix=None,*,wrapper=WRAPPER,timeout=20):
             with tempfile.TemporaryFile() as out,tempfile.TemporaryFile() as err:
-                proc=subprocess.Popen((prefix if active_prefix is None else active_prefix)+["--","/usr/bin/python3","-I","-c",WRAPPER]+args,
+                proc=subprocess.Popen((prefix if active_prefix is None else active_prefix)+["--","/usr/bin/python3","-I","-c",wrapper]+args,
                     stdin=subprocess.DEVNULL,stdout=out,stderr=err,start_new_session=True,
                     env={"PATH":"/usr/bin:/bin","LC_ALL":"C.UTF-8"})
                 try:
-                    proc.wait(timeout=20)
+                    proc.wait(timeout=timeout)
                 except subprocess.TimeoutExpired:
                     os.killpg(proc.pid,signal.SIGKILL)
                     proc.wait(timeout=5)
@@ -217,7 +229,7 @@ def main(stt_binary=None,stt_model=None):
             record("speech-flac-dependent-receipt-"+lang,conversion.result()[4]==hashlib.sha256(flac_data).hexdigest())
             transcript=None
             if stt_paths:
-                from whisper_engine_acceptance import MODEL_SHA,ENGINE_REV,digest as model_digest
+                from whisper_engine_acceptance import ENGINE_REV,WRAPPER as STT_WRAPPER,digest as model_digest
                 from transcription_result import Transcript
                 stt_out=root/("stt-"+lang)
                 stt_out.mkdir(mode=0o700)
@@ -250,7 +262,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 transcript=job.start_transcription(ENGINE_REV,MODEL_SHA,"transcript-"+lang,stt_grant)
                 transcript.checkpoint()
                 run(["/work/whisper-cli","-m","/work/model.bin","-f","/work/sample.wav",
-                     "-l",lang,"-t","2","-ng","-nt","-otxt","-of","/work/out/transcript"],stt_scope)
+                     "-l",lang,"-t","2","-ng","-nt","-otxt","-of","/work/out/transcript"],stt_scope,wrapper=STT_WRAPPER,timeout=120)
                 path=stt_out/"transcript.txt"
                 if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=16384:
                     transcript.cancel()
