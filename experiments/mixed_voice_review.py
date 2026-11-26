@@ -69,6 +69,20 @@ class EditedMixedPreview:
     text_digest: str
     review_digest: str
 
+@dataclass(frozen=True)
+class MixedReviewOutcome:
+    status: str
+    reason: str | None
+    preview: MixedPreview | None
+
+def inspect_mixed_review(data,cuts,transcripts,model_digest):
+    """UI-facing fail-closed outcome. Never return partial or stale transcript text."""
+    try:
+        result=MixedVoiceReview(data,cuts,transcripts,model_digest).preview()
+    except Refused as exc:
+        return MixedReviewOutcome("HOLD",str(exc),None)
+    return MixedReviewOutcome("READY",None,result)
+
 class MixedVoiceReview:
     """Build a fresh review from live typed transcript fixtures only.
 

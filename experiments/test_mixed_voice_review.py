@@ -147,3 +147,27 @@ class MixedVoiceTests(unittest.TestCase):
         jobs[1].cancel()
         with self.assertRaises(Refused):
             review.edit_preview(((0,original.segments[0].transcript_digest,"Merhaba dünya"),))
+
+
+    def test_mixed_review_exact_deadline_reports_hold_without_text(self):
+        from unittest.mock import patch
+        from mixed_voice_review import inspect_mixed_review
+        # Fixed simulated policy time, not a renewed or extended real grant.
+        with patch("tihulu_jarvis.profiles.time.time",return_value=1000), \
+             patch("tihulu_jarvis.profiles.time.monotonic",return_value=200):
+            g=FixtureGateway(self.ctx,self.rules,clock=profiles.PolicyClock())
+            jobs=self.make(gateway=g)
+            self.assertEqual(inspect_mixed_review(self.data,self.cuts,jobs,"a"*64).status,"READY")
+        with patch("tihulu_jarvis.profiles.time.time",return_value=1060), \
+             patch("tihulu_jarvis.profiles.time.monotonic",return_value=260):
+            outcome=inspect_mixed_review(self.data,self.cuts,jobs,"a"*64)
+            self.assertEqual((outcome.status,outcome.reason,outcome.preview),("HOLD","expired",None))
+
+    def test_mixed_review_revoked_or_incomplete_never_returns_partial_text(self):
+        from mixed_voice_review import inspect_mixed_review
+        jobs=self.make()
+        jobs[0].cancel()
+        for selected in (jobs,jobs[:2]):
+            result=inspect_mixed_review(self.data,self.cuts,selected,"a"*64)
+            self.assertEqual(result.status,"HOLD")
+            self.assertIsNone(result.preview)

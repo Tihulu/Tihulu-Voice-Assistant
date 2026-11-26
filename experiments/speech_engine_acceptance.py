@@ -581,8 +581,14 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 if len(transcripts)!=len(paused_pieces):
                     record("mixed-auto-fresh-ordered-review",False,reason="segment_detection_hold")
                     return 1
+                from mixed_voice_review import inspect_mixed_review
+                outcome=inspect_mixed_review(pause_data,proposed,tuple(transcripts),MODEL_SHA)
+                if outcome.status!="READY":
+                    record("mixed-auto-fresh-ordered-review",False,reason=outcome.reason,
+                           review_status=outcome.status)
+                    return 1
                 mixed=MixedVoiceReview(pause_data,proposed,tuple(transcripts),MODEL_SHA)
-                view=mixed.preview()
+                view=outcome.preview
                 record("mixed-auto-fresh-ordered-review",
                        [row.language for row in view.segments]==[lang for _,lang,_ in samples]
                        and view.text=="\n".join(t.result()[0].text for t in transcripts),
