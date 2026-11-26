@@ -33,11 +33,17 @@ class WaveRun:
         self._thread()
         if self._cancelled:
             raise Refused("agent_run_cancelled")
-        if type(context) is not Context or context!=self._gateway.context:
-            raise Refused("agent_context_changed")
-        fresh=plan_agents(context,self._workers,candidates,self._budget,self._limit,self._preference)
-        if fresh!=self._plan:
-            raise Refused("agent_plan_changed")
+        try:
+            if type(context) is not Context or context!=self._gateway.context:
+                raise Refused("agent_context_changed")
+            fresh=plan_agents(context,self._workers,candidates,self._budget,self._limit,self._preference)
+            if fresh!=self._plan:
+                raise Refused("agent_plan_changed")
+        except Refused:
+            # Observed stale context/inventory is terminal, even if the old
+            # snapshot is later supplied again. No automatic replan.
+            self.cancel()
+            raise
 
     def _wave(self):
         return next((w for w in self._plan.waves if any(a.worker not in self._done for a in w)),())
@@ -59,8 +65,13 @@ class WaveRun:
         req=self.request(worker)
         # Prior waves are complete. Bind the entire earlier wave barrier
         # (including transitive grant dependencies) before claiming a child.
-        parents=tuple(self._claims[a.worker] for wave in self._plan.waves
-                      for a in wave if a.worker in self._done)
+        current_wave=self._wave()
+        previous=[]
+        for wave in self._plan.waves:
+            if wave is current_wave:
+                break
+            previous.extend(self._claims[a.worker] for a in wave)
+        parents=tuple(previous)
         if parents:
             self._gateway.claim_with_dependencies(grant,req,parents)
         else:
