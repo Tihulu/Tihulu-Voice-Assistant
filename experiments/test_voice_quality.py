@@ -65,6 +65,7 @@ class VoiceQualityTests(unittest.TestCase):
             ("mixed-auto","small",(True,True,22)),
             ("mixed-auto-turbo","turbo-q5",(True,True,22)),
             ("mixed-auto-piper","small",(True,True,22)),
+            ("mixed-auto-piper-short","small",(True,True,22)),
             ("mixed-auto-reviewed","small",(True,True,24)),
             ("mixed-auto-reviewed-short","small",(True,True,24))):
             self.assertEqual(speech_corpus_profile(name,engine,True),expected)
@@ -73,3 +74,9 @@ class VoiceQualityTests(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 speech_corpus_profile(name,engine,False)
         self.assertEqual(speech_corpus_profile("original","tiny",False),(False,False,0))
+
+    def test_neural_short_dispatch_rejects_unrecognized_profiles(self):
+        from voice_quality import speech_corpus_profile
+        for name in ("mixed-auto-piper-short-reviewed","mixed-auto-piper-short-turbo","mixed-auto-piper-short "):
+            with self.assertRaises(RuntimeError):
+                speech_corpus_profile(name,"small",True)
