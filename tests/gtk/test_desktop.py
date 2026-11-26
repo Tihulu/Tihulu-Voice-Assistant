@@ -317,6 +317,31 @@ class FreshStartTests(DesktopFixture):
         self.text("Merhaba!")
         self.assertEqual(len(self.ui.session.history), 2)
 
+    def test_discovery_write_failure_does_not_publish_inventory(self):
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        before = settings.load()
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.ui.reload.emit("clicked")
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "settings_unwritable")
+        self.assertEqual(self.ui.inventory, ())
+        self.assertEqual(self.ui.cfg, before)
+        self.assertEqual(settings.load(), before)
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+
+    def test_discovery_refuses_stale_settings_before_inventory_publication(self):
+        self.ui.url.set_text("http://127.0.0.1:9876")
+        before = settings.load()
+        changed = {**before, "text_scale": "large"}
+        settings.save(changed)
+        self.ui.reload.emit("clicked")
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "settings_changed")
+        self.assertEqual(self.ui.inventory, ())
+        self.assertEqual(self.ui.cfg, before)
+        self.assertEqual(settings.load(), changed)
+        self.assertFalse(self.ui.return_to_chat.get_sensitive())
+
     def test_discovery_failure_invalidates_previously_ready_inventory(self):
         self.ui.url.set_text("http://127.0.0.1:9876")
         self.ui.reload.emit("clicked")
