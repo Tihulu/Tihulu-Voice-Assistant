@@ -68,6 +68,20 @@ class JanTests(unittest.IsolatedAsyncioTestCase):
             with self.assertRaises(Hold):
                 await body(reader)
 
+    async def test_invalid_messages_refused_before_connect_in_both_modes(self):
+        jan = Jan("http://127.0.0.1:9876", "fixture")
+        with patch.object(jan, "_connect", new_callable=AsyncMock) as connect:
+            for messages in (None, (), "not messages", (object(),),
+                             (Message("user", "bad\x00text"),),
+                             (Message("user", "\ud800"),),
+                             (Message("tool", "fixture"),)):
+                for callback in (None, lambda _: None):
+                    with self.subTest(messages=repr(messages)), self.assertRaisesRegex(Hold, "invalid_messages"):
+                        await jan.chat(messages, on_delta=callback)
+            with self.assertRaisesRegex(Hold, "invalid_messages"):
+                await jan.chat((Message("user", "hi"),), on_delta=True)
+            connect.assert_not_called()
+
     async def test_inventory_no_model_guess(self):
         jan = Jan("http://127.0.0.1:9876")
         with patch.object(jan,"_request",AsyncMock(return_value={"data":[{"id":"fixture"},{"id":"fixture"},{},None,{"id":"bad\nentry"}]})) as req:
@@ -166,6 +180,17 @@ class JanStreamTests(unittest.IsolatedAsyncioTestCase):
         async with server:
             with self.assertRaisesRegex(Hold, "jan_invalid_response"):
                 await self.client(server).chat((Message("user", "hi"),), on_delta=lambda p: None)
+
+    async def test_ambiguous_and_nonfinite_json_refused_in_full_and_stream(self):
+        full = b'{"choices":[{"message":{"role":"assistant","content":"one","content":"two"}}]}'
+        stream = b'data: {"choices":[{"delta":{"content":"one","content":"two"}}]}\n\ndata: [DONE]\n\n'
+        for raw, callback in ((full, None), (stream, lambda _: self.fail("unexpected delta")),
+                              (b'{"choices":[{"message":{"role":"assistant","content":"ok"}}],"extra":NaN}', None)):
+            head = b"HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n" % len(raw)
+            server, _ = await self.serve([head + raw])
+            async with server:
+                with self.assertRaisesRegex(Hold, "jan_invalid_response"):
+                    await self.client(server).chat((Message("user", "hi"),), on_delta=callback)
 
     async def test_a_broken_event_is_a_bounded_reason(self):
         head = b"HTTP/1.1 200 OK\r\n\r\n"

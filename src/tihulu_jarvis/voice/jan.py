@@ -9,7 +9,7 @@ import re
 import socket
 from urllib.parse import urlsplit
 
-from .m1 import Hold
+from .m1 import Hold, Message
 from ..owned_wait import OperationDeadline, await_with_deadline
 
 LIMIT = 524288
@@ -149,6 +149,33 @@ def model_id(v):
     return isinstance(v, str) and 0 < len(v) <= 256 and v.isprintable()
 
 
+def decode_json(raw):
+    """Reject ambiguous response fields and non-JSON numeric constants."""
+    def unique(items):
+        out = {}
+        for key, value in items:
+            if key in out:
+                raise ValueError("duplicate field")
+            out[key] = value
+        return out
+
+    def invalid_constant(_):
+        raise ValueError("nonfinite constant")
+
+    return json.loads(raw.decode("utf-8"), object_pairs_hook=unique,
+                      parse_constant=invalid_constant)
+
+
+def encode_request(data):
+    try:
+        payload = json.dumps(data, ensure_ascii=False, allow_nan=False).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        raise Hold("invalid_messages") from None
+    if len(payload) > LIMIT:
+        raise Hold("jan_request_too_large")
+    return payload
+
+
 async def event_lines(parts):
     """Assemble bounded SSE lines across arbitrary HTTP fragment boundaries."""
     pending = bytearray()
@@ -193,7 +220,7 @@ async def _events(lines, on_delta, *, framed=False):
                 return "".join(parts)
             continue
         try:
-            obj = json.loads(data.decode("utf-8"))
+            obj = decode_json(data)
             delta = obj["choices"][0]["delta"]
             if not isinstance(delta, dict):
                 raise TypeError
@@ -252,15 +279,13 @@ class Jan:
                 deadline.check()
                 raw = await body(r)
                 deadline.check()
-                return json.loads(raw.decode("utf-8"))
+                return decode_json(raw)
             finally:
                 w.close()
 
     async def _request(self, op, data=None):
         self._checkpoint()
-        payload = None if data is None else json.dumps(data, ensure_ascii=False).encode("utf-8")
-        if payload is not None and len(payload) > LIMIT:
-            raise Hold("jan_request_too_large")
+        payload = None if data is None else encode_request(data)
         try:
             deadline = OperationDeadline(self.timeout, self._checkpoint)
             return await await_with_deadline(lambda: self._exchange(op, payload, deadline),
@@ -282,7 +307,11 @@ class Jan:
         self._checkpoint()
         if not model_id(self.model):
             raise Hold("select_installed_model")
-        if not messages or any(m.role not in ("system", "assistant", "user") or not isinstance(m.content, str) for m in messages):
+        if (not isinstance(messages, (tuple, list)) or not messages
+                or any(not isinstance(m, Message)
+                       or m.role not in ("system", "assistant", "user")
+                       or not safe_text(m.content) for m in messages)
+                or (on_delta is not None and not callable(on_delta))):
             raise Hold("invalid_messages")
         body = {"model": self.model, "stream": on_delta is not None,
                 "messages": [{"role": m.role, "content": m.content} for m in messages]}
@@ -296,9 +325,7 @@ class Jan:
                 return text
             except (KeyError, IndexError, TypeError, ValueError):
                 raise Hold("jan_invalid_response") from None
-        payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
-        if len(payload) > LIMIT:
-            raise Hold("jan_request_too_large")
+        payload = encode_request(body)
         try:
             deadline = OperationDeadline(self.timeout, self._checkpoint)
             return await await_with_deadline(lambda: self._stream(payload, on_delta, deadline),
