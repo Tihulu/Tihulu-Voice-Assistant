@@ -6228,6 +6228,23 @@ class MuteTests(DesktopTests):
             self.until(lambda: not self.ui.busy)
         self.assertEqual(seen, ["tr"])
         self.assertTrue(self.ui.stt_language.get_sensitive())
+        self.assertEqual(settings.load()["stt_language"], "tr")
+
+    def test_input_language_save_failure_and_reload_restore_visible_choice(self):
+        self.ui.stt_language.set_active_id("de")
+        before = settings.load()
+        self.assertEqual(before["stt_language"], "de")
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.ui.stt_language.set_active_id("tr")
+        self.assertEqual(self.ui.stt_language.get_active_id(), "de")
+        self.assertEqual(self.ui.cfg, before)
+        self.assertEqual(settings.load(), before)
+        settings.save({**before, "stt_language": "segmented"}, expected=before)
+        with self.assertRaisesRegex(Hold, "settings_changed"):
+            self.ui.selected_stt_language()
+        self.ui.reload_local_preferences()
+        self.assertEqual(self.ui.stt_language.get_active_id(), "segmented")
+        self.ui.stt_language.set_active_id("auto")
         self.assertNotIn("stt_language", settings.load())
 
     def test_muted_voice_input_works_without_piper_or_voice_files(self):

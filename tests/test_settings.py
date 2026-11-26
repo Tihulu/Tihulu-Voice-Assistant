@@ -30,6 +30,29 @@ class SpokenTextTests(unittest.TestCase):
             self.assertTrue(settings.load(path)["show_spoken_text"])
 
 
+class SpeechInputLanguageTests(unittest.TestCase):
+    def test_default_keeps_legacy_serialized_form_and_invalid_is_refused(self):
+        self.assertNotIn("stt_language", settings.empty())
+        self.assertEqual(settings.checked({"stt_language": "auto"}), settings.empty())
+        self.assertEqual(settings._serialize(settings.checked({"stt_language": "auto"})),
+                         settings._serialize(settings.empty()))
+        for bad in ("th", "", None, [], 1):
+            with self.subTest(bad=bad), self.assertRaises(Hold):
+                settings.checked({"stt_language": bad})
+
+    def test_saved_language_round_trip_and_reload(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "models.json"
+            previous = settings.empty()
+            settings.save(previous, path)
+            for language in ("tr", "en", "de", "segmented", "auto"):
+                proposed = settings.checked({**previous, "stt_language": language})
+                settings.save(proposed, path, expected=previous)
+                self.assertEqual(settings.reload_preferences(previous, path), proposed)
+                self.assertEqual(settings.load(path).get("stt_language", "auto"), language)
+                previous = proposed
+
+
 class TextScaleTests(unittest.TestCase):
     def test_a_scale_is_one_of_the_two(self):
         self.assertEqual(settings.empty()["text_scale"], "normal")
