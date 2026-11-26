@@ -58,10 +58,22 @@ def local_request(context, call, *, dependent=False):
 
 class LocalAdapter:
     """Owner-side state machine, not a backend. All payloads synthetic."""
-    def __init__(self,gateway,context,candidate,identity,operation,data,grant,*,dependencies=()):
+    def __init__(self,gateway,context,candidate,identity,operation,data,grant,*,dependencies=(),response_language=None):
         if type(candidate) is not Candidate or candidate.locality!="local":
             raise Refused("local_candidate_required")
         self._call=prepare(candidate,identity,operation,data)
+        if response_language is not None:
+            if (type(response_language) is not str or response_language not in ("tr","en","de")
+                    or operation!="llm" or not dependencies):
+                raise Refused("invalid_bound_language")
+            try:
+                obj=json.loads(data)
+            except (ValueError,UnicodeError):
+                raise Refused("invalid_bound_language") from None
+            if (type(obj) is not dict or obj.get("kind")!="voice_turn"
+                    or obj.get("response_language")!=response_language):
+                raise Refused("voice_language_mismatch")
+        self._response_language=response_language
         self._g,self._grant=gateway,grant
         if type(dependencies) is not tuple:
             raise Refused("invalid_dependency_group")
@@ -194,6 +206,8 @@ class LocalAdapter:
         from capabilities import CapabilityCall
         if self.call.operation!="llm":
             raise Refused("local_llm_required")
+        if self._response_language is not None and language!=self._response_language:
+            raise Refused("voice_language_mismatch")
         payload=self._completed_result()
         call=CapabilityCall("espeak_ng",version,"text_to_wav",
                     (("artifact",artifact),("digest",sha256(payload).hexdigest()),

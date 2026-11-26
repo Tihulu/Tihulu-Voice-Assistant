@@ -97,7 +97,8 @@ class TranscriptFixture:
         with self._lock:
             _,payload=self._turn_input(candidate,identity,response_language)
             job=LocalAdapter(self._g,self._req.context,candidate,identity,"llm",
-                             payload,grant,dependencies=((self._grant,self._req),))
+                             payload,grant,dependencies=((self._grant,self._req),),
+                             response_language=response_language)
             return job,payload
 
     def cancel(self):

@@ -135,3 +135,17 @@ class TranscriptVoiceChainTests(unittest.TestCase):
         self.g.revoke("transcribe")
         with self.assertRaises(Refused):
             self.stt.start_local_turn(self.c,"turn","de",grant)
+
+    def test_bound_response_language_cannot_be_replaced_by_voice(self):
+        turn,_=self.start_turn()
+        turn.event("turn",1,"text","Guten Tag")
+        turn.event("turn",2,"completed",None)
+        for lang in ("tr","en"):
+            with self.assertRaisesRegex(Refused,"voice_language_mismatch"):
+                turn.prepare_speech("1.50",lang,"turn-text","turn-audio")
+        self.assertEqual(dict(turn.prepare_speech("1.50","de","turn-text","turn-audio").args)["language"],"de")
+    def test_bound_language_not_valid_for_unrelated_payload(self):
+        req=local_request(self.ctx,prepare(self.c,"other","llm",b"plain"))
+        grant=self.g.fixture_grant("other",req,60)
+        with self.assertRaises(Refused):
+            LocalAdapter(self.g,self.ctx,self.c,"other","llm",b"plain",grant,response_language="de")
