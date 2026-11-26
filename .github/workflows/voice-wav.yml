@@ -1,0 +1,58 @@
+name: Real WAV engine acceptance
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'src/tihulu_jarvis/voice/**'
+      - 'tools/voice_wav_acceptance.py'
+      - '.github/workflows/voice-wav.yml'
+permissions:
+  contents: read
+jobs:
+  real-wav:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Prepare disposable CPU audio engines
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y cmake g++ espeak-ng ffmpeg alsa-utils python3-venv
+          root="$RUNNER_TEMP/jarvis-voice-qa"
+          mkdir -p "$root"
+          git init "$root/whisper"
+          git -C "$root/whisper" remote add origin https://github.com/ggml-org/whisper.cpp.git
+          git -C "$root/whisper" fetch --depth 1 origin 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          git -C "$root/whisper" checkout --detach FETCH_HEAD
+          test "$(git -C "$root/whisper" rev-parse HEAD)" = 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          cmake -S "$root/whisper" -B "$root/build" -DWHISPER_BUILD_TESTS=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$root/build" --target whisper-cli -j 2
+          python3 -m venv "$root/venv"
+          "$root/venv/bin/pip" install --only-binary=:all: piper-tts==1.8.0
+          "$root/venv/bin/pip" freeze
+          echo "$root/build/bin" >> "$GITHUB_PATH"
+          echo "$root/venv/bin" >> "$GITHUB_PATH"
+          curl --fail --location --retry 2 --max-time 180 -o "$root/ggml-base.bin" 'https://huggingface.co/ggerganov/whisper.cpp/resolve/fb5ed9369c26eaf08392504d8446da431e0fffb9/ggml-base.bin'
+          printf '%s  %s\n' 60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe "$root/ggml-base.bin" | sha256sum -c -
+          url='https://huggingface.co/rhasspy/piper-voices/resolve/a08e8fa47faf6681ecc42a79cfa95369430cbcf6/en/en_US/lessac/low/en_US-lessac-low.onnx'
+          curl --fail --location --retry 2 --max-time 180 -o "$root/en_US-lessac-low.onnx" "$url"
+          printf '%s  %s\n' f7d01dde371555732c4c314111ac79672b1a5ce2fc19266ab42178fd8df7f375 "$root/en_US-lessac-low.onnx" | sha256sum -c -
+          curl --fail --location --retry 2 --max-time 60 -o "$root/en_US-lessac-low.onnx.json" "$url.json"
+          sha256sum "$root/en_US-lessac-low.onnx.json" "$root/whisper/samples/jfk.wav"
+      - name: Run known-speech WAV acceptance with real engines
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          root="$RUNNER_TEMP/jarvis-voice-qa"
+          python3 --version
+          espeak-ng --version
+          python3 tools/voice_wav_acceptance.py --model "$root/ggml-base.bin" --voice "$root/en_US-lessac-low.onnx" --human-wav "$root/whisper/samples/jfk.wav" --report "$root/report.json"
+      - name: Print bounded synthetic/public evidence
+        if: always()
+        run: |
+          root="$RUNNER_TEMP/jarvis-voice-qa"
+          if test -f "$root/report.json"; then cat "$root/report.json"; fi
