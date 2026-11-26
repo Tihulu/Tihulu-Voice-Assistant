@@ -15,12 +15,14 @@ jobs:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
+          fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
       - name: Verify exact head and unchanged shipped code
         env:
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git diff --exit-code d4b756351b1552aa5806c89e39eda3b5b82aa337 HEAD -- src packaging tools tests pyproject.toml data
       - name: Prepare disposable fixture engines
         run: |
           sudo apt-get update -qq
@@ -29,5 +31,6 @@ jobs:
       - name: Run fixed public synthetic fixtures
         env:
           PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: src:experiments
           OMP_THREAD_LIMIT: '2'
         run: /usr/bin/python3 experiments/document_engine_acceptance.py
