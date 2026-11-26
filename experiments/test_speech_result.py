@@ -60,3 +60,37 @@ class SpeechResultTests(unittest.TestCase):
     def test_mixed_language_not_supported_by_single_voice(self):
         with self.assertRaises(Refused):
             replace(self.call,args=self.call.args[:2]+(("language","tr-en-de"),)+self.call.args[3:]).checked()
+
+    def test_audio_conversion_binds_completed_speech_and_separate_grant(self):
+        from conversion_result import ConversionResult
+        self.job.complete(self.value)
+        call=self.job.prepare_conversion("4.4","flac")
+        args=dict(call.args)
+        self.assertEqual(args,{"artifact":"audio","digest":sha256(self.value.data).hexdigest(),"output":"flac"})
+        req=call.request(self.ctx)
+        grant=self.g.fixture_grant("conversion",req,60)
+        child=self.job.start_conversion("4.4","flac",grant)
+        data=b"fLaCsynthetic"
+        child.complete(ConversionResult(req.target,args["digest"],"flac","flac",data))
+        self.assertEqual(child.result()[4],sha256(data).hexdigest())
+        self.job.cancel()
+        with self.assertRaises(Refused):
+            child.result()
+    def test_audio_conversion_no_alias_or_incomplete_speech(self):
+        with self.assertRaises(Refused):
+            self.job.prepare_conversion("4.4","flac")
+        self.job.complete(self.value)
+        for output in ("audio","text"):
+            with self.assertRaises(Refused):
+                self.job.prepare_conversion("4.4",output)
+    def test_audio_conversion_wrong_digest_or_revoked_parent_denied(self):
+        self.job.complete(self.value)
+        call=self.job.prepare_conversion("4.4","flac")
+        wrong=replace(call,args=(call.args[0],("digest","c"*64),call.args[2]))
+        grant=self.g.fixture_grant("wrong",wrong.request(self.ctx),60)
+        with self.assertRaises(Refused):
+            self.job.start_conversion("4.4","flac",grant)
+        exact=self.g.fixture_grant("exact",call.request(self.ctx),60)
+        self.g.revoke("voice")
+        with self.assertRaises(Refused):
+            self.job.start_conversion("4.4","flac",exact)
