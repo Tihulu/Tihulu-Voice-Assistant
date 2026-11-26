@@ -10,6 +10,7 @@ import json
 import os
 from pathlib import Path
 import re
+import resource
 import shutil
 import socket
 import subprocess
@@ -69,6 +70,24 @@ def child(browser,driver,host_net,host_port):
     except OSError:
         host_denied=True
     record("browser-host-loopback-denied",host_denied)
+    status=dict(line.split(":",1) for line in Path("/proc/self/status").read_text().splitlines() if ":" in line)
+    record("browser-capabilities-dropped",all(int(status[k].strip(),16)==0
+                                             for k in ("CapEff","CapPrm","CapAmb")))
+    limits=((resource.RLIMIT_CORE,0),(resource.RLIMIT_FSIZE,32*1024*1024),
+            (resource.RLIMIT_CPU,60),(resource.RLIMIT_NOFILE,1024))
+    for kind,value in limits:
+        resource.setrlimit(kind,(value,value))
+    record("browser-bounded-inherited-limits",all(resource.getrlimit(k)==(v,v) for k,v in limits))
+    original=hashlib.sha256(HTML).hexdigest()
+    record("browser-exact-source-preflight",hashlib.sha256(Path("/work/fixture.html").read_bytes()).hexdigest()==original)
+    readonly=True
+    for path in ("/work/fixture.html","/work/fixture-code/gateway.py","/work/unapproved"):
+        try:
+            with open(path,"ab"):
+                readonly=False
+        except OSError:
+            pass
+    record("browser-input-and-code-readonly",readonly)
     if not all(results):
         return 1
     version=subprocess.run([browser,"--version"],stdin=subprocess.DEVNULL,
@@ -141,6 +160,8 @@ def child(browser,driver,host_net,host_port):
             command("POST",base+"/timeouts",{"pageLoad":10000,"script":5000,"implicit":0})
             version=caps.get("browserVersion")
             source_hash=hashlib.sha256(Path("/work/fixture.html").read_bytes()).hexdigest()
+            if source_hash!=original:
+                raise RuntimeError("fixture source changed")
             ctx=Context("browser-fixture","session","profile",1,"local","LOCAL_ONLY")
             rules=tuple(profiles.Rule(x,(),"allow") for x in
                         ("browser_navigate","filesystem_read","host_shell"))
@@ -241,7 +262,7 @@ def child(browser,driver,host_net,host_port):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=3)
-    return 0 if len(results)==14 and all(results) else 1
+    return 0 if len(results)==18 and all(results) else 1
 
 def main():
     tools=[]
