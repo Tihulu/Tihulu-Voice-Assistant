@@ -242,3 +242,97 @@ class SettingsSnapshotBoundaryTests(unittest.TestCase):
         with patch.object(settings.os, "read", side_effect=disappearing):
             with self.assertRaisesRegex(Hold, "settings_changed"):
                 settings.load(self.path)
+
+
+class JanChoiceJournalTests(unittest.TestCase):
+    def setUp(self):
+        from dataclasses import replace
+        from tihulu_jarvis import profiles
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        root = Path(tmp.name)
+        self.path = root / "models.json"
+        self.store = profiles.Store(root / "profiles")
+        self.before = self.store.save(profiles.Profile(id="local-only", name="Fixture",
+                                                      version=1, llm_model_id="old"))
+        self.after = replace(self.before, version=2, llm_model_id="new").checked()
+        self.old = {**settings.empty(), "profile": self.before.id, "llm": "old"}
+        self.new = {**self.old, "llm": "new"}
+        settings.save(self.old, self.path)
+
+    def stage(self):
+        record = settings._jan_record(self.store, self.before, self.after, self.old, self.new)
+        import json
+        settings._replace_text(settings._choice_journal(self.path), json.dumps(record, sort_keys=True))
+
+    def test_success_removes_journal_after_profile_commit(self):
+        with self.store._mutation_lock():
+            with settings.choice_transaction(self.new, self.path, expected=self.old,
+                    jan_transition=(self.store, self.before, self.after)):
+                self.assertTrue(settings.choice_pending(self.path))
+                self.store._save_locked(self.after)
+        self.assertFalse(settings.choice_pending(self.path))
+        self.assertEqual(settings.load(self.path), self.new)
+
+    def test_compensated_failure_clears_only_old_profile_journal(self):
+        with self.store._mutation_lock():
+            with self.assertRaisesRegex(Hold, "fixture"):
+                with settings.choice_transaction(self.new, self.path, expected=self.old,
+                        jan_transition=(self.store, self.before, self.after)):
+                    raise Hold("fixture")
+        self.assertFalse(settings.choice_pending(self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+
+    def test_interrupted_settings_stage_recovers_old_choice(self):
+        self.stage()
+        settings._replace_text(self.path, settings._serialize(self.new))
+        self.assertTrue(settings.recover_jan_choice(self.store, self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+        self.assertEqual(self.store.load(self.before.id), self.before)
+        self.assertFalse(settings.choice_pending(self.path))
+
+    def test_committed_profile_and_settings_finalize_missing_history(self):
+        self.stage()
+        settings._replace_text(self.path, settings._serialize(self.new))
+        self.store.save(self.after)
+        (self.store.history / "local-only-v2.json").unlink()
+        self.assertTrue(settings.recover_jan_choice(self.store, self.path))
+        self.assertEqual(self.store.versions(self.before.id)[-1], self.after)
+        self.assertEqual(settings.load(self.path), self.new)
+        self.assertFalse(settings.choice_pending(self.path))
+
+    def test_committed_profile_with_compensated_settings_is_held(self):
+        self.stage()
+        self.store.save(self.after)
+        with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+            settings.recover_jan_choice(self.store, self.path)
+        self.assertTrue(settings.choice_pending(self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+        self.assertEqual(self.store.load(self.before.id), self.after)
+
+    def test_unrelated_settings_and_profile_are_never_rewritten(self):
+        self.stage()
+        changed = {**self.old, "text_scale": "large"}
+        settings._replace_text(self.path, settings._serialize(changed))
+        with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+            settings.recover_jan_choice(self.store, self.path)
+        self.assertEqual(settings.load(self.path), changed)
+        self.assertTrue(settings.choice_pending(self.path))
+
+    def test_pending_journal_blocks_ordinary_writes(self):
+        self.stage()
+        for action in (lambda: settings.save(self.new, self.path),
+                       lambda: settings.forget(self.path)):
+            with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+                action()
+        with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+            with settings.choice_transaction(self.new, self.path):
+                self.fail("unexpected write")
+
+    def test_journal_refuses_privilege_change(self):
+        from dataclasses import replace
+        with self.assertRaisesRegex(Hold, "invalid_jan_choice_transition"):
+            with settings.choice_transaction(self.new, self.path, expected=self.old,
+                    jan_transition=(self.store, self.before, replace(self.after, name="changed"))):
+                self.fail("unexpected commit")
+        self.assertFalse(settings.choice_pending(self.path))
