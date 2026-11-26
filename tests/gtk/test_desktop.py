@@ -5775,6 +5775,35 @@ class SettingsPageTests(DesktopTests):
         self.assertEqual(self.ui.cfg["profile"], old)
         self.assertEqual(settings.load(), newer)
 
+    def test_failed_display_save_restores_previous_widgets(self):
+        before = settings.load()
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.ui.settings_scale.set_active(1)
+            self.ui.settings_spoken.set_active(True)
+        self.assertEqual(self.ui.cfg["text_scale"], before["text_scale"])
+        self.assertEqual(self.ui.cfg["show_spoken_text"], before["show_spoken_text"])
+        self.assertEqual(self.ui.settings_scale.get_active(), 0)
+        self.assertFalse(self.ui.settings_spoken.get_active())
+        self.assertEqual(settings.load(), before)
+
+    def test_failed_resource_save_does_not_apply_unsaved_profile(self):
+        before = settings.load()
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.ui.resource_profile.set_active(0)
+        self.assertEqual(self.ui.cfg["resources"], before["resources"])
+        self.assertEqual(self.ui.effective_resource().id, before["resources"]["profile"])
+        self.assertEqual(settings.load(), before)
+
+    def test_forget_resets_visible_model_and_resource_choices(self):
+        self.connect_model()
+        self.ui.resource_profile.set_active(0)
+        self.ui.forget_choices()
+        self.assertEqual(self.ui.url.get_text(), "")
+        self.assertEqual(self.ui.inventory, ())
+        self.assertEqual(self.ui.labels["stt"].get_text(), "—")
+        self.assertEqual(self.ui.effective_resource().id, "balance")
+        self.assertEqual(settings.load()["resources"], {"profile": "balance"})
+
     def test_the_text_scale_applies_without_a_restart(self):
         self.ui.settings_scale.set_active(1)
         self.until(lambda: self.ui.cfg["text_scale"] == "large")
