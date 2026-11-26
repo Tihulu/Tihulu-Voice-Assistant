@@ -43,6 +43,8 @@ CAPABILITIES = MappingProxyType({
     ("brave", "snapshot"): ("browser_read", "public", ("profile", "tab", "url", "digest")),
     ("libreoffice", "window_inspect"): ("application_ui", "private", ("window",)),
     ("gimp", "window_inspect"): ("application_ui", "private", ("window",)),
+    ("espeak_ng", "text_to_wav"): ("application_engine", "private",
+                                ("artifact","digest","language","output")),
     ("ffmpeg", "audio_convert"): ("application_engine", "private", ("artifact", "digest", "output")),
     ("ffmpeg", "wav_to_flac"): ("application_engine", "private", ("artifact", "digest", "output")),
     ("libreoffice", "text_to_pdf"): ("application_engine", "private", ("artifact", "digest", "output")),
@@ -143,6 +145,8 @@ class CapabilityCall:
             checked_value(key, pair[1])
         if "output" in spec[2] and dict(self.args)["output"] == dict(self.args)["artifact"]:
             raise Refused("source_overwrite_denied")
+        if self.operation=="text_to_wav" and dict(self.args)["language"] not in ("tr","en","de"):
+            raise Refused("invalid_speech_language")
         if self.operation=="pdf_merge":
             args=dict(self.args)
             if len(args["page_order"])!=len(args["part_digests"]):
