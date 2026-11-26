@@ -1971,6 +1971,70 @@ class ArchiveDurabilityTests(unittest.TestCase):
         self.assertEqual(self.target.read_bytes(), OLD)
         self.assertEqual(self.registry.card(self.card.model_id), self.card)
 
+    def test_interrupted_archive_link_recovers_exact_duplicate(self):
+        archive = self.registry._archive_path(self.card)
+        temporary = archive.parent / ".archive-abcdefgh"
+        temporary.write_bytes(OLD)
+        temporary.chmod(0o600)
+        market.os.link(temporary, archive)
+        unrelated = archive.parent / ".archive-ijklmnop"
+        unrelated.write_bytes(b"unrelated")
+        self.assertEqual(self.registry.retain_artifact(self.card, self.target), archive)
+        self.assertFalse(temporary.exists())
+        self.assertEqual(archive.stat().st_nlink, 1)
+        self.assertEqual(archive.read_bytes(), OLD)
+        self.assertEqual(unrelated.read_bytes(), b"unrelated")
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    def test_interrupted_archive_link_preserves_wrong_digest(self):
+        archive = self.registry._archive_path(self.card)
+        temporary = archive.parent / ".archive-abcdefgh"
+        temporary.write_bytes(b"x" * len(OLD))
+        temporary.chmod(0o600)
+        market.os.link(temporary, archive)
+        with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+            self.registry.retain_artifact(self.card, self.target)
+        self.assertTrue(temporary.exists())
+        self.assertEqual(archive.stat().st_nlink, 2)
+        self.assertEqual(self.target.read_bytes(), OLD)
+
+    def test_interrupted_archive_link_preserves_unknown_alias(self):
+        archive = self.registry._archive_path(self.card)
+        temporary = archive.parent / "unknown"
+        temporary.write_bytes(OLD)
+        temporary.chmod(0o600)
+        market.os.link(temporary, archive)
+        with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+            self.registry.retain_artifact(self.card, self.target)
+        self.assertTrue(temporary.exists())
+        self.assertEqual(archive.stat().st_nlink, 2)
+
+    def test_interrupted_archive_link_preserves_third_alias(self):
+        archive = self.registry._archive_path(self.card)
+        temporary = archive.parent / ".archive-abcdefgh"
+        temporary.write_bytes(OLD)
+        temporary.chmod(0o600)
+        market.os.link(temporary, archive)
+        extra = self.root / "extra"
+        market.os.link(archive, extra)
+        with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+            self.registry.retain_artifact(self.card, self.target)
+        self.assertTrue(temporary.exists())
+        self.assertTrue(extra.exists())
+        self.assertEqual(archive.stat().st_nlink, 3)
+
+    def test_interrupted_archive_link_keeps_alias_on_sync_failure(self):
+        archive = self.registry._archive_path(self.card)
+        temporary = archive.parent / ".archive-abcdefgh"
+        temporary.write_bytes(OLD)
+        temporary.chmod(0o600)
+        market.os.link(temporary, archive)
+        with patch.object(market, "_sync_directory", side_effect=OSError("fixture")):
+            with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+                self.registry.retain_artifact(self.card, self.target)
+        self.assertTrue(temporary.exists())
+        self.assertEqual(archive.stat().st_nlink, 2)
+
     def test_existing_archive_is_resynced_before_reuse(self):
         archive = self.registry.retain_artifact(self.card, self.target)
         with patch.object(market, "_sync_directory", wraps=market._sync_directory) as sync:
