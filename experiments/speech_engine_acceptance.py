@@ -424,7 +424,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
         if corpus=="mixed-auto":
             # A fresh public fixture review session for the changed PCM bytes.
             # Do not revive or inherit the revoked original segment receipts.
-            from language_detection import Detection,DetectionFixture,parse_detection
+            from language_detection import Detection,DetectionFixture,parse_detection,detection_observation
             auto_ctx=Context("mixed-auto-fixture","session","profile",1,"local","LOCAL_ONLY")
             auto_gate=lifetime.track(FixtureGateway(auto_ctx,rules,clock=profiles.PolicyClock()))
             detectors=[]
@@ -457,11 +457,22 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     detector.checkpoint()
                     common=["/work/whisper-cli","-m","/work/model.bin","-f","/work/sample.wav","-t","2","-ng","-nt"]
                     raw=run(common+["-l","auto","-dl"],scope,wrapper=STT_WRAPPER,timeout=120,capture_stderr=True)
-                    detected,ppm=parse_detection(raw)
+                    observed,score=None,None
+                    try:
+                        observed,score=detection_observation(raw)
+                        detected,ppm=parse_detection(raw)
+                    except Refused as exc:
+                        detector.cancel()
+                        record("mixed-auto-real-detection-"+str(i),False,reason=str(exc),
+                               observed_language=observed,confidence_ppm=score)
+                        # Independent subsequent samples remain observable.
+                        # Never force the expected language or issue a child grant.
+                        continue
                     correct=detected==lang and not list(out.iterdir()) and audio_path.read_bytes()==piece.data
                     record("mixed-auto-real-detection-"+str(i),correct,detected=detected,confidence_ppm=ppm)
                     if not correct:
-                        return 1
+                        detector.cancel()
+                        continue
                     detector.complete(Detection(req.target,piece.digest,MODEL_SHA,"auto-language-"+str(i),detected,ppm))
                     target="auto-text-"+str(i)
                     call=detector.prepare_transcription(target)
@@ -485,6 +496,9 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     if not unchanged:
                         return 1
                     trans.complete(Transcript(req.target,piece.digest,MODEL_SHA,detected,target,recognized))
+                if len(transcripts)!=len(paused_pieces):
+                    record("mixed-auto-fresh-ordered-review",False,reason="segment_detection_hold")
+                    return 1
                 mixed=MixedVoiceReview(pause_data,proposed,tuple(transcripts),MODEL_SHA)
                 view=mixed.preview()
                 record("mixed-auto-fresh-ordered-review",
