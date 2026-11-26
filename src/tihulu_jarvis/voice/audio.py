@@ -15,7 +15,7 @@ import struct
 import tempfile
 import wave
 from collections.abc import Mapping
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, nullcontext
 from pathlib import Path
 from threading import Event
 
@@ -264,7 +264,8 @@ def _sealed_sidecar(fd, identity, checkpoint, *, expected_digest=None):
 
 
 @contextmanager
-def _pinned_model_arguments(name, args, checkpoint, *, model_identity=None, voice_proof=None):
+def _pinned_model_arguments(name, args, checkpoint, *, model_identity=None, voice_proof=None,
+                            alias_dir=None):
     """Hand inherited read-only model descriptors to Linux audio engines.
 
     Weights are pinned against pathname replacement, not in-place writes.
@@ -275,6 +276,7 @@ def _pinned_model_arguments(name, args, checkpoint, *, model_identity=None, voic
     argv = list(map(str, args))
     descriptors = []
     originals = []
+    inherited = ()
     try:
         if name in ("whisper-cli", "piper"):
             flag = "-m" if name == "whisper-cli" else "--model"
@@ -315,15 +317,32 @@ def _pinned_model_arguments(name, args, checkpoint, *, model_identity=None, voic
                 config = model.with_name(model.name + ".json")
                 if voice_proof is not None and voice_proof[0] != config:
                     raise Hold("voice_locale_unverified")
-                argv[index + 1:index + 1] = ["--config", pin(config, seal=True,
+                config_fd_path = pin(config, seal=True,
                     expected=voice_proof[1] if voice_proof is not None else None,
-                    digest=voice_proof[2] if voice_proof is not None else None)]
+                    digest=voice_proof[2] if voice_proof is not None else None)
+                # Some Piper CLI versions ignore --config and infer model + ".json".
+                # Both spellings must resolve to the same inherited, sealed bytes.
+                if alias_dir is None:
+                    raise Hold("audio_model_descriptor_unavailable")
+                weights_fd_path = argv[index]
+                inherited = tuple(fd for fd in descriptors
+                                  if "/proc/self/fd/%d" % fd in (weights_fd_path, config_fd_path))
+                alias = Path(alias_dir) / "voice.onnx"
+                sidecar = alias.with_name("voice.onnx.json")
+                try:
+                    alias.symlink_to(weights_fd_path)
+                    sidecar.symlink_to(config_fd_path)
+                except OSError:
+                    raise Hold("audio_model_descriptor_unavailable") from None
+                argv[index] = str(alias)
+                argv[index + 1:index + 1] = ["--config", str(sidecar)]
+            else:
+                inherited = tuple(fd for fd in descriptors if "/proc/self/fd/%d" % fd in argv)
             checkpoint()
             for path, identity in originals:
                 if _runtime_identity(path) != identity:
                     raise Hold("model_file_changed")
-        # Keep source FDs until spawn, but inherit only the exact argument FDs.
-        inherited = tuple(fd for fd in descriptors if "/proc/self/fd/%d" % fd in argv)
+        # Keep source FDs until spawn, but inherit only the exact engine FDs.
         yield tuple(argv), inherited
     finally:
         for fd in descriptors:
@@ -340,34 +359,38 @@ async def child(name, *args, stdin=False, checkpoint=lambda: None,
     binary = shutil.which(name)
     if not binary:
         raise Hold("missing_" + name)
-    checkpoint()
-    async def start():
-        # This runs in the scheduled spawn task, not merely before queuing it.
-        env = {**os.environ, **spawn_environment()}
+    # The private Piper alias directory must outlive process execution, not
+    # merely spawn: the CLI may open its inferred sidecar much later.
+    with (tempfile.TemporaryDirectory(prefix="tihulu-piper-fds-")
+          if name == "piper" else nullcontext()) as alias_dir:
         checkpoint()
-        with _pinned_model_arguments(name, args, checkpoint, model_identity=model_identity,
-                                     voice_proof=voice_proof) as (argv, descriptors):
+        async def start():
+            # This runs in the scheduled spawn task, not merely before queuing it.
+            env = {**os.environ, **spawn_environment()}
             checkpoint()
-            extra = {"pass_fds": descriptors} if descriptors else {}
-            return await asyncio.create_subprocess_exec(binary, *argv,
-                stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-                env=env, **extra)
-    spawn = asyncio.create_task(start())
-    try:
-        p = await asyncio.shield(spawn)
-    except asyncio.CancelledError:
-        async def reclaim_spawn():
-            await terminate(await spawn)
-        await finish_owned(reclaim_spawn())
-        raise
-    except OSError:
-        raise Hold("audio_start_failed") from None
-    try:
-        checkpoint()
-        yield p
-    finally:
-        await finish_owned(terminate(p))
+            with _pinned_model_arguments(name, args, checkpoint, model_identity=model_identity,
+                                         voice_proof=voice_proof, alias_dir=alias_dir) as (argv, descriptors):
+                checkpoint()
+                extra = {"pass_fds": descriptors} if descriptors else {}
+                return await asyncio.create_subprocess_exec(binary, *argv,
+                    stdin=asyncio.subprocess.PIPE if stdin else asyncio.subprocess.DEVNULL,
+                    stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+                    env=env, **extra)
+        spawn = asyncio.create_task(start())
+        try:
+            p = await asyncio.shield(spawn)
+        except asyncio.CancelledError:
+            async def reclaim_spawn():
+                await terminate(await spawn)
+            await finish_owned(reclaim_spawn())
+            raise
+        except OSError:
+            raise Hold("audio_start_failed") from None
+        try:
+            checkpoint()
+            yield p
+        finally:
+            await finish_owned(terminate(p))
 
 
 def has_signal(path, *, checkpoint=lambda: None):
