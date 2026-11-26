@@ -56,3 +56,19 @@ class VoiceQualityTests(unittest.TestCase):
         for rate,frames in ((22050,22050*8+1),(16000,16000),(22050,0),(True,1)):
             with self.assertRaises(Refused):
                 turbo_short_args(rate,frames)
+
+
+    def test_corpus_dispatch_retention_auto_and_count_are_consistent(self):
+        from voice_quality import speech_corpus_profile
+        for name,engine,expected in (
+            ("mixed-preview","small",(True,False,8)),
+            ("mixed-auto","small",(True,True,22)),
+            ("mixed-auto-turbo","turbo-q5",(True,True,22)),
+            ("mixed-auto-piper","small",(True,True,22)),
+            ("mixed-auto-reviewed","small",(True,True,24))):
+            self.assertEqual(speech_corpus_profile(name,engine,True),expected)
+            with self.assertRaises(RuntimeError):
+                speech_corpus_profile(name,"tiny",True)
+            with self.assertRaises(RuntimeError):
+                speech_corpus_profile(name,engine,False)
+        self.assertEqual(speech_corpus_profile("original","tiny",False),(False,False,0))
