@@ -1123,6 +1123,52 @@ class PersistentPartialTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(record.exists())
         return payload, record
 
+    async def test_threaded_partial_cleanup_drains_under_repeated_cancel(self):
+        from threading import Event, get_ident
+        card = self.registry.save_card(market.ModelCard(
+            model_id="cleanup-model", display_name="Cleanup", category="stt"))
+        started = asyncio.Event()
+        cleaning = asyncio.Event()
+        release = Event()
+        loop = asyncio.get_running_loop()
+        owner = get_ident()
+        async def fetch(path, note):
+            Path(path).write_bytes(NEW[:3])
+            note(3)
+            started.set()
+            await asyncio.Future()
+        transfer = market.Transfer(self.registry, card, self.source, fetch, now=1)
+        original = transfer._finish_temp
+        def delayed(*, keep):
+            self.assertNotEqual(get_ident(), owner)
+            loop.call_soon_threadsafe(cleaning.set)
+            if not release.wait(5):
+                raise AssertionError("fixture deadline")
+            return original(keep=keep)
+        with patch.object(transfer, "_finish_temp", side_effect=delayed):
+            task = asyncio.create_task(transfer.run(threaded_publication=True))
+            try:
+                await asyncio.wait_for(started.wait(), 3)
+                task.cancel()
+                await asyncio.wait_for(cleaning.wait(), 3)
+                task.cancel()
+                await asyncio.sleep(0)
+                self.assertFalse(task.done())
+                with self.assertRaisesRegex(Hold, "transfer_busy"):
+                    with self.registry.transfer_lease(card.model_id):
+                        pass
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        payload, metadata = transfer._partial_paths()
+        self.assertEqual(payload.read_bytes(), NEW[:3])
+        self.assertTrue(metadata.exists())
+        self.assertIsNone(transfer.temp)
+        self.assertEqual(self.registry.card(card.model_id).state, "CANCELLED")
+        with self.registry.transfer_lease(card.model_id):
+            pass
+
     async def test_restart_resume_valid_prefix_and_fresh_grant(self):
         from dataclasses import replace
         payload, record = self.partial()
