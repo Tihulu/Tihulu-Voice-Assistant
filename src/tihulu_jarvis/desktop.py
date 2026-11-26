@@ -1796,12 +1796,30 @@ def create_window(app, loop, bridge=None):
 
         def select_model(self, widget):
             value = widget.get_active_text()
-            if value and value in self.inventory and value != self.cfg["llm"]:
-                self.search_recall_epoch += 1
-                self.clear_model_probe()
-                self.cfg["llm"] = value
-                self.save()
-                self.refresh()
+            if not value or value not in self.inventory or value == self.cfg["llm"]:
+                return
+            previous = self.cfg["llm"]
+            try:
+                if self.busy or self.closing:
+                    raise Hold("model_selection_busy")
+                card = self.market.lookup_card(value)
+                if card is None:
+                    # This ID was returned by the current local inventory.
+                    discovered = market.ModelCard(
+                        model_id=value, display_name=value, category="llm",
+                        provider="jan", engine="jan", installed=True,
+                        trust_level="curated")
+                    self.market.record_jan_inventory((discovered,))
+                    card = self.market.card(value)
+                if not self.market._jan_inventory_card(card):
+                    raise Hold("registry_discovery_conflict")
+                self.use_card(value, expected=card)
+                self.build_market_page()
+            except (Hold, OSError) as exc:
+                widget.set_active(self.inventory.index(previous)
+                                  if previous in self.inventory else -1)
+                self.set_state("ready", str(exc) if isinstance(exc, Hold)
+                               else "model_selection_write_failed")
 
         def update_labels(self):
             for key,label in self.labels.items():
@@ -4098,7 +4116,8 @@ def create_window(app, loop, bridge=None):
                 checkpoint()
                 self.cfg["endpoint"]=route[3]
                 previous=self.cfg["llm"]
-                self.cfg["llm"]=""
+                # Restoring the saved choice is not a new explicit selection.
+                self.cfg["llm"]=previous if previous in models else ""
                 self.inventory=models
                 self.models.remove_all()
                 for m in models:
