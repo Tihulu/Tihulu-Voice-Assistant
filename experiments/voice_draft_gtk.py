@@ -23,6 +23,7 @@ class VoiceDraftWidget:
             self.root.append(child)
         self._button=None
         self._handler=None
+        self._review=None
         self.composer.get_buffer().connect("changed",self._changed)
 
     def text(self):
@@ -42,6 +43,7 @@ class VoiceDraftWidget:
 
     def invalidate(self,reason="Review invalidated"):
         self._control.invalidate()
+        self._review=None
         self._remove_button()
         self.preview.get_buffer().set_text("")
         self.status.set_text(reason)
@@ -50,6 +52,21 @@ class VoiceDraftWidget:
         # Even typing and clearing again invalidates the displayed review.
         self.invalidate()
 
+    def refresh_review(self):
+        """Trusted UI event/tick hook; clear stale text and button on HOLD.
+        Caller schedules ticks and profile/model/route change notifications.
+        No background timer is owned by this isolated widget.
+        """
+        if self._review is None:
+            return False
+        display,args,edits=self._review
+        try:
+            self._control.refresh(self._current(),display,*args,edits=edits)
+        except Refused as exc:
+            self.invalidate("HOLD: "+str(exc))
+            return False
+        return True
+
     def present(self,*args,edits=()):
         self.invalidate()
         try:
@@ -57,6 +74,7 @@ class VoiceDraftWidget:
         except Refused as exc:
             self.status.set_text("HOLD: "+str(exc))
             return None
+        self._review=(display,args,edits)
         self.preview.get_buffer().set_text(display.preview.text)
         button=Gtk.Button(label="Use reviewed text")
         self._button=button
