@@ -11,6 +11,52 @@ from .jan import LIMIT
 from .m1 import Hold, LANGUAGES, LanguageContext, Message, complete_turn, lexical_identifier, route_language, valid_response, safe_text
 
 
+_NONFINAL = re.compile(r"</?(?:think|analysis)\b", re.I)
+_TAG_PREFIXES = ("<think", "</think", "<analysis", "</analysis")
+
+
+class StreamGate:
+    """Keep possible nonfinal tag prefixes off the display across deltas.
+
+    This is a narrow filter for the existing literal tag contract, not an
+    arbitrary reasoning detector. The final response is still validated.
+    """
+    def __init__(self):
+        self.pending = ""
+        self.rejected = False
+        self.size = 0
+
+    def feed(self, piece):
+        if not safe_text(piece):
+            self.rejected = True
+            raise Hold("invalid_response_text")
+        self.size += len(piece)
+        if self.size > 32000:
+            self.rejected = True
+            raise Hold("response_too_long")
+        if self.rejected:
+            return ""
+        text = self.pending + piece
+        self.pending = ""
+        # A complete name at the very end still needs the next character
+        # to distinguish "<think>" from an ordinary "<thinking" literal.
+        match = _NONFINAL.search(text)
+        if match and match.end() < len(text):
+            self.rejected = True
+            return ""
+        lower = text.lower()
+        for n in range(min(len(text), max(map(len, _TAG_PREFIXES))), 0, -1):
+            if any(tag.startswith(lower[-n:]) for tag in _TAG_PREFIXES):
+                self.pending = text[-n:]
+                return text[:-n]
+        return text
+
+    def finish(self):
+        if _NONFINAL.search(self.pending):
+            self.rejected = True
+        return "" if self.rejected else self.pending
+
+
 class Session:
     def __init__(self):
         self.epoch, self.history, self.context = 0, (), LanguageContext()
@@ -109,14 +155,14 @@ class Session:
 
         active_attempt = None
 
-        def delta_for(attempt):
+        def delta_for(attempt, gate):
             def guarded_delta(piece):
                 checkpoint()
                 if active_attempt != attempt:
                     raise Hold("stream_attempt_closed")
-                if not safe_text(piece):
-                    raise Hold("invalid_response_text")
-                on_delta(piece)
+                visible = gate.feed(piece)
+                if visible:
+                    on_delta(visible)
             return guarded_delta
 
         if voices is not None:
@@ -143,9 +189,10 @@ class Session:
             # A caller without a reset callback cannot distinguish retry
             # deltas from the rejected draft. Keep that retry whole.
             active_attempt = attempt
+            gate = StreamGate()
             try:
                 if streaming and (attempt == 0 or on_retry is not None):
-                    result = await jan.chat(request, on_delta=delta_for(attempt))
+                    result = await jan.chat(request, on_delta=delta_for(attempt, gate))
                 elif streaming:
                     result = await jan.chat(request, on_delta=None)
                 else:
@@ -153,9 +200,14 @@ class Session:
             finally:
                 active_attempt = None
             checkpoint()
-            if (safe_text(result) and result.strip() and len(result)<=32000
-                    and not re.search(r"</?(?:think|analysis)\b",result,re.I)
+            tail = gate.finish()
+            if (not gate.rejected and safe_text(result) and result.strip() and len(result)<=32000
+                    and not _NONFINAL.search(result)
                     and valid_response(result,decision.response_language,lexical_identifier)):
+                if tail and streaming:
+                    checkpoint()
+                    on_delta(tail)
+                    checkpoint()
                 self.history, self.context = (*history,message,Message("assistant",result)),decision.next_context
                 self._history_route = route
                 self.has_attachment_history = self.has_attachment_history or attachment is not None
