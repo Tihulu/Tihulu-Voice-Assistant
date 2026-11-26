@@ -3554,12 +3554,17 @@ def create_window(app, loop, bridge=None):
             try:
                 if getattr(row, "source", None) != source:
                     raise Hold("source_registration_changed")
-                self.require_registered_source(source)
                 recorded = catalog_sources.registry_card(card, source)
-                known = self.market.lookup_card(recorded.model_id)
-                if known is not None and replace(known, revision=0) != replace(recorded, revision=0):
-                    raise Hold("registry_discovery_conflict")
-                recorded = self.market.save_card(recorded if known is None else known, expected=known)
+                # Use the established registry -> settings lock order. No
+                # awaits or network I/O inside this publication boundary.
+                p = settings.config_path()
+                with self.market._write_guard(require_clean=True), settings._write_guard(p):
+                    settings._require_no_choice(p)
+                    self.require_registered_source(source)
+                    known = self.market.lookup_card(recorded.model_id)
+                    if known is not None and replace(known, revision=0) != replace(recorded, revision=0):
+                        raise Hold("registry_discovery_conflict")
+                    recorded = self.market.save_card(recorded if known is None else known, expected=known)
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return None
@@ -3570,21 +3575,34 @@ def create_window(app, loop, bridge=None):
             return recorded
 
         def remember_hosts(self):
+            if getattr(self, "_restoring_catalog_hosts", False):
+                return False
             hosts = [h for h in self.catalog_hosts.get_text().split() if h]
-            if hosts != self.cfg.get("allowed_hosts", []):
+            previous = list(self.cfg.get("allowed_hosts", []))
+            if hosts != previous:
                 self.cfg["allowed_hosts"] = hosts
-                self.save()
+                if not self.save():
+                    self.cfg["allowed_hosts"] = previous
+                    self._restoring_catalog_hosts = True
+                    try:
+                        self.catalog_hosts.set_text(" ".join(previous))
+                    finally:
+                        self._restoring_catalog_hosts = False
+                    return False
+            return True
 
         def fetch_catalog(self):
-            if self.busy:
+            if self.busy or self.closing:
                 return
-            self.remember_hosts()
+            if not self.remember_hosts():
+                return
             url = self.catalog_url.get_text().strip()
             hosts = self.cfg.get("allowed_hosts", [])
             try:
                 self.require_catalog_fetch(url, hosts)
                 raw = self.loop.run_until_complete(
                     catalog_fetch.fetch(url, hosts, catalog_fetch.urlopen_opener()))
+                self.require_catalog_fetch(url, hosts)
                 self.load_catalog_text(raw)
                 self.set_state("ready", tr("Catalog fetched and verified.",
                                            "Katalog getirildi ve dogrulandi.",
@@ -3596,7 +3614,10 @@ def create_window(app, loop, bridge=None):
             if not hosts:
                 raise Hold("catalog_host_not_allowed")
             host = catalog_fetch.allowed(url, hosts)
+            if host != catalog_fetch.allowed(url, settings.load()["allowed_hosts"]):
+                raise Hold("catalog_host_not_allowed")
             self.require_tools(("external_network", ("catalog", host)))
+            catalog_fetch.allowed(url, settings.load()["allowed_hosts"])
 
         def import_catalog(self):
             if self.busy:
