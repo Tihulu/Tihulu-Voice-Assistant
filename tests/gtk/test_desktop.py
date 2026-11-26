@@ -5794,6 +5794,28 @@ class SettingsPageTests(DesktopTests):
         self.assertEqual(self.ui.effective_resource().id, before["resources"]["profile"])
         self.assertEqual(settings.load(), before)
 
+    def test_forget_clears_registered_site_source_and_research_views(self):
+        self.ui.web_target.set_text("https://example.com/")
+        self.ui.register_target()
+        self.ui.source_host.set_text("huggingface.co")
+        self.ui.register_source()
+        self.ui.catalog_hosts.set_text("example.com")
+        self.assertIsNotNone(self.ui.web_targets.get_first_child())
+        self.assertIsNotNone(self.ui.source_list.get_first_child())
+        self.ui.web_note.set_text("old preview")
+        self.ui.folder_root.set_text("/fixture")
+        self.ui.forget_choices()
+        self.assertIsNone(self.ui.web_targets.get_first_child())
+        self.assertIsNone(self.ui.source_list.get_first_child())
+        self.assertIsNone(self.ui.source_cards.get_first_child())
+        self.assertEqual(self.ui.web_note.get_text(), "")
+        self.assertEqual(self.ui.folder_root.get_text(), "")
+        self.assertEqual(self.ui.catalog_hosts.get_text(), "")
+        self.assertFalse(self.ui.web_read.get_sensitive())
+        self.assertFalse(self.ui.source_search.get_sensitive())
+        self.assertEqual(settings.load()["web_targets"], [])
+        self.assertEqual(settings.load()["sources"], [])
+
     def test_forget_resets_visible_model_and_resource_choices(self):
         self.connect_model()
         self.ui.resource_profile.set_active(0)
