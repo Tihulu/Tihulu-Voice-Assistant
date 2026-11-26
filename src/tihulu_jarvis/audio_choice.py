@@ -116,7 +116,9 @@ def recover(registry, path=None):
                 raise Hold(REASON)
             if current != desired:
                 settings._replace_text(p, settings._serialize(desired))
-            if registry.snapshot()[0] != generation or settings.load(p) != desired:
+                stamp = settings._choice_identity(p.lstat())
+            if (registry.snapshot()[0] != generation or settings.load(p) != desired
+                    or settings._choice_identity(p.lstat()) != stamp):
                 raise Hold(REASON)
             _clear(p, proof)
             return True
@@ -151,6 +153,7 @@ def commit(registry, expected_card, card, current, proposed, slot, path=None):
             raise Hold("registry_card_changed")
         if settings.load(p) != current:
             raise Hold("settings_changed")
+        settings_stamp = settings._choice_identity(p.lstat())
         old_generation = registry.snapshot()[0]
         _, cards, selection, history = registry._prepared_card(card)
         new_generation = market._text_digest(registry._serialized(cards, selection, history=history))
@@ -164,17 +167,23 @@ def commit(registry, expected_card, card, current, proposed, slot, path=None):
         except OSError:
             raise Hold("settings_unwritable") from None
         proof = _read(p)
-        if proof[0] != rec:
+        if (proof[0] != rec or registry.snapshot()[0] != old_generation
+                or settings.load(p) != current or settings._choice_identity(p.lstat()) != settings_stamp):
             raise Hold(REASON)
         try:
             settings._replace_text(p, settings._serialize(proposed))
         except OSError:
             raise Hold("settings_unwritable") from None
+        staged_stamp = settings._choice_identity(p.lstat())
+        if (settings.load(p) != proposed or _read(p) != proof
+                or registry.snapshot()[0] != old_generation):
+            raise Hold(REASON)
         try:
             saved = registry.save_card(card, expected=expected_card)
         except (Hold, OSError):
             if (registry.snapshot()[0] != old_generation or _read(p) != proof
-                    or settings.load(p) != proposed):
+                    or settings.load(p) != proposed
+                    or settings._choice_identity(p.lstat()) != staged_stamp):
                 raise Hold(REASON) from None
             try:
                 settings._replace_text(p, settings._serialize(current))
@@ -184,7 +193,8 @@ def commit(registry, expected_card, card, current, proposed, slot, path=None):
             raise
         try:
             market._sync_directory(registry.root)
-            if registry.snapshot()[0] != new_generation or settings.load(p) != proposed:
+            if (registry.snapshot()[0] != new_generation or settings.load(p) != proposed
+                    or settings._choice_identity(p.lstat()) != staged_stamp):
                 raise Hold(REASON)
             _clear(p, proof)
         except (Hold, OSError):
