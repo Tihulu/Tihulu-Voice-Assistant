@@ -69,8 +69,8 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
                 or model_digest(stt_paths[1])!=MODEL_SHA):
             raise RuntimeError("invalid pinned STT model")
         print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
-    if (corpus not in ("original","expanded","targeted","turbo-expanded")
-            or (corpus=="expanded" and (not stt_paths or stt_profile!="small"))
+    if (corpus not in ("original","expanded","targeted","turbo-expanded","mixed-preview")
+            or (corpus in ("expanded","mixed-preview") and (not stt_paths or stt_profile!="small"))
             or (corpus in ("targeted","turbo-expanded") and (not stt_paths or stt_profile!="turbo-q5"))):
         raise RuntimeError("invalid corpus profile")
     samples=tuple((lang,lang,text) for lang,text in TEXT.items())
@@ -153,6 +153,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
                               "/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack"]
         fv=run(["/usr/bin/ffmpeg","-version"],ffmpeg_prefix).decode("utf-8").splitlines()[0].split()[2]
         digests=set()
+        retained=[]
         for case_id,lang,text in samples:
             payload=text.encode("utf-8")
             lang_source=root/("text-"+case_id+".txt")
@@ -309,6 +310,12 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 else:
                     transcript.cancel()
                     qrecord("multilingual-stt-typed-receipt-"+case_id,False,reason="quality_gate_failed")
+            if corpus=="mixed-preview":
+                if transcript is None or not all(quality):
+                    job.cancel()
+                    return 1
+                retained.append((case_id,lang,data,job,transcript,conversion))
+                continue
             job.cancel()
             if transcript is not None:
                 try:
@@ -327,9 +334,63 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
             record("speech-revoke-invalidates-conversion-"+case_id,denied)
             if not all(results):
                 return 1
+        if corpus=="mixed-preview":
+            import io,wave
+            from mixed_voice_review import MixedVoiceReview,split_pcm
+            # All original short WAVs are real engine outputs, with known
+            # boundaries; assemble a single canonical PCM fixture in memory.
+            cuts=[0]
+            joined=io.BytesIO()
+            with wave.open(joined,"wb") as out:
+                out.setparams((1,2,22050,0,"NONE","not compressed"))
+                for case_id,lang,data,job,transcript,conversion in retained:
+                    receipt=job.result()
+                    if receipt[5]!=22050 or receipt[6]*2!=len(data)-44:
+                        raise RuntimeError("mixed segment format mismatch")
+                    cuts.append(cuts[-1]+receipt[6])
+                    out.writeframes(data[44:])
+            mixed_data=joined.getvalue()
+            pieces=split_pcm(mixed_data,tuple(cuts))
+            record("mixed-real-exact-frame-coverage",len(pieces)==3 and all(
+                   p.data==row[2] for p,row in zip(pieces,retained)))
+            review=MixedVoiceReview(mixed_data,tuple(cuts),tuple(row[4] for row in retained),MODEL_SHA)
+            preview=review.preview()
+            record("mixed-real-ordered-language-preview",
+                   [r.language for r in preview.segments]==[r[1] for r in retained]
+                   and [(r.start_frame,r.end_frame) for r in preview.segments]==list(zip(cuts,cuts[1:])),
+                   languages=[r.language for r in preview.segments],frames=cuts[-1],sample_rate=22050)
+            expected="\n".join(row[4].result()[0].text for row in retained)
+            record("mixed-real-exact-reviewed-text",preview.text==expected
+                   and preview.text_digest==hashlib.sha256(expected.encode()).hexdigest())
+            retained[1][3].cancel()
+            try:
+                review.preview()
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("mixed-real-revoked-segment-denies-review",denied)
+            record("mixed-real-independent-segments-remain-live",
+                   all(row[4].result()[0].language==row[1] for row in (retained[0],retained[2])))
+            for case_id,lang,data,job,transcript,conversion in retained:
+                job.cancel()
+                try:
+                    transcript.result()
+                except Refused:
+                    stt_denied=True
+                else:
+                    stt_denied=False
+                qrecord("multilingual-stt-revoked-result-"+case_id,stt_denied)
+                try:
+                    conversion.result()
+                except Refused:
+                    denied=True
+                else:
+                    denied=False
+                record("speech-revoke-invalidates-conversion-"+case_id,denied)
         record("speech-distinct-multilingual-output",len(digests)==len(samples))
         record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+case_id)).iterdir())==[speech_filename(case_id)] for case_id,_,_ in samples) and not list(output.iterdir()))
-    return 0 if len(results)==5+7*len(samples) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
+    return 0 if len(results)==5+7*len(samples)+(5 if corpus=="mixed-preview" else 0) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
 
 if __name__=="__main__":
     raise SystemExit(main(*sys.argv[1:]))
