@@ -73,6 +73,7 @@ def speech_corpus_profile(corpus,stt_profile,has_stt):
         "mixed-auto":(True,True,22,"small"),
         "mixed-auto-turbo":(True,True,22,"turbo-q5"),
         "mixed-auto-piper":(True,True,22,"small"),
+        "mixed-auto-piper-short":(True,True,22,"small"),
         "mixed-auto-reviewed":(True,True,24,"small"),
         "mixed-auto-reviewed-short":(True,True,24,"small"),
     }
