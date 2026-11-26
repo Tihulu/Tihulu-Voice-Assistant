@@ -880,6 +880,34 @@ sys.exit(99)
         self.assertFalse(self.backup.exists())
         self.assert_new_recovered()
 
+    def test_removal_recovery_refuses_backup_changed_after_verification(self):
+        self.interrupt("moved")
+        original = market._verified_artifact
+        def changed(path, size, **kwargs):
+            result = original(path, size, **kwargs)
+            if Path(path) == self.backup:
+                self.backup.write_bytes(NEW)
+            return result
+        with patch.object(market, "_verified_artifact", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "uninstall_recovery_required"):
+                market.Registry(self.root).load()
+        self.assertEqual(self.backup.read_bytes(), NEW)
+        self.assertFalse(self.target.exists())
+        self.assertTrue(self.registry.removal_journal.exists())
+
+    def test_removal_recovery_preserves_replaced_journal_after_sync(self):
+        self.interrupt("moved")
+        original = market._sync_directory
+        def changed(path):
+            original(path)
+            if path == self.target.parent:
+                self.registry.removal_journal.write_text("{}")
+        with patch.object(market, "_sync_directory", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "uninstall_recovery_required"):
+                market.Registry(self.root).load()
+        self.assertEqual(self.target.read_bytes(), OLD)
+        self.assertEqual(self.registry.removal_journal.read_text(), "{}")
+
     def test_recovery_refuses_corrupt_backup(self):
         self.interrupt("moved")
         self.backup.write_bytes(NEW)
@@ -1089,6 +1117,51 @@ sys.exit(99)
         restored = self.assert_recovered(OLD)
         self.assertGreater(restored.revision, current.revision)
         self.assertEqual(restored.network_approval, "")
+
+    def test_publication_recovery_refuses_target_changed_during_backup_hash(self):
+        self.install_old()
+        self.child("update", "moved")
+        original = market._verified_artifact
+        def changed(path, size, **kwargs):
+            result = original(path, size, **kwargs)
+            if Path(path) == self.backup:
+                self.target.write_bytes(b"replacement")
+            return result
+        with patch.object(market, "_verified_artifact", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "publication_recovery_required"):
+                market.Registry(self.root).load()
+        self.assertEqual(self.target.read_bytes(), b"replacement")
+        self.assertEqual(self.backup.read_bytes(), OLD)
+        self.assertTrue(self.registry.publication_journal.exists())
+
+    def test_committed_recovery_preserves_backup_changed_during_registry_sync(self):
+        self.install_old()
+        self.child("update", "committed")
+        original = market._sync_directory
+        def changed(path):
+            original(path)
+            if path == self.root:
+                self.backup.write_bytes(b"replacement")
+        with patch.object(market, "_sync_directory", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "publication_recovery_required"):
+                market.Registry(self.root).load()
+        self.assertEqual(self.target.read_bytes(), NEW)
+        self.assertEqual(self.backup.read_bytes(), b"replacement")
+        self.assertTrue(self.registry.publication_journal.exists())
+
+    def test_publication_recovery_preserves_replaced_journal_after_sync(self):
+        self.install_old()
+        self.child("update", "moved")
+        original = market._sync_directory
+        def changed(path):
+            original(path)
+            if path == self.target.parent:
+                self.registry.publication_journal.write_text("{}")
+        with patch.object(market, "_sync_directory", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "publication_recovery_required"):
+                market.Registry(self.root).load()
+        self.assertEqual(self.target.read_bytes(), OLD)
+        self.assertEqual(self.registry.publication_journal.read_text(), "{}")
 
     def test_corrupt_backup_blocks_recovery(self):
         self.install_old()
