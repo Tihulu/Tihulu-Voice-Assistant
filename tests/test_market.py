@@ -326,6 +326,16 @@ class RegistryTests(unittest.TestCase):
         with self.assertRaisesRegex(Hold, "model_not_registered"):
             self.store.unregister("fixture-stt")
 
+    def test_locked_unregister_does_not_reacquire_model_lease(self):
+        item = self.active("fixture-stt")
+        with self.assertRaisesRegex(Hold, "registry_lock_required"):
+            self.store._unregister_locked(item.model_id, expected=item)
+        with self.store.transfer_lease(item.model_id), self.store._write_guard():
+            with self.assertRaisesRegex(Hold, "transfer_busy"):
+                self.store.unregister(item.model_id, expected=item)
+            self.store._unregister_locked(item.model_id, expected=item)
+        self.assertEqual(self.store.cards(), ())
+
     def test_shared_weights_cannot_be_uninstalled(self):
         path = self.tmp / "tr_fixture.onnx"
         path.write_bytes(b"voice fixture\n")

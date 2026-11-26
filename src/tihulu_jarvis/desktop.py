@@ -4146,7 +4146,7 @@ def create_window(app, loop, bridge=None):
                             if not proposed.get(field):
                                 proposed.pop(field, None)
                     text = settings._serialize(proposed)
-                    self.market.unregister(model_id, expected=expected)
+                    self.market._unregister_locked(model_id, expected=expected)
                     # If publication fails, retaining an old reference is safer
                     # than silently removing the verification requirement.
                     if proposed != current:
