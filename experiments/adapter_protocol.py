@@ -92,6 +92,12 @@ class LocalAdapter:
                 raise Refused("transport_input_mismatch")
             self._transport_started=True
 
+    def checkpoint_fixture_transport(self):
+        with self._lock:
+            if not self._transport_started or self._state not in ("ready","running"):
+                raise Refused("transport_not_live")
+            self._checkpoint()
+
     @property
     def call(self):
         return self._call

@@ -31,7 +31,11 @@ def exchange(adapter, payload, response_id, reply):
     adapter.begin_fixture_transport(payload)
     captured=[]
     errors=[]
-    client,peer=socket.socketpair()
+    try:
+        client,peer=socket.socketpair()
+    except OSError:
+        stream.abort()
+        raise
     client.settimeout(2)
     peer.settimeout(2)
     body=json.dumps({"model":adapter.call.model,"stream":True,
@@ -62,6 +66,7 @@ def exchange(adapter, payload, response_id, reply):
     conn=NoConnect("fixture.invalid",timeout=2)
     conn.sock=client
     try:
+        adapter.checkpoint_fixture_transport()
         conn.request("POST","/v1/chat/completions",body=body,headers={
             "Content-Type":"application/json","Accept":"text/event-stream","Connection":"close"})
         # Closed HTTP fixture response: bound the whole byte stream, including
@@ -70,11 +75,13 @@ def exchange(adapter, payload, response_id, reply):
         deadline=time.monotonic()+2
         raw=bytearray()
         while True:
+            adapter.checkpoint_fixture_transport()
             remaining=deadline-time.monotonic()
             if remaining<=0:
                 raise Refused("fixture_http_deadline")
             client.settimeout(remaining)
             data=client.recv(4096)
+            adapter.checkpoint_fixture_transport()
             if not data:
                 break
             raw.extend(data)
@@ -196,3 +203,40 @@ class LocalHTTPFixtureTests(unittest.TestCase):
                     exchange(self.a,payload,identity,self.reply(self.sse()))
             pair.assert_not_called()
         self.assertEqual(self.a.state,"ready")
+
+    def test_socket_setup_failure_cancels_claimed_transport(self):
+        from unittest.mock import patch
+        with patch("socket.socketpair",side_effect=OSError("fixture allocation")):
+            with self.assertRaises(OSError):
+                exchange(self.a,self.payload,"response1",self.reply(self.sse()))
+        self.assertEqual(self.a.state,"cancelled")
+        with self.assertRaises(Refused):
+            self.a.result()
+    def test_revocation_after_socket_acquisition_blocks_send(self):
+        from unittest.mock import patch
+        original=socket.socketpair
+        def revoke():
+            pair=original()
+            self.g.revoke("stream")
+            return pair
+        with patch("socket.socketpair",side_effect=revoke),patch.object(NoConnect,"request") as send:
+            with self.assertRaises(Refused):
+                exchange(self.a,self.payload,"response1",self.reply(self.sse()))
+            send.assert_not_called()
+        self.assertEqual(self.a.state,"cancelled")
+    def test_revocation_during_receive_discards_reply(self):
+        from unittest.mock import patch
+        original=self.a.checkpoint_fixture_transport
+        calls=0
+        def check():
+            nonlocal calls
+            calls+=1
+            if calls==3:
+                self.g.revoke("stream")
+            return original()
+        with patch.object(self.a,"checkpoint_fixture_transport",side_effect=check):
+            with self.assertRaises(Refused):
+                exchange(self.a,self.payload,"response1",self.reply(self.sse()))
+        self.assertGreaterEqual(calls,3)
+        with self.assertRaises(Refused):
+            self.a.result()
