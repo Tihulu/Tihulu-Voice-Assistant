@@ -424,3 +424,58 @@ sys.exit(99)
                 settings.recover_jan_choice(self.store, self.path)
         self.assertTrue(journal.exists())
         self.assertEqual(settings.load(self.path), self.old)
+
+    def committed_review_fixture(self):
+        from tihulu_jarvis import market
+        registry = market.Registry(self.path.parent / "market")
+        card = registry.save_card(market.register_installed(market.ModelCard(
+            model_id="new", display_name="New Jan model", category="llm",
+            provider="jan", engine="jan", installed=True)))
+        self.stage()
+        self.store.save(self.after)
+        return registry, card
+
+    def test_explicit_committed_review_repairs_only_local_preference(self):
+        registry, card = self.committed_review_fixture()
+        profile = self.store.snapshot(self.before.id)
+        review = settings.review_committed_jan_choice(self.store, registry, self.path)
+        self.assertEqual(review[0], card)
+        self.assertEqual(settings.load(self.path), self.old)
+        self.assertEqual(settings.resolve_committed_jan_choice(
+            self.store, registry, expected=review, path=self.path), self.new)
+        self.assertEqual(self.store.snapshot(self.before.id), profile)
+        self.assertEqual(registry.card(card.model_id), card)
+        self.assertFalse(settings.choice_pending(self.path))
+
+    def test_explicit_resolution_refuses_changed_registry_card(self):
+        from dataclasses import replace
+        registry, card = self.committed_review_fixture()
+        review = settings.review_committed_jan_choice(self.store, registry, self.path)
+        registry.save_card(replace(card, display_name="Changed"), expected=card)
+        with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+            settings.resolve_committed_jan_choice(self.store, registry,
+                                                  expected=review, path=self.path)
+        self.assertTrue(settings.choice_pending(self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+
+    def test_explicit_resolution_refuses_changed_profile(self):
+        from dataclasses import replace
+        registry, card = self.committed_review_fixture()
+        review = settings.review_committed_jan_choice(self.store, registry, self.path)
+        self.store.save(replace(self.after, version=3, name="Changed"))
+        with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+            settings.resolve_committed_jan_choice(self.store, registry,
+                                                  expected=review, path=self.path)
+        self.assertTrue(settings.choice_pending(self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+
+    def test_explicit_review_refuses_unregistered_jan_card(self):
+        from tihulu_jarvis import market
+        registry = market.Registry(self.path.parent / "market")
+        registry.save_card(market.ModelCard(model_id="new", display_name="New",
+                    category="llm", provider="jan", engine="jan", installed=True))
+        self.stage()
+        self.store.save(self.after)
+        with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+            settings.review_committed_jan_choice(self.store, registry, self.path)
+        self.assertEqual(settings.load(self.path), self.old)
