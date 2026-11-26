@@ -7,9 +7,8 @@ from pathlib import Path
 import subprocess
 import tempfile
 import time
-import wave
 
-from voice_wav_acceptance import CASES, convert, digest, wer
+from voice_wav_acceptance import CASES, convert, digest, wer, language_recall, concatenate_clips
 from tihulu_jarvis import resources
 from tihulu_jarvis.voice import audio
 from tihulu_jarvis.voice.m1 import Hold
@@ -29,13 +28,9 @@ async def run(model):
                 convert(raw, wav)
                 clips[lang] = wav
             mixed = root / "mixed.wav"
-            with wave.open(str(mixed), "wb") as out:
-                out.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
-                for lang in ("tr", "en", "de"):
-                    with wave.open(str(clips[lang]), "rb") as clip:
-                        out.writeframes(clip.readframes(clip.getnframes()))
-                    out.writeframes(bytes(16000))
-            mixed_text = " ".join(CASES[lang] for lang in ("tr", "en", "de"))
+            references = [(lang, CASES[lang]) for lang in ("tr", "en", "de")]
+            concatenate_clips([clips[lang] for lang, _ in references], mixed)
+            mixed_text = " ".join(text for _, text in references)
             cases = [
                 ("en-auto", clips["en"], CASES["en"], "auto"),
                 ("de-auto", clips["de"], CASES["de"], "auto"),
@@ -52,8 +47,10 @@ async def run(model):
                     actual = await audio.transcribe(str(model), str(path), checkpoint=lambda: None,
                                                     language=lang)
                     error = wer(expected, actual)
+                    recall = language_recall(references, actual) if name.startswith("mixed-") else {}
                     row.update(actual=actual, wer=round(error, 4),
-                               status="PASS" if error <= .5 else "FAIL")
+                               language_recall={k: round(v, 4) for k, v in recall.items()},
+                               status="PASS" if error <= .5 and all(v >= .5 for v in recall.values()) else "FAIL")
                 except (Hold, asyncio.TimeoutError) as exc:
                     row.update(status="FAIL", reason=str(exc) or type(exc).__name__)
                 row["seconds"] = round(time.monotonic() - started, 2)

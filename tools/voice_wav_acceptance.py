@@ -49,6 +49,50 @@ def wer(expected, actual):
     return row[-1] / len(a)
 
 
+def language_recall(references, actual):
+    """Exact in-order word retention per reference block; no reused matches.
+
+    A global WER may conceal the complete loss of one language. Use an LCS
+    alignment across the complete reference, then count matches by block.
+    Insertions/substitutions remain penalized separately by WER.
+    """
+    groups = [(lang, words(text)) for lang, text in references]
+    if not groups or any(not tokens for _, tokens in groups):
+        raise ValueError("empty reference")
+    ref = [(lang, word) for lang, tokens in groups for word in tokens]
+    observed = words(actual)
+    table = [[0] * (len(observed) + 1) for _ in range(len(ref) + 1)]
+    for i, (_, token) in enumerate(ref, 1):
+        for j, value in enumerate(observed, 1):
+            table[i][j] = (table[i-1][j-1] + 1 if token == value
+                           else max(table[i-1][j], table[i][j-1]))
+    counts, totals = {}, {}
+    for lang, tokens in groups:
+        totals[lang] = totals.get(lang, 0) + len(tokens)
+        counts[lang] = 0
+    i, j = len(ref), len(observed)
+    while i and j:
+        if ref[i-1][1] == observed[j-1]:
+            counts[ref[i-1][0]] += 1
+            i, j = i-1, j-1
+        elif table[i-1][j] >= table[i][j-1]:
+            i -= 1
+        else:
+            j -= 1
+    return {lang: counts[lang] / total for lang, total in totals.items()}
+
+
+def concatenate_clips(paths, target):
+    with wave.open(str(target), "wb") as out:
+        out.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+        for path in paths:
+            with wave.open(str(path), "rb") as clip:
+                if (clip.getnchannels(), clip.getsampwidth(), clip.getframerate()) != (1, 2, 16000):
+                    raise ValueError("incompatible fixture")
+                out.writeframes(clip.readframes(clip.getnframes()))
+            out.writeframes(bytes(16000))
+
+
 def convert(src, dst):
     subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-y", "-i", str(src),
                     "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le", str(dst)],
@@ -73,15 +117,19 @@ async def run(args):
             results.append(row)
             print(json.dumps(row, ensure_ascii=False), flush=True)
 
-        async def transcribe(case, path, expected, threshold, language="auto"):
+        async def transcribe(case, path, expected, threshold, language="auto", references=None):
             started = time.monotonic()
             stages = []
             try:
                 actual = await audio.transcribe(str(args.model), str(path), publish=stages.append,
                                                 checkpoint=lambda: None, language=language)
                 error = wer(expected, actual)
-                report(case, "PASS" if error <= threshold and stages == ["transcribing"] else "FAIL",
+                recall = language_recall(references, actual) if references else {}
+                passed = (error <= threshold and stages == ["transcribing"]
+                          and all(v >= .5 for v in recall.values()))
+                report(case, "PASS" if passed else "FAIL",
                        expected=expected, actual=actual, wer=round(error, 4),
+                       language_recall={k: round(v, 4) for k, v in recall.items()},
                        threshold=threshold, seconds=round(time.monotonic()-started, 2),
                        wav_sha256=digest(path), stages=stages)
             except (Hold, asyncio.TimeoutError) as exc:
@@ -104,22 +152,17 @@ async def run(args):
         # automatic single-language detection handles code switching.
         mixed = root / "mixed.wav"
         delayed = root / "delayed.wav"
-        with wave.open(str(mixed), "wb") as out:
-            out.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
-            for lang in ("tr", "en", "de"):
-                with wave.open(str(clips[lang]), "rb") as clip:
-                    out.writeframes(clip.readframes(clip.getnframes()))
-                out.writeframes(bytes(16000))
+        references = [(lang, CASES[lang]) for lang in ("tr", "en", "de")]
+        mixed_text = " ".join(text for _, text in references)
+        concatenate_clips([clips[lang] for lang, _ in references], mixed)
         with wave.open(str(delayed), "wb") as out:
             out.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
             out.writeframes(bytes(32 * 32000))
             with wave.open(str(clips["en"]), "rb") as clip:
                 out.writeframes(clip.readframes(clip.getnframes()))
-        await transcribe("mixed-tr-en-de", mixed,
-                         " ".join(CASES[lang] for lang in ("tr", "en", "de")), .5)
-        await transcribe("mixed-segmented-tr-en-de", mixed,
-                         " ".join(CASES[lang] for lang in ("tr", "en", "de")), .5,
-                         language="segmented")
+        await transcribe("mixed-tr-en-de", mixed, mixed_text, .5, references=references)
+        await transcribe("mixed-segmented-tr-en-de", mixed, mixed_text, .5,
+                         language="segmented", references=references)
         await transcribe("speech-after-32s", delayed, CASES["en"], .5)
 
         silence = root / "silence.wav"
@@ -173,6 +216,7 @@ async def run(args):
         config = root / "alsa.conf"
         config.write_text("pcm.!default { type null }\n", encoding="utf-8")
         original_child = audio.child
+        piper_clips = {}
         for lang, voice in (("en", args.voice), ("tr", args.voice_tr), ("de", args.voice_de)):
             output, roundtrip = root / (lang + "-piper.wav"), root / (lang + "-roundtrip.wav")
             children, stages = [], []
@@ -203,7 +247,17 @@ async def run(args):
             except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
                 report("piper-roundtrip-" + lang, "FAIL", reason="conversion_failed")
                 continue
+            piper_clips[lang] = roundtrip
             await transcribe("piper-roundtrip-" + lang, roundtrip, CASES[lang], .5)
+        if len(piper_clips) == 3:
+            mixed_piper = root / "mixed-piper.wav"
+            concatenate_clips([piper_clips[lang] for lang, _ in references], mixed_piper)
+            await transcribe("mixed-piper-auto", mixed_piper, mixed_text, .5, references=references)
+            await transcribe("mixed-piper-segmented", mixed_piper, mixed_text, .5,
+                             language="segmented", references=references)
+        else:
+            for case in ("mixed-piper-auto", "mixed-piper-segmented"):
+                report(case, "HOLD", reason="missing_piper_fixture")
     audio.configure(None)
     return results
 
@@ -217,7 +271,7 @@ def main():
         setattr(args, attr, getattr(args, attr).resolve(strict=True))
     results = asyncio.run(run(args))
     args.report.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return 0 if len(results) == 20 and all(x["status"] == "PASS" for x in results) else 1
+    return 0 if len(results) == 22 and all(x["status"] == "PASS" for x in results) else 1
 
 
 if __name__ == "__main__":
