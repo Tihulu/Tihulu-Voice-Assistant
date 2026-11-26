@@ -132,6 +132,38 @@ async def run(args):
         else:
             report("silence", "FAIL", reason="unexpected_transcript")
 
+        # ALSA's file PCM accepts raw audio as a virtual microphone. Run the
+        # production arecord -> WAV -> Whisper path with a padded known clip.
+        # No actual microphone, system-wide ALSA change or fake recorder.
+        capture_config = root / "capture.conf"
+        raw_input = root / "capture.raw"
+        for lang, source in clips.items():
+            with wave.open(str(source), "rb") as clip:
+                data = clip.readframes(clip.getnframes())
+            if len(data) > 30 * 32000:
+                report("virtual-mic-" + lang, "FAIL", reason="fixture_too_long")
+                continue
+            raw_input.write_bytes(data + bytes(30 * 32000 - len(data)))
+            capture_config.write_text(
+                'pcm.null { type null }\n'
+                'pcm.!default { type file slave.pcm "null" file "/dev/null" '
+                'infile "' + str(raw_input) + '" format "raw" }\n', encoding="utf-8")
+            started, stages = time.monotonic(), []
+            try:
+                with patch.dict(os.environ, {"ALSA_CONFIG_PATH": str(capture_config)}):
+                    actual = await audio.listen(str(args.model), asyncio.Event(), stages.append,
+                                                checkpoint=lambda: None)
+                error = wer(CASES[lang], actual)
+                # A null-backed source may finish before the 40ms capture poll.
+                # That is not a physical listening-state/timing acceptance.
+                report("virtual-mic-" + lang,
+                       "PASS" if error <= .5 and stages in (["transcribing"], ["listening", "transcribing"]) else "FAIL",
+                       expected=CASES[lang], actual=actual, wer=round(error, 4),
+                       threshold=.5, stages=stages, seconds=round(time.monotonic()-started, 2),
+                       pcm_sha256=digest(raw_input))
+            except (Hold, asyncio.TimeoutError, OSError) as exc:
+                report("virtual-mic-" + lang, "FAIL", reason=str(exc) or type(exc).__name__, stages=stages)
+
         # A real aplay process sends audio to a deliberately configured null
         # device. Observe/copy only the private output at the playback boundary.
         config = root / "alsa.conf"
@@ -181,7 +213,7 @@ def main():
         setattr(args, attr, getattr(args, attr).resolve(strict=True))
     results = asyncio.run(run(args))
     args.report.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return 0 if len(results) == 13 and all(x["status"] == "PASS" for x in results) else 1
+    return 0 if len(results) == 16 and all(x["status"] == "PASS" for x in results) else 1
 
 
 if __name__ == "__main__":
