@@ -26,6 +26,13 @@ class ProfileTests(unittest.TestCase):
         tight = resources.replace(tight, threads=3)
         self.assertEqual(tight.threads_for(8), 3)            # an explicit cap wins
 
+    def test_thread_counts_are_bounded_by_affinity_and_missing_affinity_is_safe(self):
+        profile = resources.effective({"profile": "custom", "threads": 256})
+        self.assertEqual(profile.threads_for(2), 2)
+        self.assertEqual(profile.threads_for(None), 4)
+        self.assertEqual(resources.preset("performance").threads_for(1024), 256)
+        self.assertEqual(resources.preset("balance").threads_for(None), 3)
+
     def test_the_environment_is_bounded_and_names_the_device(self):
         quiet = resources.environment(resources.preset("balance"), 8)
         self.assertEqual(quiet["OMP_NUM_THREADS"], "6")
@@ -43,6 +50,15 @@ class CustomTests(unittest.TestCase):
         self.assertEqual((profile.id, profile.idle_release, profile.keep_warm, profile.gpu),
                          ("custom", 5, True, "cuda"))
         self.assertEqual(profile.cpu_share, resources.preset("balance").cpu_share)
+
+    def test_invalid_stored_overrides_and_boolean_numbers_are_refused(self):
+        with self.assertRaises(Hold):
+            resources.stored("balance", {"threads": 3})
+        for key in ("threads", "idle_release", "cpu_share"):
+            with self.subTest(key=key), self.assertRaises(Hold):
+                resources.effective({"profile": "custom", key: True})
+        with self.assertRaises(Hold):
+            resources.preset([])
 
     def test_an_unknown_or_impossible_profile_is_refused(self):
         for bad in ("huge", "", None, 3, "Balance"):

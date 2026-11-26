@@ -49,23 +49,25 @@ class Profile:
     def checked(self):
         if self.id not in PROFILE_IDS:
             raise Hold("unknown_resource_profile")
-        if not isinstance(self.cpu_share, (int, float)) or not 0.05 <= self.cpu_share <= 1.0:
+        if type(self.cpu_share) not in (int, float) or not 0.05 <= self.cpu_share <= 1.0:
             raise Hold("invalid_local_settings")
-        if not isinstance(self.idle_release, int) or not 0 <= self.idle_release <= 86400:
+        if type(self.idle_release) is not int or not 0 <= self.idle_release <= 86400:
             raise Hold("invalid_local_settings")
         if not isinstance(self.keep_warm, bool):
             raise Hold("invalid_local_settings")
         if self.gpu not in GPUS:
             raise Hold("invalid_local_settings")
-        if not isinstance(self.threads, int) or not 0 <= self.threads <= 256:
+        if type(self.threads) is not int or not 0 <= self.threads <= 256:
             raise Hold("invalid_local_settings")
         return self
 
     def threads_for(self, cores):
         """How many threads a local engine gets, on a machine with ``cores``."""
+        # Affinity discovery can fail, including on non-Linux hosts.
+        count = cores if type(cores) is int and cores > 0 else 4
         if self.threads:
-            return min(self.threads, 256)
-        return max(1, int(cores * self.cpu_share))
+            return min(self.threads, 256, count)
+        return min(256, max(1, int(count * self.cpu_share)))
 
     def releases_after(self):
         """Seconds of idleness before a local engine is released, or None."""
@@ -102,7 +104,7 @@ LABELS = {
 
 def preset(name):
     """A ready-made profile, checked. An unknown id is refused."""
-    if name not in PRESETS:
+    if not isinstance(name, str) or name not in PRESETS:
         raise Hold("unknown_resource_profile")
     return PRESETS[name]
 
@@ -164,6 +166,8 @@ def stored(profile_id, overrides=None):
         if unknown:
             raise Hold("invalid_local_settings")
         replace(preset(BALANCE), **overrides).checked()
+    elif overrides:
+        raise Hold("invalid_local_settings")
     return {"profile": profile_id, **overrides}
 
 
