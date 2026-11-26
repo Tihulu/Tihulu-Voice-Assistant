@@ -233,32 +233,71 @@ async def run(args):
         # No actual microphone, system-wide ALSA change or fake recorder.
         capture_config = root / "capture.conf"
         raw_input = root / "capture.raw"
-        for lang, source in clips.items():
-            with wave.open(str(source), "rb") as clip:
-                data = clip.readframes(clip.getnframes())
+
+        def configure_capture(data):
             if len(data) > 30 * 32000:
-                report("virtual-mic-" + lang, "FAIL", reason="fixture_too_long")
-                continue
+                raise ValueError("fixture_too_long")
             raw_input.write_bytes(data + bytes(30 * 32000 - len(data)))
             capture_config.write_text(
                 'pcm.null { type null }\n'
                 'pcm.!default { type file slave.pcm "null" file "/dev/null" '
                 'infile "' + str(raw_input) + '" format "raw" }\n', encoding="utf-8")
+
+        async def virtual_capture(case, language, expected):
             started, stages = time.monotonic(), []
             try:
                 with patch.dict(os.environ, {"ALSA_CONFIG_PATH": str(capture_config)}):
                     actual = await audio.listen(str(args.model), asyncio.Event(), stages.append,
-                                                checkpoint=lambda: None)
-                error = wer(CASES[lang], actual)
-                # A null-backed source may finish before the 40ms capture poll.
-                # That is not a physical listening-state/timing acceptance.
-                report("virtual-mic-" + lang,
+                                                checkpoint=lambda: None, language=language)
+                error = wer(expected, actual)
+                # A null-backed source may finish before capture publication.
+                report(case,
                        "PASS" if error <= .5 and stages in (["transcribing"], ["listening", "transcribing"]) else "FAIL",
-                       expected=CASES[lang], actual=actual, wer=round(error, 4),
+                       expected=expected, actual=actual, wer=round(error, 4), input_language=language,
                        threshold=.5, stages=stages, seconds=round(time.monotonic()-started, 2),
                        pcm_sha256=digest(raw_input))
             except (Hold, asyncio.TimeoutError, OSError) as exc:
-                report("virtual-mic-" + lang, "FAIL", reason=str(exc) or type(exc).__name__, stages=stages)
+                report(case, "FAIL", reason=str(exc) or type(exc).__name__, stages=stages)
+
+        for lang, source in clips.items():
+            with wave.open(str(source), "rb") as clip:
+                data = clip.readframes(clip.getnframes())
+            if len(data) > 30 * 32000:
+                for case in ("virtual-mic-" + lang, "virtual-mic-forced-" + lang):
+                    report(case, "FAIL", reason="fixture_too_long")
+                continue
+            configure_capture(data)
+            await virtual_capture("virtual-mic-" + lang, "auto", CASES[lang])
+            await virtual_capture("virtual-mic-forced-" + lang, lang, CASES[lang])
+
+        configure_capture(b"")
+        stages = []
+        try:
+            with patch.dict(os.environ, {"ALSA_CONFIG_PATH": str(capture_config)}):
+                await audio.listen(str(args.model), asyncio.Event(), stages.append,
+                                   checkpoint=lambda: None)
+        except Hold as exc:
+            report("virtual-mic-silence",
+                   "PASS" if str(exc) == "no_speech_signal" and "transcribing" not in stages else "FAIL",
+                   reason=str(exc), stages=stages)
+        else:
+            report("virtual-mic-silence", "FAIL", reason="unexpected_transcript")
+
+        # Reproduce an early voiced prefix followed by missing advertised
+        # frames. Actual adapter must refuse it before inference publication.
+        truncated = root / "truncated.wav"
+        payload = clips["en"].read_bytes()
+        truncated.write_bytes(payload[:-1000])
+        stages = []
+        try:
+            await audio.transcribe(str(args.model), str(truncated), publish=stages.append,
+                                   checkpoint=lambda: None)
+        except Hold as exc:
+            report("truncated-voiced-wav",
+                   "PASS" if str(exc) == "no_speech_signal" and not stages else "FAIL",
+                   reason=str(exc), stages=stages)
+        else:
+            report("truncated-voiced-wav", "FAIL", reason="unexpected_transcript")
 
         # A real aplay process sends audio to a deliberately configured null
         # device. Observe/copy only the private output at the playback boundary.
@@ -320,7 +359,7 @@ def main():
         setattr(args, attr, getattr(args, attr).resolve(strict=True))
     results = asyncio.run(run(args))
     args.report.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return 0 if len(results) == 31 and all(x["status"] == "PASS" for x in results) else 1
+    return 0 if len(results) == 36 and all(x["status"] == "PASS" for x in results) else 1
 
 
 if __name__ == "__main__":

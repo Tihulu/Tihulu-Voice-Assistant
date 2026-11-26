@@ -30,3 +30,7 @@ Speech input language is now persisted as an optional validated preference. Auto
 ## Stress extension
 
 31 real scenarios per model: prior 22 cases unchanged, plus nine deterministic eSpeak cases (three 15dB seeded uniform-noise clips, three faster 190 WPM clips, three short assistant-command utterances). Commands are transcribed only, never executed. Command WER threshold 25%; noise and speed 50%. Noise SNR is measured before PCM clipping; seeded input is reproducible within the same fixture engine version. This is not real room noise, human accents or hardware acceptance. Base and Small each run the full 31 cases (62 executions); no existing threshold is relaxed.
+
+## Capture and corrupt-input extension
+
+36 cases per model (72 full executions): retain all prior 31, add explicit TR/EN/DE virtual-microphone recognition using identical PCM inputs to auto mode, actual arecord silence refusal before transcription, and truncated voiced WAV refusal before inference. No microphone device, no system config changes, no relaxed prior thresholds. Verify both auto and forced paths separately.
