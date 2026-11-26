@@ -4,6 +4,7 @@ on:
     branches: ['**']
     paths:
       - 'experiments/piper_engine_acceptance.py'
+      - 'experiments/language_detection.py'
       - 'experiments/piper-fixture-requirements.txt'
       - 'experiments/speech_result.py'
       - 'experiments/capabilities.py'
@@ -82,4 +83,4 @@ jobs:
           VOICE_LANGUAGE: ${{ matrix.language }}
         run: |
           /usr/bin/python3 experiments/piper_engine_acceptance.py "$RUNNER_TEMP/piper-fixture/site" "$RUNNER_TEMP/piper-fixture/voice.onnx" "$RUNNER_TEMP/piper-fixture/voice.json" "$VOICE_LANGUAGE"
-          /usr/bin/python3 experiments/piper_engine_acceptance.py "$RUNNER_TEMP/piper-fixture/site" "$RUNNER_TEMP/piper-fixture/voice.onnx" "$RUNNER_TEMP/piper-fixture/voice.json" "$VOICE_LANGUAGE" "$RUNNER_TEMP/piper-stt/build/bin/whisper-cli" "$RUNNER_TEMP/piper-stt/model.bin"
+          /usr/bin/python3 experiments/piper_engine_acceptance.py "$RUNNER_TEMP/piper-fixture/site" "$RUNNER_TEMP/piper-fixture/voice.onnx" "$RUNNER_TEMP/piper-fixture/voice.json" "$VOICE_LANGUAGE" "$RUNNER_TEMP/piper-stt/build/bin/whisper-cli" "$RUNNER_TEMP/piper-stt/model.bin" auto
