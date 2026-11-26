@@ -35,6 +35,30 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.history,())
         self.assertIsNone(session.context.response_language)
 
+    async def test_invalid_adapter_response_never_commits_history(self):
+        session = Session()
+
+        async def chat(messages):
+            return "hello\x00world"
+
+        with self.assertRaisesRegex(Hold, "response_rejected_after_one_retry"):
+            await session.own(lambda e: session.reply("hello", chat, e))
+        self.assertEqual(session.history, ())
+
+    async def test_invalid_stream_delta_never_reaches_composer(self):
+        session = Session()
+        seen = []
+
+        class Backend:
+            async def chat(self, messages, on_delta):
+                on_delta("hello\x00world")
+                return "Hello"
+
+        with self.assertRaisesRegex(Hold, "invalid_response_text"):
+            await session.own(lambda e: session.reply("hello", Backend(), e, on_delta=seen.append))
+        self.assertEqual(seen, [])
+        self.assertEqual(session.history, ())
+
     async def test_text_chat_does_not_require_a_voice(self):
         session=Session()
         responses=iter(["Hello how are you?", "Merhaba, nasılsın?"])
@@ -142,13 +166,21 @@ class TranscribeFileTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_invalid_engine_output_is_reported_precisely(self):
         clip = self.recording()
-        for payload in (b"\xff", b"a" * (audio.MAX_TRANSCRIPT + 1)):
+        for payload in (b"\xff", b"hello\x00world", b"a" * (audio.MAX_TRANSCRIPT + 1)):
             with self.subTest(size=len(payload)):
                 async def runner(model, wav, stem):
                     stem.with_suffix(".txt").write_bytes(payload)
 
                 with self.assertRaisesRegex(Hold, "invalid_transcript"):
                     await audio.transcribe(self.model, str(clip), runner, checkpoint=lambda: None)
+
+    async def test_invalid_speech_payload_is_refused_before_model_access(self):
+        from tihulu_jarvis.voice.m1 import SpeechRequest
+        for text in ("hello\x00world", "hello\ud800", " ", "a" * 32001):
+            with self.subTest(text_length=len(text)), self.assertRaisesRegex(Hold, "invalid_speech_text"):
+                await audio.speak(SpeechRequest(text, "en", "not a model"),
+                                  lambda _: self.fail("unexpected playback"),
+                                  checkpoint=lambda: None)
 
     async def test_a_rejected_recording_never_reaches_the_engine(self):
         calls = []

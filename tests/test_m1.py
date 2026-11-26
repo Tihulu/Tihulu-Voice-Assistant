@@ -109,6 +109,11 @@ class LanguageRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reset.response_language, "en")
         self.assertIsNone(reset.next_context.persistent_response_language)
 
+    def test_unrepresentable_user_input_is_refused(self):
+        for text in ("hello\x00world", "hello\ud800"):
+            with self.subTest(text=repr(text)), self.assertRaisesRegex(Hold, "invalid_input"):
+                route_language(text, LanguageContext())
+
     def test_empty_and_conflicting_input(self):
         for text in ("", " \n ", "..."):
             with self.assertRaises(Hold):
@@ -129,6 +134,12 @@ class SpeechNormalizationTests(unittest.TestCase):
         self.assertEqual(
             speech_text("[OpenCode](https://example.test/docs)"), "OpenCode"
         )
+
+    def test_unrepresentable_response_is_refused(self):
+        for text in ("hello\x00world", "hello\ud800"):
+            with self.subTest(text=repr(text)), self.assertRaisesRegex(Hold, "invalid_response_text"):
+                speech_text(text)
+            self.assertFalse(valid_response(text, "en", lexical_identifier))
 
     def test_unsupported_speech_is_not_silently_corrupted(self):
         for text in (
