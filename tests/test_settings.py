@@ -273,6 +273,21 @@ class SettingsSnapshotBoundaryTests(unittest.TestCase):
         settings.save(cfg, self.path)
         self.assertEqual(settings.load(self.path), cfg)
 
+    def test_reload_preferences_allows_audio_and_display_changes_but_not_profile(self):
+        before = {**settings.empty(), "profile": "strict"}
+        after = {**before, "stt": "/fixture/new.bin", "text_scale": "large"}
+        settings.save(after, self.path)
+        self.assertEqual(settings.reload_preferences(before, self.path), after)
+        settings.save({**after, "profile": "other"}, self.path)
+        with self.assertRaisesRegex(Hold, "settings_changed_restart_required"):
+            settings.reload_preferences(before, self.path)
+
+    def test_reload_preferences_refuses_endpoint_change(self):
+        before = settings.empty()
+        settings.save({**before, "endpoint": "http://127.0.0.1:8080"}, self.path)
+        with self.assertRaisesRegex(Hold, "settings_changed_restart_required"):
+            settings.reload_preferences(before, self.path)
+
     def test_profile_guard_rechecks_replaced_settings_and_allows_cosmetic_change(self):
         from unittest.mock import patch
         cfg = {**settings.empty(), "profile": "strict"}

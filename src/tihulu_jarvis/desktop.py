@@ -216,6 +216,7 @@ def create_window(app, loop, bridge=None):
             except Hold as e:
                 read_error = (read_error + " " if read_error else "") + str(e)
             self.saved_cfg = deepcopy(self.cfg)
+            self.syncing_preferences = False
             self.runtime_model_proofs = market.RuntimeModelProofs()
             self.profile_selection_guard = settings.ProfileSelectionGuard()
             self.look = LOOK
@@ -1778,6 +1779,8 @@ def create_window(app, loop, bridge=None):
 
         def choose_resource_profile(self, *_):
             """Apply the chosen profile now; a restart is never required."""
+            if self.syncing_preferences:
+                return
             chosen = resources.PROFILE_IDS[self.resource_profile.get_active()]
             stored = {"profile": chosen}
             if chosen == "custom":
@@ -1839,11 +1842,15 @@ def create_window(app, loop, bridge=None):
 
         def choose_spoken_text(self, *_):
             """Store the choice immediately; a restart is never required."""
+            if self.syncing_preferences:
+                return
             self.cfg["show_spoken_text"] = bool(self.settings_spoken.get_active())
             self.save()
 
         def choose_text_scale(self, *_):
             """Store and apply the chosen scale immediately, never at restart."""
+            if self.syncing_preferences:
+                return
             try:
                 self.cfg["text_scale"] = a11y.checked(
                     "large" if self.settings_scale.get_active() == 1 else "normal")
@@ -3087,6 +3094,9 @@ def create_window(app, loop, bridge=None):
                                                           "Yerel seçimleri unut",
                                                           "Lokale Auswahl vergessen"),
                                                self.forget_choices)
+            self.settings_reload = self.button(forget, tr(
+                "Reload display and audio choices", "Görünüm ve ses seçimlerini yenile",
+                "Anzeige- und Audioauswahl neu laden"), self.reload_local_preferences)
             self.settings_note = Gtk.Label(xalign=0, wrap=True)
             page.append(self.settings_note)
             self.settings_note.set_text(tr(
@@ -3112,6 +3122,8 @@ def create_window(app, loop, bridge=None):
             self.settings_choice_inspect.set_sensitive(available)
             self.settings_choice_confirm.set_sensitive(available and self.settings_choice_review is not None)
             self.settings_forget.set_sensitive(not self.busy and not pending and not self.audio_choice_blocked())
+            self.settings_reload.set_sensitive(not self.busy and not self.closing
+                                               and not pending and not self.audio_choice_blocked())
             if not pending:
                 self.settings_choice_review = None
 
@@ -3154,6 +3166,47 @@ def create_window(app, loop, bridge=None):
                 self.settings_choice_note.set_text(str(exc))
                 self.set_state("ready", str(exc))
             self.refresh_choice_recovery()
+
+        def sync_preference_widgets(self):
+            self.syncing_preferences = True
+            try:
+                self.settings_scale.set_active(1 if self.cfg["text_scale"] == "large" else 0)
+                self.settings_spoken.set_active(self.cfg["show_spoken_text"])
+                profile = self.effective_resource()
+                self.resource_profile.set_active(resources.PROFILE_IDS.index(profile.id))
+                self.resource_threads.set_value(profile.threads_for(resources.cores()))
+                self.resource_gpu.set_active(resources.GPUS.index(profile.gpu))
+                self.resource_warm.set_active(profile.keep_warm)
+                self.resource_idle.set_value(profile.idle_release)
+            finally:
+                self.syncing_preferences = False
+            self.apply_text_scale()
+            self.apply_resource_profile()
+            self.refresh_resources_note()
+            self.update_labels()
+
+        def reload_local_preferences(self):
+            if self.busy or self.closing or self.owned_picker is not None:
+                return
+            try:
+                current = settings.reload_preferences(self.saved_cfg)
+                if any(self.cfg.get(k) != self.saved_cfg.get(k)
+                       for k in (self.cfg.keys() | self.saved_cfg.keys()) - settings.RELOADABLE):
+                    raise Hold("settings_changed_restart_required")
+                self.profile_selection_guard.require(current["profile"])
+            except (Hold, OSError) as exc:
+                self.settings_note.set_text(str(exc))
+                return
+            self.cfg = current
+            self.saved_cfg = deepcopy(current)
+            self.runtime_model_proofs = market.RuntimeModelProofs()
+            self.clear_model_scan()
+            self.sync_preference_widgets()
+            self.refresh()
+            self.settings_note.set_text(tr(
+                "Display and audio choices reloaded from disk.",
+                "Görünüm ve ses seçimleri diskten yenilendi.",
+                "Anzeige- und Audioauswahl von Datenträger neu geladen."))
 
         def forget_choices(self):
             """Erase the stored choices, and state what it did not erase."""
