@@ -62,6 +62,52 @@ class AudioChoiceTests(unittest.TestCase):
             audio_choice.unregister(self.registry, self.card, self.new, self.path)
         self.assertFalse(settings.audio_choice_pending(self.path))
 
+    def prepare_registration(self):
+        digest = "a" * 64
+        ref = "sha256-" + digest[:32]
+        card = market.register_installed(market.ModelCard(
+            model_id="new-stt", display_name="New", category="stt",
+            engine="whisper.cpp", installed=True, storage_ref=ref))
+        new = settings.checked(self.old)
+        new["market_refs"][ref] = "/fixture/registered.bin"
+        new["audio_digests"] = {ref: digest}
+        return card, new
+
+    def test_registration_recovers_metadata_after_registry_commit(self):
+        card, new = self.prepare_registration()
+        with patch.object(market, "_sync_directory", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                audio_choice.register(self.registry, None, card, self.old, new, self.path)
+        self.assertEqual(settings.load(self.path), self.old)
+        self.assertTrue(settings.audio_choice_pending(self.path))
+        self.assertTrue(audio_choice.recover(self.registry, self.path))
+        self.assertEqual(settings.load(self.path), new)
+        self.assertEqual(self.registry.card(card.model_id), card)
+
+    def test_registration_recovers_old_settings_before_registry_commit(self):
+        card, new = self.prepare_registration()
+        with patch.object(self.registry, "save_card", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                audio_choice.register(self.registry, None, card, self.old, new, self.path)
+        self.assertTrue(audio_choice.recover(self.registry, self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+        self.assertIsNone(self.registry.lookup_card(card.model_id))
+
+    def test_first_registration_recovers_missing_settings_and_registry(self):
+        card, _ = self.prepare_registration()
+        path = self.path.parent / "first.json"
+        registry = market.Registry(self.path.parent / "first-market")
+        old = settings.empty()
+        new = settings.checked(old)
+        new["market_refs"][card.storage_ref] = "/fixture/registered.bin"
+        new["audio_digests"] = {card.storage_ref: "a" * 64}
+        with patch.object(market, "_sync_directory", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                audio_choice.register(registry, None, card, old, new, path)
+        self.assertTrue(audio_choice.recover(registry, path))
+        self.assertEqual(settings.load(path), new)
+        self.assertEqual(registry.card(card.model_id), card)
+
     def test_success_commits_both(self):
         saved = self.commit()
         self.assertEqual(saved.state, "ACTIVE")
