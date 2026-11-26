@@ -86,3 +86,5 @@ CAP-06 #316/#317 actual file-limit probe failed while process limits and other c
 CAP-04/06/08 persist trusted fixture dependency edges at claim and revalidate transitive ancestors in every later checkpoint/claim (including standalone checkpoint). Bounded visited traversal, no new callback or transport. Four regression methods cover direct parent revoke, ancestor expiry, child initiation denial and shared ancestor/unrelated grant. Real effect serialization remains open.
 
 CAP-06: exact ordered 13-case sandbox preflight required before any real fixture conversion/version probe. A failed/held/missing/reordered preflight stops engine execution; failed lossless roundtrip prevents successful typed receipt. Four preflight regressions. Existing 16 real cases preserved. Disposable CI only, no owner activation.
+
+CAP-01/02/06: actual Poppler per-page bbox and Tesseract TSV OCR inside existing fail-closed Bubblewrap boundary, fixed TR/EN/DE generated public PDF/images, typed preclaim and receipt, source digest preservation. Seven additional cases (23 total planned), CI-only packages; no personal documents or runtime permission. Preserve prior 16 cases.
