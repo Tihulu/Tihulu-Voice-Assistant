@@ -211,22 +211,41 @@ class FixtureGateway:
                 self._claimed.add(grant.identity)
             return "SIMULATED_ALLOW"
 
-    def claim_dependent(self, grant, req, dependency, dependency_req):
-        """Linearize a simulated child claim against an already claimed parent.
+    def _check_claimed_group_locked(self, dependencies, now):
+        if type(dependencies) is not tuple or not 1 <= len(dependencies) <= MAX_GRANTS:
+            raise Refused("invalid_dependency_group")
+        identities = set()
+        for pair in dependencies:
+            if type(pair) is not tuple or len(pair) != 2:
+                raise Refused("invalid_dependency_group")
+            grant, req = pair
+            self._validate_locked(grant, req, now)
+            if grant.identity in identities or grant.identity not in self._claimed:
+                raise Refused("dependency_not_claimed")
+            identities.add(grant.identity)
+        return identities
 
-        Trusted fixture callers supply the exact dependency relationship. No
-        callback, I/O, or production effect is authorized by this method.
-        """
+    def checkpoint_claimed_group(self, dependencies):
+        """One simulated policy-time observation for an entire claimed chain."""
+        with self._lock:
+            self._check_claimed_group_locked(dependencies, self._clock.now())
+            return "SIMULATED_ALLOW"
+
+    def claim_with_dependencies(self, grant, req, dependencies):
+        """Trusted fixture chain, no I/O callback or real effect authorization."""
         with self._lock:
             now = self._clock.now()
             self._validate_locked(grant, req, now)
-            self._validate_locked(dependency, dependency_req, now)
-            if grant is dependency or dependency.identity not in self._claimed:
+            identities = self._check_claimed_group_locked(dependencies, now)
+            if grant.identity in identities:
                 raise Refused("dependency_not_claimed")
             if grant.identity in self._claimed:
                 raise Refused("grant_already_claimed")
             self._claimed.add(grant.identity)
             return "SIMULATED_ALLOW"
+
+    def claim_dependent(self, grant, req, dependency, dependency_req):
+        return self.claim_with_dependencies(grant, req, ((dependency, dependency_req),))
 
     def checkpoint(self, grant, req):
         return self._validate_grant(grant, req)

@@ -65,8 +65,8 @@ class BrowserTask:
     def _check(self):
         if self._closed:
             raise Refused("browser_closed")
-        for grant, request in self._claims:
-            self._g.checkpoint(grant,request)
+        if self._claims:
+            self._g.checkpoint_claimed_group(tuple(self._claims))
 
     def navigate(self, url, grant):
         with self._lock:
@@ -74,7 +74,10 @@ class BrowserTask:
             if self._index >= len(self._plan.pages) or url != self._plan.pages[self._index]:
                 raise Refused("unexpected_navigation")
             request = self._plan.call("navigate",url).request(self._ctx)
-            self._g.claim(grant,request)
+            if self._claims:
+                self._g.claim_with_dependencies(grant,request,tuple(self._claims))
+            else:
+                self._g.claim(grant,request)
             self._claims.append((grant,request))
             self._check()
             self._active = url
@@ -98,7 +101,7 @@ class BrowserTask:
                 raise Refused("invalid_snapshot")
             digest = sha256(data).hexdigest()
             request = self._plan.call("snapshot",url,digest).request(self._ctx)
-            self._g.claim(grant,request)
+            self._g.claim_with_dependencies(grant,request,tuple(self._claims))
             self._claims.append((grant,request))
             self._check()
             self._result = (url,digest,text)
