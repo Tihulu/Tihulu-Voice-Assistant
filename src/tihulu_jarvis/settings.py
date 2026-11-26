@@ -172,6 +172,18 @@ def load(path=None):
         raise Hold("settings_unreadable") from None
 
 
+def require_current_audio_selection(expected, path=None):
+    """Refuse an old window after another writer changes persisted audio context.
+
+    Read a bounded, validated settings snapshot. Unrelated UI preferences do
+    not revoke audio authorization. The caller owns the live operation checks.
+    """
+    current = load(path)
+    fields = ("profile", "stt", "voices", "market_refs", "resources")
+    if any(current[key] != expected[key] for key in fields):
+        raise Hold("audio_settings_changed_restart_required")
+
+
 @contextmanager
 def _write_guard(p):
     """Serialize cooperating settings writers, without waiting on the GTK thread."""

@@ -2454,6 +2454,20 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         self.assertEqual(self.ui.settings_note.get_text(), "settings_changed")
         self.assertEqual(settings.load(), newer)
 
+    def test_other_window_audio_change_refuses_existing_audio_checkpoint(self):
+        self.ui.require_audio_choice()
+        newer = settings.load()
+        newer["stt"] = "/fixture/external.bin"
+        settings.save(newer)
+        with self.assertRaisesRegex(Hold, "audio_settings_changed_restart_required"):
+            self.ui.require_audio_choice()
+
+    def test_other_window_cosmetic_change_keeps_audio_checkpoint(self):
+        newer = settings.load()
+        newer["text_scale"] = "large"
+        settings.save(newer)
+        self.ui.require_audio_choice()
+
     def test_external_settings_change_refuses_stale_local_choice(self):
         card, path = self.prepare_stt()
         before = self.ui.cfg["stt"]

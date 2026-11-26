@@ -208,6 +208,29 @@ class SettingsSnapshotBoundaryTests(unittest.TestCase):
         self.assertTrue(settings.forget(self.path, expected=newer))
         self.assertEqual(settings.load(self.path), before)
 
+    def test_audio_snapshot_refuses_changed_voice_context(self):
+        before = settings.empty()
+        settings.save(before, self.path)
+        for field, value in (("stt", "/fixture/changed.bin"),
+                             ("voices", {"en": "/fixture/new.onnx"}),
+                             ("profile", "strict"),
+                             ("market_refs", {"opaque": "/fixture/new.bin"}),
+                             ("resources", {"profile": "performance"})):
+            with self.subTest(field=field):
+                newer = settings.empty()
+                newer[field] = value
+                settings.save(newer, self.path)
+                with self.assertRaisesRegex(Hold, "audio_settings_changed_restart_required"):
+                    settings.require_current_audio_selection(before, self.path)
+
+    def test_unrelated_preference_does_not_revoke_audio_context(self):
+        before = settings.empty()
+        newer = settings.empty()
+        newer["text_scale"] = "large"
+        newer["show_spoken_text"] = True
+        settings.save(newer, self.path)
+        settings.require_current_audio_selection(before, self.path)
+
     def test_current_snapshot_allows_choice(self):
         before = settings.empty()
         settings.save(before, self.path)

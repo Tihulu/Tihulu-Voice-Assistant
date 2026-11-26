@@ -8,6 +8,7 @@ import os
 import time
 from threading import Event
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
 
@@ -214,7 +215,7 @@ def create_window(app, loop, bridge=None):
                 self.cfg = settings.load()
             except Hold as e:
                 read_error = (read_error + " " if read_error else "") + str(e)
-            self.saved_cfg = json.loads(settings._serialize(self.cfg))
+            self.saved_cfg = deepcopy(self.cfg)
             self.look = LOOK
             self.scale_provider = None
             self.apply_text_scale()
@@ -864,6 +865,7 @@ def create_window(app, loop, bridge=None):
         def require_audio_choice(self):
             if self.audio_choice_blocked():
                 raise Hold(audio_choice.REASON)
+            settings.require_current_audio_selection(self.saved_cfg)
 
         def attachment_route(self):
             if self.jan_choice_blocked():
@@ -1832,7 +1834,7 @@ def create_window(app, loop, bridge=None):
 
         def save(self):
             try:
-                snapshot = json.loads(settings._serialize(self.cfg))
+                snapshot = deepcopy(self.cfg)
                 settings.save(snapshot, expected=self.saved_cfg)
                 self.saved_cfg = snapshot
                 return True
@@ -1959,7 +1961,7 @@ def create_window(app, loop, bridge=None):
                     if known is None:
                         card = self.market.save_card(card, expected=None)
             self.cfg = proposed
-            self.saved_cfg = json.loads(settings._serialize(proposed))
+            self.saved_cfg = deepcopy(proposed)
             self.build_market_page()
             return card
 
@@ -2060,7 +2062,7 @@ def create_window(app, loop, bridge=None):
                                 raise Hold("llm_choice_recovery_required") from None
                             raise
             self.cfg = proposed
-            self.saved_cfg = json.loads(settings._serialize(proposed))
+            self.saved_cfg = deepcopy(proposed)
             self.activate_profile(updated.id, quiet=True, persist=False)
             self.models.set_active(self.inventory.index(card.model_id))
             self.refresh()
@@ -2115,7 +2117,7 @@ def create_window(app, loop, bridge=None):
                                 "stt" if card.category == "stt" else lang,
                                 checkpoint=checkpoint)
             self.cfg = proposed
-            self.saved_cfg = json.loads(settings._serialize(proposed))
+            self.saved_cfg = deepcopy(proposed)
             self.update_labels()
             self.refresh()
 
@@ -3082,7 +3084,7 @@ def create_window(app, loop, bridge=None):
                     raise Hold("settings_changed_restart_required")
                 proposed = settings.resolve_committed_jan_choice(self.store, self.market, expected=review)
                 self.cfg = proposed
-                self.saved_cfg = json.loads(settings._serialize(proposed))
+                self.saved_cfg = deepcopy(proposed)
                 self.forget_inventory()
                 self.activate_profile(proposed["profile"], quiet=True, persist=False)
                 self.settings_choice_note.set_text(tr(
