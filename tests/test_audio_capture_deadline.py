@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Capture must not publish or signal after an observable stage deadline."""
 import asyncio
+import signal
 import struct
 import tempfile
 import unittest
@@ -13,7 +14,7 @@ from tihulu_jarvis.voice.m1 import Hold
 
 
 class CaptureDeadlineTests(unittest.IsolatedAsyncioTestCase):
-    async def exercise(self, late=None):
+    async def exercise(self, late=None, *, exit_status=0, owner_finish=True, fail_capture=False):
         with tempfile.TemporaryDirectory() as tmp:
             model = Path(tmp) / "fixture.bin"
             model.touch()
@@ -22,7 +23,8 @@ class CaptureDeadlineTests(unittest.IsolatedAsyncioTestCase):
             offset = 0
             events, signals, children, closed = [], [], [], []
             finish = asyncio.Event()
-            finish.set()
+            if owner_finish:
+                finish.set()
             def advance(seconds):
                 nonlocal offset
                 offset += seconds
@@ -36,11 +38,11 @@ class CaptureDeadlineTests(unittest.IsolatedAsyncioTestCase):
                             advance(5)
                         if late == "total":
                             advance(34)
-                    return None
+                    return None if owner_finish else exit_status
                 def send_signal(self, sig):
                     signals.append(sig)
                 async def wait(self):
-                    return 0
+                    return exit_status
             class Whisper:
                 async def wait(self):
                     return 0
@@ -69,6 +71,9 @@ class CaptureDeadlineTests(unittest.IsolatedAsyncioTestCase):
                 if late:
                     with self.assertRaisesRegex(Hold, "capture_timeout"):
                         await audio.listen(str(model), finish, publish, checkpoint=lambda: None)
+                elif fail_capture:
+                    with self.assertRaisesRegex(Hold, "capture_failed"):
+                        await audio.listen(str(model), finish, publish, checkpoint=lambda: None)
                 else:
                     self.assertEqual(await audio.listen(str(model), finish, publish,
                                                        checkpoint=lambda: None), "fixture transcript")
@@ -77,6 +82,11 @@ class CaptureDeadlineTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(closed, children)
                 self.assertEqual(signals, [])
                 self.assertEqual(events, ["listening"] if late == "callback" else [])
+            elif fail_capture:
+                self.assertEqual(children, ["arecord"])
+                self.assertEqual(closed, children)
+                self.assertEqual(len(signals), int(owner_finish))
+                self.assertNotIn("transcribing", events)
             else:
                 self.assertEqual(children, ["arecord", "whisper-cli"])
                 self.assertEqual(closed, children)
@@ -97,6 +107,17 @@ class CaptureDeadlineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_normal_capture_and_transcription(self):
         await self.exercise()
+
+    async def test_spontaneous_nonzero_recorder_exit_refuses_partial_wav(self):
+        await self.exercise(exit_status=1, owner_finish=False, fail_capture=True)
+
+    async def test_unexpected_exit_after_finish_refuses_partial_wav(self):
+        await self.exercise(exit_status=2, fail_capture=True)
+
+    async def test_owner_interrupt_preserves_normal_arecord_exit_conventions(self):
+        for status in (1, -signal.SIGINT):
+            with self.subTest(status=status):
+                await self.exercise(exit_status=status)
 
 
 class SpawnCheckpointTests(unittest.IsolatedAsyncioTestCase):
