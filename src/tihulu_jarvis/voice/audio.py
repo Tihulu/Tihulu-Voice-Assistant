@@ -225,13 +225,16 @@ def _pinned_model_arguments(name, args, checkpoint):
             def pin(path):
                 checkpoint()
                 identity = _runtime_identity(path)
-                fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-                descriptors.append(fd)
-                alias = "/proc/self/fd/%d" % fd
-                if (_voice_identity(os.fstat(fd)) != identity
-                        or _voice_identity(os.stat(alias)) != identity
-                        or _runtime_identity(path) != identity):
-                    raise Hold("model_file_changed")
+                try:
+                    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+                    descriptors.append(fd)
+                    alias = "/proc/self/fd/%d" % fd
+                    if (_voice_identity(os.fstat(fd)) != identity
+                            or _voice_identity(os.stat(alias)) != identity
+                            or _runtime_identity(path) != identity):
+                        raise Hold("model_file_changed")
+                except OSError:
+                    raise Hold("audio_model_descriptor_unavailable") from None
                 originals.append((path, identity))
                 checkpoint()
                 return alias
@@ -247,8 +250,6 @@ def _pinned_model_arguments(name, args, checkpoint):
                 if _runtime_identity(path) != identity:
                     raise Hold("model_file_changed")
         yield tuple(argv), tuple(descriptors)
-    except OSError:
-        raise Hold("audio_model_descriptor_unavailable") from None
     finally:
         for fd in descriptors:
             os.close(fd)

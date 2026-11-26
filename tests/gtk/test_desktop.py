@@ -2468,6 +2468,28 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         settings.save(newer)
         self.ui.require_audio_choice()
 
+    def test_registered_changed_stt_is_refused_before_capture(self):
+        path = self.weights("runtime-changed.bin")
+        self.ui.select_imported_audio("stt", str(path))
+        self.connect_model()
+        path.write_bytes(b"substituted-runtime-weights")
+        self.ui.voice()
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "model_digest_mismatch")
+        desktop.audio.listen.assert_not_called()
+        self.assertFalse(self.backend.requests)
+
+    def test_registered_changed_piper_is_refused_before_preview(self):
+        path = self.weights("runtime-changed.onnx")
+        path.with_name(path.name + ".json").write_text('{"language":{"code":"tr"}}')
+        self.ui.select_imported_audio("tr", str(path))
+        path.write_bytes(b"substituted-runtime-weights")
+        self.ui.preview("tr")
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "model_digest_mismatch")
+        desktop.audio.speak.assert_not_called()
+        self.assertFalse(self.backend.speeches)
+
     def test_external_settings_change_refuses_stale_local_choice(self):
         card, path = self.prepare_stt()
         before = self.ui.cfg["stt"]

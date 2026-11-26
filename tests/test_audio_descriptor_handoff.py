@@ -61,6 +61,14 @@ class AudioDescriptorHandoffTests(unittest.IsolatedAsyncioTestCase):
     async def test_piper_child_reads_original_weights_and_sidecar(self):
         await self.exercise("piper", "--model", b"originalconfig-original")
 
+    async def test_spawn_error_retains_backend_failure_reason(self):
+        with patch.object(audio.shutil, "which", return_value=str(self.fixture)), \
+             patch.object(audio.asyncio, "create_subprocess_exec", side_effect=OSError("fixture")):
+            for name, args in (("arecord", ()), ("whisper-cli", ("-m", self.model))):
+                with self.subTest(name=name), self.assertRaisesRegex(Hold, "audio_start_failed"):
+                    async with audio.child(name, *args):
+                        self.fail("unexpected child")
+
     async def test_symlink_is_refused_before_child_spawn(self):
         link = self.root / "link.onnx"
         link.symlink_to(self.model)
