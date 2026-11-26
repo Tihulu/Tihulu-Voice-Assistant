@@ -5034,10 +5034,13 @@ def create_window(app, loop, bridge=None):
             Mute is state, not a preference: it is never stored, so a restart
             never begins muted, and a muted reply still appears as text.
             """
+            if self.mute.get_active() and self.playback is not None:
+                # Keep the real stopping stage until the owned child drains.
+                self.stop_speaking()
+            if self.busy:
+                self.refresh()
+                return
             if self.mute.get_active():
-                if self.playback is not None:
-                    # A turn already speaking stops its output now.
-                    self.stop_speaking()
                 self.set_state("ready", tr("Audio output muted.",
                                            "Ses çıkışı sessize alındı.",
                                            "Audioausgabe stummgeschaltet."))
@@ -5100,6 +5103,9 @@ def create_window(app, loop, bridge=None):
                     nxt=child.get_next_sibling()
                     self.log.remove(child)
                     child=nxt
+                # GTK removal alone does not release labels held by the
+                # streaming cache. The invalidated epoch prevents late growth.
+                self.growing.clear()
             self.set_state("stopping" if self.busy else "ready")
 
         def attachment_policy(self):

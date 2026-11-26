@@ -4544,6 +4544,17 @@ class StreamingReplyTests(DesktopTests):
         self.assertEqual(self.ui.inventory, ("fixture-chat",))
         self.assertEqual(self.ui.session.history, ())
 
+    def test_end_conversation_releases_cached_labels_and_text(self):
+        self.connect_model()
+        self.text("Merhaba!")
+        self.assertTrue(self.ui.growing)
+        self.click(self.ui.end)
+        self.assertEqual(self.ui.growing, {})
+        self.assertEqual(self.ui.session.history, ())
+        self.assertEqual(self.bubbles(), [])
+        self.text("Merhaba!")
+        self.assertEqual(len(self.ui.growing), 2)
+
     def test_a_reply_grows_with_the_pieces_as_they_arrive(self):
         self.connect_model()
         self.pieces[:] = ["Merha", "ba!", " Nasılsın?"]
@@ -6188,6 +6199,13 @@ class MuteTests(DesktopTests):
         self.assertTrue(self.backend.speeches)
         self.ui.mute.set_active(True)
         self.until(lambda: self.backend.playback_cleaning)
+        self.assertTrue(self.ui.busy)
+        self.assertEqual(self.ui.stage, "stopping_playback")
+        self.assertFalse(self.ui.talk.get_sensitive())
+        self.ui.mute.set_active(False)
+        self.assertEqual(self.ui.stage, "stopping_playback")
+        self.assertTrue(self.ui.busy)
+        self.ui.mute.set_active(True)
         self.backend.playback_release.set()
         self.until(lambda: not self.ui.busy)
         self.assertIn("audio output muted", self.ui.state_row.get_text())
