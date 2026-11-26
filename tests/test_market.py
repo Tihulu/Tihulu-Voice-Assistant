@@ -151,6 +151,54 @@ class FileImportTests(unittest.TestCase):
         with self.assertRaisesRegex(Hold, "model_file_not_found"):
             from_file(str(self.tmp / "missing.bin"), "stt")
 
+    def test_import_proof_refuses_same_size_replacement(self):
+        from tihulu_jarvis import market
+        path = self.tmp / "fixture.bin"
+        path.write_bytes(b"old")
+        card, proof = market.inspect_file(str(path), "stt", engine="whisper.cpp")
+        other = self.tmp / "replacement"
+        other.write_bytes(b"new")
+        other.replace(path)
+        with self.assertRaisesRegex(Hold, "model_file_changed"):
+            market.require_import_proof(proof)
+
+    def test_import_refuses_symlink_and_fifo(self):
+        import os
+        path = self.tmp / "fixture.bin"
+        target = self.tmp / "other"
+        target.write_bytes(b"fixture")
+        path.symlink_to(target)
+        with self.assertRaisesRegex(Hold, "model_file_not_found"):
+            from_file(str(path), "stt")
+        path.unlink()
+        os.mkfifo(path)
+        with self.assertRaisesRegex(Hold, "model_file_not_found"):
+            from_file(str(path), "stt")
+
+    def test_import_hash_checks_cancellation_between_reads(self):
+        path = self.tmp / "fixture.bin"
+        path.write_bytes(b"x" * (3 << 20))
+        calls = []
+        def checkpoint():
+            calls.append(1)
+            if len(calls) == 4:
+                raise Hold("turn_cancelled")
+        with self.assertRaisesRegex(Hold, "turn_cancelled"):
+            from_file(str(path), "stt", checkpoint=checkpoint)
+        self.assertEqual(len(calls), 4)
+
+    def test_import_refuses_mutation_during_hash(self):
+        path = self.tmp / "fixture.bin"
+        path.write_bytes(b"x" * (2 << 20))
+        calls = []
+        def checkpoint():
+            calls.append(1)
+            if len(calls) == 4:
+                with path.open("r+b") as f:
+                    f.write(b"changed")
+        with self.assertRaises(Hold):
+            from_file(str(path), "stt", checkpoint=checkpoint)
+
     def test_digest_is_bounded_and_complete(self):
         path = self.tmp / "digest.bin"
         path.write_bytes(b"abc")
