@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 import sys
-from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus, turbo_short_args, speech_corpus_profile, neural_sample_allowed
+from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus, turbo_short_args, speech_corpus_profile, neural_sample_allowed, bounded_detection_args
 from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
@@ -504,7 +504,9 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     common=["/work/whisper-cli","-m","/work/model.bin","-f","/work/sample.wav","-t","2","-ng","-nt"]
                     started=time.monotonic()
                     try:
-                        raw=run(common+["-l","auto","-dl"],scope,wrapper=STT_WRAPPER,timeout=120,capture_stderr=True)
+                        from speech_result import pcm_info
+                        detect_args=bounded_detection_args(corpus,*pcm_info(piece.data))
+                        raw=run(common+["-l","auto","-dl"]+detect_args,scope,wrapper=STT_WRAPPER,timeout=120,capture_stderr=True)
                     except RuntimeError as exc:
                         detector.cancel()
                         record("mixed-auto-real-detection-"+str(i),False,reason=str(exc)[:2500],
