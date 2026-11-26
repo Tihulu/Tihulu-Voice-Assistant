@@ -210,6 +210,10 @@ def forget(path=None):
             return False
         except OSError:
             raise Hold("settings_unwritable") from None
+        try:
+            _sync_parent(p)
+        except OSError:
+            raise Hold("settings_recovery_required") from None
         return True
 
 
@@ -259,11 +263,20 @@ def choice_transaction(obj, path=None, *, expected=None):
                     raise Hold("settings_recovery_required")
                 if previous is None:
                     p.unlink()
+                    _sync_parent(p)
                 else:
                     _replace_text(p, previous)
             except (Hold, OSError, ValueError):
                 raise Hold("settings_recovery_required") from None
             raise
+
+
+def _sync_parent(p):
+    fd = os.open(p.parent, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 def _replace_text(p, text):
@@ -277,6 +290,12 @@ def _replace_text(p, text):
             os.fsync(f.fileno())
         os.replace(tmp, p)
         tmp = None
+        try:
+            _sync_parent(p)
+        except OSError:
+            # The name may already contain the new generation. An ordinary
+            # pre-commit error would misrepresent this durability failure.
+            raise Hold("settings_recovery_required") from None
     finally:
         if tmp:
             Path(tmp).unlink(missing_ok=True)

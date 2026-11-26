@@ -86,6 +86,39 @@ class ChoiceTransactionTests(unittest.TestCase):
         self.new = settings.empty()
         self.new["stt"] = "/fixture/model.bin"
 
+    def test_settings_replace_syncs_directory(self):
+        from unittest.mock import patch
+        with patch.object(settings, "_sync_parent", wraps=settings._sync_parent) as sync:
+            settings.save(self.new, self.path)
+        sync.assert_called_once_with(self.path)
+        self.assertEqual(settings.load(self.path), self.new)
+
+    def test_uncertain_choice_sync_failure_never_runs_registry_commit(self):
+        from unittest.mock import patch
+        settings.save(self.old, self.path)
+        with patch.object(settings, "_sync_parent", side_effect=OSError("fixture")):
+            with self.assertRaisesRegex(Hold, "settings_recovery_required"):
+                with settings.choice_transaction(self.new, self.path, expected=self.old):
+                    self.fail("unexpected registry commit")
+        self.assertEqual(settings.load(self.path), self.new)
+
+    def test_absent_settings_compensation_syncs_directory(self):
+        from unittest.mock import patch
+        with patch.object(settings, "_sync_parent", wraps=settings._sync_parent) as sync:
+            with self.assertRaisesRegex(Hold, "fixture"):
+                with settings.choice_transaction(self.new, self.path):
+                    raise Hold("fixture")
+        self.assertFalse(self.path.exists())
+        self.assertEqual(sync.call_count, 2)
+
+    def test_forget_sync_failure_reports_uncertain_removal(self):
+        from unittest.mock import patch
+        settings.save(self.old, self.path)
+        with patch.object(settings, "_sync_parent", side_effect=OSError("fixture")):
+            with self.assertRaisesRegex(Hold, "settings_recovery_required"):
+                settings.forget(self.path)
+        self.assertFalse(self.path.exists())
+
     def test_success_retains_new_settings(self):
         settings.save(self.old, self.path)
         with settings.choice_transaction(self.new, self.path):
