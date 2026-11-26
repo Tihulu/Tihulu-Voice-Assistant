@@ -53,7 +53,7 @@ jobs:
           echo "$STT_SHA  $RUNNER_TEMP/multilingual-stt/model.bin" | sha256sum -c -
           cmake -S "$RUNNER_TEMP/multilingual-stt/source" -B "$RUNNER_TEMP/multilingual-stt/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
           cmake --build "$RUNNER_TEMP/multilingual-stt/build" --target whisper-cli -j 2
-      - name: Actual TR EN DE generated speech and ordered mixed preview
+      - name: Actual TR EN DE mixed preview and artificial-pause proposals
         env:
           PYTHONPATH: src:experiments
           PYTHONDONTWRITEBYTECODE: '1'

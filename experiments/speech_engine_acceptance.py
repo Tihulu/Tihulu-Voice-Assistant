@@ -359,6 +359,38 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                    [r.language for r in preview.segments]==[r[1] for r in retained]
                    and [(r.start_frame,r.end_frame) for r in preview.segments]==list(zip(cuts,cuts[1:])),
                    languages=[r.language for r in preview.segments],frames=cuts[-1],sample_rate=22050)
+            # Separate artificial-pause experiment, not a claim about
+            # continuous code-switching or automatic language boundaries.
+            from mixed_voice_review import silence_boundaries
+            paused=io.BytesIO()
+            pause_frames=22050
+            joins=[]
+            with wave.open(paused,"wb") as out:
+                out.setparams((1,2,22050,0,"NONE","not compressed"))
+                total=0
+                for i,row in enumerate(retained):
+                    if i:
+                        joins.append((total,total+pause_frames))
+                        out.writeframes(b"\0\0"*pause_frames)
+                        total+=pause_frames
+                    out.writeframes(row[2][44:])
+                    total+=(len(row[2])-44)//2
+            pause_data=paused.getvalue()
+            proposed=silence_boundaries(pause_data)
+            record("mixed-pause-real-proposal",len(proposed)==4 and all(
+                   start<=cut<=end for cut,(start,end) in zip(proposed[1:-1],joins)),
+                   cuts=list(proposed),inserted_pause_ranges=joins)
+            paused_pieces=split_pcm(pause_data,proposed)
+            record("mixed-pause-full-frame-coverage",b"".join(piece.data[44:] for piece in paused_pieces)==pause_data[44:])
+            # Previous receipts were for different WAV bytes. They cannot be
+            # reused with new boundaries or padding.
+            try:
+                MixedVoiceReview(pause_data,proposed,tuple(row[4] for row in retained),MODEL_SHA)
+            except Refused:
+                stale_denied=True
+            else:
+                stale_denied=False
+            record("mixed-pause-old-receipts-denied",stale_denied)
             expected="\n".join(row[4].result()[0].text for row in retained)
             record("mixed-real-exact-reviewed-text",preview.text==expected
                    and preview.text_digest==hashlib.sha256(expected.encode()).hexdigest())
@@ -390,7 +422,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 record("speech-revoke-invalidates-conversion-"+case_id,denied)
         record("speech-distinct-multilingual-output",len(digests)==len(samples))
         record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+case_id)).iterdir())==[speech_filename(case_id)] for case_id,_,_ in samples) and not list(output.iterdir()))
-    return 0 if len(results)==5+7*len(samples)+(5 if corpus=="mixed-preview" else 0) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
+    return 0 if len(results)==5+7*len(samples)+(8 if corpus=="mixed-preview" else 0) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
 
 if __name__=="__main__":
     raise SystemExit(main(*sys.argv[1:]))
