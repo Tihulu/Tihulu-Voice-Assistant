@@ -108,3 +108,42 @@ class MixedVoiceTests(unittest.TestCase):
         quiet=b"\x01\x00"*12800
         data=wav(voiced+quiet+voiced)
         self.assertEqual(silence_boundaries(data),(0,30400,60800))
+
+
+    def test_edit_preview_preserves_original_segment_provenance(self):
+        review=MixedVoiceReview(self.data,self.cuts,self.make(),"a"*64)
+        original=review.preview()
+        edited=review.edit_preview(((1,original.segments[1].transcript_digest,"Hello world"),))
+        self.assertEqual(edited.text,"Merhaba\nHello world\nGuten Tag")
+        self.assertEqual(edited.audio_digest,original.audio_digest)
+        self.assertEqual(tuple(r.original for r in edited.segments),original.segments)
+        self.assertEqual([r.edited for r in edited.segments],[False,True,False])
+        self.assertNotEqual(edited.review_digest,review.edit_preview().review_digest)
+        self.assertEqual(review.preview(),original)
+
+    def test_edit_preview_rejects_stale_invalid_and_duplicate_edits(self):
+        review=MixedVoiceReview(self.data,self.cuts,self.make(),"a"*64)
+        original=review.preview()
+        first=original.segments[0].transcript_digest
+        second=original.segments[1].transcript_digest
+        for edits in (((0,"b"*64,"Edit"),),((0,first," "),),((0,first,"bad\0"),),
+                      ((0,first,"A"),(0,first,"B")),((1,second,"B"),(0,first,"A")),
+                      ((True,second,"B"),),((3,first,"B"),)):
+            with self.assertRaises(Refused):
+                review.edit_preview(edits)
+
+    def test_edit_preview_hash_binds_segment_partition_not_just_text(self):
+        review=MixedVoiceReview(self.data,self.cuts,self.make(),"a"*64)
+        r=review.preview().segments
+        a=review.edit_preview(((0,r[0].transcript_digest,"a\nb"),(1,r[1].transcript_digest,"c")))
+        b=review.edit_preview(((0,r[0].transcript_digest,"a"),(1,r[1].transcript_digest,"b\nc")))
+        self.assertEqual(a.text_digest,b.text_digest)
+        self.assertNotEqual(a.review_digest,b.review_digest)
+
+    def test_edit_preview_rechecks_revoked_segment(self):
+        jobs=self.make()
+        review=MixedVoiceReview(self.data,self.cuts,jobs,"a"*64)
+        original=review.preview()
+        jobs[1].cancel()
+        with self.assertRaises(Refused):
+            review.edit_preview(((0,original.segments[0].transcript_digest,"Merhaba dünya"),))
