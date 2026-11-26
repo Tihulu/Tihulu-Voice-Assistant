@@ -12,3 +12,7 @@ minimum disclosure consent, OS containment, independent review and owner gates.
 ## CAP-07 typed application capabilities (fixture only)
 
 Closed catalog for OCR, PDF extract/render/export, public search, Firefox/Brave read, application window inspection and FFmpeg conversion. Each call binds adapter, version, operation, exact ordered typed arguments and input digest into the existing gateway Request target. Separate policy ceilings for host, file read/write and browser/network. No app, command, browser, parser, file, search provider or worker is invoked; the sole result is a synthetic receipt. No actual URL/IP/DNS validation claim; origin is a fixture token only. Submit/upload/download, UI input and arbitrary functions deliberately refused pending separate runtime security contracts. Seven regression methods; source shipping unchanged. Roadmap #286, activation HOLD.
+
+## CAP-01/02 document evidence contract (fixture only)
+
+Typed synthetic OCR and PDF text output: exact call target, source digest, requested page, immutable normalized integer boxes, OCR confidence 0–100 only, UTF-8/control/size and count limits. The output digest includes geometry and confidence; one completion, live gateway checks before accepting and publishing, cancel/revoke drops results. No real document parser, file access, OCR binary or export effect. No claim of recognizing actual documents. Five tests, existing synthetic suite remains intact.
