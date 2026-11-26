@@ -2029,13 +2029,10 @@ def create_window(app, loop, bridge=None):
                 if previous_voice is not None and previous_voice != inspected[2][2]:
                     raise Hold("voice_digest_mismatch")
                 voices[card.storage_ref] = inspected[2][2]
-            with self.market.transfer_lease(card.model_id), self.market._write_guard():
-                if self.market.lookup_card(card.model_id) != known:
-                    raise Hold("registry_card_changed")
-                with settings.choice_transaction(proposed, expected=self.cfg):
-                    self.check_import_inspection(key, path, inspected, checkpoint=checkpoint)
-                    if known is None:
-                        card = self.market.save_card(card, expected=None)
+            if settings.checked(self.cfg) != self.saved_cfg:
+                raise Hold("settings_changed")
+            card = audio_choice.register(self.market, known, card, self.saved_cfg, proposed,
+                checkpoint=lambda: self.check_import_inspection(key, path, inspected, checkpoint=checkpoint))
             self.cfg = proposed
             self.saved_cfg = deepcopy(proposed)
             self.build_market_page()
