@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 import sys
-from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus, turbo_short_args, speech_corpus_profile, neural_sample_allowed, bounded_detection_args
+from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus, turbo_short_args, speech_corpus_profile, neural_sample_allowed, bounded_detection_args, turbo_context300_args
 from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
@@ -572,7 +572,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     decode=common+["-l",dict(call.args)["language"],"-otxt","-of","/work/out/transcript"]
                     if stt_profile=="turbo-q5" or corpus in ("mixed-auto-reviewed-short","mixed-auto-piper-short"):
                         from speech_result import pcm_info
-                        decode+=turbo_short_args(*pcm_info(piece.data))
+                        decode+=(turbo_context300_args if corpus=="mixed-auto-turbo-context300" else turbo_short_args)(*pcm_info(piece.data))
                     started=time.monotonic()
                     try:
                         run(decode,scope,wrapper=STT_WRAPPER,timeout=120)
