@@ -87,6 +87,26 @@ class SpeechFixture:
                 raise
             return self._receipt
 
+    def _conversion_call(self,version,output):
+        if self._state!="completed" or self._receipt is None:
+            raise Refused("speech_no_result")
+        self._g.checkpoint(self._grant,self._req)
+        if output in (self._args["artifact"],self._args["output"]):
+            raise Refused("speech_conversion_alias")
+        return CapabilityCall("ffmpeg",version,"wav_to_flac",
+                    (("artifact",self._receipt[3]),("digest",self._receipt[4]),("output",output))).checked()
+
+    def prepare_conversion(self,version,output):
+        with self._lock:
+            return self._conversion_call(version,output)
+
+    def start_conversion(self,version,output,grant):
+        from conversion_result import ConversionFixture
+        with self._lock:
+            call=self._conversion_call(version,output)
+            return ConversionFixture(self._g,grant,self._req.context,call,
+                                     dependencies=((self._grant,self._req),))
+
     def cancel(self):
         with self._lock:
             self._receipt=None

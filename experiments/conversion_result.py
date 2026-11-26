@@ -36,13 +36,18 @@ class ConversionResult:
         return sha256(self.data).hexdigest()
 
 class ConversionFixture:
-    def __init__(self,gateway,grant,context,call):
+    def __init__(self,gateway,grant,context,call,*,dependencies=()):
         if (type(gateway) is not FixtureGateway or type(call) is not CapabilityCall
                 or (call.adapter,call.operation) not in FORMATS):
             raise Refused("unsupported_conversion")
         self._g,self._grant,self._call = gateway,grant,call
         self._request = call.request(context)
-        gateway.claim(grant,self._request)
+        if type(dependencies) is not tuple:
+            raise Refused("invalid_conversion_dependencies")
+        if dependencies:
+            gateway.claim_with_dependencies(grant,self._request,dependencies)
+        else:
+            gateway.claim(grant,self._request)
         self._lock = Lock()
         self._state = "ready"
         self._result = None
