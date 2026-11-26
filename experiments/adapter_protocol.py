@@ -56,12 +56,25 @@ def local_request(context, call, *, dependent=False):
     return Request(context,"engine",call.target,"local").checked()
 
 
+# Fixed disposable native completion profile, not an arbitrary endpoint.
+VOICE_NATIVE_MODEL="stories260k-047bf46455a544931cff6fef14d7910154c56afbc23ab1c5e56a72e69912c04b"
+VOICE_NATIVE_PROVIDER="llama-4762ad7316dcdec20016ab5985fb46a27902204d"
+
+def native_voice_payload(text):
+    if len(text_bytes(text))>1024:
+        raise Refused("native_voice_prompt_limit")
+    return json.dumps({"prompt":text,"n_predict":16,"temperature":0,"seed":42,
+        "stream":False,"return_tokens":True,"cache_prompt":False,
+        "response_fields":["content","tokens","stop","stop_type","model","truncated"]},
+        ensure_ascii=False,separators=(",",":")).encode("utf-8")
+
 class LocalAdapter:
     """Owner-side state machine, not a backend. All payloads synthetic."""
     def __init__(self,gateway,context,candidate,identity,operation,data,grant,*,dependencies=(),response_language=None):
         if type(candidate) is not Candidate or candidate.locality!="local":
             raise Refused("local_candidate_required")
         self._call=prepare(candidate,identity,operation,data)
+        self._wire_digest=self._call.input_digest
         if response_language is not None:
             if (type(response_language) is not str or response_language not in ("tr","en","de")
                     or operation!="llm" or not dependencies):
@@ -73,6 +86,14 @@ class LocalAdapter:
             if (type(obj) is not dict or obj.get("kind")!="voice_turn"
                     or obj.get("response_language")!=response_language):
                 raise Refused("voice_language_mismatch")
+            if "native_wire_digest" in obj:
+                if (response_language!="en" or obj.get("input_language")!="en"
+                        or candidate.identity!=VOICE_NATIVE_MODEL or candidate.provider!=VOICE_NATIVE_PROVIDER):
+                    raise Refused("native_voice_profile_denied")
+                digest=sha256(native_voice_payload(obj.get("transcript"))).hexdigest()
+                if obj["native_wire_digest"]!=digest:
+                    raise Refused("native_voice_wire_mismatch")
+                self._wire_digest=digest
         self._response_language=response_language
         self._g,self._grant=gateway,grant
         if type(dependencies) is not tuple:
@@ -100,7 +121,7 @@ class LocalAdapter:
             if self._state!="ready" or self._transport_started:
                 raise Refused("transport_already_started")
             self._checkpoint()
-            if type(data) is not bytes or not 0<len(data)<=MAX_TEXT or sha256(data).hexdigest()!=self.call.input_digest:
+            if type(data) is not bytes or not 0<len(data)<=MAX_TEXT or sha256(data).hexdigest()!=self._wire_digest:
                 raise Refused("transport_input_mismatch")
             self._transport_started=True
 

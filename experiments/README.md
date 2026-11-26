@@ -170,3 +170,5 @@ CAP-08 typed transcript→local LLM→speech chain: exact completed live transcr
 CAP-08 #360 HOLD: espeak --version died SIGXFSZ before first inference, 7 earlier/host checks passed; cause not proven. Successor disables unnecessary PulseAudio autospawn/shared memory via private config and nonexistent private socket, moves version probe before server and bounds capture; no resource-limit increase or security relaxation. Real 17-case rerun required.
 
 CAP-08 bind transcript-selected response language to the LocalAdapter voice-turn input and reject mismatched downstream speech language, before granting any effect. Two regression methods. This is selected-language consistency, not automatic language identification or semantic language quality.
+
+CAP-08 exact native voice transport: fixed English stories260k native completion profile; normalized transcript envelope commits to actual canonical HTTP payload digest, with exact model/provider and language. Separate normal/native grants, reject wire mutation/replay/revocation. Four regression methods. No arbitrary endpoint or production transport authorization.

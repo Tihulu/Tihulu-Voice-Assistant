@@ -149,3 +149,50 @@ class TranscriptVoiceChainTests(unittest.TestCase):
         grant=self.g.fixture_grant("other",req,60)
         with self.assertRaises(Refused):
             LocalAdapter(self.g,self.ctx,self.c,"other","llm",b"plain",grant,response_language="de")
+
+class NativeVoiceTransportTests(unittest.TestCase):
+    def setUp(self):
+        from capabilities import CapabilityCall
+        from transcription_result import TranscriptFixture,Transcript
+        from adapter_protocol import VOICE_NATIVE_MODEL,VOICE_NATIVE_PROVIDER
+        self.ctx=Context("task","session","profile",1,"local","LOCAL_ONLY")
+        rules=tuple(profiles.Rule(x,(),"allow") for x in ("host_shell","filesystem_read","filesystem_write"))
+        self.g=FixtureGateway(self.ctx,rules,clock=profiles.PolicyClock())
+        self.c=Candidate(VOICE_NATIVE_MODEL,"llm","local",VOICE_NATIVE_PROVIDER,True,True,16,50)
+        call=CapabilityCall("whisper_cpp","fixture","transcribe_wav",
+                    (("artifact","audio"),("digest","a"*64),("model_digest","b"*64),
+                     ("language","en"),("output","transcript")))
+        req=call.request(self.ctx)
+        grant=self.g.fixture_grant("stt",req,60)
+        self.stt=TranscriptFixture(self.g,self.ctx,call,grant)
+        self.stt.complete(Transcript(req.target,"a"*64,"b"*64,"en","transcript","Hello world"))
+
+    def start(self):
+        req=self.stt.prepare_local_turn(self.c,"turn","en",native_completion=True)
+        grant=self.g.fixture_grant("turn",req,60)
+        return self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True)
+    def test_exact_native_bytes_not_envelope(self):
+        import json
+        turn,wire=self.start()
+        self.assertEqual(json.loads(wire)["prompt"],"Hello world")
+        self.assertNotEqual(turn.call.input_digest,sha256(wire).hexdigest())
+        with self.assertRaises(Refused):
+            turn.begin_fixture_transport(wire+b" ")
+        turn.begin_fixture_transport(wire)
+        turn.checkpoint_fixture_transport()
+        with self.assertRaises(Refused):
+            turn.begin_fixture_transport(wire)
+    def test_native_grant_not_reusable_for_normalized_turn(self):
+        req=self.stt.prepare_local_turn(self.c,"turn","en",native_completion=True)
+        grant=self.g.fixture_grant("turn",req,60)
+        with self.assertRaises(Refused):
+            self.stt.start_local_turn(self.c,"turn","en",grant)
+    def test_native_profile_and_language_restricted(self):
+        for c,lang in ((replace(self.c,identity="other"),"en"),(self.c,"de")):
+            with self.assertRaises(Refused):
+                self.stt.prepare_local_turn(c,"turn",lang,native_completion=True)
+    def test_native_transport_revoked_parent(self):
+        turn,wire=self.start()
+        self.stt.cancel()
+        with self.assertRaises(Refused):
+            turn.begin_fixture_transport(wire)
