@@ -189,5 +189,59 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaises(Refused):
             g.fixture_grant("y",replace(req,actor="cloud"),10)
 
+    def test_dependent_claim_requires_claimed_exact_parent(self):
+        g = self.gateway()
+        parent_req = Request(self.ctx, "engine", "target", "local")
+        child_req = Request(self.ctx, "publish", "target", "local")
+        parent = g.fixture_grant("parent", parent_req, 20)
+        child = g.fixture_grant("child", child_req, 20)
+        with self.assertRaisesRegex(Refused, "dependency_not_claimed"):
+            g.claim_dependent(child, child_req, parent, parent_req)
+        g.claim(parent, parent_req)
+        with self.assertRaisesRegex(Refused, "request_mismatch"):
+            g.claim_dependent(child, child_req, parent, child_req)
+        self.assertEqual(g.claim_dependent(child, child_req, parent, parent_req),
+                         "SIMULATED_ALLOW")
+        with self.assertRaisesRegex(Refused, "grant_already_claimed"):
+            g.claim_dependent(child, child_req, parent, parent_req)
+
+    def test_dependent_claim_rejects_revoked_parent_without_consuming_child(self):
+        g = self.gateway()
+        r = Request(self.ctx, "engine", "target", "local")
+        parent = g.fixture_grant("parent", r, 20)
+        child = g.fixture_grant("child", r, 20)
+        g.claim(parent, r)
+        g.revoke("parent")
+        with self.assertRaisesRegex(Refused, "unknown_or_revoked_grant"):
+            g.claim_dependent(child, r, parent, r)
+        # Diagnostic only: no real effect, proves failed pair did not claim child.
+        self.assertEqual(g.claim(child, r), "SIMULATED_ALLOW")
+
+    def test_dependent_claim_refuses_expired_parent_and_same_grant(self):
+        g = self.gateway()
+        r = Request(self.ctx, "engine", "target", "local")
+        parent = g.fixture_grant("parent", r, 5)
+        child = g.fixture_grant("child", r, 20)
+        g.claim(parent, r)
+        with self.assertRaisesRegex(Refused, "dependency_not_claimed"):
+            g.claim_dependent(parent, r, parent, r)
+        self.wall = 106
+        with self.assertRaisesRegex(Refused, "expired"):
+            g.claim_dependent(child, r, parent, r)
+
+    def test_dependent_claim_refuses_foreign_or_revoked_child(self):
+        g = self.gateway()
+        other = self.gateway()
+        r = Request(self.ctx, "engine", "target", "local")
+        parent = g.fixture_grant("parent", r, 20)
+        g.claim(parent, r)
+        foreign = other.fixture_grant("child", r, 20)
+        with self.assertRaisesRegex(Refused, "unknown_or_revoked_grant"):
+            g.claim_dependent(foreign, r, parent, r)
+        child = g.fixture_grant("child", r, 20)
+        g.revoke("child")
+        with self.assertRaisesRegex(Refused, "unknown_or_revoked_grant"):
+            g.claim_dependent(child, r, parent, r)
+
 if __name__ == "__main__":
     unittest.main()

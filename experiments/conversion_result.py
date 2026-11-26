@@ -100,9 +100,7 @@ class ConversionFixture:
         with self._lock:
             call = self._publication_call(version,destination)
             request = call.request(self._request.context)
-            self._g.claim(grant,request)
-            self._g.checkpoint(self._grant,self._request)
-            self._g.checkpoint(grant,request)
+            self._g.claim_dependent(grant,request,self._grant,self._request)
             self._published = True
             return ("SIMULATED_ONLY",call.adapter,call.operation,request.target)
 
