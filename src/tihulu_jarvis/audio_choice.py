@@ -100,6 +100,11 @@ def _read(p):
 def _clear(p, proof):
     if _read(p) != proof:
         raise Hold(REASON)
+    # Flush the settings directory while recovery evidence is still present.
+    # If this fails, a later retry can reconcile the same journal.
+    settings._sync_parent(p)
+    if _read(p) != proof or settings.choice_pending(p):
+        raise Hold(REASON)
     _journal(p).unlink()
     settings._sync_parent(p)
 
@@ -204,9 +209,11 @@ def diagnose(registry, path=None):
             if generation == rec["old_registry"] == rec["new_registry"]:
                 return "already_aligned"
             if generation == rec["old_registry"]:
-                return "already_aligned" if current == old else "restore_previous_selection"
+                return "already_aligned" if current == old else (
+                    "restore_previous_selection" if rec["version"] == 1 else "restore_previous_reference")
             if generation == rec["new_registry"]:
-                return "already_aligned" if current == new else "restore_committed_selection"
+                return "already_aligned" if current == new else (
+                    "restore_committed_selection" if rec["version"] == 1 else "restore_committed_reference")
             return "registry_generation_conflict"
     except (Hold, OSError, ValueError, TypeError, RecursionError):
         return "recovery_check_unavailable"

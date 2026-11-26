@@ -3174,6 +3174,8 @@ def create_window(app, loop, bridge=None):
                 "registry_generation_conflict": tr("Registry differs from both recorded generations.", "Model kaydı iki kayıtlı sürümle de eşleşmiyor.", "Registry weicht von beiden gespeicherten Generationen ab."),
                 "restore_previous_selection": tr("Previous audio selection can be restored.", "Önceki ses seçimi kurtarılabilir.", "Vorherige Audioauswahl wiederherstellbar."),
                 "restore_committed_selection": tr("Committed audio selection can be restored.", "Kaydedilmiş ses seçimi kurtarılabilir.", "Gespeicherte Audioauswahl wiederherstellbar."),
+                "restore_previous_reference": tr("Previous model reference metadata can be restored.", "Önceki model referans bilgileri kurtarılabilir.", "Vorherige Modellreferenzdaten wiederherstellbar."),
+                "restore_committed_reference": tr("Committed model reference metadata can be reconciled.", "Kaydedilmiş model referans bilgileri eşitlenebilir.", "Gespeicherte Modellreferenzdaten abgleichbar."),
                 "already_aligned": tr("Recorded generations agree.", "Kayıtlı sürümler uyumlu.", "Gespeicherte Generationen stimmen überein."),
             }
             message = descriptions.get(state, tr("Recovery check unavailable; no change made.", "Kurtarma kontrolü yapılamadı; değişiklik yok.", "Wiederherstellungsprüfung nicht verfügbar; keine Änderung."))
@@ -3223,6 +3225,7 @@ def create_window(app, loop, bridge=None):
                     self.runtime_model_proofs = market.RuntimeModelProofs()
                     self.clear_model_scan()
                     self.sync_preference_widgets()
+                    self.build_market_page()
                     completed.append(tr("Audio choice recovered from disk.",
                         "Ses seçimi diskten kurtarıldı.",
                         "Audioauswahl vom Datenträger wiederhergestellt."))

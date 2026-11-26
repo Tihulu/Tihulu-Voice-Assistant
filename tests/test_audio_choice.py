@@ -73,6 +73,17 @@ class AudioChoiceTests(unittest.TestCase):
         new["audio_digests"] = {ref: digest}
         return card, new
 
+    def test_recovery_sync_failure_preserves_aligned_journal(self):
+        self.interrupt_child("registry")
+        journal = audio_choice._journal(self.path)
+        before = journal.read_bytes()
+        with patch.object(settings, "_sync_parent", side_effect=OSError("fixture")):
+            with self.assertRaisesRegex(Hold, audio_choice.REASON):
+                audio_choice.recover(self.registry, self.path)
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(settings.load(self.path), self.new)
+        self.assertTrue(audio_choice.recover(self.registry, self.path))
+
     def test_registration_recovers_metadata_after_registry_commit(self):
         card, new = self.prepare_registration()
         with patch.object(market, "_sync_directory", side_effect=KeyboardInterrupt):
@@ -80,6 +91,7 @@ class AudioChoiceTests(unittest.TestCase):
                 audio_choice.register(self.registry, None, card, self.old, new, self.path)
         self.assertEqual(settings.load(self.path), self.old)
         self.assertTrue(settings.audio_choice_pending(self.path))
+        self.assertEqual(audio_choice.diagnose(self.registry, self.path), "restore_committed_reference")
         self.assertTrue(audio_choice.recover(self.registry, self.path))
         self.assertEqual(settings.load(self.path), new)
         self.assertEqual(self.registry.card(card.model_id), card)
