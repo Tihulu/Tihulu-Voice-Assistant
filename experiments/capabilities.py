@@ -38,6 +38,8 @@ CAPABILITIES = MappingProxyType({
     ("ffmpeg", "audio_convert"): ("application_engine", "private", ("artifact", "digest", "output")),
     ("ffmpeg", "wav_to_flac"): ("application_engine", "private", ("artifact", "digest", "output")),
     ("libreoffice", "text_to_pdf"): ("application_engine", "private", ("artifact", "digest", "output")),
+    ("artifact_store", "publish_conversion"): ("publish", "private",
+                                                ("artifact", "digest", "result_digest", "output")),
 })
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 # A fixture origin identity, not a URL or DNS proof. A real adapter must

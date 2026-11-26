@@ -69,3 +69,45 @@ class ConversionTests(unittest.TestCase):
         job.cancel()
         with self.assertRaises(Refused):
             job.complete(self.output)
+
+
+    def publication_fixture(self):
+        g = FixtureGateway(self.ctx,tuple(profiles.Rule(a,(),"allow") for a in
+                           ("host_shell","filesystem_read","filesystem_write","publish_artifact")),
+                           clock=profiles.PolicyClock())
+        conversion = g.fixture_grant("convert",self.req,60)
+        job = ConversionFixture(g,conversion,self.ctx,self.call)
+        job.complete(self.output)
+        return g,conversion,job
+
+    def test_publication_requires_exact_separate_grant(self):
+        g,conversion,job = self.publication_fixture()
+        call = job.prepare_publication("fixture","destination")
+        self.assertEqual(dict(call.args)["result_digest"],sha256(self.output.data).hexdigest())
+        approved = g.fixture_grant("publish",call.request(self.ctx),60)
+        with self.assertRaisesRegex(Refused,"request_mismatch"):
+            job.simulate_publication("fixture","other",approved)
+        with self.assertRaisesRegex(Refused,"request_mismatch"):
+            job.simulate_publication("fixture","destination",conversion)
+        self.assertEqual(job.simulate_publication("fixture","destination",approved)[0],"SIMULATED_ONLY")
+        with self.assertRaisesRegex(Refused,"conversion_not_publishable"):
+            job.prepare_publication("fixture","destination")
+
+    def test_publication_refuses_aliases_and_missing_policy(self):
+        g,_,job = self.publication_fixture()
+        for destination in ("source","new"):
+            with self.assertRaisesRegex(Refused,"publication_destination_conflict"):
+                job.prepare_publication("fixture",destination)
+        limited,job = self.fixture()
+        job.complete(self.output)
+        call = job.prepare_publication("fixture","destination")
+        with self.assertRaises(Refused):
+            limited.fixture_grant("publish",call.request(self.ctx),60)
+
+    def test_revocation_before_publication(self):
+        g,_,job = self.publication_fixture()
+        call = job.prepare_publication("fixture","destination")
+        approved = g.fixture_grant("publish",call.request(self.ctx),60)
+        g.revoke("convert")
+        with self.assertRaises(Refused):
+            job.simulate_publication("fixture","destination",approved)

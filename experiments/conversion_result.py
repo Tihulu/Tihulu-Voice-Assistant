@@ -3,10 +3,11 @@
 from dataclasses import dataclass
 from hashlib import sha256
 from threading import Lock
+from types import MappingProxyType
 from gateway import FixtureGateway, Refused
 from capabilities import CapabilityCall
 
-FORMATS = {("ffmpeg","wav_to_flac"): "flac", ("libreoffice","text_to_pdf"): "pdf"}
+FORMATS = MappingProxyType({("ffmpeg","wav_to_flac"): "flac", ("libreoffice","text_to_pdf"): "pdf"})
 MAX_OUTPUT = 1024 * 1024
 
 @dataclass(frozen=True)
@@ -45,6 +46,7 @@ class ConversionFixture:
         self._lock = Lock()
         self._state = "ready"
         self._result = None
+        self._published = False
 
     def complete(self,result):
         with self._lock:
@@ -75,6 +77,34 @@ class ConversionFixture:
                 raise
             result,digest = self._result
             return ("SIMULATED_ONLY",self._call.adapter,self._call.version,result,digest)
+
+    def _publication_call(self, version, destination):
+        if self._state != "completed" or self._published:
+            raise Refused("conversion_not_publishable")
+        self._g.checkpoint(self._grant,self._request)
+        result,digest = self._result
+        args = dict(self._call.args)
+        # Separate logical destination from the conversion's staging handle.
+        # A real store must still resolve and pin actual filesystem identity.
+        if destination in (args["artifact"],args["output"]):
+            raise Refused("publication_destination_conflict")
+        return CapabilityCall("artifact_store",version,"publish_conversion",
+                              (("artifact",result.output),("digest",result.source_digest),
+                               ("result_digest",digest),("output",destination))).checked()
+
+    def prepare_publication(self,version,destination):
+        with self._lock:
+            return self._publication_call(version,destination)
+
+    def simulate_publication(self,version,destination,grant):
+        with self._lock:
+            call = self._publication_call(version,destination)
+            request = call.request(self._request.context)
+            self._g.claim(grant,request)
+            self._g.checkpoint(self._grant,self._request)
+            self._g.checkpoint(grant,request)
+            self._published = True
+            return ("SIMULATED_ONLY",call.adapter,call.operation,request.target)
 
     def cancel(self):
         with self._lock:
