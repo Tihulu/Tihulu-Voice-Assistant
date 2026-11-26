@@ -90,3 +90,5 @@ CAP-06: exact ordered 13-case sandbox preflight required before any real fixture
 CAP-01/02/06: actual Poppler per-page bbox and Tesseract TSV OCR inside existing fail-closed Bubblewrap boundary, fixed TR/EN/DE generated public PDF/images, typed preclaim and receipt, source digest preservation. Seven additional cases (23 total planned), CI-only packages; no personal documents or runtime permission. Preserve prior 16 cases.
 
 CAP-08: strict normalized offline model response frame binds exact grant invocation, target, model-call identity and sequence; closed JSON fields, duplicate/malformed/oversize rejection, immutable public call property, stale/revoked frame denial. Five regressions. Not actual Jan/OpenAI SSE or model inference, no network/transport.
+
+CAP-06/08 private fixture publication phase evidence: recheck exact claimed publication and source immediately before link; explicit uncertain outcome after successful link but fsync/cleanup failure, never retry automatically or delete final name. Four injected real-filesystem phase tests. Not proof of atomic revoke/effect, malicious same-UID mutation, or power-loss recovery.

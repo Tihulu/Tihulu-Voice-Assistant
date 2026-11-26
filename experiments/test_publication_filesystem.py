@@ -5,6 +5,7 @@ import stat
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 from hashlib import sha256
 from tihulu_jarvis import profiles
 from gateway import Context, FixtureGateway, Refused
@@ -40,6 +41,10 @@ def source_digest(fd):
         return sha256(data).hexdigest()
 
 
+class PublicationUncertain(RuntimeError):
+    """Link succeeded; never retry or remove the final name automatically."""
+
+
 def publish_fixture(directory, job, grant):
     """Fixed private CI directory; pin exact directory identity in fixture grant.
 
@@ -52,6 +57,7 @@ def publish_fixture(directory, job, grant):
         raise Refused("fixture_digest_mismatch")
     fd = open_directory(directory)
     created = False
+    linked = False
     try:
         if source_digest(fd) != result.source_digest:
             raise Refused("fixture_source_changed")
@@ -63,14 +69,30 @@ def publish_fixture(directory, job, grant):
             handle.write(result.data)
             handle.flush()
             os.fsync(handle.fileno())
+        # Check the exact claimed publication and transitive parent again
+        # immediately before the effect. A real broker still needs to
+        # serialize revocation against the OS link itself.
+        if source_digest(fd) != result.source_digest:
+            raise Refused("fixture_source_changed")
+        job.check_publication(grant)
         os.link(".fixture-stage", "published", src_dir_fd=fd, dst_dir_fd=fd,
                 follow_symlinks=False)
+        linked = True
         os.fsync(fd)
+    except OSError as exc:
+        if linked:
+            raise PublicationUncertain("publication_linked_durability_unknown") from exc
+        raise
     finally:
         try:
             if created:
-                os.unlink(".fixture-stage", dir_fd=fd)
-                os.fsync(fd)
+                try:
+                    os.unlink(".fixture-stage", dir_fd=fd)
+                    os.fsync(fd)
+                except OSError as exc:
+                    if linked:
+                        raise PublicationUncertain("publication_linked_cleanup_unknown") from exc
+                    raise
         finally:
             os.close(fd)
 
@@ -198,3 +220,56 @@ class PublicationFilesystemTests(unittest.TestCase):
             self.assertFalse((self.root/"published").exists())
             self.assertFalse((self.root/".fixture-stage").exists())
             self.assertTrue(self.source.is_symlink())
+
+    def test_revoked_after_staging_prevents_final_link(self):
+        real_fsync=os.fsync
+        fired=False
+        def revoke_after_fsync(fd):
+            nonlocal fired
+            real_fsync(fd)
+            if not fired:
+                fired=True
+                self.gateway.revoke("conversion")
+        with patch("os.fsync",side_effect=revoke_after_fsync):
+            with self.assertRaises(Refused):
+                publish_fixture(self.root,self.job,self.grant)
+        self.assertFalse((self.root/"published").exists())
+        self.unchanged()
+
+    def test_stage_write_failure_leaves_no_final_file(self):
+        with patch("os.fsync",side_effect=[OSError("fixture stage flush"),None]):
+            with self.assertRaises(OSError):
+                publish_fixture(self.root,self.job,self.grant)
+        self.assertFalse((self.root/"published").exists())
+        self.unchanged()
+
+    def test_post_link_fsync_failure_is_uncertain_not_retry(self):
+        real_fsync=os.fsync
+        calls=0
+        def fail_second(fd):
+            nonlocal calls
+            calls+=1
+            if calls==2:
+                raise OSError("fixture directory flush")
+            real_fsync(fd)
+        with patch("os.fsync",side_effect=fail_second):
+            with self.assertRaisesRegex(PublicationUncertain,"durability_unknown"):
+                publish_fixture(self.root,self.job,self.grant)
+        self.assertEqual((self.root/"published").read_bytes(),self.data)
+        self.unchanged()
+        with self.assertRaises(Refused):
+            publish_fixture(self.root,self.job,self.grant)
+        self.assertEqual((self.root/"published").read_bytes(),self.data)
+
+    def test_post_link_cleanup_failure_preserves_final_name(self):
+        real_unlink=os.unlink
+        def fail_stage(path,*args,**kwargs):
+            if path==".fixture-stage":
+                raise OSError("fixture cleanup failure")
+            return real_unlink(path,*args,**kwargs)
+        with patch("os.unlink",side_effect=fail_stage):
+            with self.assertRaisesRegex(PublicationUncertain,"cleanup_unknown"):
+                publish_fixture(self.root,self.job,self.grant)
+        self.assertEqual((self.root/"published").read_bytes(),self.data)
+        self.assertEqual((self.root/".fixture-stage").read_bytes(),self.data)
+        self.assertEqual(sha256(self.source.read_bytes()).hexdigest(),self.before)
