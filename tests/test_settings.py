@@ -509,3 +509,33 @@ sys.exit(99)
                 settings.review_committed_jan_choice(self.store, registry, self.path)
         self.assertTrue(settings.choice_pending(self.path))
         self.assertEqual(settings.load(self.path), self.old)
+
+    def test_jan_automatic_recovery_preserves_simultaneous_audio_journal(self):
+        self.stage()
+        settings._replace_text(self.path, settings._serialize(self.new))
+        audio = self.path.with_name(self.path.name + ".audio-choice-journal")
+        audio.write_text("{}")
+        with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+            settings.recover_jan_choice(self.store, self.path)
+        self.assertEqual(settings.load(self.path), self.new)
+        self.assertTrue(settings.choice_pending(self.path))
+        self.assertEqual(audio.read_text(), "{}")
+
+    def test_jan_confirmation_refuses_audio_journal_created_after_review(self):
+        registry, card = self.committed_review_fixture()
+        review = settings.review_committed_jan_choice(self.store, registry, self.path)
+        audio = self.path.with_name(self.path.name + ".audio-choice-journal")
+        audio.write_text("{}")
+        with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+            settings.resolve_committed_jan_choice(self.store, registry,
+                                                  expected=review, path=self.path)
+        self.assertTrue(settings.choice_pending(self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+
+    def test_jan_review_never_runs_pending_registry_recovery(self):
+        registry, card = self.committed_review_fixture()
+        registry.publication_journal.write_text("{}")
+        with self.assertRaisesRegex(Hold, "registry_recovery_required"):
+            settings.review_committed_jan_choice(self.store, registry, self.path)
+        self.assertEqual(registry.publication_journal.read_text(), "{}")
+        self.assertTrue(settings.choice_pending(self.path))

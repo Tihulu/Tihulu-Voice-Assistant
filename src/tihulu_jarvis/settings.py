@@ -317,6 +317,8 @@ def recover_jan_choice(store, path=None):
     with store._mutation_lock(), _write_guard(p):
         if not choice_pending(p):
             return False
+        if audio_choice_pending(p):
+            raise Hold("llm_choice_recovery_required")
         record, raw, journal_stamp = _read_choice(p)
         try:
             settings_stamp = _choice_identity(p.lstat())
@@ -388,9 +390,9 @@ def review_committed_jan_choice(store, registry, path=None):
     """Review an exact committed profile with compensated old settings."""
     p = config_path() if path is None else Path(path)
     record, raw, stamp = _read_choice(p)
-    with registry.transfer_lease(record["new_model"]), registry._write_guard():
+    with registry.transfer_lease(record["new_model"]), registry._write_guard(require_clean=True):
         with store._mutation_lock(), _write_guard(p):
-            if _read_choice(p) != (record, raw, stamp):
+            if audio_choice_pending(p) or _read_choice(p) != (record, raw, stamp):
                 raise Hold("llm_choice_recovery_required")
             return _review_committed_locked(store, registry, p)
 
@@ -404,9 +406,9 @@ def resolve_committed_jan_choice(store, registry, *, expected, path=None):
     """
     p = config_path() if path is None else Path(path)
     card = expected[0]
-    with registry.transfer_lease(card.model_id), registry._write_guard():
+    with registry.transfer_lease(card.model_id), registry._write_guard(require_clean=True):
         with store._mutation_lock(), _write_guard(p):
-            if _review_committed_locked(store, registry, p) != expected:
+            if audio_choice_pending(p) or _review_committed_locked(store, registry, p) != expected:
                 raise Hold("llm_choice_recovery_required")
             record, raw, stamp = _read_choice(p)
             profile = store.load(record["profile"])
