@@ -340,11 +340,13 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
                 job.cancel()
                 return False, "", ""
             blocks = parse(proc.stdout)
+            text = " ".join(b.text for b in blocks)
+            if norm(text)!=norm(expected):
+                job.cancel()
+                return False,text,""
             job.complete(DocumentResult(req.target,dict(args)["digest"],page,blocks,
                                        dict(args).get("render_digest")))
-            receipt = job.result()
-            text = " ".join(b.text for b in receipt[3].blocks)
-            return norm(text)==norm(expected),text,receipt[4]
+            return True,text,job.result()[4]
         pv = run(["/usr/bin/pdftotext","-v"])
         tv = run(["/usr/bin/tesseract","--version"])
         if pv.returncode or tv.returncode:
@@ -387,6 +389,8 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
         record("sandbox-mixed-pdf-text-and-empty-pages",
                page_count("/work/mixed.pdf")==["3"] and
                [page_text("/work/mixed.pdf",p) for p in (1,2,3)]==[norm(TEXT["deu"]),"",""])
+        if results[-1]["status"]!="PASS":
+            return 1
         rendered = output/"mixed-render.png"
         raster = run(["/usr/bin/pdftoppm","-f","2","-l","2","-r","144","-png",
                       "-singlefile","/work/mixed.pdf","/work/out/mixed-render"])
@@ -405,6 +409,8 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
               lambda raw:ocr_blocks(raw.decode("utf-8"),*dims),TEXT["tur"])
         record("sandbox-mixed-pdf-scan-receipt",passed and
                hashlib.sha256(rendered.read_bytes()).hexdigest()==rh,actual=text,result_sha256=receipt)
+        if results[-1]["status"]!="PASS" or hashlib.sha256(mixed.read_bytes()).hexdigest()!=source_hashes[mixed]:
+            return 1
         # Fixed split and reorder operations, not arbitrary page selection or
         # runtime export authorization. Never write the original input.
         from pdf_manipulation import PDFManipulation
@@ -427,7 +433,8 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
                page_count("/work/out/"+p.name)==["1"] and
                page_text("/work/out/"+p.name,1)==norm(text)
                for p,text in zip(parts,TEXT.values())))
-        if not split_ok:
+        if results[-1]["status"]!="PASS" or hashlib.sha256(pdf.read_bytes()).hexdigest()!=source_hashes[pdf]:
+            split_job.cancel()
             return 1
         split_job.complete(tuple(p.read_bytes() for p in parts))
         ph=list(split_job.result())
@@ -437,6 +444,9 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
         merge_req=merge_call.request(split_ctx)
         merge_job=PDFManipulation(split_gate,split_gate.fixture_grant("merge",merge_req,60),
                                   split_ctx,merge_call,parent=split_job)
+        if ph!=[hashlib.sha256(p.read_bytes()).hexdigest() for p in parts]:
+            merge_job.cancel()
+            return 1
         merged=output/"reordered.pdf"
         merge=run(["/usr/bin/pdfunite","/work/out/selected-3.pdf","/work/out/selected-1.pdf",
                    "/work/out/selected-2.pdf","/work/out/reordered.pdf"])
@@ -446,13 +456,16 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
         record("sandbox-pdf-reorder",merge_ok and page_count("/work/out/reordered.pdf")==["3"]
                and all(page_text("/work/out/reordered.pdf",p)==norm(expected[i])
                        for p,i in enumerate((2,0,1),1)))
-        if merge_ok:
+        order_ok=results[-1]["status"]=="PASS"
+        unchanged=(ph==[hashlib.sha256(p.read_bytes()).hexdigest() for p in parts] and
+                   all(hashlib.sha256(p.read_bytes()).hexdigest()==h for p,h in source_hashes.items()))
+        if order_ok and unchanged:
             merge_job.complete((merged.read_bytes(),))
-        record("sandbox-pdf-manipulation-typed-receipt",merge_ok and
+        else:
+            merge_job.cancel()
+        record("sandbox-pdf-manipulation-typed-receipt",order_ok and unchanged and
                merge_job.result()==(hashlib.sha256(merged.read_bytes()).hexdigest(),))
-        record("sandbox-pdf-manipulation-sources-unchanged",
-               ph==[hashlib.sha256(p.read_bytes()).hexdigest() for p in parts] and
-               all(hashlib.sha256(p.read_bytes()).hexdigest()==h for p,h in source_hashes.items()))
+        record("sandbox-pdf-manipulation-sources-unchanged",unchanged)
         if not all(row["status"]=="PASS" for row in results):
             return 1
         # Debian/Ubuntu package configuration lives outside /usr. Copy only
