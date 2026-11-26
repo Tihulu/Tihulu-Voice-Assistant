@@ -144,3 +144,5 @@ CAP-04 actual WebDriver window handle replaces synthetic tab token; require exac
 CAP-04 terminal failure handling: revoked/expired ancestors close offline browser fixture at prepare/begin/active checkpoint, clear receipt and revoke all claims; enforce bounded operation count before planning. Three regression methods. No actual browser teardown on its own, real CI wrapper owns teardown; not production runtime.
 
 CAP-04 non-idempotent fixed local click fixture: repeat click increments a counter and changes DOM text; inspect exact counter and visible text after explicit host deny and ancestor revocation to distinguish an unintended repeat effect. No extra case count (22 planned). Trusted test-only observation, no generic selector or production operation.
+
+Gateway dense-chain performance: #349 199/199 tests but 64-operation limit test consumed ~24–25s whole suite because group checks re-evaluated shared ancestors. Deduplicate exact grant/request evaluation within one lock/time observation; repeated forged grant/request and unclaimed/revoked ancestor still denied. Four regression methods including exact validation count. No production changes or relaxed policy.
