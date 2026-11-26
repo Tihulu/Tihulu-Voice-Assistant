@@ -4,6 +4,9 @@ on:
     branches: ['**']
     paths:
       - 'experiments/document_engine_acceptance.py'
+      - 'experiments/document_geometry.py'
+      - 'experiments/document_result.py'
+      - 'experiments/capabilities.py'
       - '.github/workflows/document-engine-evidence.yml'
 permissions:
   contents: read

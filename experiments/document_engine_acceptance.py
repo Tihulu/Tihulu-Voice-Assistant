@@ -58,7 +58,8 @@ def validate_output(call, page, blocks, expected):
                              clock=profiles.PolicyClock())
     grant = gateway.fixture_grant("fixture",request,60)
     job = DocumentFixture(gateway,grant,context,call)
-    result = DocumentResult(request.target,dict(call.args)["digest"],page,blocks)
+    result = DocumentResult(request.target,dict(call.args)["digest"],page,blocks,
+                            dict(call.args).get("render_digest"))
     job.complete(result)
     receipt = job.result()
     actual = " ".join(block.text for block in receipt[3].blocks)
@@ -140,6 +141,42 @@ def main():
         actual = run(["tesseract", str(rendered), "stdout", "-l", "tur", "--psm", "6"], root).stdout.decode("utf-8")
         record("scan-render-ocr-tur", norm(actual) == norm(TEXT["tur"]) and digest(scan) == source,
                expected=TEXT["tur"], actual=actual.strip(), sha256=source, render_sha256=digest(rendered))
+        # Real heterogeneous document: text, scanned image, blank page.
+        mixed = root / "mixed.pdf"
+        out = canvas.Canvas(str(mixed), pagesize=(900, 160), invariant=True)
+        out.setFont("FixtureFont", 23)
+        out.drawString(30, 100, TEXT["deu"])
+        out.showPage()
+        out.drawImage(str(images["tur"]), 0, 0, width=900, height=160)
+        out.showPage()
+        out.showPage()
+        out.save()
+        mixed_digest = digest(mixed)
+        info = run(["pdfinfo", str(mixed)], root).stdout.decode("utf-8")
+        pages = [line.split(":", 1)[1].strip() for line in info.splitlines()
+                 if line.startswith("Pages:")]
+        record("mixed-pdf-page-count", pages == ["3"], pages=pages, sha256=mixed_digest)
+        for page, expected in ((1,TEXT["deu"]),(2,""),(3,"")):
+            extracted = run(["pdftotext","-f",str(page),"-l",str(page),
+                             "-enc","UTF-8",str(mixed),"-"], root).stdout.decode("utf-8")
+            record("mixed-pdf-text-page-"+str(page), norm(extracted)==norm(expected),
+                   page=page, actual=extracted.strip())
+        prefix = root / "mixed-render"
+        run(["pdftoppm","-f","2","-l","2","-r","144","-png","-singlefile",
+             str(mixed),str(prefix)],root)
+        rendered = prefix.with_suffix(".png")
+        rendered_digest = digest(rendered)
+        with Image.open(rendered) as image:
+            dimensions = image.size
+        tsv = run(["tesseract",str(rendered),"stdout","-l","tur","--psm","6","tsv"],
+                  root).stdout.decode("utf-8")
+        call = CapabilityCall("tesseract",ocr_version,"pdf_page_ocr",
+                              (("artifact","mixed-pdf"),("digest",mixed_digest),("page",2),
+                               ("render_digest",rendered_digest),("language","tr")))
+        passed, actual, result_digest = validate_output(call,2,ocr_blocks(tsv,*dimensions),TEXT["tur"])
+        record("mixed-pdf-scan-page-contract", passed and digest(mixed)==mixed_digest
+               and digest(rendered)==rendered_digest, page=2, actual=actual,
+               source_sha256=mixed_digest, render_sha256=rendered_digest, result_sha256=result_digest)
         corrupt = root / "bad.pdf"
         corrupt.write_bytes(b"%PDF-1.4\nnot a PDF\n")
         bad = run(["pdftotext", str(corrupt), "-"], root, success=False)
@@ -152,7 +189,7 @@ def main():
         out.save()
         locked = run(["pdftotext", str(encrypted), "-"], root, success=False)
         record("encrypted-pdf-without-password-refused", locked.returncode != 0 and not locked.stdout)
-    return 0 if len(rows) == 16 and all(row["status"] == "PASS" for row in rows) else 1
+    return 0 if len(rows) == 21 and all(row["status"] == "PASS" for row in rows) else 1
 
 
 if __name__ == "__main__":
