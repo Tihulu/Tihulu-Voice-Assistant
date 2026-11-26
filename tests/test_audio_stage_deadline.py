@@ -9,7 +9,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import patch
 from tihulu_jarvis.voice import audio
-from tihulu_jarvis.voice.m1 import SpeechRequest
+from tihulu_jarvis.voice.m1 import Hold, SpeechRequest
 
 
 class AudioStageDeadlineTests(unittest.IsolatedAsyncioTestCase):
@@ -144,6 +144,50 @@ class AudioStageDeadlineTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_late_runner_result_refused(self):
         await self.exercise("runner", "runner_result")
+
+    async def test_malformed_piper_output_never_reaches_playback(self):
+        for kind in ("not_wav", "truncated", "empty", "wrong_format", "symlink"):
+            with self.subTest(kind=kind):
+                children, events = [], []
+
+                @asynccontextmanager
+                async def child(name, *args, **kwargs):
+                    children.append(name)
+                    self.assertEqual(name, "piper")
+
+                    class Process:
+                        returncode = 0
+                        async def communicate(inner, payload):
+                            output = Path(args[-1])
+                            if kind == "not_wav":
+                                output.write_bytes(b"x" * 100)
+                            elif kind == "symlink":
+                                output.symlink_to(self.recording)
+                            elif kind == "truncated":
+                                self.wav(output)
+                                output.write_bytes(output.read_bytes()[:-2])
+                            else:
+                                with wave.open(str(output), "wb") as w:
+                                    w.setparams((2 if kind == "wrong_format" else 1,
+                                                 2, 22050, 0, "NONE", "not compressed"))
+                                    if kind == "wrong_format":
+                                        w.writeframes(bytes(100))
+                            return b"", b""
+                    yield Process()
+
+                with patch.object(audio, "child", child), patch.object(audio, "tools_ready", return_value=True):
+                    with self.assertRaisesRegex(Hold, "synthesis_failed"):
+                        await audio.speak(SpeechRequest("Fixture", "en", str(self.voice)),
+                                          events.append, checkpoint=lambda: None)
+                self.assertEqual(children, ["piper"])
+                self.assertEqual(events, ["synthesizing"])
+
+    async def test_valid_piper_native_sample_rate_is_accepted(self):
+        output = self.root / "native.wav"
+        with wave.open(str(output), "wb") as w:
+            w.setparams((1, 2, 22050, 0, "NONE", "not compressed"))
+            w.writeframes(struct.pack("<hh", 1250, -1250) * 1600)
+        audio.require_playback_wav(output, checkpoint=lambda: None)
 
     async def test_normal_speech(self):
         await self.exercise("speech")
