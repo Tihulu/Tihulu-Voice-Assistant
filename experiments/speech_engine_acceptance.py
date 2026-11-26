@@ -10,7 +10,7 @@ import socket
 import subprocess
 import tempfile
 import sys
-from voice_quality import word_errors, acceptable
+from voice_quality import word_errors, acceptable, expanded_corpus
 from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
@@ -52,7 +52,7 @@ STT_MODELS={
     "small":("1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b",500000000),
 }
 
-def main(stt_binary=None,stt_model=None,stt_profile="tiny"):
+def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
     if os.getuid()==0:
         raise RuntimeError("root fixture prohibited")
     stt_paths=None
@@ -68,6 +68,12 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny"):
                 or model_digest(stt_paths[1])!=MODEL_SHA):
             raise RuntimeError("invalid pinned STT model")
         print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
+    if corpus not in ("original","expanded") or (corpus=="expanded" and (not stt_paths or stt_profile!="small")):
+        raise RuntimeError("invalid corpus profile")
+    samples=tuple((lang,lang,text) for lang,text in TEXT.items())
+    if corpus=="expanded":
+        samples+=expanded_corpus()
+    print(json.dumps({"corpus":corpus,"sample_count":len(samples)}),flush=True)
     results=[]
     quality=[]
     def qrecord(case,ok,**extra):
@@ -142,11 +148,11 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny"):
                               "/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack"]
         fv=run(["/usr/bin/ffmpeg","-version"],ffmpeg_prefix).decode("utf-8").splitlines()[0].split()[2]
         digests=set()
-        for lang,text in TEXT.items():
+        for case_id,lang,text in samples:
             payload=text.encode("utf-8")
-            lang_source=root/("text-"+lang+".txt")
+            lang_source=root/("text-"+case_id+".txt")
             lang_source.write_bytes(payload)
-            lang_output=root/("voice-"+lang)
+            lang_output=root/("voice-"+case_id)
             lang_output.mkdir(mode=0o700)
             scope=prefix.copy()
             scope[scope.index(str(source))]=str(lang_source)
@@ -154,10 +160,10 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny"):
             digest=hashlib.sha256(payload).hexdigest()
             dest=lang_output/(lang+".wav")
             call=CapabilityCall("espeak_ng",version.group(1),"text_to_wav",
-                    (("artifact","fixture-text-"+lang),("digest",digest),("language",lang),
-                     ("output","fixture-audio-"+lang)))
+                    (("artifact","fixture-text-"+case_id),("digest",digest),("language",lang),
+                     ("output","fixture-audio-"+case_id)))
             req=call.request(ctx)
-            grant=gate.fixture_grant("voice-"+lang,req,60)
+            grant=gate.fixture_grant("voice-"+case_id,req,60)
             job=SpeechFixture(gate,ctx,call,grant)
             if dest.exists() or dest.is_symlink():
                 job.cancel()
@@ -166,42 +172,42 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny"):
             scope_probe=json.loads(run(["/usr/bin/python3","-I","-c",
                 "import hashlib,json; from pathlib import Path; print(json.dumps({'digest':hashlib.sha256(Path('/work/text.txt').read_bytes()).hexdigest(),'work':sorted(p.name for p in Path('/work').iterdir()),'out':list(Path('/work/out').iterdir())}))"],scope))
             scoped=(scope_probe=={"digest":digest,"work":["out","text.txt"],"out":[]})
-            record("speech-exact-private-language-scope-"+lang,scoped)
+            record("speech-exact-private-language-scope-"+case_id,scoped)
             if not scoped:
                 job.cancel()
                 return 1
             job.checkpoint()
             run(["/usr/bin/espeak-ng","-v",lang,"-s","150","-f","/work/text.txt",
-                 "-w","/work/out/"+lang+".wav"],scope)
+                 "-w","/work/out/"+case_id+".wav"],scope)
             if dest.is_symlink() or not dest.is_file() or not 44<dest.stat().st_size<=MAX_WAV:
                 job.cancel()
-                record("speech-wav-"+lang,False)
+                record("speech-wav-"+case_id,False)
                 return 1
             data=dest.read_bytes()
             unchanged=lang_source.read_bytes()==payload
-            record("speech-source-preserved-"+lang,unchanged)
+            record("speech-source-preserved-"+case_id,unchanged)
             if not unchanged:
                 job.cancel()
                 return 1
-            job.complete(SpeechResult(req.target,digest,lang,"fixture-audio-"+lang,data))
+            job.complete(SpeechResult(req.target,digest,lang,"fixture-audio-"+case_id,data))
             receipt=job.result()
             result_digest=hashlib.sha256(data).hexdigest()
-            record("speech-real-wav-"+lang,receipt[4]==result_digest,
+            record("speech-real-wav-"+case_id,receipt[4]==result_digest,
                    rate=receipt[5],frames=receipt[6],digest=result_digest)
             digests.add(result_digest)
             # Each conversion receives only its exact synthesized WAV and a
             # fresh output directory, not the text or other language files.
-            converted=root/("converted-"+lang)
+            converted=root/("converted-"+case_id)
             converted.mkdir(mode=0o700)
             scope=ffmpeg_prefix.copy()
             i=scope.index(str(source))
             scope[i:i+2]=[str(dest),"/work/input.wav"]
             i=scope.index(str(output))
             scope[i]=str(converted)
-            call=job.prepare_conversion(fv,"fixture-flac-"+lang)
+            call=job.prepare_conversion(fv,"fixture-flac-"+case_id)
             req=call.request(ctx)
-            grant=gate.fixture_grant("convert-"+lang,req,60)
-            conversion=job.start_conversion(fv,"fixture-flac-"+lang,grant)
+            grant=gate.fixture_grant("convert-"+case_id,req,60)
+            conversion=job.start_conversion(fv,"fixture-flac-"+case_id,grant)
             gate.checkpoint(grant,req)
             if hashlib.sha256(dest.read_bytes()).hexdigest()!=result_digest:
                 conversion.cancel()
@@ -210,7 +216,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny"):
                  "-c:a","flac","/work/out/audio.flac"],scope)
             flac=converted/"audio.flac"
             ok=not flac.is_symlink() and flac.is_file() and 4<flac.stat().st_size<=MAX_WAV
-            record("speech-real-flac-"+lang,ok)
+            record("speech-real-flac-"+case_id,ok)
             if not ok:
                 conversion.cancel()
                 return 1
@@ -220,18 +226,18 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny"):
             pcm=converted/"roundtrip.pcm"
             exact=(not pcm.is_symlink() and pcm.is_file() and pcm.stat().st_size==len(data)-44
                    and pcm.read_bytes()==data[44:] and dest.read_bytes()==data)
-            record("speech-lossless-pcm-"+lang,exact)
+            record("speech-lossless-pcm-"+case_id,exact)
             if not exact:
                 conversion.cancel()
                 return 1
             flac_data=flac.read_bytes()
-            conversion.complete(ConversionResult(req.target,result_digest,"fixture-flac-"+lang,"flac",flac_data))
-            record("speech-flac-dependent-receipt-"+lang,conversion.result()[4]==hashlib.sha256(flac_data).hexdigest())
+            conversion.complete(ConversionResult(req.target,result_digest,"fixture-flac-"+case_id,"flac",flac_data))
+            record("speech-flac-dependent-receipt-"+case_id,conversion.result()[4]==hashlib.sha256(flac_data).hexdigest())
             transcript=None
             if stt_paths:
                 from whisper_engine_acceptance import ENGINE_REV,WRAPPER as STT_WRAPPER,digest as model_digest
                 from transcription_result import Transcript
-                stt_out=root/("stt-"+lang)
+                stt_out=root/("stt-"+case_id)
                 stt_out.mkdir(mode=0o700)
                 stt_scope=prefix.copy()
                 i=stt_scope.index(str(source))
@@ -252,14 +258,14 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 probe=json.loads(run(["/usr/bin/python3","-I","-c",probe_code],stt_scope))
                 scoped=probe=={"model":MODEL_SHA,"audio":result_digest,
                     "work":["model.bin","out","sample.wav","whisper-cli"],"out":[],"no_devices":True}
-                qrecord("multilingual-stt-scope-"+lang,scoped)
+                qrecord("multilingual-stt-scope-"+case_id,scoped)
                 if not scoped:
                     job.cancel()
                     return 1
-                stt_call=job.prepare_transcription(ENGINE_REV,MODEL_SHA,"transcript-"+lang)
+                stt_call=job.prepare_transcription(ENGINE_REV,MODEL_SHA,"transcript-"+case_id)
                 stt_req=stt_call.request(ctx)
-                stt_grant=gate.fixture_grant("stt-"+lang,stt_req,60)
-                transcript=job.start_transcription(ENGINE_REV,MODEL_SHA,"transcript-"+lang,stt_grant)
+                stt_grant=gate.fixture_grant("stt-"+case_id,stt_req,60)
+                transcript=job.start_transcription(ENGINE_REV,MODEL_SHA,"transcript-"+case_id,stt_grant)
                 transcript.checkpoint()
                 run(["/work/whisper-cli","-m","/work/model.bin","-f","/work/sample.wav",
                      "-l",lang,"-t","2","-ng","-nt","-otxt","-of","/work/out/transcript"],stt_scope,wrapper=STT_WRAPPER,timeout=120)
@@ -270,22 +276,22 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 recognized=path.read_text(encoding="utf-8").strip()
                 errors,count=word_errors(text,recognized,lang)
                 ok=acceptable(errors,count)
-                qrecord("multilingual-stt-semantic-"+lang,ok,errors=errors,reference_words=count,
+                qrecord("multilingual-stt-semantic-"+case_id,ok,errors=errors,reference_words=count,language=lang,
                         recognized=recognized[:200])
                 unchanged=(model_digest(stt_paths[1])==MODEL_SHA and dest.read_bytes()==data
                            and sorted(p.name for p in stt_out.iterdir())==["transcript.txt"])
-                qrecord("multilingual-stt-inputs-unchanged-"+lang,unchanged)
+                qrecord("multilingual-stt-inputs-unchanged-"+case_id,unchanged)
                 if not unchanged:
                     transcript.cancel()
                     return 1
                 if ok:
                     transcript.complete(Transcript(stt_req.target,result_digest,MODEL_SHA,lang,
-                                                   "transcript-"+lang,recognized))
-                    qrecord("multilingual-stt-typed-receipt-"+lang,
+                                                   "transcript-"+case_id,recognized))
+                    qrecord("multilingual-stt-typed-receipt-"+case_id,
                             transcript.result()[1]==hashlib.sha256(recognized.encode()).hexdigest())
                 else:
                     transcript.cancel()
-                    qrecord("multilingual-stt-typed-receipt-"+lang,False,reason="quality_gate_failed")
+                    qrecord("multilingual-stt-typed-receipt-"+case_id,False,reason="quality_gate_failed")
             job.cancel()
             if transcript is not None:
                 try:
@@ -294,19 +300,19 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     stt_denied=True
                 else:
                     stt_denied=False
-                qrecord("multilingual-stt-revoked-result-"+lang,stt_denied)
+                qrecord("multilingual-stt-revoked-result-"+case_id,stt_denied)
             try:
                 conversion.result()
             except Refused:
                 denied=True
             else:
                 denied=False
-            record("speech-revoke-invalidates-conversion-"+lang,denied)
+            record("speech-revoke-invalidates-conversion-"+case_id,denied)
             if not all(results):
                 return 1
-        record("speech-distinct-multilingual-output",len(digests)==3)
-        record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+lang)).iterdir())==[lang+".wav"] for lang in TEXT) and not list(output.iterdir()))
-    return 0 if len(results)==26 and all(results) and (not stt_paths or (len(quality)==15 and all(quality))) else 1
+        record("speech-distinct-multilingual-output",len(digests)==len(samples))
+        record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+case_id)).iterdir())==[case_id+".wav"] for case_id,_,_ in samples) and not list(output.iterdir()))
+    return 0 if len(results)==5+7*len(samples) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
 
 if __name__=="__main__":
     raise SystemExit(main(*sys.argv[1:]))

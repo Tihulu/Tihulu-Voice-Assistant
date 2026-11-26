@@ -28,3 +28,15 @@ def acceptable(errors,count):
     # Predeclared 40% WER ceiling and at least three reference words.
     return (type(errors) is int and type(count) is int and 3<=count<=64
             and 0<=errors and errors*5<=count*2)
+
+# Fixed additional public generated samples, declared before observing output.
+# These are inert strings, never computer commands.
+def expanded_corpus():
+    return (
+        ("tr-2","tr","Lütfen bu metni Türkçe olarak oku."),
+        ("tr-3","tr","Yarın sabah hava durumunu kontrol etmek istiyorum."),
+        ("en-2","en","Please read this short message aloud."),
+        ("en-3","en","I would like to check the weather tomorrow morning."),
+        ("de-2","de","Bitte lies diese kurze Nachricht vor."),
+        ("de-3","de","Ich möchte morgen früh das Wetter prüfen."),
+    )

@@ -23,3 +23,14 @@ class VoiceQualityTests(unittest.TestCase):
             word_errors("x "*65,"x","en")
         with self.assertRaises(Refused):
             word_errors("x","x "*129,"en")
+
+    def test_expanded_corpus_balanced_and_distinct(self):
+        from voice_quality import expanded_corpus,words
+        samples=expanded_corpus()
+        self.assertEqual(len(samples),6)
+        self.assertEqual(len({s[0] for s in samples}),6)
+        self.assertEqual({lang:sum(s[1]==lang for s in samples) for lang in ("tr","en","de")},
+                         {"tr":2,"en":2,"de":2})
+        for identity,lang,text in samples:
+            self.assertTrue(identity.startswith(lang+"-"))
+            self.assertGreaterEqual(len(words(text,lang)),3)
