@@ -15,9 +15,21 @@ ACTIONS = {
     "catalog": "external_network", "transfer": "external_network",
     "publish": "publish_artifact",
     "capture": "local_audio_device", "browser": "browser_navigate",
+    "document_engine": "filesystem_read", "document_export": "filesystem_write",
+    "application_ui": "host_shell", "application_engine": "host_shell",
+    "browser_read": "browser_navigate",
 }
-HOST = frozenset(("engine", "agent", "local_plan", "publish", "capture"))
-EXTERNAL = frozenset(("research", "provider", "disclose", "catalog", "transfer", "browser"))
+HOST = frozenset(("engine", "agent", "local_plan", "publish", "capture",
+                  "document_engine", "document_export", "application_ui",
+                  "application_engine", "browser_read"))
+EXTERNAL = frozenset(("research", "provider", "disclose", "catalog", "transfer", "browser", "browser_read"))
+EXTRA_CEILINGS = {
+    "browser": ("external_network",),
+    "browser_read": ("external_network", "host_shell"),
+    "document_engine": ("host_shell",),
+    "document_export": ("filesystem_read", "host_shell"),
+    "application_engine": ("filesystem_read", "filesystem_write"),
+}
 TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 MAX_GRANTS = 64
 
@@ -135,20 +147,20 @@ class FixtureGateway:
             raise Refused("host_boundary")
         if req.action in ("provider", "disclose") and mode == "LOCAL_ONLY":
             raise Refused("local_only")
-        if req.action in ("research", "catalog", "transfer", "browser") and mode == "LOCAL_ONLY" and not self.context.public_opt_in:
+        if req.action in ("research", "catalog", "transfer", "browser", "browser_read") and mode == "LOCAL_ONLY" and not self.context.public_opt_in:
             raise Refused("public_opt_in_required")
         if req.action in EXTERNAL and req.classification == "private":
             raise Refused("private_egress_denied")
         if req.action in ("disclose", "provider") and req.classification not in (
                 ("public", "minimized") if mode == "SECURE_HYBRID" else ("public",)):
             raise Refused("disclosure_classification_denied")
-        if req.action in ("research", "catalog", "transfer", "browser") and req.classification != "public":
+        if req.action in ("research", "catalog", "transfer", "browser", "browser_read") and req.classification != "public":
             raise Refused("public_data_required")
         if req.action == "capture" and req.classification != "private":
             raise Refused("private_capture_required")
         # A browser operation requires both the browser-specific and the
         # external-network policy ceiling. No inherited research grant.
-        actions = (ACTIONS[req.action], "external_network") if req.action == "browser" else (ACTIONS[req.action],)
+        actions = (ACTIONS[req.action], *EXTRA_CEILINGS.get(req.action, ()))
         for action in actions:
             if any(r.decision == profiles.DENY and r.matches(action, (req.target,)) for r in self._rules):
                 raise Refused("explicit_deny")
