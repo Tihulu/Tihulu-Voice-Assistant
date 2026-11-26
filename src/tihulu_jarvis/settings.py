@@ -268,6 +268,7 @@ def require_current_audio_selection(expected, path=None):
     current = load(path)
     fields = ("profile", "stt", "voices", "market_refs", "resources")
     if (any(current[key] != expected[key] for key in fields)
+            or current.get("stt_language", "auto") != expected.get("stt_language", "auto")
             or current.get("audio_digests", {}) != expected.get("audio_digests", {})
             or current.get("voice_digests", {}) != expected.get("voice_digests", {})):
         raise Hold("audio_settings_changed_restart_required")
