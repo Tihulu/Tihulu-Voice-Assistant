@@ -7,6 +7,7 @@ import math
 import os
 import shutil
 import signal
+import stat
 import struct
 import tempfile
 import wave
@@ -57,18 +58,66 @@ def selected_file(value, suffix):
     return p
 
 
-def voice_for(value, lang):
+def _voice_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode, info.st_nlink)
+
+
+def inspect_voice(value, lang, *, checkpoint=lambda: None):
+    """Pin and bound the Piper sidecar; never wait on a FIFO or follow a symlink."""
     p = selected_file(value, ".onnx")
     config = p.with_name(p.name + ".json")
+    fd = None
     try:
-        if config.stat().st_size > 1048576:
+        checkpoint()
+        fd = os.open(config, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= 1048576:
             raise ValueError
-        locale = json.loads(config.read_text(encoding="utf-8"))["language"]["code"]
+        raw = bytearray()
+        while len(raw) <= before.st_size:
+            checkpoint()
+            block = os.read(fd, min(65536, before.st_size + 1 - len(raw)))
+            if not block:
+                break
+            raw.extend(block)
+        identity = _voice_identity(before)
+        if (len(raw) != before.st_size or _voice_identity(os.fstat(fd)) != identity
+                or _voice_identity(config.lstat()) != identity):
+            raise ValueError
+        def unique(items):
+            out = {}
+            for key, value in items:
+                if key in out:
+                    raise ValueError
+                out[key] = value
+            return out
+        locale = json.loads(raw.decode("utf-8"), object_pairs_hook=unique)["language"]["code"]
         if not isinstance(locale, str) or locale.replace("-", "_").split("_")[0].lower() != lang:
             raise ValueError
-    except (KeyError, ValueError, TypeError, OSError):
+    except (KeyError, ValueError, TypeError, OSError, RecursionError):
         raise Hold("voice_locale_unverified") from None
-    return Voice(str(p), lang)
+    finally:
+        if fd is not None:
+            os.close(fd)
+    proof = (config, identity)
+    require_voice_proof(proof, checkpoint=checkpoint)
+    return Voice(str(p), lang), proof
+
+
+def require_voice_proof(proof, *, checkpoint=lambda: None):
+    checkpoint()
+    config, identity = proof
+    try:
+        if _voice_identity(config.lstat()) != identity:
+            raise Hold("voice_locale_unverified")
+    except OSError:
+        raise Hold("voice_locale_unverified") from None
+    checkpoint()
+
+
+def voice_for(value, lang):
+    return inspect_voice(value, lang)[0]
 
 
 class SelectedVoices(Mapping):

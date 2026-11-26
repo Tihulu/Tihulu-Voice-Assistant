@@ -199,6 +199,44 @@ class FileImportTests(unittest.TestCase):
         with self.assertRaises(Hold):
             from_file(str(path), "stt", checkpoint=checkpoint)
 
+    def test_voice_sidecar_rejects_fifo_and_symlink(self):
+        import os
+        from tihulu_jarvis.voice import audio
+        path = self.tmp / "tr.onnx"
+        path.write_bytes(b"fixture")
+        config = path.with_name(path.name + ".json")
+        target = self.tmp / "other.json"
+        target.write_text('{"language":{"code":"tr"}}')
+        config.symlink_to(target)
+        with self.assertRaisesRegex(Hold, "voice_locale_unverified"):
+            audio.voice_for(str(path), "tr")
+        config.unlink()
+        os.mkfifo(config)
+        with self.assertRaisesRegex(Hold, "voice_locale_unverified"):
+            audio.voice_for(str(path), "tr")
+
+    def test_voice_sidecar_rejects_duplicate_locale(self):
+        from tihulu_jarvis.voice import audio
+        path = self.tmp / "tr.onnx"
+        path.write_bytes(b"fixture")
+        path.with_name(path.name + ".json").write_text(
+            '{"language":{"code":"de","code":"tr"}}')
+        with self.assertRaisesRegex(Hold, "voice_locale_unverified"):
+            audio.voice_for(str(path), "tr")
+
+    def test_voice_sidecar_proof_refuses_identical_replacement(self):
+        from tihulu_jarvis.voice import audio
+        path = self.tmp / "tr.onnx"
+        path.write_bytes(b"fixture")
+        config = path.with_name(path.name + ".json")
+        config.write_text('{"language":{"code":"tr"}}')
+        voice, proof = audio.inspect_voice(str(path), "tr")
+        other = self.tmp / "new.json"
+        other.write_bytes(config.read_bytes())
+        other.replace(config)
+        with self.assertRaisesRegex(Hold, "voice_locale_unverified"):
+            audio.require_voice_proof(proof)
+
     def test_digest_is_bounded_and_complete(self):
         path = self.tmp / "digest.bin"
         path.write_bytes(b"abc")
