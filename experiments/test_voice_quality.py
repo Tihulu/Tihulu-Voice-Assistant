@@ -129,3 +129,13 @@ class VoiceQualityTests(unittest.TestCase):
                 bounded_detection_args(name,rate,frames)
         with self.assertRaises(RuntimeError):
             speech_corpus_profile(name,"small",True)
+
+    def test_manual_neural_profile_has_five_additional_checks(self):
+        from voice_quality import speech_corpus_profile,neural_sample_allowed
+        name="mixed-manual-piper-short"
+        self.assertEqual(speech_corpus_profile(name,"small",True),(True,True,27))
+        self.assertTrue(neural_sample_allowed(name,"tr","tr","original","original"))
+        self.assertFalse(neural_sample_allowed(name,"tr-2","tr","Lütfen bu metni Türkçe olarak oku.","original"))
+        for model,available in (("small",False),("turbo-q5",True)):
+            with self.assertRaises(RuntimeError):
+                speech_corpus_profile(name,model,available)
