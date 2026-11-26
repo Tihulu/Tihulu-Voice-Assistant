@@ -699,7 +699,7 @@ async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint,
             await _whisper(model, source, output_stem, checkpoint=deadline.check,
                            model_identity=model_identity, language=selected_language)
         else:
-            await runner(model, wav, stem)
+            await runner(model, source, output_stem)
         deadline.check()
         output = output_stem.with_suffix(".txt")
         try:

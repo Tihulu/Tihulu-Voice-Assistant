@@ -174,6 +174,24 @@ class TranscribeFileTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(b"".join(parts), payload)
         self.assertEqual(seen, ["transcribing"])
 
+    async def test_segmented_failure_never_returns_partial_transcript(self):
+        speech = struct.pack("<hh", 1250, -1250) * 16000
+        clip = self.recording(speech + bytes(32000) + speech + bytes(32000) + speech)
+        outputs = []
+
+        async def runner(model, wav, stem):
+            outputs.append(stem)
+            if len(outputs) == 2:
+                raise Hold("transcription_failed")
+            stem.with_suffix(".txt").write_text("first", encoding="utf-8")
+
+        with self.assertRaisesRegex(Hold, "transcription_failed"):
+            await audio.transcribe(self.model, str(clip), runner,
+                                   checkpoint=lambda: None, language="segmented")
+        self.assertEqual(len(outputs), 2)
+        self.assertNotEqual(outputs[0], outputs[1])
+        self.assertFalse(outputs[0].parent.exists())
+
     async def test_segmented_mode_refuses_over_limit_without_decoding(self):
         clip = self.recording(struct.pack("<hh", 1250, -1250) * (31 * 16000))
         calls = []
