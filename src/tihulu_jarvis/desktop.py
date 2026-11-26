@@ -1941,9 +1941,9 @@ def create_window(app, loop, bridge=None):
             self.refresh()
 
         def build_market_page(self):
-            # The rollback worker owns the registry lock. Do not read it from
-            # GTK or clear its visible snapshot until the worker has drained.
-            if getattr(self, "rollback_worker_active", False):
+            # An owned publication/rollback may hold the registry lock.
+            # Preserve the visible snapshot until that operation drains.
+            if getattr(self, "registry_worker_active", False):
                 return
             if getattr(self, "market_list", None) is not None:
                 self.market_row_ids = {}
@@ -3296,6 +3296,7 @@ def create_window(app, loop, bridge=None):
         def transfer_checkpoint(self, epoch):
             context = self.picker_context()
             def check():
+                # No GTK access: publication may use this from a worker.
                 self.session.check(epoch)
                 if self.closing or self.picker_context() != context:
                     raise Hold("profile_changed")
@@ -3598,7 +3599,7 @@ def create_window(app, loop, bridge=None):
             async def run(epoch):
                 self.session.check(epoch)
                 checkpoint()
-                self.rollback_worker_active = True
+                self.registry_worker_active = True
                 self.market_filter.set_sensitive(False)
                 self.refresh_market_buttons()
                 worker = asyncio.create_task(asyncio.to_thread(restore))
@@ -3620,7 +3621,7 @@ def create_window(app, loop, bridge=None):
                             failure.append(str(error))
                         elif not isinstance(error, Hold):
                             failure.append("Local operation failed")
-                    self.rollback_worker_active = False
+                    self.registry_worker_active = False
                     self.market_filter.set_sensitive(True)
                     try:
                         self.build_market_page()
@@ -3638,12 +3639,13 @@ def create_window(app, loop, bridge=None):
         def update_selected_card(self):
             """Re-fetch the approved source of an installed item, keeping history."""
             model_id = self.selected_card()
-            if model_id is None or self.busy:
+            if model_id is None or self.busy or self.closing:
                 return
 
             expected = self.selected_card_snapshot()
             if expected is None:
                 return
+            completion, failure = [], []
 
             async def run(epoch):
                 transfer = self.bound_transfer(epoch, model_id, expected=expected)
@@ -3651,22 +3653,42 @@ def create_window(app, loop, bridge=None):
                 entry = {"id": model_id, "state": "DOWNLOADING", "received": 0,
                          "total": source.size, "note": "", "resume": 0}
                 self.downloads.append(entry)
+                self.registry_worker_active = True
+                self.market_filter.set_sensitive(False)
+                self.refresh_market_buttons()
                 try:
-                    result = await transfer.update(self.download_progress(entry, 0))
+                    result = await transfer.update(self.download_progress(entry, 0),
+                                                   threaded_publication=True)
+                    completion.append(tr("Updated.", "Güncellendi.", "Aktualisiert."))
                     self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
-                    entry["state"], entry["note"] = result.state, tr(
-                        "Updated.", "Güncellendi.", "Aktualisiert.")
+                    entry["state"], entry["note"] = result.state, completion[0]
+                except (Hold, OSError, asyncio.TimeoutError) as exc:
+                    if not isinstance(exc, Hold):
+                        failure.append("Operation timed out" if isinstance(exc, asyncio.TimeoutError)
+                                       else "Local operation failed")
+                    elif str(exc) != "turn_cancelled":
+                        failure.append(str(exc))
+                    raise
                 finally:
                     if transfer.state == "CANCELLED":
                         entry["state"], entry["resume"], entry["partial_identity"] = "CANCELLED", 0, None
-                    try:
-                        self.session.check(epoch)
-                    except Hold:
-                        pass
+                    elif not completion:
+                        entry["state"] = "FAILED"
+                        entry["note"] = failure[0] if failure else ""
+                    self.registry_worker_active = False
+                    self.market_filter.set_sensitive(True)
                     self.build_downloads_page()
-                    self.build_market_page()
+                    try:
+                        self.build_market_page()
+                    except (Hold, OSError):
+                        if completion:
+                            completion[0] = tr("Updated; registry refresh unavailable.",
+                                               "Güncellendi; kayıt yenilenemedi.",
+                                               "Aktualisiert; Registry-Aktualisierung nicht verfügbar.")
             self.submit(run, kind="update",
-                        label=tr("Model update", "Model güncelleme", "Modellaktualisierung"))
+                        label=tr("Model update", "Model güncelleme", "Modellaktualisierung"),
+                        committed=lambda: completion[0] if completion else "",
+                        worker_failure=lambda: failure[0] if failure else "")
 
         def forget_selected_card(self):
             model_id = self.selected_card()
