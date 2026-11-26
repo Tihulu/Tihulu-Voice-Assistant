@@ -1784,7 +1784,8 @@ class Registry:
         finally:
             temp.unlink(missing_ok=True)
 
-    def _restore_owned(self, current, candidate, restored):
+    def _restore_owned(self, current, candidate, restored, *, checkpoint=lambda: None):
+        checkpoint()
         if (not current.owned_by_jarvis or not candidate.owned_by_jarvis
                 or current.shared_storage_owner or candidate.shared_storage_owner
                 or current.loaded or candidate.loaded or not current.artifact_digest
@@ -1796,8 +1797,10 @@ class Registry:
         except Hold:
             raise Hold("rollback_artifact_unverified") from None
         if current.artifact_digest == candidate.artifact_digest:
-            if _verified_artifact(target, candidate.disk_size_bytes) != candidate.artifact_digest:
+            if _verified_artifact(target, candidate.disk_size_bytes,
+                                  checkpoint=checkpoint) != candidate.artifact_digest:
                 raise Hold("rollback_artifact_unverified")
+            checkpoint()
             return self.save_card(restored)
         archive = self._archive_path(candidate)
         try:
@@ -1806,30 +1809,38 @@ class Registry:
                 raise Hold("rollback_artifact_unverified")
             if info.st_nlink == 2:
                 self._recover_archive_link(candidate, target, archive, info,
-                                           checkpoint=lambda: None)
+                                           checkpoint=checkpoint)
                 info = archive.lstat()
             if info.st_nlink != 1:
                 raise Hold("rollback_artifact_unverified")
         except OSError:
             raise Hold("rollback_artifact_unverified") from None
-        if _verified_artifact(archive, candidate.disk_size_bytes) != candidate.artifact_digest:
+        if _verified_artifact(archive, candidate.disk_size_bytes,
+                              checkpoint=checkpoint) != candidate.artifact_digest:
             raise Hold("rollback_artifact_unverified")
-        self.retain_artifact(current, target)
+        self.retain_artifact(current, target, checkpoint=checkpoint)
+        checkpoint()
         _require_free_space(target.parent, candidate.disk_size_bytes)
         fd, name = tempfile.mkstemp(prefix=".rollback-", dir=target.parent)
         os.close(fd)
         temp = Path(name)
         temp.unlink()
         try:
-            proof = _copy_verified_artifact(archive, temp, candidate)
-            return self._publish_owned(current, restored, temp, staging_proof=proof)
+            proof = _copy_verified_artifact(archive, temp, candidate, checkpoint=checkpoint)
+            return self._publish_owned(current, restored, temp, checkpoint=checkpoint,
+                                       staging_proof=proof)
         finally:
             temp.unlink(missing_ok=True)
 
     @_model_leased
     @_registry_locked
-    def rollback(self, model_id, revision, *, expected=None):
-        """Restore a previous revision as current, as a new revision."""
+    def rollback(self, model_id, revision, *, expected=None, checkpoint=lambda: None):
+        """Restore a previous revision as current, as a new revision.
+
+        Check cancellation before publication; once a generation commits,
+        independent recovery completes without cancellation checkpoints.
+        """
+        checkpoint()
         current = self.card(model_id)
         if expected is not None and current != expected:
             raise Hold("registry_card_changed")
@@ -1846,7 +1857,9 @@ class Registry:
                     restored = replace(restored, network_approval="", approval_expires_at=0.0,
                                        loaded=False, health_status=UNKNOWN, last_tested_at=0.0,
                                        state="REGISTERED", installed=True, registered=True)
-                    return self._restore_owned(current, candidate, restored)
+                    return self._restore_owned(current, candidate, restored,
+                                               checkpoint=checkpoint)
+                checkpoint()
                 return self.save_card(restored)
         raise Hold("revision_not_found")
 
