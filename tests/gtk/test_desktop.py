@@ -2602,6 +2602,7 @@ class QueueRestoreTests(DownloadFixture):
         journal.write_text("{}")
         fresh = desktop.create_window(self.app, self.loop, self.bridge)
         self.addCleanup(fresh.win.close)
+        self.until(lambda: not fresh.busy)
         self.assertIn("publication_recovery_required", fresh.market_note.get_text())
         self.assertIn("publication_recovery_required", fresh.status.get_text())
         self.assertFalse(fresh.market_fetch.get_sensitive())
@@ -2617,6 +2618,7 @@ class QueueRestoreTests(DownloadFixture):
         journal = self.ui.market.publication_journal
         journal.write_text("{}")
         self.click(self.ui.market_refresh)
+        self.until(lambda: not self.ui.busy)
         self.assertEqual(self.ui.market_row_ids, {})
         self.assertFalse(self.ui.market_use.get_sensitive())
         self.assertFalse(self.ui.market_forget.get_sensitive())
@@ -2624,9 +2626,46 @@ class QueueRestoreTests(DownloadFixture):
         # Simulate an external, explicitly reviewed repair; UI never deletes it.
         journal.unlink()
         self.click(self.ui.market_refresh)
+        self.until(lambda: not self.ui.busy)
         self.pick_card(card.model_id)
         self.assertEqual(self.ui.selected_card_snapshot(), card)
         self.assertNotIn("Registry unavailable", self.ui.market_note.get_text())
+
+    def test_startup_recovery_worker_does_not_block_gtk_and_drains_on_close(self):
+        from threading import Event, get_ident
+        entered, release, drained = Event(), Event(), Event()
+        owner = get_ident()
+        journal = self.ui.market.publication_journal
+        journal.write_text("{}")
+        original = market.Registry.recovery_snapshot
+        def delayed(registry):
+            try:
+                if get_ident() == owner:
+                    raise AssertionError("recovery ran on GTK thread")
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("fixture deadline")
+                return original(registry)
+            finally:
+                drained.set()
+        fresh = None
+        with patch.object(market.Registry, "recovery_snapshot", delayed):
+            try:
+                fresh = desktop.create_window(self.app, self.loop, self.bridge)
+                self.addCleanup(fresh.win.close)
+                self.until(entered.is_set)
+                self.assertTrue(fresh.busy)
+                self.assertFalse(fresh.market_fetch.get_sensitive())
+                self.assertFalse(fresh.market_refresh.get_sensitive())
+                self.assertFalse(fresh.download_resume.get_sensitive())
+                fresh.win.close()
+                self.assertTrue(fresh.busy)
+                self.assertFalse(drained.is_set())
+            finally:
+                release.set()
+            self.until(lambda: not fresh.busy and not fresh.win.get_visible())
+        self.assertTrue(drained.is_set())
+        self.assertEqual(journal.read_text(), "{}")
 
     def test_an_orphan_partial_is_ignored(self):
         transfers = Path(self.market_home, "transfers")
