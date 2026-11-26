@@ -116,3 +116,16 @@ class VoiceQualityTests(unittest.TestCase):
         for model,available in (("small",True),("turbo-q5",False)):
             with self.assertRaises(RuntimeError):
                 speech_corpus_profile("mixed-auto-turbo-bounded-detect",model,available)
+
+    def test_context300_comparison_is_explicit_and_no_truncation(self):
+        from voice_quality import speech_corpus_profile,bounded_detection_args,turbo_context300_args
+        name="mixed-auto-turbo-context300"
+        self.assertEqual(speech_corpus_profile(name,"turbo-q5",True),(True,True,22))
+        self.assertEqual(turbo_context300_args(22050,110250),["-ac","300","-bs","1","-bo","1"])
+        self.assertEqual(bounded_detection_args(name,22050,110250),["-ac","300"])
+        self.assertEqual(bounded_detection_args("mixed-auto-turbo-bounded-detect",22050,110250),["-ac","500"])
+        for rate,frames in ((22050,110251),(22050,0),(16000,16000),(True,1)):
+            with self.assertRaises(Refused):
+                bounded_detection_args(name,rate,frames)
+        with self.assertRaises(RuntimeError):
+            speech_corpus_profile(name,"small",True)
