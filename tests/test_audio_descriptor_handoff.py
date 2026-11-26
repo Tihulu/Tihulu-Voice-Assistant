@@ -85,6 +85,29 @@ class AudioDescriptorHandoffTests(unittest.IsolatedAsyncioTestCase):
                     self.fail("unexpected child")
             spawn.assert_not_called()
 
+    async def test_expected_weight_identity_refuses_substituted_descriptor(self):
+        identity = audio._runtime_identity(self.model)
+        self.replace(self.model)
+        with patch.object(audio.shutil, "which", return_value=str(self.fixture)), patch.object(
+                audio.asyncio, "create_subprocess_exec") as spawn:
+            with self.assertRaisesRegex(Hold, "model_file_changed"):
+                async with audio.child("whisper-cli", "-m", self.model, self.output,
+                                       model_identity=identity):
+                    self.fail("unexpected child")
+            spawn.assert_not_called()
+
+    async def test_sealed_bytes_must_match_expected_sidecar_digest(self):
+        import hashlib
+        proof = (self.config, audio._runtime_identity(self.config),
+                 hashlib.sha256(b"not the inspected bytes").hexdigest())
+        with patch.object(audio.shutil, "which", return_value=str(self.fixture)), patch.object(
+                audio.asyncio, "create_subprocess_exec") as spawn:
+            with self.assertRaisesRegex(Hold, "voice_digest_mismatch"):
+                async with audio.child("piper", "--model", self.model, self.output,
+                                       voice_proof=proof):
+                    self.fail("unexpected child")
+            spawn.assert_not_called()
+
     async def test_spawn_error_retains_backend_failure_reason(self):
         with patch.object(audio.shutil, "which", return_value=str(self.fixture)), \
              patch.object(audio.asyncio, "create_subprocess_exec", side_effect=OSError("fixture")):
