@@ -9,7 +9,7 @@ import re
 import socket
 from urllib.parse import urlsplit
 
-from .m1 import Hold, Message
+from .m1 import Hold, Message, safe_text
 from ..owned_wait import OperationDeadline, await_with_deadline
 
 LIMIT = 524288
@@ -132,17 +132,6 @@ async def body_parts(r, length, chunked):
 async def body(r):
     length, chunked = await response_head(r)
     return b"".join([part async for part in body_parts(r, length, chunked)])
-
-
-def safe_text(value):
-    # UTF-8/GTK cannot represent lone surrogates or embedded NUL as text.
-    if not isinstance(value, str) or "\x00" in value:
-        return False
-    try:
-        value.encode("utf-8", errors="strict")
-    except UnicodeError:
-        return False
-    return True
 
 
 def model_id(v):

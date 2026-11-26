@@ -8,7 +8,7 @@ import json
 from .. import attachments
 from .jan import LIMIT
 
-from .m1 import Hold, LANGUAGES, LanguageContext, Message, complete_turn, lexical_identifier, route_language, valid_response
+from .m1 import Hold, LANGUAGES, LanguageContext, Message, complete_turn, lexical_identifier, route_language, valid_response, safe_text
 
 
 class Session:
@@ -65,6 +65,8 @@ class Session:
             if not isinstance(attachment, attachments.Attachment):
                 raise Hold("attachment_not_text")
             content += "\n\n" + attachments.prompt_block(attachment.checked())
+        if not safe_text(content):
+            raise Hold("invalid_input")
         message = Message("user", content)
         for attempt in range(2):
             system = self._text_instruction(decision, attempt)
@@ -107,6 +109,8 @@ class Session:
 
         def guarded_delta(piece):
             checkpoint()
+            if not safe_text(piece):
+                raise Hold("invalid_response_text")
             on_delta(piece)
 
         if voices is not None:
@@ -132,7 +136,7 @@ class Session:
             result = await (jan.chat((Message("system",system),*history,message), on_delta=guarded_delta)
                             if streaming else jan((Message("system",system),*history,message)))
             checkpoint()
-            if (isinstance(result,str) and result.strip() and len(result)<=32000
+            if (safe_text(result) and result.strip() and len(result)<=32000
                     and not re.search(r"</?(?:think|analysis)\b",result,re.I)
                     and valid_response(result,decision.response_language,lexical_identifier)):
                 self.history, self.context = (*history,message,Message("assistant",result)),decision.next_context

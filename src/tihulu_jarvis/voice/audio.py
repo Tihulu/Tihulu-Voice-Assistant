@@ -23,7 +23,7 @@ from .. import resources
 from ..owned_wait import OperationDeadline, await_with_deadline, finish_owned
 from ..owned_wait import await_authorized as owned_wait
 from ..selected_csv import selection_identity, copy_selected_to
-from .m1 import Hold, Voice
+from .m1 import Hold, Voice, safe_text
 
 
 PROFILE = None
@@ -589,6 +589,8 @@ async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint,
             text = payload.decode("utf-8").replace("\r\n", "\n").replace("\r", "\n").strip()
         except (OSError, UnicodeError):
             raise Hold("invalid_transcript") from None
+        if not safe_text(text):
+            raise Hold("invalid_transcript")
         if not text or len(text) > 16000 or not any(ch.isalnum() for ch in text):
             raise Hold("empty_transcript")
         deadline.check()
@@ -658,6 +660,8 @@ def require_playback_wav(path, *, checkpoint):
 
 async def speak(speech, publish, *, checkpoint):
     checkpoint()
+    if not safe_text(speech.text) or not speech.text.strip() or len(speech.text) > 32000:
+        raise Hold("invalid_speech_text")
     model_path = selected_file(speech.voice_id, ".onnx")
     model_identity = _runtime_identity(model_path)
     model_check = _bind_runtime_model(model_path, checkpoint, expected_identity=model_identity)

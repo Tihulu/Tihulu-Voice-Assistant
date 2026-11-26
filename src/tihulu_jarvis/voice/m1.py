@@ -197,12 +197,23 @@ def explicit_request(text: str) -> tuple[str | None, str] | None:
     return requests[0] if requests else None
 
 
+def safe_text(value):
+    # UTF-8/GTK cannot represent lone surrogates or embedded NUL as text.
+    if not isinstance(value, str) or "\x00" in value:
+        return False
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeError:
+        return False
+    return True
+
+
 def route_language(
     text: str,
     context: LanguageContext,
     identify: Identifier = lexical_identifier,
 ) -> Decision:
-    if not isinstance(text, str) or len(text) > 16000:
+    if not safe_text(text) or len(text) > 16000:
         raise Hold("invalid_input")
     if not any(c.isalnum() for c in text):
         raise Hold("empty_input")
@@ -253,6 +264,8 @@ def speech_text(display_text: str) -> str:
         raise Hold("empty_response")
     if len(display_text) > 32000:
         raise Hold("response_too_long")
+    if not safe_text(display_text):
+        raise Hold("invalid_response_text")
 
     text = html.unescape(display_text)
     if re.search(r"</?(?:think|analysis)\b", text, re.I):
@@ -307,6 +320,8 @@ def valid_response(text: str, expected: str, identify: Identifier) -> bool:
     A limited lexical identifier must not reject short, informal or
     numeric-but-correct answers merely for lacking cue words.
     """
+    if not safe_text(text):
+        return False
     pieces = [
         p.strip() for p in re.split(r"(?<=[.!?;])\s+|\n+", text)
         if any(c.isalpha() for c in p)
