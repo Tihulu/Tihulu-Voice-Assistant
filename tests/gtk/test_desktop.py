@@ -4663,6 +4663,27 @@ class ApprovedSitesTests(DesktopTests):
         super().setUp()
         self.last = []
 
+    def test_stale_site_submission_plan_is_refused(self):
+        self.ui.web_target.set_text("https://example.com/")
+        self.ui.web_submit.set_active(True)
+        self.ui.register_target()
+        self.ui.web_targets.select_row(self.ui.web_targets.get_first_child())
+        cfg = settings.load()
+        cfg["web_targets"] = []
+        settings.save(cfg)
+        self.ui.submit_target()
+        self.assertEqual(self.ui.web_note.get_text(), "site_registration_changed")
+        self.ui.read_target()
+        self.assertEqual(self.ui.web_note.get_text(), "site_registration_changed")
+
+    def test_failed_site_registration_does_not_create_local_permission(self):
+        self.ui.web_target.set_text("https://example.com/")
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.ui.register_target()
+        self.assertEqual(self.ui.cfg["web_targets"], [])
+        self.assertIsNone(self.ui.web_targets.get_first_child())
+        self.assertEqual(settings.load()["web_targets"], [])
+
     def test_a_registered_site_is_listed_with_its_right(self):
         self.register("https://example.test/docs")
         self.assertEqual(len(self.rows()), 1)
@@ -6288,6 +6309,14 @@ class ApprovedSourcesTests(DesktopTests):
                             "lfs": {"sha256": digest}}]},
                 {"modelId": "broken/no-digest", "pipeline_tag": "text-to-speech",
                  "tags": ["ggml"], "files": []}]
+
+    def test_failed_source_registration_does_not_create_local_permission(self):
+        self.ui.source_host.set_text("huggingface.co")
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.assertIsNone(self.ui.register_source())
+        self.assertEqual(self.ui.cfg["sources"], [])
+        self.assertEqual(self.rows(), [])
+        self.assertEqual(settings.load()["sources"], [])
 
     def test_a_registered_source_is_listed_and_stored(self):
         self.register()
