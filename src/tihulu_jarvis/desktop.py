@@ -216,6 +216,7 @@ def create_window(app, loop, bridge=None):
             except Hold as e:
                 read_error = (read_error + " " if read_error else "") + str(e)
             self.saved_cfg = deepcopy(self.cfg)
+            self.runtime_model_proofs = market.RuntimeModelProofs()
             self.look = LOOK
             self.scale_provider = None
             self.apply_text_scale()
@@ -4287,7 +4288,9 @@ def create_window(app, loop, bridge=None):
                     checkpoint = self.tool_checkpoint("local_audio_device", ("push_to_talk",),
                                                      epoch, selection=lambda: self.cfg["voices"].get(lang),
                                                      expected=speech.voice_id)
-                    await audio.speak(speech, progress, checkpoint=checkpoint)
+                    checked_model = await self.runtime_model_proofs.bind(
+                        speech.voice_id, self.saved_cfg["market_refs"], checkpoint=checkpoint)
+                    await audio.speak(speech, progress, checkpoint=checked_model)
             self.submit(run, label=tr("Voice preview", "Ses önizlemesi", "Stimmprobe"))
 
         def test_chat(self):
@@ -4376,9 +4379,12 @@ def create_window(app, loop, bridge=None):
                                                  selection=lambda: self.cfg["stt"], expected=model,
                                                  expected_generation=(context[0], context[4]))
                 checkpoint()
+                checked_model = await self.runtime_model_proofs.bind(
+                    model, self.saved_cfg["market_refs"], checkpoint=checkpoint)
                 self.set_state("transcribing")
                 raw = await audio.transcribe(model, path, runner=self.transcribe_runner,
-                                             checkpoint=checkpoint, expected_identity=identity)
+                                             checkpoint=checked_model, expected_identity=identity)
+                checked_model()
                 checkpoint()
                 self.bubble("Recording", raw)
                 self.turn_outcome = "transcribed"
@@ -5044,7 +5050,10 @@ def create_window(app, loop, bridge=None):
                     self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
                     check_voice_grant()
-                    text=await audio.listen(stt_choice,self.finish,progress, checkpoint=check_voice_grant)
+                    checked_model = await self.runtime_model_proofs.bind(
+                        stt_choice, self.saved_cfg["market_refs"], checkpoint=check_voice_grant)
+                    text=await audio.listen(stt_choice,self.finish,progress, checkpoint=checked_model)
+                    checked_model()
                 # Already captured samples cannot be undone. Refuse to display
                 # or dispatch the returned transcription after revocation.
                 self.note_leases()
@@ -5088,7 +5097,9 @@ def create_window(app, loop, bridge=None):
                     self.require_tools(("local_audio_device", ("push_to_talk",)))
                     self.note_leases()
                     check_voice_grant()
-                    playback = loop.create_task(audio.speak(speech, progress, checkpoint=check_voice_grant))
+                    checked_voice = await self.runtime_model_proofs.bind(
+                        speech.voice_id, self.saved_cfg["market_refs"], checkpoint=check_voice_grant)
+                    playback = loop.create_task(audio.speak(speech, progress, checkpoint=checked_voice))
                     self.playback = playback
                     try:
                         # Stop Speaking preserves the turn. Cancel Turn invalidates

@@ -324,6 +324,66 @@ def require_import_proof(proof, *, checkpoint=lambda: None):
     checkpoint()
 
 
+class RuntimeModelProofs:
+    """Per-window bounded cache of verified registered local weight identities.
+
+    The historical storage reference holds 128 bits of SHA-256, not a full
+    digest. Legacy paths with no reference retain their existing behavior;
+    this class does not claim they are content-verified.
+    """
+
+    def __init__(self):
+        self._proofs = {}
+
+    async def bind(self, path, refs, *, checkpoint):
+        checkpoint()
+        matching = tuple(ref for ref, value in refs.items() if value == path)
+        if not matching:
+            return checkpoint
+        if len(matching) != 1 or not re.fullmatch(r"sha256-[0-9a-f]{32}", matching[0]):
+            raise Hold("model_reference_unverified")
+        ref = matching[0]
+        identity = import_file_identity(path)
+        key = (path, ref)
+        proof = self._proofs.get(key)
+        if proof is None or proof.identity != identity:
+            stop = threading.Event()
+
+            def worker_check():
+                if stop.is_set():
+                    raise Hold("turn_cancelled")
+
+            def work():
+                _, verified = inspect_file(path, "stt", model_id="runtime-verification",
+                                           checkpoint=worker_check, expected_identity=identity)
+                if not hmac.compare_digest(ref, "sha256-" + verified.digest[:32]):
+                    raise Hold("model_digest_mismatch")
+                return verified
+
+            worker = asyncio.create_task(asyncio.to_thread(work))
+            try:
+                while True:
+                    checkpoint()
+                    done, _ = await asyncio.wait((worker,), timeout=.25)
+                    checkpoint()
+                    if done:
+                        proof = worker.result()
+                        break
+            finally:
+                stop.set()
+                await finish_owned(asyncio.gather(worker, return_exceptions=True))
+            require_import_proof(proof, checkpoint=checkpoint)
+            if len(self._proofs) >= 8:
+                self._proofs.pop(next(iter(self._proofs)))
+            self._proofs[key] = proof
+
+        def bound():
+            require_import_proof(proof, checkpoint=checkpoint)
+
+        bound()
+        return bound
+
+
 async def from_models(client, languages=(), now=0.0):
     """List what a local Jan endpoint actually reports. No model guessing."""
     try:
