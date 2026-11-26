@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -21,13 +22,19 @@ HTML=b"""<!doctype html><meta charset=utf-8><title>TIHULU Fixture</title>
 <button id="change" onclick="document.getElementById('message').textContent='Changed locally'">Change</button>
 """
 
-def child(browser,driver,host_net):
+def child(browser,driver,host_net,host_port):
     results=[]
     def record(case,ok,**details):
         results.append(bool(ok))
         print(json.dumps(dict(case=case,status="PASS" if ok else "FAIL",**details)),flush=True)
     record("browser-separate-network-namespace",os.readlink("/proc/self/ns/net")!=host_net)
     record("browser-private-home",os.environ.get("HOME")=="/tmp" and not Path("/work/not-approved").exists())
+    try:
+        with socket.create_connection(("127.0.0.1",int(host_port)),timeout=1):
+            host_denied=False
+    except OSError:
+        host_denied=True
+    record("browser-host-loopback-denied",host_denied)
     if not all(results):
         return 1
     version=subprocess.run([browser,"--version"],stdin=subprocess.DEVNULL,
@@ -102,9 +109,26 @@ def child(browser,driver,host_net):
                 return 1
             command("POST",element("change")+"/click",{})
             record("browser-fixed-local-click",command("GET",element("message")+"/text")=="Changed locally")
+            # Fixed disposable host-loopback listener only, not external URLs.
+            # A real browser navigation must not reach it across namespaces.
+            try:
+                command("POST",base+"/url",{"url":"http://127.0.0.1:"+host_port+"/fixture"})
+            except RuntimeError as exc:
+                denied=("NS_ERROR_CONNECTION_REFUSED" in str(exc)
+                        or "NS_ERROR_NET_TIMEOUT" in str(exc))
+            else:
+                denied=False
+            record("browser-real-host-navigation-denied",denied)
             command("DELETE",base)
             session=None
             record("browser-session-closed",True)
+            try:
+                command("GET",base+"/title")
+            except RuntimeError as exc:
+                closed="invalid session id" in str(exc).lower()
+            else:
+                closed=False
+            record("browser-closed-session-unusable",closed)
         except (RuntimeError,OSError,http.client.HTTPException) as exc:
             print(json.dumps({"case":"browser-webdriver-session","status":"HOLD",
                               "reason":str(exc)[:1000]}),flush=True)
@@ -123,7 +147,7 @@ def child(browser,driver,host_net):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=3)
-    return 0 if len(results)==7 and all(results) else 1
+    return 0 if len(results)==10 and all(results) else 1
 
 def main():
     tools=[]
@@ -192,12 +216,28 @@ def main():
                  "--setenv","LD_LIBRARY_PATH","/usr/lib/firefox:/usr/lib/x86_64-linux-gnu/pulseaudio",
                  "--chdir","/work","--remount-ro","/"]
         host_net=os.readlink("/proc/self/ns/net")
-        result=subprocess.run(prefix+["--","/usr/bin/python3","-I","/work/runner.py","--child",*tools,host_net],
-                              stdin=subprocess.DEVNULL,timeout=90,check=False,
-                              env={"PATH":"/usr/bin:/bin","LC_ALL":"C.UTF-8"})
+        with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as listener:
+            listener.bind(("127.0.0.1",0))
+            if listener.getsockname()[1]==4444:
+                raise RuntimeError("fixture port collision")
+            listener.listen(4)
+            port=str(listener.getsockname()[1])
+            result=subprocess.run(prefix+["--","/usr/bin/python3","-I","/work/runner.py","--child",*tools,host_net,port],
+                                  stdin=subprocess.DEVNULL,timeout=90,check=False,
+                                  env={"PATH":"/usr/bin:/bin","LC_ALL":"C.UTF-8"})
+            listener.setblocking(False)
+            try:
+                connection,_=listener.accept()
+            except BlockingIOError:
+                untouched=True
+            else:
+                connection.close()
+                untouched=False
+            print(json.dumps({"case":"browser-host-listener-untouched",
+                              "status":"PASS" if untouched else "FAIL"}),flush=True)
         unchanged=hashlib.sha256(page.read_bytes()).digest()==hashlib.sha256(HTML).digest()
         print(json.dumps({"case":"browser-source-unchanged","status":"PASS" if unchanged else "FAIL"}),flush=True)
-        return 0 if result.returncode==0 and unchanged else 1
+        return 0 if result.returncode==0 and unchanged and untouched else 1
 
 if __name__=="__main__":
-    raise SystemExit(child(*sys.argv[2:]) if len(sys.argv)==5 and sys.argv[1]=="--child" else main())
+    raise SystemExit(child(*sys.argv[2:]) if len(sys.argv)==6 and sys.argv[1]=="--child" else main())
