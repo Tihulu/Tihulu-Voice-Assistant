@@ -1,8 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 # Distributed without warranty; see LICENSE for the full terms.
 """Desktop-owned local model choices. Nothing is discovered, loaded or downloaded on startup."""
+import hashlib
 import json
 import os
+import re
+from dataclasses import replace
 import tempfile
 import stat
 from contextlib import contextmanager
@@ -144,7 +147,7 @@ def _read_text(p):
         os.close(fd)
 
 
-def _decode(text):
+def _unique_json(text):
     def pairs(items):
         result = {}
         for key, value in items:
@@ -152,7 +155,11 @@ def _decode(text):
                 raise ValueError("duplicate settings key")
             result[key] = value
         return result
-    return checked(json.loads(text, object_pairs_hook=pairs))
+    return json.loads(text, object_pairs_hook=pairs)
+
+
+def _decode(text):
+    return checked(_unique_json(text))
 
 
 def load(path=None):
@@ -193,6 +200,134 @@ def _write_guard(p):
         os.close(fd)
 
 
+def _choice_journal(p):
+    return p.with_name(p.name + ".jan-choice-journal")
+
+
+def choice_pending(path=None):
+    p = config_path() if path is None else Path(path)
+    try:
+        _choice_journal(p).lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise Hold("llm_choice_recovery_required") from None
+
+
+def _require_no_choice(p):
+    if choice_pending(p):
+        raise Hold("llm_choice_recovery_required")
+
+
+def _digest(text):
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _profile_digest(store, profile):
+    return _digest(store._dump(profile))
+
+
+def _jan_record(store, before, after, current, proposed):
+    """Only a model preference/version change, never a policy transition."""
+    if (before.state != "active"
+            or after != replace(before, version=before.version + 1,
+                                llm_model_id=proposed["llm"]).checked()
+            or not proposed["llm"] or current["profile"] != before.id
+            or proposed != {**current, "llm": proposed["llm"]}):
+        raise Hold("invalid_jan_choice_transition")
+    return {"version": 1, "profile": before.id,
+            "old_model": current["llm"], "new_model": proposed["llm"],
+            "old_settings": _digest(_serialize(current)),
+            "new_settings": _digest(_serialize(proposed)),
+            "old_profile": _profile_digest(store, before),
+            "new_profile": _profile_digest(store, after)}
+
+
+def _read_choice(p):
+    try:
+        path = _choice_journal(p)
+        info = path.lstat()
+        if (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1
+                or info.st_uid != os.geteuid() or info.st_mode & 0o077):
+            raise Hold("llm_choice_recovery_required")
+        raw = _read_text(path)
+        record = _unique_json(raw)
+        from .profiles import ID
+        if (not isinstance(record, dict)
+                or set(record) != {"version", "profile", "old_model", "new_model",
+                                   "old_settings", "new_settings", "old_profile", "new_profile"}
+                or type(record["version"]) is not int or record["version"] != 1
+                or not isinstance(record["profile"], str) or not ID.fullmatch(record["profile"])
+                or any(not isinstance(record[k], str) or len(record[k]) > 4096
+                       for k in ("old_model", "new_model"))
+                or not record["new_model"]
+                or any(not isinstance(record[k], str) or not re.fullmatch(r"[0-9a-f]{64}", record[k])
+                       for k in ("old_settings", "new_settings", "old_profile", "new_profile"))
+                or record["old_profile"] == record["new_profile"]):
+            raise Hold("llm_choice_recovery_required")
+        return record, raw
+    except (Hold, OSError, ValueError, TypeError, RecursionError):
+        raise Hold("llm_choice_recovery_required") from None
+
+
+def _clear_choice(p, raw):
+    journal = _choice_journal(p)
+    try:
+        if _read_text(journal) != raw:
+            raise Hold("llm_choice_recovery_required")
+        journal.unlink()
+        _sync_parent(journal)
+    except (Hold, OSError, ValueError):
+        raise Hold("llm_choice_recovery_required") from None
+
+
+def recover_jan_choice(store, path=None):
+    """Reconcile only an exact interrupted local preference transition.
+
+    Never replay policy or registry writes. A committed profile with rolled
+    back settings, or an unrelated generation, requires explicit review.
+    Locks follow the production order: profile, then settings.
+    """
+    p = config_path() if path is None else Path(path)
+    if not choice_pending(p):
+        return False
+    with store._mutation_lock(), _write_guard(p):
+        if not choice_pending(p):
+            return False
+        record, raw = _read_choice(p)
+        try:
+            current = load(p)
+            profile, stamp = store.snapshot(record["profile"])
+            old = {**current, "llm": record["old_model"]}
+            new = {**current, "llm": record["new_model"]}
+            if (current["profile"] != record["profile"]
+                    or _digest(_serialize(old)) != record["old_settings"]
+                    or _digest(_serialize(new)) != record["new_settings"]
+                    or current not in (old, new)):
+                raise Hold("llm_choice_recovery_required")
+            generation = _profile_digest(store, profile)
+            if generation == record["old_profile"]:
+                if current != old:
+                    if not store.is_current(profile.id, stamp) or _read_choice(p) != (record, raw):
+                        raise Hold("llm_choice_recovery_required")
+                    _replace_text(p, _serialize(old))
+            elif generation == record["new_profile"] and current == new:
+                # Repair only missing history of this exact active generation.
+                store._ensure_current_archive_locked(profile)
+            else:
+                raise Hold("llm_choice_recovery_required")
+            if not store.is_current(profile.id, stamp):
+                raise Hold("llm_choice_recovery_required")
+            expected = old if generation == record["old_profile"] else new
+            if load(p) != expected:
+                raise Hold("llm_choice_recovery_required")
+            _clear_choice(p, raw)
+            return True
+        except (Hold, OSError, ValueError, TypeError, RecursionError):
+            raise Hold("llm_choice_recovery_required") from None
+
+
 def forget(path=None):
     """Remove the stored choices, and say what was left alone.
 
@@ -204,6 +339,7 @@ def forget(path=None):
     if not p.parent.exists():
         return False
     with _write_guard(p):
+        _require_no_choice(p)
         try:
             p.unlink()
         except FileNotFoundError:
@@ -228,11 +364,12 @@ def save(obj, path=None):
     p = config_path() if path is None else Path(path)
     text = _serialize(obj)
     with _write_guard(p):
+        _require_no_choice(p)
         _replace_text(p, text)
 
 
 @contextmanager
-def choice_transaction(obj, path=None, *, expected=None):
+def choice_transaction(obj, path=None, *, expected=None, jan_transition=None):
     """Stage settings during a synchronous registry commit.
 
     Cooperating writers cannot interleave. Ordinary commit errors restore
@@ -242,6 +379,7 @@ def choice_transaction(obj, path=None, *, expected=None):
     p = config_path() if path is None else Path(path)
     text = _serialize(obj)
     with _write_guard(p):
+        _require_no_choice(p)
         try:
             previous = _read_text(p)
             current = _decode(previous)
@@ -251,9 +389,21 @@ def choice_transaction(obj, path=None, *, expected=None):
             raise Hold("settings_unreadable") from None
         if expected is not None and current != checked(expected):
             raise Hold("settings_changed")
+        record = journal_text = None
+        if jan_transition is not None:
+            store, before, after = jan_transition
+            if store.load(before.id) != before:
+                raise Hold("profile_changed")
+            record = _jan_record(store, before, after, current, checked(obj))
+            journal_text = json.dumps(record, sort_keys=True)
+            try:
+                _replace_text(_choice_journal(p), journal_text)
+            except OSError:
+                raise Hold("settings_unwritable") from None
         try:
             _replace_text(p, text)
         except OSError:
+            # The durable journal is retained if staging fails.
             raise Hold("settings_unwritable") from None
         try:
             yield
@@ -268,7 +418,19 @@ def choice_transaction(obj, path=None, *, expected=None):
                     _replace_text(p, previous)
             except (Hold, OSError, ValueError):
                 raise Hold("settings_recovery_required") from None
+            if record is not None:
+                # Keep evidence if the active profile may have committed.
+                try:
+                    unchanged = store.load(before.id) == before
+                except (Hold, OSError):
+                    unchanged = False
+                if unchanged:
+                    _clear_choice(p, journal_text)
             raise
+        if record is not None:
+            if store.load(after.id) != after or load(p) != checked(obj):
+                raise Hold("llm_choice_recovery_required")
+            _clear_choice(p, journal_text)
 
 
 def _sync_parent(p):
