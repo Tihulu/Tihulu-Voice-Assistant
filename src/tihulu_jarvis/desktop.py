@@ -5303,7 +5303,7 @@ def create_window(app, loop, bridge=None):
                 self.entry.set_text("")
                 if item is not None:
                     self.clear_attachment()
-                self.bubble("You",message.content)
+                user_label = self.bubble("You",message.content)
                 self.set_state("thinking")
                 answer=self.bubble("JARVIS","")
                 def grow(piece):
@@ -5315,11 +5315,25 @@ def create_window(app, loop, bridge=None):
                                                       attachment=item,model=self.cfg["llm"],
                                                       authorize=permitted)
                     self.session.check(epoch)
-                except (Hold, asyncio.CancelledError):
+                except (Hold, asyncio.CancelledError) as exc:
                     # Earlier authorized deltas cannot be unseen, but a
                     # rejected turn must not retain a partial assistant reply.
                     self.growing.pop(answer, None)
-                    if answer.get_parent() == self.log:
+                    if (isinstance(exc, Hold) and str(exc) == "jan_unavailable"
+                            and epoch == self.session.epoch and not self.closing):
+                        self.forget_inventory()
+                        # Plain text can be retried explicitly after discovery.
+                        # Never silently restore an attachment or resend its
+                        # contents under a different grant.
+                        if item is None and not self.entry.get_text():
+                            self.entry.set_text(text)
+                            for label in (user_label, answer):
+                                self.growing.pop(label, None)
+                                if label.get_parent() == self.log:
+                                    self.log.remove(label)
+                        elif answer.get_parent() == self.log:
+                            answer.set_text("JARVIS\n")
+                    elif answer.get_parent() == self.log:
                         # Preserve the existing empty cancelled-turn label.
                         answer.set_text("JARVIS\n")
                     raise
@@ -5404,8 +5418,14 @@ def create_window(app, loop, bridge=None):
                         return False
                 backend, route = self.conversation_backend(extra=audio_allowed)
                 check_voice_grant()
-                result,speech=await self.session.reply(text,backend,epoch,voices,route=route,
-                    authorize=lambda: voice_authorized(route))
+                try:
+                    result,speech=await self.session.reply(text,backend,epoch,voices,route=route,
+                        authorize=lambda: voice_authorized(route))
+                except Hold as exc:
+                    if (str(exc) == "jan_unavailable" and epoch == self.session.epoch
+                            and not self.closing):
+                        self.forget_inventory()
+                    raise
                 check_voice_grant()
                 if not self.conversation_authorized(route):
                     raise Hold("attachment_context_changed")

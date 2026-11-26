@@ -4508,6 +4508,42 @@ class StreamingReplyTests(DesktopTests):
             item = item.get_next_sibling()
         return out
 
+    def test_connection_loss_preserves_plain_draft_and_requires_rediscovery(self):
+        self.connect_model()
+        self.text("Merhaba!")
+        before = self.ui.session.history
+        previous = self.bubbles()
+
+        async def unavailable(messages, on_delta=None):
+            on_delta("Unfinished")
+            raise Hold("jan_unavailable")
+
+        with patch.object(self.backend, "chat", side_effect=unavailable):
+            self.ui.entry.set_text("naber nasilsin")
+            self.click(self.ui.send)
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "jan_unavailable")
+        self.assertEqual(self.ui.entry.get_text(), "naber nasilsin")
+        self.assertEqual(self.ui.session.history, before)
+        self.assertEqual(self.bubbles(), previous)
+        self.assertEqual(self.ui.inventory, ())
+        self.assertFalse(self.ui.send.get_sensitive())
+        self.assertEqual(settings.load()["llm"], "fixture-chat")
+        self.connect_model()
+        self.assertEqual(self.ui.entry.get_text(), "naber nasilsin")
+        self.assertEqual(self.ui.session.history, before)
+        self.click(self.ui.send)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(self.ui.session.history), len(before) + 2)
+
+    def test_timeout_does_not_claim_that_the_endpoint_disconnected(self):
+        self.connect_model()
+        with patch.object(self.backend, "chat", side_effect=Hold("jan_timeout")):
+            self.text("Merhaba!")
+        self.assertEqual(self.ui.status.get_text(), "jan_timeout")
+        self.assertEqual(self.ui.inventory, ("fixture-chat",))
+        self.assertEqual(self.ui.session.history, ())
+
     def test_a_reply_grows_with_the_pieces_as_they_arrive(self):
         self.connect_model()
         self.pieces[:] = ["Merha", "ba!", " Nasılsın?"]
