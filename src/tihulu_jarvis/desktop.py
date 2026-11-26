@@ -1941,6 +1941,10 @@ def create_window(app, loop, bridge=None):
             self.refresh()
 
         def build_market_page(self):
+            # The rollback worker owns the registry lock. Do not read it from
+            # GTK or clear its visible snapshot until the worker has drained.
+            if getattr(self, "rollback_worker_active", False):
+                return
             if getattr(self, "market_list", None) is not None:
                 self.market_row_ids = {}
                 child = self.market_list.get_first_child()
@@ -2317,12 +2321,14 @@ def create_window(app, loop, bridge=None):
             return getattr(self, "turn_note", "") or tr("a local turn", "yerel tur",
                                                         "eine lokale Runde")
 
-        def finish_task(self, board_id, t, message, *, invalidated=False):
+        def finish_task(self, board_id, t, message, *, invalidated=False, committed=False):
             """Publish a terminal state only after the owned task has drained."""
             try:
                 row = self.board.get(board_id)
                 state = "failed" if message else "done"
-                if t.cancelled() or invalidated:
+                if committed:
+                    state = "done"
+                elif t.cancelled() or invalidated:
                     state = "cancelled"
                     message = row.reason or message or "Stopped"
                 self.board.finish(board_id, state, message or "")
@@ -3120,6 +3126,9 @@ def create_window(app, loop, bridge=None):
             for w in (self.market_use, self.market_forget):
                 w.set_sensitive(not self.busy and chosen is not None)
             self.market_list.set_sensitive(not self.busy)
+            if self.busy:
+                for widget in (self.market_fetch, self.market_rollback, self.market_update):
+                    widget.set_sensitive(False)
             if not self.busy:
                 ready = False
                 if chosen is not None:
@@ -3550,22 +3559,70 @@ def create_window(app, loop, bridge=None):
         def rollback_selected_card(self):
             """Restore the previous revision of a registered item, as a new revision."""
             model_id = self.selected_card()
-            if model_id is None or self.busy:
+            if model_id is None or self.busy or self.closing:
                 return
             try:
                 revisions = self.market.history(model_id)
+                expected = self.selected_card_snapshot()
+                if expected is None or self.market.card(model_id) != expected:
+                    raise Hold("registry_card_changed")
                 if not revisions:
                     raise Hold("revision_not_found")
-                expected = self.selected_card_snapshot()
-                if expected is None:
-                    raise Hold("registry_card_changed")
-                self.market.rollback(model_id, revisions[-1].revision, expected=expected)
-                self.build_market_page()
-                self.set_state("ready", tr("Previous revision restored.",
-                                           "Önceki sürüm geri yüklendi.",
-                                           "Vorherige Revision wiederhergestellt."))
-            except Hold as exc:
+                candidate = revisions[-1]
+                profile, stamp = self.store.snapshot(self.cfg["profile"])
+                if profile.state != "active":
+                    raise Hold("profile_not_active")
+            except (Hold, OSError) as exc:
                 self.set_state("ready", str(exc))
+                return
+            # Worker checkpoints use immutable context and a thread-safe
+            # stop flag, never GTK widgets or callbacks.
+            stop = Event()
+            completion = []
+            restored_note = tr("Previous revision restored.",
+                               "Önceki sürüm geri yüklendi.",
+                               "Vorherige Revision wiederhergestellt.")
+            def checkpoint():
+                if stop.is_set():
+                    raise Hold("turn_cancelled")
+                if not self.store.is_current(profile.id, stamp):
+                    raise Hold("profile_changed")
+            def restore():
+                result = self.market.rollback(model_id, candidate.revision,
+                                              expected=expected, checkpoint=checkpoint)
+                return result
+            async def run(epoch):
+                self.session.check(epoch)
+                checkpoint()
+                self.rollback_worker_active = True
+                self.market_filter.set_sensitive(False)
+                self.refresh_market_buttons()
+                worker = asyncio.create_task(asyncio.to_thread(restore))
+                try:
+                    try:
+                        await asyncio.shield(worker)
+                    except asyncio.CancelledError:
+                        stop.set()
+                        await finish_owned(asyncio.gather(worker, return_exceptions=True))
+                        raise
+                finally:
+                    # The worker cannot outlive the owner's busy state.
+                    # A late stop after a committed generation is not a rollback.
+                    if worker.done() and not worker.cancelled() and worker.exception() is None:
+                        completion.append(restored_note)
+                    self.rollback_worker_active = False
+                    self.market_filter.set_sensitive(True)
+                    try:
+                        self.build_market_page()
+                    except (Hold, OSError):
+                        if completion:
+                            completion[0] = tr("Revision restored; registry refresh unavailable.",
+                                               "Sürüm geri yüklendi; kayıt yenilenemedi.",
+                                               "Revision wiederhergestellt; Registry-Aktualisierung nicht verfügbar.")
+            self.submit(run, kind="update",
+                        label=tr("Restore model revision", "Model sürümünü geri yükle",
+                                 "Modellrevision wiederherstellen"),
+                        committed=lambda: completion[0] if completion else "")
 
         def update_selected_card(self):
             """Re-fetch the approved source of an installed item, keeping history."""
@@ -4048,7 +4105,7 @@ def create_window(app, loop, bridge=None):
             except Hold:
                 return False
 
-        def submit(self, work, *, kind="turn", label=None):
+        def submit(self, work, *, kind="turn", label=None, committed=lambda: ""):
             if self.busy or self.closing:
                 return
             task_label = label if label is not None else self.turn_label()
@@ -4083,14 +4140,21 @@ def create_window(app, loop, bridge=None):
                     message="Local operation failed"
                 self.busy=False
                 self.finish=self.playback=None
-                self.finish_task(board_id, t, message, invalidated=epoch != self.session.epoch)
+                committed_note = committed()
+                self.finish_task(board_id, t, committed_note or message,
+                                 invalidated=epoch != self.session.epoch,
+                                 committed=bool(committed_note))
                 self.active_task = None
+                if hasattr(self, "market_list"):
+                    self.refresh_market_buttons()
                 self.refresh_activity()
                 # A turn that stated its own outcome keeps it: a generic
                 # "ready" must not overwrite "reply muted; shown as text".
                 if not message and self.turn_outcome:
                     message = self.turn_outcome
-                if epoch==self.session.epoch:
+                if committed_note:
+                    self.set_state("ready", committed_note)
+                elif epoch==self.session.epoch:
                     self.set_state("ready",message)
                 else:
                     self.set_state("ready","Stopped")

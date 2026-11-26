@@ -1908,12 +1908,76 @@ class RevisionHistoryUITests(MarketFixture):
         self.pick_card(card.model_id)
         self.assertTrue(self.ui.market_rollback.get_sensitive())
         self.click(self.ui.market_rollback)
-        self.until(lambda: self.ui.market.card(card.model_id).display_name == "Renamed once")
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.market.card(card.model_id).display_name, "Renamed once")
         self.assertEqual(self.ui.market.card(card.model_id).revision, 3)
         # The rollback itself is a revision, so the replaced entry is kept too.
         self.assertEqual(len(self.ui.market.history(card.model_id)), 3)
         self.assertEqual(self.ui.status.get_text(), "Previous revision restored.")
         self.assertIn("Renamed once", self.rows()[0])
+
+    def test_rollback_worker_keeps_gtk_responsive_and_drains_on_stop(self):
+        from threading import Event, get_ident
+        card = self.ui.register_choice("stt", str(self.weights("fixture-stt.bin")))
+        self.revise(card.model_id, "Newer")
+        self.ui.build_market_page()
+        self.pick_card(card.model_id)
+        entered, release, drained = Event(), Event(), Event()
+        ui_thread = get_ident()
+        original = self.ui.market.rollback
+        def delayed(*args, **kwargs):
+            try:
+                if get_ident() == ui_thread:
+                    raise AssertionError("rollback ran on GTK thread")
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("fixture deadline")
+                kwargs["checkpoint"]()
+                return original(*args, **kwargs)
+            finally:
+                drained.set()
+        with patch.object(self.ui.market, "rollback", side_effect=delayed):
+            try:
+                self.click(self.ui.market_rollback)
+                self.until(entered.is_set)
+                self.assertTrue(self.ui.busy)
+                self.assertFalse(self.ui.market_filter.get_sensitive())
+                self.ui.interrupt(False)
+                self.assertTrue(self.ui.busy)
+                release.set()
+                self.until(lambda: not self.ui.busy)
+            finally:
+                release.set()
+        self.assertTrue(drained.is_set())
+        self.assertEqual(self.ui.market.card(card.model_id).display_name, "Newer")
+        self.assertTrue(self.ui.market_filter.get_sensitive())
+        self.assertEqual(self.ui.status.get_text(), "Stopped")
+
+    def test_rollback_late_stop_reports_committed_revision(self):
+        from threading import Event
+        card = self.ui.register_choice("stt", str(self.weights("fixture-stt.bin")))
+        self.revise(card.model_id, "Newer")
+        self.ui.build_market_page()
+        self.pick_card(card.model_id)
+        entered, release = Event(), Event()
+        original = self.ui.market.rollback
+        def delayed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("fixture deadline")
+            return result
+        with patch.object(self.ui.market, "rollback", side_effect=delayed):
+            try:
+                self.click(self.ui.market_rollback)
+                self.until(entered.is_set)
+                self.ui.interrupt(False)
+                release.set()
+                self.until(lambda: not self.ui.busy)
+            finally:
+                release.set()
+        self.assertEqual(self.ui.market.card(card.model_id).display_name, card.display_name)
+        self.assertEqual(self.ui.status.get_text(), "Previous revision restored.")
 
     def test_rollback_without_history_stays_refused(self):
         self.ui.market.save_card(market.ModelCard(
