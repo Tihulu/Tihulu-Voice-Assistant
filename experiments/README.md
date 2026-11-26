@@ -130,3 +130,5 @@ CAP-04 #340 Firefox 160.0.1 version succeeded, 5/12 checks PASS, WebDriver sessi
 CAP-08: local synthetic socketpair transport checks the exact live invocation before send and before/after each bounded receive, cancels on socket allocation failure. Three regressions for setup failure and revoke at send/receive. Not atomic OS send/revoke serialization or actual Jan backend.
 
 CAP-04 offline browser fixture capability: separate private local-only open/read/fixed click scope with browser+read+host ceilings but no external network permission. Exact profile/tab/artifact/digest/element, distinct claimed grants and live chain, close revokes. Six regressions. No actual I/O, arbitrary file URLs or public browsing; real WebDriver binding remains separate.
+
+CAP-04 #341 startup correction succeeded, 11/12 cases PASS; host listener untouched and closed session denied, browser navigation error classifier failed. Successor records structured WebDriver error status/type/message and accepts only explicit network refusal/timeout or Gecko about:neterror exact target and closed code. No generic error or successful navigation accepted. Preserve #341 evidence.

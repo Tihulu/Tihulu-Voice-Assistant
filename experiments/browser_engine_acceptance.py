@@ -16,11 +16,34 @@ import subprocess
 import sys
 import tempfile
 import time
+from urllib.parse import urlsplit, parse_qs
 
 HTML=b"""<!doctype html><meta charset=utf-8><title>TIHULU Fixture</title>
 <p id="message">Public synthetic browser fixture</p>
 <button id="change" onclick="document.getElementById('message').textContent='Changed locally'">Change</button>
 """
+
+class WebDriverError(RuntimeError):
+    def __init__(self,status,error,message):
+        super().__init__(f"webdriver {status} {error}: {message[:1000]}")
+        self.status,self.error,self.message=status,error,message
+
+def denied_navigation(error,target):
+    if type(error) is not WebDriverError or error.status!=500:
+        return False
+    if error.error not in ("unknown error","timeout"):
+        return False
+    if any(code in error.message for code in ("NS_ERROR_CONNECTION_REFUSED","NS_ERROR_NET_TIMEOUT")):
+        return True
+    # Gecko reports the privileged about:neterror URL in an unknown error.
+    # Require a closed network error code and the exact attempted destination.
+    marker="about:neterror?"
+    if marker not in error.message:
+        return False
+    raw=marker+error.message.split(marker,1)[1].split()[0].rstrip('"')
+    parts=urlsplit(raw)
+    params=parse_qs(parts.query)
+    return params.get("e") in (["connectionFailure"],["netTimeout"]) and params.get("u")==[target]
 
 def child(browser,driver,host_net,host_port):
     results=[]
@@ -54,12 +77,18 @@ def child(browser,driver,host_net,host_port):
             conn.request(method,path,body=body,headers={"Content-Type":"application/json"})
             response=conn.getresponse()
             data=response.read(65537)
-            if response.status!=200 or len(data)>65536:
-                raise RuntimeError("webdriver status "+str(response.status)+": "+data[:500].decode("utf-8","replace"))
+            if len(data)>65536:
+                raise RuntimeError("webdriver response limit")
             result=json.loads(data)
             if type(result) is not dict or "value" not in result:
                 raise RuntimeError("invalid webdriver response")
-            return result["value"]
+            value=result["value"]
+            if response.status!=200:
+                if (type(value) is not dict or type(value.get("error")) is not str
+                        or type(value.get("message")) is not str):
+                    raise RuntimeError("invalid webdriver error")
+                raise WebDriverError(response.status,value["error"],value["message"])
+            return value
         finally:
             conn.close()
     with open("/tmp/geckodriver.log","wb") as log:
@@ -117,14 +146,17 @@ def child(browser,driver,host_net,host_port):
             # Fixed disposable host-loopback listener only, not external URLs.
             # A real browser navigation must not reach it across namespaces.
             phase="denied_navigation"
+            target="http://127.0.0.1:"+host_port+"/fixture"
             try:
-                command("POST",base+"/url",{"url":"http://127.0.0.1:"+host_port+"/fixture"},timeout=15)
-            except RuntimeError as exc:
-                denied=("NS_ERROR_CONNECTION_REFUSED" in str(exc)
-                        or "NS_ERROR_NET_TIMEOUT" in str(exc))
+                command("POST",base+"/url",{"url":target},timeout=15)
+            except WebDriverError as exc:
+                denied=denied_navigation(exc,target)
+                diagnostic={"error":exc.error,"message":exc.message[:1500],"http":exc.status}
             else:
                 denied=False
-            record("browser-real-host-navigation-denied",denied)
+                diagnostic={"returned_url":command("GET",base+"/url"),
+                            "title":command("GET",base+"/title")}
+            record("browser-real-host-navigation-denied",denied,**diagnostic)
             phase="session_close"
             command("DELETE",base)
             session=None
