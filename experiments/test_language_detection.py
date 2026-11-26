@@ -30,7 +30,7 @@ class DetectionTests(unittest.TestCase):
         self.job.complete(self.value)
         call=self.job.prepare_transcription("text")
         args=dict(call.args)
-        self.assertEqual(args,{"artifact":"audio","digest":"a"*64,"model_digest":"b"*64","language":"tr","output":"text"})
+        self.assertEqual(args,{"artifact":"audio","digest":"a"*64,"model_digest":"b"*64,"language":"tr","output":"text"})
         req=call.request(self.ctx)
         child=self.job.start_transcription("text",self.g.fixture_grant("child",req,60))
         child.complete(Transcript(req.target,"a"*64,"b"*64,"tr","text","Merhaba"))
