@@ -129,7 +129,16 @@ def main():
             path = root/(lang+".png")
             image.save(path)
             images[lang] = path
-        source_hashes = {p:hashlib.sha256(p.read_bytes()).hexdigest() for p in (pdf,*images.values())}
+        mixed = root/"mixed.pdf"
+        doc = canvas.Canvas(str(mixed),pagesize=(900,160),invariant=True)
+        doc.setFont("IsolatedFixtureFont",23)
+        doc.drawString(30,100,TEXT["deu"])
+        doc.showPage()
+        doc.drawImage(str(images["tur"]),0,0,width=900,height=160)
+        doc.showPage()
+        doc.showPage()
+        doc.save()
+        source_hashes = {p:hashlib.sha256(p.read_bytes()).hexdigest() for p in (pdf,mixed,*images.values())}
         office_source = root/"office.txt"
         office_text = "Synthetic fixture report. Istanbul, Berlin, London."
         office_source.write_text(office_text+"\n",encoding="utf-8")
@@ -155,6 +164,7 @@ def main():
         prefix += ["--proc","/proc","--dev","/dev","--tmpfs","/tmp",
                    "--dir","/work","--ro-bind",str(source),"/work/input.wav",
                    "--ro-bind",str(pdf),"/work/document.pdf",
+                   "--ro-bind",str(mixed),"/work/mixed.pdf",
                    "--ro-bind",str(office_source),"/work/office.txt",
                    "--ro-bind",str(font_config),"/work/fonts.conf",
                    "--bind",str(output),"/work/out","--chdir","/work",
@@ -329,7 +339,8 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
                 job.cancel()
                 return False, "", ""
             blocks = parse(proc.stdout)
-            job.complete(DocumentResult(req.target,dict(args)["digest"],page,blocks))
+            job.complete(DocumentResult(req.target,dict(args)["digest"],page,blocks,
+                                       dict(args).get("render_digest")))
             receipt = job.result()
             text = " ".join(b.text for b in receipt[3].blocks)
             return norm(text)==norm(expected),text,receipt[4]
@@ -356,6 +367,70 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
             record("sandbox-ocr-"+lang,passed,actual=text,result_sha256=receipt)
         record("sandbox-document-sources-unchanged",all(
                hashlib.sha256(p.read_bytes()).hexdigest()==h for p,h in source_hashes.items()))
+        if not all(row["status"]=="PASS" for row in results):
+            return 1
+        # Real isolated mixed PDF fallback. The render is generated from the
+        # fixed source/page; the OCR grant includes its actual digest.
+        def page_text(path,page):
+            proc = run(["/usr/bin/pdftotext","-f",str(page),"-l",str(page),
+                        "-enc","UTF-8",path,"-"])
+            if proc.returncode:
+                raise RuntimeError("isolated page extraction failed")
+            return norm(proc.stdout.decode("utf-8"))
+        def page_count(path):
+            proc = run(["/usr/bin/pdfinfo",path])
+            if proc.returncode:
+                return []
+            return [line.split(":",1)[1].strip() for line in proc.stdout.decode().splitlines()
+                    if line.startswith("Pages:")]
+        record("sandbox-mixed-pdf-text-and-empty-pages",
+               page_count("/work/mixed.pdf")==["3"] and
+               [page_text("/work/mixed.pdf",p) for p in (1,2,3)]==[norm(TEXT["deu"]),"",""])
+        rendered = output/"mixed-render.png"
+        raster = run(["/usr/bin/pdftoppm","-f","2","-l","2","-r","144","-png",
+                      "-singlefile","/work/mixed.pdf","/work/out/mixed-render"])
+        render_ok = (raster.returncode==0 and not rendered.is_symlink() and rendered.is_file()
+                     and 0<rendered.stat().st_size<=MAX_OUTPUT)
+        record("sandbox-mixed-pdf-render",render_ok,exit=raster.returncode)
+        if not render_ok:
+            return 1
+        rh = hashlib.sha256(rendered.read_bytes()).hexdigest()
+        with Image.open(rendered) as image:
+            dims=image.size
+        passed,text,receipt = checked_doc("tesseract",ocr_version,"pdf_page_ocr",
+              (("artifact","fixture-mixed-pdf"),("digest",source_hashes[mixed]),("page",2),
+               ("render_digest",rh),("language","tr")),2,
+              ["/usr/bin/tesseract","/work/out/mixed-render.png","stdout","-l","tur","--psm","6","tsv"],
+              lambda raw:ocr_blocks(raw.decode("utf-8"),*dims),TEXT["tur"])
+        record("sandbox-mixed-pdf-scan-receipt",passed and
+               hashlib.sha256(rendered.read_bytes()).hexdigest()==rh,actual=text,result_sha256=receipt)
+        # Fixed split and reorder operations, not arbitrary page selection or
+        # runtime export authorization. Never write the original input.
+        split = run(["/usr/bin/pdfseparate","-f","1","-l","3","/work/document.pdf",
+                     "/work/out/selected-%d.pdf"])
+        parts=[output/("selected-"+str(i)+".pdf") for i in (1,2,3)]
+        split_ok=(split.returncode==0 and
+                  sorted(p.name for p in output.glob("selected-*.pdf"))==[p.name for p in parts]
+                  and all(not p.is_symlink() and p.is_file() and 0<p.stat().st_size<=MAX_OUTPUT for p in parts))
+        record("sandbox-pdf-split",split_ok and all(
+               page_count("/work/out/"+p.name)==["1"] and
+               page_text("/work/out/"+p.name,1)==norm(text)
+               for p,text in zip(parts,TEXT.values())))
+        if not split_ok:
+            return 1
+        ph=[hashlib.sha256(p.read_bytes()).hexdigest() for p in parts]
+        merged=output/"reordered.pdf"
+        merge=run(["/usr/bin/pdfunite","/work/out/selected-3.pdf","/work/out/selected-1.pdf",
+                   "/work/out/selected-2.pdf","/work/out/reordered.pdf"])
+        merge_ok=(merge.returncode==0 and not merged.is_symlink() and merged.is_file()
+                  and 0<merged.stat().st_size<=MAX_OUTPUT)
+        expected=list(TEXT.values())
+        record("sandbox-pdf-reorder",merge_ok and page_count("/work/out/reordered.pdf")==["3"]
+               and all(page_text("/work/out/reordered.pdf",p)==norm(expected[i])
+                       for p,i in enumerate((2,0,1),1)))
+        record("sandbox-pdf-manipulation-sources-unchanged",
+               ph==[hashlib.sha256(p.read_bytes()).hexdigest() for p in parts] and
+               all(hashlib.sha256(p.read_bytes()).hexdigest()==h for p,h in source_hashes.items()))
         if not all(row["status"]=="PASS" for row in results):
             return 1
         office_version = run(["/usr/bin/libreoffice","--version"])
@@ -399,7 +474,7 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
         else:
             office_job.cancel()
             record("sandbox-office-typed-receipt",False)
-    return 0 if len(results)==26 and all(r["status"]=="PASS" for r in results) else 1
+    return 0 if len(results)==32 and all(r["status"]=="PASS" for r in results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main())

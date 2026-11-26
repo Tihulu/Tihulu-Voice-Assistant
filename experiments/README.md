@@ -94,3 +94,5 @@ CAP-08: strict normalized offline model response frame binds exact grant invocat
 CAP-06/08 private fixture publication phase evidence: recheck exact claimed publication and source immediately before link; explicit uncertain outcome after successful link but fsync/cleanup failure, never retry automatically or delete final name. Four injected real-filesystem phase tests. Not proof of atomic revoke/effect, malicious same-UID mutation, or power-loss recovery.
 
 CAP-06 actual isolated LibreOffice text-to-PDF with disposable profile and explicit fontconfig file, no host /etc or home mount. Validate output and extract exact text inside sandbox before typed receipt, source unchanged. Three additional cases (26 planned), no owner files or runtime activation.
+
+CAP-02 actual isolated mixed PDF text/blank/scan fallback and selected fixed split/reorder, original and split file digests unchanged. Six additional CI cases (32 planned with Office). OCR receipt binds exact original PDF/page/render digest; fixed PDF split/merge still lacks runtime export grant. No owner files or activation.
