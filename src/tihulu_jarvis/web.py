@@ -27,21 +27,26 @@ class Target:
     submit: bool = False
 
     def checked(self):
-        if not isinstance(self.host, str) or not self.host:
+        if type(self.host) is not str or not self.host or type(self.path) is not str:
             raise Hold("invalid_local_settings")
-        if len(self.host) > 253 or len(self.path) > 200:
+        if len(self.host) > 253 or len(self.path) > 200 or self.host != self.host.lower():
             raise Hold("invalid_local_settings")
         try:
             ip = ipaddress.ip_address(self.host)
         except ValueError:
-            if not re.fullmatch(r"[A-Za-z0-9.-]{1,253}", self.host) or ".." in self.host:
+            labels = self.host.split(".")
+            if (any(not re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+                    for label in labels)
+                    or not any(c.isalpha() for c in labels[-1])):
                 raise Hold("invalid_local_settings") from None
             if "." not in self.host or self._is_local_name():
                 # A local name or a bare label is a local service, not the web.
                 raise Hold("target_not_public")
         else:
             # A private address is a local service, not a web target.
-            if ip.is_loopback or ip.is_private or ip.is_link_local or ip.is_reserved:
+            # This stored target format supports only DNS names and canonical
+            # global IPv4 literals; IPv6 needs its own bracket-aware schema.
+            if ip.version != 4 or not ip.is_global or ip.is_multicast or ip.is_reserved:
                 raise Hold("target_not_public")
         if not isinstance(self.submit, bool):
             raise Hold("invalid_local_settings")
@@ -62,17 +67,28 @@ class Target:
 
 def parse(raw):
     """A registered target from its own string form."""
-    if not isinstance(raw, str) or not raw.startswith(SCHEME + "://"):
+    if (type(raw) is not str or not raw.startswith(SCHEME + "://")
+            or len(raw) > 400 or not raw.isascii()
+            or any(ord(c) <= 32 or ord(c) == 127 for c in raw)):
         raise Hold("invalid_local_settings")
-    parts = urlsplit(raw)
-    host = parts.hostname or ""
+    try:
+        parts = urlsplit(raw)
+        host = parts.hostname or ""
+    except ValueError:
+        raise Hold("invalid_local_settings") from None
+    # No silent port removal, bracket rewriting or authority normalization
+    # other than case-folding the DNS name. Explicit ports are unsupported.
+    if parts.netloc.lower() != host:
+        raise Hold("invalid_local_settings")
     if not host or not parts.path or parts.username or parts.password \
             or parts.query or parts.fragment:
         # A target states its path explicitly; a bare domain is not a target.
         raise Hold("invalid_local_settings")
     if any(c in raw for c in "?#@\"'\\ ") or not raw.isascii():
         raise Hold("invalid_local_settings")
-    return Target(host, parts.path or "/", parts.path.endswith("/submit")).checked()
+    # A pathname never carries consent. Only the trusted UI's explicit
+    # submit checkbox or a validated stored boolean can grant this right.
+    return Target(host, parts.path or "/", False).checked()
 
 
 def entry(target):
@@ -86,10 +102,11 @@ def entry(target):
 
 
 def from_entry(item):
-    if not isinstance(item, dict) or not isinstance(item.get("url"), str):
+    if (type(item) is not dict or set(item) - {"url", "submit"}
+            or type(item.get("url")) is not str or type(item.get("submit", False)) is not bool):
         raise Hold("invalid_local_settings")
     target = parse(item["url"])
-    return Target(target.host, target.path, bool(item.get("submit", False)))
+    return Target(target.host, target.path, item.get("submit", False)).checked()
 
 
 def entries(items):
