@@ -21,7 +21,7 @@ from .chat_files import ChatFiles
 from .selected_csv import selection_identity
 from . import analysis_intent, local_actions
 from . import locks, search, states
-from . import market, profiles, settings
+from . import audio_choice, market, profiles, settings
 from .voice import audio
 from .voice.jan import Jan
 from .voice.m1 import Hold, SpeechRequest
@@ -197,9 +197,19 @@ def create_window(app, loop, bridge=None):
             read_error = ""
             try:
                 if settings.choice_pending():
+                    if settings.audio_choice_pending():
+                        raise Hold("llm_choice_recovery_required")
                     settings.recover_jan_choice(profiles.Store(profiles.profile_dir()))
             except (Hold, OSError):
                 read_error = "llm_choice_recovery_required"
+            try:
+                if settings.audio_choice_pending():
+                    registry = market.Registry(market.market_dir())
+                    if settings.choice_pending() or registry.recovery_pending():
+                        raise Hold(audio_choice.REASON)
+                    audio_choice.recover(registry)
+            except (Hold, OSError):
+                read_error = (read_error + " " if read_error else "") + audio_choice.REASON
             try:
                 self.cfg = settings.load()
             except Hold as e:
@@ -843,6 +853,16 @@ def create_window(app, loop, bridge=None):
                 return settings.choice_pending()
             except Hold:
                 return True
+
+        def audio_choice_blocked(self):
+            try:
+                return settings.audio_choice_pending()
+            except Hold:
+                return True
+
+        def require_audio_choice(self):
+            if self.audio_choice_blocked():
+                raise Hold(audio_choice.REASON)
 
         def attachment_route(self):
             if self.jan_choice_blocked():
@@ -1508,8 +1528,13 @@ def create_window(app, loop, bridge=None):
                                    if path and Path(path).is_file())
             missing_tools = tuple(name for name in readiness.AUDIO_TOOLS
                                   if not audio.tools_ready(name))
-            voice_ready = allowed and stt_present and bool(voices_present) and not missing_tools
-            if not allowed:
+            audio_blocked = self.audio_choice_blocked()
+            voice_ready = allowed and stt_present and bool(voices_present) and not missing_tools and not audio_blocked
+            if audio_blocked:
+                voice_note = tr("Audio model choice recovery required. Voice operations blocked.",
+                                "Ses modeli seçimi kurtarması gerekli. Ses işlemleri engellendi.",
+                                "Audiomodellauswahl muss wiederhergestellt werden. Sprachfunktionen gesperrt.")
+            elif not allowed:
                 voice_note = tr("Audio permission is not granted.", "Ses izni verilmemiş.",
                                 "Audiofreigabe fehlt.")
             elif missing_tools:
@@ -1561,9 +1586,9 @@ def create_window(app, loop, bridge=None):
                       self.transcribe_button,*self.previews):
                 w.set_sensitive(not self.busy)
             transcribe_ready = stt_present and audio.tools_ready("whisper-cli")
-            self.transcribe_button.set_sensitive(not self.busy and transcribe_ready)
+            self.transcribe_button.set_sensitive(not self.busy and transcribe_ready and not audio_blocked)
             if hasattr(self, "chat_transcribe"):
-                self.chat_transcribe.set_sensitive(not self.busy and transcribe_ready)
+                self.chat_transcribe.set_sensitive(not self.busy and transcribe_ready and not audio_blocked)
                 if not stt_present:
                     note = tr("Select a local Whisper model in Installed models.",
                               "Kurulu modellerden yerel Whisper modeli seç.",
@@ -1965,14 +1990,9 @@ def create_window(app, loop, bridge=None):
                 proposed["stt"] = path
             else:
                 proposed["voices"][lang] = path
-            # Lock order: model, registry, settings. No await or network here.
-            # On ordinary write failure restore old settings, and publish no
-            # in-memory choice until both writes have completed.
-            with self.market.transfer_lease(model_id), self.market._write_guard():
-                if self.market.card(model_id) != expected:
-                    raise Hold("registry_card_changed")
-                with settings.choice_transaction(proposed, expected=self.cfg):
-                    card = self.market.save_card(card, expected=expected)
+            # Bind both durable generations before changing either store.
+            audio_choice.commit(self.market, expected, card, self.cfg, proposed,
+                                "stt" if card.category == "stt" else lang)
             self.cfg = proposed
             self.update_labels()
             self.refresh()
@@ -2909,7 +2929,7 @@ def create_window(app, loop, bridge=None):
             available = pending and not self.busy and not self.closing
             self.settings_choice_inspect.set_sensitive(available)
             self.settings_choice_confirm.set_sensitive(available and self.settings_choice_review is not None)
-            self.settings_forget.set_sensitive(not self.busy and not pending)
+            self.settings_forget.set_sensitive(not self.busy and not pending and not self.audio_choice_blocked())
             if not pending:
                 self.settings_choice_review = None
 
@@ -4123,6 +4143,9 @@ def create_window(app, loop, bridge=None):
         def preview(self, lang):
             if self.busy or lang not in ("tr", "en", "de"):
                 return
+            if self.audio_choice_blocked():
+                self.set_state("ready", audio_choice.REASON)
+                return
             if not audio.tools_ready("piper", "aplay"):
                 self.set_state("ready", "audio_backend_missing")
                 return
@@ -4185,6 +4208,7 @@ def create_window(app, loop, bridge=None):
             if self.busy or self.closing:
                 return
             try:
+                self.require_audio_choice()
                 audio.selected_file(self.cfg["stt"], ".bin")
                 if not audio.tools_ready("whisper-cli"):
                     raise Hold("transcription_backend_missing")
@@ -4212,6 +4236,7 @@ def create_window(app, loop, bridge=None):
             if self.busy or self.closing:
                 return
             try:
+                self.require_audio_choice()
                 self.require_tools(("filesystem_read", ("recording",)), selected=True)
                 model = self.cfg["stt"]
                 context = self.picker_context()
@@ -4253,6 +4278,8 @@ def create_window(app, loop, bridge=None):
                 raise Hold("profile_changed")
             def identity():
                 self.session.check(epoch)
+                if action == "local_audio_device" or (action == "filesystem_read" and scope == ("recording",)):
+                    self.require_audio_choice()
                 if (self.closing or self.cfg.get("profile") != active
                         or selection() != expected or not self.store.is_current(active, stamp)):
                     raise Hold("profile_changed")
@@ -4848,6 +4875,9 @@ def create_window(app, loop, bridge=None):
             self.submit(run)
 
         def voice(self):
+            if self.audio_choice_blocked():
+                self.set_state("ready", audio_choice.REASON)
+                return
             if self.attachment_invalidated or self.attachment is not None:
                 self.set_state("ready", tr("Remove the text attachment before starting voice chat.",
                     "Sesli sohbete başlamadan önce metin ekini kaldır.",
@@ -4869,6 +4899,7 @@ def create_window(app, loop, bridge=None):
 
                 def check_voice_grant():
                     self.session.check(epoch)
+                    self.require_audio_choice()
                     if (not self.route_current(capture_route)
                             or self.cfg["stt"] != stt_choice or self.cfg["voices"] != voice_choices):
                         raise Hold("profile_changed")
