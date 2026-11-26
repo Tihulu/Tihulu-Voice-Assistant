@@ -399,6 +399,16 @@ def has_signal(path, *, checkpoint=lambda: None):
         with wave.open(str(path),"rb") as w:
             if (w.getnchannels(),w.getsampwidth(),w.getframerate()) != (1,2,16000):
                 return False
+            frames = w.getnframes()
+            if not 0 < frames <= MAX_RECORDING // 2:
+                return False
+            # A voiced prefix does not prove the advertised recording exists.
+            # Check its last complete frame before any early signal return.
+            w.setpos(frames - 1)
+            if len(w.readframes(1)) != 2:
+                return False
+            w.rewind()
+            checkpoint()
             # Require at least 100 ms of non-silent frames; this is not a VAD
             # quality guarantee. A selected recording can be much longer
             # than the 30-second microphone capture. Scan up to the existing

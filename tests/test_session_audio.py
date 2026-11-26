@@ -144,6 +144,19 @@ class TranscribeFileTests(unittest.IsolatedAsyncioTestCase):
                                         checkpoint=lambda: None)
         self.assertEqual(result, "Merhaba!")
 
+    async def test_truncated_voiced_recording_never_reaches_inference(self):
+        clip = self.recording(struct.pack("<hh", 1250, -1250) * 16000)
+        clip.write_bytes(clip.read_bytes()[:-1000])
+        calls = []
+
+        async def runner(*args):
+            calls.append(args)
+
+        self.assertFalse(audio.has_signal(clip))
+        with self.assertRaisesRegex(Hold, "no_speech_signal"):
+            await audio.transcribe(self.model, str(clip), runner, checkpoint=lambda: None)
+        self.assertEqual(calls, [])
+
     async def test_long_silent_recording_still_refused(self):
         clip = self.recording(bytes(32 * 16000 * 2))
         calls = []
