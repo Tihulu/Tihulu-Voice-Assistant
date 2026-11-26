@@ -25,7 +25,7 @@ from . import locks, search, states
 from . import audio_choice, market, profiles, settings
 from .voice import audio
 from .voice.jan import Jan
-from .voice.m1 import Hold, SpeechRequest
+from .voice.m1 import require_conversation_transcript, Hold, SpeechRequest
 from .voice.session import Session
 
 
@@ -5481,6 +5481,19 @@ def create_window(app, loop, bridge=None):
                 self.note_leases()
                 check_voice_grant()
                 self.bubble("You",text)
+                try:
+                    require_conversation_transcript(text)
+                except Hold as exc:
+                    if str(exc) != "unsupported_transcript_script":
+                        raise
+                    # Show the recognized text, but do not dispatch it to Jan
+                    # or any automatic tool. The owner can review/edit it.
+                    if not self.entry.get_text():
+                        self.entry.set_text(text)
+                    raise Hold(tr(
+                        "Unexpected speech script. Review the text or select the input language and retry.",
+                        "Beklenmeyen konuşma alfabesi. Metni incele veya giriş dilini seçip yeniden dene.",
+                        "Unerwartete Schriftsprache. Text prüfen oder Eingabesprache wählen und erneut versuchen.")) from None
                 if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
                     if self.analysis.dialog is not None:
                         raise Hold("analysis_picker_busy")

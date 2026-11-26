@@ -6232,6 +6232,19 @@ class MuteTests(DesktopTests):
         self.until(lambda: not self.ui.busy)
         self.assertIn("audio output muted", self.ui.state_row.get_text())
 
+    def test_unexpected_script_voice_result_requires_review_without_jan(self):
+        self.connect_model()
+        self.backend.transcript = "แม่หามา บูเกินหาซิลซื้น"
+        before = len(self.backend.requests)
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(self.backend.requests), before)
+        self.assertEqual(self.ui.session.history, ())
+        self.assertEqual(self.ui.entry.get_text(), self.backend.transcript)
+        self.assertIn("Unexpected speech script", self.ui.status.get_text())
+        self.assertEqual(self.backend.speeches, [])
+
     def test_explicit_input_language_is_dispatched_to_microphone_transcription(self):
         self.connect_model()
         self.assertEqual(self.ui.stt_language.get_active_id(), "auto")
