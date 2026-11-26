@@ -25,6 +25,10 @@ CAPABILITIES = MappingProxyType({
                                          ("artifact", "digest", "page", "result_digest", "language")),
     ("poppler", "pdf_render"): ("document_engine", "private", ("artifact", "digest", "page")),
     ("pdf_engine", "pdf_export"): ("document_export", "private", ("artifact", "digest", "output")),
+    ("poppler", "pdf_split"): ("application_engine", "private",
+                               ("artifact","digest","page_order","output")),
+    ("poppler", "pdf_merge"): ("application_engine", "private",
+                               ("artifact","digest","page_order","part_digests","output")),
     ("search_provider", "web_search"): ("research", "public", ("query_digest",)),
     ("firefox", "browser_read"): ("browser_read", "public", ("origin", "tab")),
     ("brave", "browser_read"): ("browser_read", "public", ("origin", "tab")),
@@ -80,6 +84,15 @@ def checked_value(key, value):
     elif key == "language":
         if type(value) is not str or value not in ("tr", "en", "de", "tr-en-de"):
             raise Refused("invalid_language")
+    elif key == "page_order":
+        if (type(value) is not tuple or not 1 <= len(value) <= 16
+                or any(type(p) is not int or not 1 <= p <= 500 for p in value)
+                or len(set(value)) != len(value)):
+            raise Refused("invalid_page_order")
+    elif key == "part_digests":
+        if (type(value) is not tuple or not 1 <= len(value) <= 16
+                or any(type(d) is not str or not _DIGEST.fullmatch(d) for d in value)):
+            raise Refused("invalid_part_digests")
     elif key == "page":
         if type(value) is not int or not 1 <= value <= 500:
             raise Refused("invalid_page")
@@ -123,6 +136,10 @@ class CapabilityCall:
             checked_value(key, pair[1])
         if "output" in spec[2] and dict(self.args)["output"] == dict(self.args)["artifact"]:
             raise Refused("source_overwrite_denied")
+        if self.operation=="pdf_merge":
+            args=dict(self.args)
+            if len(args["page_order"])!=len(args["part_digests"]):
+                raise Refused("pdf_merge_part_count")
         return self
 
     def request(self, context, *, actor="local"):
