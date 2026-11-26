@@ -30,11 +30,6 @@ def child(browser,driver,host_net):
     record("browser-private-home",os.environ.get("HOME")=="/tmp" and not Path("/work/not-approved").exists())
     if not all(results):
         return 1
-    # The stock Ubuntu Firefox launcher is a shell script that needs which.
-    # CI provides the package binary via /usr, not a host alternatives tree.
-    if shutil.which("which") is None:
-        print(json.dumps({"case":"browser-launcher-dependency","status":"HOLD"}),flush=True)
-        return 1
     version=subprocess.run([browser,"--version"],stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=8,check=False)
     print(json.dumps({"firefox_version_exit":version.returncode,
@@ -138,6 +133,22 @@ def main():
             print(json.dumps({"case":"browser-tool-availability","status":"HOLD","missing":name}))
             return 1
         path=Path(found).resolve()
+        if name=="firefox":
+            # Hosted Ubuntu 22.04 package wrapper calls which through the
+            # host alternatives tree. Use only the fixed actual package ELF
+            # in the already read-only /usr, never mount /etc/alternatives.
+            candidate=Path("/usr/lib/firefox/firefox")
+            if (path!=Path("/usr/lib/firefox/firefox.sh") and path!=candidate
+                    or not candidate.is_file() or candidate.resolve()!=candidate
+                    or candidate.stat().st_uid!=0):
+                print(json.dumps({"case":"browser-package-binary","status":"HOLD",
+                                  "resolved":str(path)}))
+                return 1
+            with candidate.open("rb") as handle:
+                if handle.read(4)!=b"\x7fELF":
+                    print(json.dumps({"case":"browser-package-binary","status":"HOLD"}))
+                    return 1
+            path=candidate
         if not str(path).startswith("/usr/") or not path.is_file():
             print(json.dumps({"case":"browser-tool-availability","status":"HOLD","tool":name}))
             return 1
