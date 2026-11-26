@@ -76,3 +76,31 @@ class ManagedWaveTests(unittest.TestCase):
             self.run.start("plan",self.grants["a"],self.ctx,self.models)
         self.assertEqual(self.ledger.snapshot(),(4096,1024,3072))
         self.ledger.release(other)
+
+    def test_revoked_live_checkpoint_drains_without_releasing(self):
+        h=self.start("plan")
+        self.run.checkpoint(h,self.ctx,self.models)
+        self.g.revoke("owned-plan")
+        with self.assertRaises(Refused):
+            self.run.checkpoint(h,self.ctx,self.models)
+        self.assertEqual(self.run.pending(),(h,))
+        self.assertEqual(self.ledger.snapshot(),(4096,2048,2048))
+        self.assertEqual(self.exit(h),"DRAINED")
+
+    def test_foreign_live_checkpoint_cannot_stop_current_worker(self):
+        h=self.start("plan")
+        with self.assertRaises(Refused):
+            self.run.checkpoint(replace(h),replace(self.ctx,generation=2),self.models)
+        self.run.checkpoint(h,self.ctx,self.models)
+        self.exit(h)
+
+    def test_live_expiry_drains_without_releasing_until_exit(self):
+        from unittest.mock import patch
+        with patch("tihulu_jarvis.profiles.time.time",return_value=1000),patch("tihulu_jarvis.profiles.time.monotonic",return_value=200):
+            self.setUp()
+            h=self.start("plan")
+        with patch("tihulu_jarvis.profiles.time.time",return_value=1060),patch("tihulu_jarvis.profiles.time.monotonic",return_value=260):
+            with self.assertRaises(Refused):
+                self.run.checkpoint(h,self.ctx,self.models)
+            self.assertEqual(self.ledger.snapshot(),(4096,2048,2048))
+            self.assertEqual(self.exit(h),"DRAINED")
