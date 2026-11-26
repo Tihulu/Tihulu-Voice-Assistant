@@ -58,3 +58,38 @@ class AgentAttemptTests(unittest.TestCase):
         for attempt in ("",[],True,"bad space"):
             with self.assertRaises(Refused):
                 self.new(attempt)
+
+    def test_duplicate_attempt_id_never_reused_even_after_cancel(self):
+        with self.assertRaises(Refused):
+            self.new("first")
+        self.a.cancel()
+        with self.assertRaises(Refused):
+            self.new("first")
+
+    def test_late_event_with_stale_context_cannot_cancel_new_attempt(self):
+        from dataclasses import replace
+        self.b.start("plan",self.gb,self.ctx,self.models)
+        stale=replace(self.ctx,generation=2)
+        for action in (lambda:self.b.complete("plan",stale,self.models,payload=b"old",completion_grant=self.ga),
+                       lambda:self.b.fail("plan",stale,self.models,completion_grant=self.ga)):
+            with self.assertRaises(Refused):
+                action()
+        self.assertEqual(self.ledger.snapshot(),(4096,2048,2048))
+        self.b.complete("plan",self.ctx,self.models,payload=b"new",completion_grant=self.gb)
+
+    def test_owned_event_with_stale_context_still_cancels(self):
+        from dataclasses import replace
+        self.b.start("plan",self.gb,self.ctx,self.models)
+        with self.assertRaises(Refused):
+            self.b.complete("plan",replace(self.ctx,generation=2),self.models,
+                            payload=b"stale",completion_grant=self.gb)
+        self.assertEqual(self.ledger.snapshot(),(4096,0,4096))
+
+    def test_gateway_attempt_registry_is_bounded_and_closed(self):
+        for i in range(62):
+            self.g.register_agent_attempt("extra-"+str(i))
+        with self.assertRaises(Refused):
+            self.g.register_agent_attempt("overflow")
+        self.g.close()
+        with self.assertRaises(Refused):
+            self.g.register_agent_attempt("after-close")
