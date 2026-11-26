@@ -543,6 +543,43 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
                         "--ro-bind",str(identity_dir/"nsswitch.conf"),"/etc/nsswitch.conf",
                         "--setenv","USER","fixture","--setenv","LOGNAME","fixture",
                         "--setenv","SAL_USE_VCLPLUGIN","svp"]
+        # Mount/environment changes require another preflight before Office.
+        # Confirm the generated config and identity are visible but not
+        # writable, host-only marker is absent and namespaces/caps persist.
+        office_probe = run(["/usr/bin/python3","-I","-c", """import json,os,sys
+from pathlib import Path
+data={}
+data["config_present"]=Path("/etc/libreoffice/registry/main.xcd").is_file()
+data["identity_generated"]=Path("/etc/passwd").read_text().startswith("fixture:x:")
+data["host_hidden"]=not Path(sys.argv[1]).exists() and not Path("/etc/shadow").exists()
+data["readonly"]=True
+for path in ("/etc/libreoffice/registry/main.xcd","/etc/passwd","/work/office.txt"):
+    try:
+        with open(path,"ab"):
+            data["readonly"]=False
+    except OSError:
+        pass
+status=dict(line.split(":",1) for line in open("/proc/self/status") if ":" in line)
+data["caps"]=all(int(status[k].strip(),16)==0 for k in ("CapEff","CapPrm","CapAmb"))
+data["netns"]=os.readlink("/proc/self/ns/net")
+data["pidns"]=os.readlink("/proc/self/ns/pid")
+data["ipcns"]=os.readlink("/proc/self/ns/ipc")
+print(json.dumps(data))
+""",str(marker)])
+        if office_probe.returncode:
+            print(json.dumps({"case":"sandbox-office-preflight","status":"HOLD",
+                              "stderr":office_probe.stderr.decode("utf-8","replace")[:1000]}),flush=True)
+            return 1
+        office_scope=json.loads(office_probe.stdout)
+        record("sandbox-office-specific-config-scope",office_scope["config_present"]
+               and office_scope["identity_generated"] and office_scope["host_hidden"])
+        record("sandbox-office-specific-readonly",office_scope["readonly"]
+               and hashlib.sha256(office_source.read_bytes()).hexdigest()==office_hash)
+        record("sandbox-office-specific-isolation",office_scope["caps"]
+               and office_scope["netns"]!=host_ns and office_scope["pidns"]!=host_pid
+               and office_scope["ipcns"]!=host_ipc)
+        if not all(row["status"]=="PASS" for row in results):
+            return 1
         office_version = run(["/usr/bin/libreoffice","-env:UserInstallation=file:///tmp/office-profile",
                               "--headless","--version"])
         if office_version.returncode:
@@ -585,7 +622,7 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
         else:
             office_job.cancel()
             record("sandbox-office-typed-receipt",False)
-    return 0 if len(results)==33 and all(r["status"]=="PASS" for r in results) else 1
+    return 0 if len(results)==36 and all(r["status"]=="PASS" for r in results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main())
