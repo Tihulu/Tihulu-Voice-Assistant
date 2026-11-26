@@ -1982,6 +1982,39 @@ class RevisionHistoryUITests(MarketFixture):
         self.assertTrue(self.ui.market_filter.get_sensitive())
         self.assertEqual(self.ui.status.get_text(), "Stopped")
 
+    def test_rollback_hard_stop_signals_before_asyncio_dispatch(self):
+        from threading import Event
+        card = self.ui.register_choice("stt", str(self.weights("fixture-stt.bin")))
+        self.revise(card.model_id, "Newer")
+        self.ui.build_market_page()
+        self.pick_card(card.model_id)
+        entered, release, refused = Event(), Event(), Event()
+        original = self.ui.market.rollback
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("fixture deadline")
+            try:
+                kwargs["checkpoint"]()
+            except Hold:
+                refused.set()
+                raise
+            return original(*args, **kwargs)
+        with patch.object(self.ui.market, "rollback", side_effect=delayed):
+            try:
+                self.click(self.ui.market_rollback)
+                self.until(entered.is_set)
+                self.ui.hard_stop()
+                release.set()
+                # No GLib/asyncio dispatch before observing the worker refusal.
+                self.assertTrue(refused.wait(3))
+                self.assertTrue(self.ui.busy)
+                self.until(lambda: not self.ui.busy)
+            finally:
+                release.set()
+        self.assertEqual(self.ui.market.card(card.model_id).display_name, "Newer")
+        self.assertEqual(self.ui.status.get_text(), "Stopped")
+
     def test_rollback_late_stop_reports_committed_revision(self):
         from threading import Event
         card = self.ui.register_choice("stt", str(self.weights("fixture-stt.bin")))
