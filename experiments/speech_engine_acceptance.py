@@ -72,7 +72,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original",pip
             raise RuntimeError("invalid pinned STT model")
         print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
     mixed_preview,mixed_auto,mixed_extra=speech_corpus_profile(corpus,stt_profile,bool(stt_paths))
-    if (corpus=="mixed-auto-piper")!=(piper_root is not None):
+    if (corpus in ("mixed-auto-piper","mixed-auto-piper-short"))!=(piper_root is not None):
         raise RuntimeError("invalid neural mixed input profile")
     if piper_root is not None:
         from whisper_engine_acceptance import WRAPPER as STT_WRAPPER_FOR_PIPER
@@ -568,7 +568,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     transcripts.append(trans)
                     trans.checkpoint()
                     decode=common+["-l",dict(call.args)["language"],"-otxt","-of","/work/out/transcript"]
-                    if stt_profile=="turbo-q5" or corpus=="mixed-auto-reviewed-short":
+                    if stt_profile=="turbo-q5" or corpus in ("mixed-auto-reviewed-short","mixed-auto-piper-short"):
                         from speech_result import pcm_info
                         decode+=turbo_short_args(*pcm_info(piece.data))
                     started=time.monotonic()
