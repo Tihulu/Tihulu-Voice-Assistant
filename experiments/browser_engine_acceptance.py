@@ -166,10 +166,20 @@ def child(browser,driver,host_net,host_port):
             rules=tuple(profiles.Rule(x,(),"allow") for x in
                         ("browser_navigate","filesystem_read","host_shell"))
             gate=FixtureGateway(ctx,rules,clock=profiles.PolicyClock())
-            owned=OfflineBrowser(gate,ctx,version,session,"tab","fixture-html",source_hash)
+            tab=command("GET",base+"/window")
+            if type(tab) is not str or not re.fullmatch(r"[a-fA-F0-9-]{1,64}",tab):
+                raise RuntimeError("unexpected browser window identity")
+            record("browser-exact-single-window",command("GET",base+"/window/handles")==[tab])
+            if not all(results):
+                return 1
+            owned=OfflineBrowser(gate,ctx,version,session,tab,"fixture-html",source_hash)
             def start(operation,identity,element=None):
                 call=owned.prepare(operation,element)
                 grant=gate.fixture_grant(identity,call.request(ctx),60)
+                if command("GET",base+"/window")!=tab or command("GET",base+"/window/handles")!=[tab]:
+                    raise RuntimeError("browser window identity changed")
+                if hashlib.sha256(Path("/work/fixture.html").read_bytes()).hexdigest()!=source_hash:
+                    raise RuntimeError("fixture source changed")
                 owned.begin(call,grant)
                 owned.checkpoint()
             start("offline_open","open")
@@ -185,8 +195,12 @@ def child(browser,driver,host_net,host_port):
                 return base+"/element/"+element_id
             start("offline_read","read","message")
             text=command("GET",element("message")+"/text")
+            if text!="Public synthetic browser fixture":
+                owned.close()
+                record("browser-real-dom-text",False)
+                return 1
             owned.complete(text)
-            record("browser-real-dom-text",text=="Public synthetic browser fixture")
+            record("browser-real-dom-text",True)
             record("browser-exact-read-receipt",owned.result()==hashlib.sha256(text.encode()).hexdigest())
             if not all(results):
                 return 1
@@ -196,9 +210,26 @@ def child(browser,driver,host_net,host_port):
             owned.complete()
             start("offline_read","after","message")
             text=command("GET",element("message")+"/text")
+            if text!="Changed locally":
+                owned.close()
+                record("browser-fixed-local-click",False)
+                return 1
             owned.complete(text)
-            record("browser-fixed-local-click",text=="Changed locally")
+            record("browser-fixed-local-click",True)
             record("browser-exact-post-click-receipt",owned.result()==hashlib.sha256(text.encode()).hexdigest())
+            # Separate negative grant, no host permission for the operation.
+            blocked=FixtureGateway(ctx,(profiles.Rule("browser_navigate",(),"allow"),
+                                        profiles.Rule("filesystem_read",(),"allow"),
+                                        profiles.Rule("host_shell",(),"deny")),clock=profiles.PolicyClock())
+            call=owned.prepare("offline_click","change")
+            try:
+                blocked.fixture_grant("deny",call.request(ctx),60)
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("browser-explicit-host-deny-no-effect",denied and
+                   command("GET",element("message")+"/text")=="Changed locally")
             gate.revoke("open")
             try:
                 start("offline_click","revoked","change")
@@ -262,7 +293,7 @@ def child(browser,driver,host_net,host_port):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=3)
-    return 0 if len(results)==18 and all(results) else 1
+    return 0 if len(results)==20 and all(results) else 1
 
 def main():
     tools=[]
