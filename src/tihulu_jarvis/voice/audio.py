@@ -53,14 +53,47 @@ def selected_file(value, suffix):
     if not isinstance(value, str) or not value:
         raise Hold("select_local_model")
     p = Path(value)
-    if not p.is_absolute() or p.suffix.lower() != suffix or not p.is_file():
+    if not p.is_absolute() or p.suffix.lower() != suffix:
         raise Hold("incompatible_model_file")
+    try:
+        if not stat.S_ISREG(p.lstat().st_mode):
+            raise OSError
+    except OSError:
+        raise Hold("incompatible_model_file") from None
     return p
 
 
 def _voice_identity(info):
     return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
             info.st_ctime_ns, info.st_mode, info.st_nlink)
+
+
+def _runtime_identity(path):
+    try:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode):
+            raise OSError
+        return _voice_identity(info)
+    except OSError:
+        raise Hold("model_file_changed") from None
+
+
+def _bind_runtime_model(path, checkpoint):
+    """Bind the current regular inode to the lifetime of an audio operation.
+
+    This is a metadata guard, not a persisted digest or an open-file handoff
+    to the engine. Never claim it closes the engine pathname-open race.
+    """
+    checkpoint()
+    identity = _runtime_identity(path)
+
+    def check():
+        checkpoint()
+        if _runtime_identity(path) != identity:
+            raise Hold("model_file_changed")
+        checkpoint()
+
+    return check
 
 
 def voice_config_identity(value):
@@ -316,6 +349,7 @@ async def _capture(wav, finish, publish, *, checkpoint):
 async def listen(model, finish, publish, *, checkpoint):
     checkpoint()
     model = selected_file(model, ".bin")
+    checkpoint = _bind_runtime_model(model, checkpoint)
     if not tools_ready("arecord","whisper-cli"):
         raise Hold("capture_backend_missing")
     with tempfile.TemporaryDirectory(prefix="tihulu-capture-") as tmp:
@@ -358,6 +392,7 @@ async def transcribe(model, recording, runner=None, publish=None, *, checkpoint,
     """Transcribe a bounded private copy of an explicitly selected recording."""
     checkpoint()
     model = selected_file(model, ".bin")
+    checkpoint = _bind_runtime_model(model, checkpoint)
     identity = recording_identity(recording, checkpoint=checkpoint)
     if expected_identity is not None and identity != expected_identity:
         raise Hold("recording_changed")
@@ -421,12 +456,20 @@ async def _whisper(model, wav, stem, *, checkpoint):
 
 async def speak(speech, publish, *, checkpoint):
     checkpoint()
-    model = voice_for(speech.voice_id, speech.language)
+    model_path = selected_file(speech.voice_id, ".onnx")
+    model_check = _bind_runtime_model(model_path, checkpoint)
+    model, voice_proof = inspect_voice(speech.voice_id, speech.language, checkpoint=model_check)
+
+    def synthesis_check():
+        model_check()
+        require_voice_proof(voice_proof, checkpoint=model_check)
+
+    synthesis_check()
     if not tools_ready("piper","aplay"):
         raise Hold("playback_backend_missing")
     with tempfile.TemporaryDirectory(prefix="tihulu-playback-") as tmp:
         wav = Path(tmp)/"reply.wav"
-        synthesis = OperationDeadline(90, checkpoint)
+        synthesis = OperationDeadline(90, synthesis_check)
 
         async def synthesize():
             synthesis.check()
@@ -443,6 +486,7 @@ async def speak(speech, publish, *, checkpoint):
                 synthesis.check()
 
         await await_with_deadline(synthesize, synthesis, interval=AUTH_POLL)
+        synthesis_check()
         playback = OperationDeadline(180, checkpoint)
 
         async def play():
