@@ -47,19 +47,39 @@ def prepare(candidate, identity, operation, data):
                        candidate.locality,operation,digest)).encode("ascii")).hexdigest()
     return Call(identity,candidate.identity,candidate.provider,operation,digest,target)
 
+def local_request(context, call, *, dependent=False):
+    # Dependency-bound document data stays private and needs the additional
+    # host ceiling. The old standalone synthetic adapter request is unchanged.
+    if dependent:
+        return Request(context,"document_engine",call.target,"local","private").checked()
+    return Request(context,"engine",call.target,"local").checked()
+
+
 class LocalAdapter:
     """Owner-side state machine, not a backend. All payloads synthetic."""
-    def __init__(self,gateway,context,candidate,identity,operation,data,grant):
+    def __init__(self,gateway,context,candidate,identity,operation,data,grant,*,dependencies=()):
         if type(candidate) is not Candidate or candidate.locality!="local":
             raise Refused("local_candidate_required")
         self.call=prepare(candidate,identity,operation,data)
         self._g,self._grant=gateway,grant
-        self._req=Request(context,"engine",self.call.target,"local")
-        self._g.claim(grant,self._req)
+        if type(dependencies) is not tuple:
+            raise Refused("invalid_dependency_group")
+        self._dependencies=dependencies
+        self._req=local_request(context,self.call,dependent=bool(dependencies))
+        if dependencies:
+            self._g.claim_with_dependencies(grant,self._req,dependencies)
+        else:
+            self._g.claim(grant,self._req)
         self._state="ready"
         self._seq=0
         self._result=bytearray()
         self._lock=Lock()
+    def _checkpoint(self):
+        if self._dependencies:
+            self._g.checkpoint_claimed_group(self._dependencies+((self._grant,self._req),))
+        else:
+            self._g.checkpoint(self._grant,self._req)
+
     @property
     def state(self):
         with self._lock:
@@ -71,7 +91,7 @@ class LocalAdapter:
         if self._state not in ("ready","running"):
             raise Refused("terminal_call")
         try:
-            self._g.checkpoint(self._grant,self._req)
+            self._checkpoint()
             if (identity!=self.call.identity or type(sequence) is not int
                     or sequence!=self._seq+1 or sequence>256
                     or kind not in ("text","completed","failed")):
@@ -93,7 +113,7 @@ class LocalAdapter:
             else:
                 self._result.clear()
                 self._state="failed"
-            self._g.checkpoint(self._grant,self._req)
+            self._checkpoint()
             self._seq=sequence
         except Refused:
             self._result.clear()
@@ -106,7 +126,7 @@ class LocalAdapter:
         if self._state!="completed":
             raise Refused("no_completed_result")
         try:
-            self._g.checkpoint(self._grant,self._req)
+            self._checkpoint()
         except Refused:
             self._result.clear()
             self._state="held"

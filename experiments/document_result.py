@@ -7,7 +7,8 @@ import json
 
 from gateway import FixtureGateway, Refused
 from capabilities import CapabilityCall
-from adapter_protocol import text_bytes
+from adapter_protocol import text_bytes, prepare, local_request, LocalAdapter
+from inference import Candidate
 
 MAX_BLOCKS = 256
 MAX_RESULT_BYTES = 16384
@@ -136,6 +137,34 @@ class DocumentFixture:
             request = call.request(self._request.context)
             self._gateway.claim_dependent(grant, request, self._grant, self._request)
             return ("SIMULATED_ONLY", call.adapter, call.operation, request.target)
+
+    def _adapter_inputs(self, candidate, identity, version, language):
+        # The private source is generated from the completed fixture, not
+        # accepted as a caller-supplied replacement payload.
+        self._summary_call(version,language)
+        if (type(candidate) is not Candidate or candidate.locality!="local"
+                or candidate.provider!="jan" or candidate.task!="llm"):
+            raise Refused("local_jan_candidate_required")
+        result,digest = self._result
+        payload = json.dumps(
+            {"operation":"summarize_document","version":version,"language":language,
+             "source_result_digest":digest,"blocks":[block.text for block in result.blocks]},
+            ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")
+        call = prepare(candidate,identity,"llm",payload)
+        return call,payload
+
+    def prepare_local_summary_adapter(self,candidate,identity,version,language):
+        with self._lock:
+            call,_ = self._adapter_inputs(candidate,identity,version,language)
+            return local_request(self._request.context,call,dependent=True)
+
+    def start_local_summary_adapter(self,candidate,identity,version,language,grant):
+        """Synthetic local stream only; never invokes Jan or a transport."""
+        with self._lock:
+            _,payload = self._adapter_inputs(candidate,identity,version,language)
+            return LocalAdapter(self._gateway,self._request.context,candidate,identity,
+                                "llm",payload,grant,
+                                dependencies=((self._grant,self._request),))
 
     def cancel(self):
         with self._lock:
