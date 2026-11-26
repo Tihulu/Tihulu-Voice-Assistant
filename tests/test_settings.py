@@ -479,3 +479,33 @@ sys.exit(99)
         with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
             settings.review_committed_jan_choice(self.store, registry, self.path)
         self.assertEqual(settings.load(self.path), self.old)
+
+    def test_committed_recovery_refuses_settings_replaced_during_history_repair(self):
+        from unittest.mock import patch
+        self.stage()
+        settings._replace_text(self.path, settings._serialize(self.new))
+        self.store.save(self.after)
+        original = self.store._ensure_current_archive_locked
+        def changed(profile):
+            original(profile)
+            settings._replace_text(self.path, settings._serialize(self.new))
+        with patch.object(self.store, "_ensure_current_archive_locked", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+                settings.recover_jan_choice(self.store, self.path)
+        self.assertTrue(settings.choice_pending(self.path))
+        self.assertEqual(settings.load(self.path), self.new)
+
+    def test_review_refuses_replaced_identical_journal_during_card_read(self):
+        from unittest.mock import patch
+        registry, card = self.committed_review_fixture()
+        original = registry.card
+        journal = settings._choice_journal(self.path)
+        def changed(model_id):
+            result = original(model_id)
+            settings._replace_text(journal, journal.read_text())
+            return result
+        with patch.object(registry, "card", side_effect=changed):
+            with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+                settings.review_committed_jan_choice(self.store, registry, self.path)
+        self.assertTrue(settings.choice_pending(self.path))
+        self.assertEqual(settings.load(self.path), self.old)

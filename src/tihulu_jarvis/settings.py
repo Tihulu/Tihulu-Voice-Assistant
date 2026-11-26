@@ -328,13 +328,18 @@ def recover_jan_choice(store, path=None):
                     _replace_text(p, _serialize(old))
             elif generation == record["new_profile"] and current == new:
                 # Repair only missing history of this exact active generation.
+                if (not store.is_current(profile.id, stamp)
+                        or _read_choice(p) != (record, raw, journal_stamp)
+                        or _choice_identity(p.lstat()) != settings_stamp):
+                    raise Hold("llm_choice_recovery_required")
                 store._ensure_current_archive_locked(profile)
             else:
                 raise Hold("llm_choice_recovery_required")
             if not store.is_current(profile.id, stamp):
                 raise Hold("llm_choice_recovery_required")
             expected = old if generation == record["old_profile"] else new
-            if load(p) != expected:
+            if (load(p) != expected
+                    or (current == expected and _choice_identity(p.lstat()) != settings_stamp)):
                 raise Hold("llm_choice_recovery_required")
             _clear_choice(p, raw, journal_stamp)
             return True
@@ -359,6 +364,8 @@ def _review_committed_locked(store, registry, p):
             or card.loaded
             or _choice_identity(p.lstat()) != settings_stamp
             or not store.is_current(profile.id, profile_stamp)):
+        raise Hold("llm_choice_recovery_required")
+    if _read_choice(p) != (record, raw, journal_stamp):
         raise Hold("llm_choice_recovery_required")
     # Immutable review proof; no settings contents or profile rules in the UI.
     return (card, raw, journal_stamp, settings_stamp, profile_stamp)
@@ -394,6 +401,10 @@ def resolve_committed_jan_choice(store, registry, *, expected, path=None):
             if _review_committed_locked(store, registry, p) != expected:
                 raise Hold("llm_choice_recovery_required")
             proposed = {**load(p), "llm": card.model_id}
+            if (load(p) != {**proposed, "llm": record["old_model"]}
+                    or _choice_identity(p.lstat()) != expected[3]
+                    or _read_choice(p) != (record, raw, stamp)):
+                raise Hold("llm_choice_recovery_required")
             _replace_text(p, _serialize(proposed))
             if (load(p) != proposed or registry.card(card.model_id) != card
                     or not store.is_current(profile.id, expected[4])):
