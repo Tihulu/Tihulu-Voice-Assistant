@@ -84,6 +84,60 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(Hold, "stream_attempt_closed"):
             callbacks[-1]("late after completion")
 
+    async def test_split_nonfinal_tags_never_reach_stream_and_retry_is_clean(self):
+        session = Session()
+        seen, requests = [], []
+
+        class Backend:
+            async def chat(self, messages, on_delta):
+                requests.append(messages)
+                if len(requests) == 1:
+                    for piece in ("Hello ", "<Th", "InK", ">hidden", " reasoning</think>"):
+                        on_delta(piece)
+                    # Even a backend returning an apparently clean final
+                    # value cannot erase the observed nonfinal stream.
+                    return "Hello!"
+                on_delta("Hello!")
+                return "Hello!"
+
+        result, _ = await session.own(lambda e: session.reply(
+            "hello", Backend(), e, on_delta=seen.append,
+            on_retry=lambda: seen.append("RESET")))
+        self.assertEqual(seen, ["Hello ", "RESET", "Hello!"])
+        self.assertEqual(result, "Hello!")
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(session.history[-1].content, "Hello!")
+
+    async def test_stream_gate_preserves_ordinary_less_than_and_tag_like_words(self):
+        from tihulu_jarvis.voice.session import StreamGate
+        gate = StreamGate()
+        pieces = ["x < ", "y, <th", "inking> and ", "<"]
+        result = "".join(gate.feed(p) for p in pieces) + gate.finish()
+        self.assertEqual(result, "".join(pieces))
+        self.assertFalse(gate.rejected)
+        gate = StreamGate()
+        self.assertEqual(gate.feed("<analysis"), "")
+        self.assertEqual(gate.finish(), "")
+        self.assertTrue(gate.rejected)
+
+    async def test_stream_size_limit_survives_caught_backend_error(self):
+        session = Session()
+        seen = []
+
+        class Backend:
+            async def chat(self, messages, on_delta):
+                try:
+                    on_delta("x" * 32001)
+                except Hold:
+                    pass
+                return "Hello!"
+
+        with self.assertRaisesRegex(Hold, "response_rejected_after_one_retry"):
+            await session.own(lambda e: session.reply(
+                "hello", Backend(), e, on_delta=seen.append, on_retry=lambda: None))
+        self.assertEqual(seen, [])
+        self.assertEqual(session.history, ())
+
     async def test_retry_without_reset_callback_does_not_append_second_stream(self):
         session = Session()
         seen, callbacks = [], []
