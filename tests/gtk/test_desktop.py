@@ -6265,9 +6265,17 @@ class MuteTests(DesktopTests):
         self.connect_model()
         self.ui.mute.set_active(True)
         self.begin_voice()
-        with patch.object(self.backend, "chat", side_effect=Hold("jan_unavailable")):
+        before = len(self.backend.requests)
+        async def unavailable(backend, messages):
+            backend.requests.append(messages)
+            raise Hold("jan_unavailable")
+        # MuteTests uses the callable-only fixture, not StreamingReplyTests.
+        # Python resolves special methods on the class, not the instance.
+        with patch.object(type(self.backend), "__call__", unavailable):
             self.click(self.ui.finish_btn)
             self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(self.backend.requests), before + 1)
+        self.assertEqual(self.ui.status.get_text(), "jan_unavailable")
         self.assertEqual(self.ui.entry.get_text(), self.backend.transcript)
         self.assertEqual(self.ui.inventory, ())
         self.assertEqual(self.ui.session.history, ())
