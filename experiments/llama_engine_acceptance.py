@@ -20,6 +20,8 @@ MODEL_SHA="047bf46455a544931cff6fef14d7910154c56afbc23ab1c5e56a72e69912c04b"
 ENGINE_REV="4762ad7316dcdec20016ab5985fb46a27902204d"
 MODEL="stories260k-"+MODEL_SHA
 MAX_REPLY=32768
+NATIVE_TOKENS=16
+NATIVE_VOCAB=512
 PROMPTS=("Once upon a time, there was a little bird named","A little girl found a small dog and")
 
 def parse_reply(raw):
@@ -37,8 +39,10 @@ def parse_reply(raw):
             or obj["model"]!=MODEL or obj["stop"] is not True or obj["truncated"] is not False
             or obj["stop_type"] not in ("eos","limit") or type(obj["content"]) is not str
             or not obj["content"].strip() or len(obj["content"].encode("utf-8"))>4096
-            or type(obj["tokens"]) is not list or not 1<=len(obj["tokens"])<=32
-            or any(type(t) is not int or not 0<=t<=1000000 for t in obj["tokens"])):
+            or any((ord(c)<32 and c not in "\n\t") or 127<=ord(c)<=159 for c in obj["content"])
+            or type(obj["tokens"]) is not list or not 1<=len(obj["tokens"])<=NATIVE_TOKENS
+            or any(type(t) is not int or not 0<=t<NATIVE_VOCAB for t in obj["tokens"])
+            or (obj["stop_type"]=="limit" and len(obj["tokens"])!=NATIVE_TOKENS)):
         raise ValueError("llm_response_contract")
     return obj["content"],tuple(obj["tokens"])
 

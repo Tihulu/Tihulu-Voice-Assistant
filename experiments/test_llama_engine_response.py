@@ -6,7 +6,7 @@ from llama_engine_acceptance import MODEL,parse_reply
 class LlamaReplyTests(unittest.TestCase):
     def payload(self,**changes):
         obj={"content":" a small bird","tokens":[1,2],"stop":True,
-             "stop_type":"limit","model":MODEL,"truncated":False}
+             "stop_type":"eos","model":MODEL,"truncated":False}
         obj.update(changes)
         return json.dumps(obj).encode()
     def test_closed_native_response(self):
@@ -21,3 +21,18 @@ class LlamaReplyTests(unittest.TestCase):
                       self.payload().replace(b'"stop": true',b'"stop": false,"stop": true')):
             with self.assertRaises(ValueError):
                 parse_reply(value)
+
+    def test_native_limit_must_match_exact_requested_count(self):
+        self.assertEqual(len(parse_reply(self.payload(stop_type="limit",tokens=list(range(16))))[1]),16)
+        for tokens in ([1]*15,[1]*17):
+            with self.assertRaises(ValueError):
+                parse_reply(self.payload(stop_type="limit",tokens=tokens))
+    def test_exact_vocabulary_and_eos_budget(self):
+        for tokens in ([512],[-1],[True],[1]*17):
+            with self.assertRaises(ValueError):
+                parse_reply(self.payload(tokens=tokens))
+        self.assertEqual(parse_reply(self.payload(tokens=[511]))[1],(511,))
+    def test_invalid_control_and_surrogate_content_denied(self):
+        for value in ("bad\0","bad\x7f","bad\x85","bad\ud800"):
+            with self.assertRaises(ValueError):
+                parse_reply(self.payload(content=value))
