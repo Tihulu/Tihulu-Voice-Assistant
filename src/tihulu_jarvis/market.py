@@ -20,7 +20,7 @@ import stat
 import threading
 from contextlib import contextmanager
 from functools import wraps
-from .owned_wait import await_authorized
+from .owned_wait import await_authorized, finish_owned
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
@@ -749,6 +749,7 @@ class Transfer:
         self._root_identity = _directory_identity(self.root)
         self.temp = None
         self._staging_proof = None
+        self._publication_stop = threading.Event()
         self.received = 0
         self.state = card.state
 
@@ -786,6 +787,8 @@ class Transfer:
             raise Hold("transfer_directory_changed")
 
     def _check(self):
+        if self._publication_stop.is_set():
+            raise Hold("turn_cancelled")
         self._check_directory()
         self._checkpoint()
         if not self.source.authorized(self._clock()):
@@ -843,6 +846,34 @@ class Transfer:
         self.temp = None
         self.card, self.state = saved, saved.state
         return saved
+
+    async def _publish_async(self, registered, *, replacing, threaded=False):
+        """Opt-in worker for callers with a thread-safe authorization checkpoint.
+
+        No transport/progress callback runs here. Keep the model lease and
+        staging ownership until the worker and its recovery have drained.
+        """
+        if not threaded:
+            return self._publish(registered, replacing=replacing)
+        self._check()
+        worker = asyncio.create_task(asyncio.to_thread(
+            self._publish, registered, replacing=replacing))
+        try:
+            return await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            self._publication_stop.set()
+            try:
+                await finish_owned(asyncio.gather(worker, return_exceptions=True))
+            except asyncio.CancelledError:
+                # finish_owned raises only after its cleanup has completed.
+                pass
+            try:
+                # A late stop cannot undo an already committed generation.
+                return worker.result()
+            except Hold as exc:
+                if str(exc) == "turn_cancelled":
+                    raise asyncio.CancelledError from None
+                raise
 
     @_transfer_locked
     def _persist(self, state):
@@ -955,7 +986,8 @@ class Transfer:
         return tuple(_partial_file_identity(path) for path in self._partial_paths())
 
     @_leased_transfer
-    async def resume(self, progress=None, start=0, allow_installed=False, *, expected_pair=None):
+    async def resume(self, progress=None, start=0, allow_installed=False, *, expected_pair=None,
+                     threaded_publication=False):
         """Continue an interrupted transfer from a verified byte offset.
 
         The card's lifecycle is not advanced here: an interrupted item stays
@@ -1031,7 +1063,8 @@ class Transfer:
                                  version=self.source.version if self.source.version != "unknown" else self.card.version,
                                  source_version=self.source.version,
                                  license_id=self.source.license_id)
-            result = self._publish(registered, replacing=allow_installed)
+            result = await self._publish_async(registered, replacing=allow_installed,
+                                               threaded=threaded_publication)
             # A cleanup failure must not turn a committed result into a failed update.
             self._consume_partial(identity, record, pair=pair)
             return result
@@ -1044,7 +1077,7 @@ class Transfer:
         finally:
             self._finish_temp(keep=self.state == "CANCELLED" and not allow_installed)
 
-    async def update(self, progress=None):
+    async def update(self, progress=None, *, threaded_publication=False):
         """Replace an installed item with its approved source, keeping history.
 
         The previous entry stays as a revision; the new one registers
@@ -1052,7 +1085,8 @@ class Transfer:
         """
         if self.card.state not in ("REGISTERED", "TESTABLE", "ACTIVE"):
             raise Hold("model_not_installed")
-        return await self.resume(progress, start=0, allow_installed=True)
+        return await self.resume(progress, start=0, allow_installed=True,
+                                 threaded_publication=threaded_publication)
 
     @_leased_transfer
     async def run(self, progress=None):
