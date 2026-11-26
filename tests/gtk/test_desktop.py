@@ -1350,6 +1350,35 @@ class MarketInventoryTests(MarketFixture):
         self.assertEqual(self.ui.cfg["llm"], "fixture-chat")
         self.assertEqual(self.ui.market.card("fixture-qwen").state, "DISCOVERED")
 
+    def test_market_discovery_failed_route_save_never_enables_chat(self):
+        self.ui.url.set_text("http://127.0.0.1:9877")
+        before = settings.load()
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.click(self.ui.market_find)
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "settings_unwritable")
+        self.assertEqual(self.ui.inventory, ())
+        self.assertFalse(self.ui.send.get_sensitive())
+        self.assertEqual(self.ui.cfg, before)
+        self.assertEqual(settings.load(), before)
+        self.assertEqual(self.ui.market.card("fixture-chat").state, "DISCOVERED")
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy)
+        self.assertTrue(self.ui.send.get_sensitive())
+        self.assertEqual(settings.load()["endpoint"], "http://127.0.0.1:9877")
+
+    def test_market_discovery_stale_settings_refuse_transport_and_registry_write(self):
+        before = settings.load()
+        changed = {**before, "text_scale": "large"}
+        settings.save(changed)
+        self.click(self.ui.market_find)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "settings_changed")
+        self.assertEqual(self.ui.inventory, ())
+        self.assertEqual(self.ui.market.cards(), ())
+        self.assertEqual(settings.load(), changed)
+        self.jan.assert_not_called()
+
     def test_market_discovery_preserves_selected_model_and_clears_stale_inventory(self):
         self.connect_model()
         self.click(self.ui.market_find)
