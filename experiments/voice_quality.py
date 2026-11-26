@@ -75,6 +75,7 @@ def speech_corpus_profile(corpus,stt_profile,has_stt):
         "mixed-auto":(True,True,22,"small"),
         "mixed-auto-turbo":(True,True,22,"turbo-q5"),
         "mixed-auto-turbo-bounded-detect":(True,True,22,"turbo-q5"),
+        "mixed-auto-turbo-context300":(True,True,22,"turbo-q5"),
         "mixed-auto-piper":(True,True,22,"small"),
         "mixed-auto-piper-short":(True,True,22,"small"),
         "mixed-auto-reviewed":(True,True,24,"small"),
@@ -103,6 +104,16 @@ def neural_sample_allowed(corpus,case_id,language,text,reference):
 
 def bounded_detection_args(corpus,rate,frames):
     """Only the separate patched disposable Turbo detector opts in."""
+    if corpus=="mixed-auto-turbo-context300":
+        return turbo_context300_args(rate,frames)[:2]
     if corpus!="mixed-auto-turbo-bounded-detect":
         return []
     return turbo_short_args(rate,frames)[:2]
+
+
+def turbo_context300_args(rate,frames):
+    """Experimental 6s context; leave at least 1s padding, never truncate."""
+    if (type(rate) is not int or type(frames) is not int
+            or rate!=22050 or not 0<frames<=rate*5):
+        raise Refused("turbo_context300_audio_limit")
+    return ["-ac","300","-bs","1","-bo","1"]
