@@ -84,3 +84,5 @@ CAP-08 local document-to-Jan fixture bridge reuses LocalAdapter streaming state 
 CAP-06 #316/#317 actual file-limit probe failed while process limits and other checks passed. Successor explicitly writes exact limit using unbuffered writes, requires EFBIG on next byte and exact on-disk size. Original failures preserved. Experimental workflow now verifies exact PR head rather than merge ref. No limit or security boundary relaxed.
 
 CAP-04/06/08 persist trusted fixture dependency edges at claim and revalidate transitive ancestors in every later checkpoint/claim (including standalone checkpoint). Bounded visited traversal, no new callback or transport. Four regression methods cover direct parent revoke, ancestor expiry, child initiation denial and shared ancestor/unrelated grant. Real effect serialization remains open.
+
+CAP-06: exact ordered 13-case sandbox preflight required before any real fixture conversion/version probe. A failed/held/missing/reordered preflight stops engine execution; failed lossless roundtrip prevents successful typed receipt. Four preflight regressions. Existing 16 real cases preserved. Disposable CI only, no owner activation.

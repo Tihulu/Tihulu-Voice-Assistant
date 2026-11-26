@@ -73,6 +73,20 @@ with open('/work/out/probe.txt','x') as handle:
 print(json.dumps(data))
 """
 
+def preflight_passed(results, expected):
+    """Only the exact completed preflight set can enable fixture engines."""
+    return (type(results) is list and len(results)==len(expected)
+            and all(type(row) is dict and row.get("status")=="PASS" for row in results)
+            and tuple(row.get("case") for row in results)==expected)
+
+
+PREFLIGHT = ("sandbox-input-scope","sandbox-input-readonly","sandbox-network-namespace",
+             "sandbox-output-scope","sandbox-capabilities-dropped","sandbox-host-environment-hidden",
+             "sandbox-process-resource-limits","sandbox-root-and-work-readonly",
+             "sandbox-private-scratch","sandbox-pid-ipc-namespaces","sandbox-file-size-limit",
+             "sandbox-capture-limit","sandbox-timeout-cleanup")
+
+
 def main():
     results = []
     def record(case,passed,**details):
@@ -204,6 +218,9 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
             record("sandbox-timeout-cleanup",str(exc)=="fixture_timeout" and not (output/"late").exists())
         else:
             record("sandbox-timeout-cleanup",False)
+        if not preflight_passed(results,PREFLIGHT):
+            print(json.dumps({"case":"sandbox-engine-preflight","status":"HOLD"}),flush=True)
+            return 1
         # The version and conversion both execute in the same fixed mount/network
         # boundary. The host owns the synthetic path; no model or owner input.
         version_probe = run(["/usr/bin/ffmpeg","-version"])
@@ -243,7 +260,7 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
                    exit=decoded.returncode)
         else:
             record("sandbox-ffmpeg-lossless-roundtrip",False,reason="conversion_failed")
-        if valid:
+        if valid and results[-1]["status"]=="PASS":
             result = ConversionResult(request.target,before,"fixture-output","flac",target.read_bytes())
             job.complete(result)
             record("sandbox-typed-conversion-receipt",job.result()[4]==hashlib.sha256(target.read_bytes()).hexdigest()
@@ -251,7 +268,7 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
                    engine_version=version)
         else:
             job.cancel()
-            record("sandbox-typed-conversion-receipt",False,reason="conversion_failed")
+            record("sandbox-typed-conversion-receipt",False,reason="conversion_or_roundtrip_failed")
     return 0 if len(results)==16 and all(r["status"]=="PASS" for r in results) else 1
 
 if __name__=="__main__":
