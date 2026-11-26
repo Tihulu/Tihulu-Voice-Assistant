@@ -77,6 +77,7 @@ class LocalAdapter:
         self._call=prepare(candidate,identity,operation,data)
         self._wire_digest=self._call.input_digest
         self._native_voice=False
+        voice_receipt=None
         # A reserved voice envelope cannot silently downgrade to a generic
         # invocation just by omitting the optional language parameter.
         try:
@@ -114,6 +115,8 @@ class LocalAdapter:
                     or parent_req.action!="application_engine" or parent_req.actor!="local"
                     or parent_req.classification!="private"):
                 raise Refused("invalid_voice_parent")
+            voice_receipt=(obj["artifact"],obj["source_digest"],obj["model_digest"],
+                           obj["input_language"],obj["transcript_digest"])
             if "native_wire_digest" in obj:
                 if (response_language!="en" or obj["input_language"]!="en"
                         or candidate.identity!=VOICE_NATIVE_MODEL or candidate.provider!=VOICE_NATIVE_PROVIDER):
@@ -129,7 +132,9 @@ class LocalAdapter:
             raise Refused("invalid_dependency_group")
         self._dependencies=dependencies
         self._req=local_request(context,self.call,dependent=bool(dependencies))
-        if dependencies:
+        if voice_receipt is not None:
+            self._g.claim_voice_turn(grant,self._req,dependencies,voice_receipt)
+        elif dependencies:
             self._g.claim_with_dependencies(grant,self._req,dependencies)
         else:
             self._g.claim(grant,self._req)

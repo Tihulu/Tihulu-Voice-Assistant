@@ -126,6 +126,7 @@ class FixtureGateway:
         self._revoked = set()
         self._claimed = set()
         self._dependencies = {}
+        self._transcript_receipts = {}
         self._closed = False
         self._lock = Lock()
 
@@ -273,6 +274,39 @@ class FixtureGateway:
             if grant.identity in self._claimed:
                 raise Refused("grant_already_claimed")
             self._dependencies[grant.identity] = dependencies
+            self._claimed.add(grant.identity)
+            return "SIMULATED_ALLOW"
+
+    def record_transcript(self, grant, req, call, text_digest):
+        """Trusted fixture completion registry, not an authentication API."""
+        from capabilities import CapabilityCall
+        if (type(call) is not CapabilityCall
+                or (call.adapter,call.operation)!=("whisper_cpp","transcribe_wav")
+                or call.request(self.context)!=req
+                or type(text_digest) is not str or not re.fullmatch(r"[0-9a-f]{64}",text_digest)):
+            raise Refused("invalid_transcript_receipt")
+        args=dict(call.args)
+        receipt=(args["output"],args["digest"],args["model_digest"],args["language"],text_digest)
+        with self._lock:
+            self._check_claimed_group_locked(((grant,req),),self._clock.now())
+            if grant.identity in self._transcript_receipts:
+                raise Refused("transcript_receipt_already_recorded")
+            self._transcript_receipts[grant.identity]=receipt
+
+    def claim_voice_turn(self, grant, req, dependencies, receipt):
+        """Atomically validate exact registered transcript and claim child."""
+        with self._lock:
+            now=self._clock.now()
+            self._validate_locked(grant,req,now)
+            if type(dependencies) is not tuple or len(dependencies)!=1:
+                raise Refused("invalid_voice_parent")
+            identities=self._check_claimed_group_locked(dependencies,now)
+            parent=dependencies[0][0]
+            if self._transcript_receipts.get(parent.identity)!=receipt or type(receipt) is not tuple:
+                raise Refused("voice_transcript_receipt_mismatch")
+            if grant.identity in identities or grant.identity in self._claimed:
+                raise Refused("grant_already_claimed")
+            self._dependencies[grant.identity]=dependencies
             self._claimed.add(grant.identity)
             return "SIMULATED_ALLOW"
 
