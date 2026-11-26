@@ -2569,6 +2569,9 @@ def create_window(app, loop, bridge=None):
             return row.target if row is not None else None
 
         def register_target(self):
+            if self.busy or self.closing:
+                return
+            previous = deepcopy(self.cfg["web_targets"])
             raw = self.web_target.get_text().strip()
             try:
                 target = web.parse(raw)
@@ -2579,17 +2582,22 @@ def create_window(app, loop, bridge=None):
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return
-            self.save()
+            if not self.save():
+                self.cfg["web_targets"] = previous
+                return
             self.web_target.set_text("")
             self.web_submit.set_active(False)
             self.refresh_web_page()
 
         def forget_target(self):
             target = self.selected_target()
-            if target is None:
+            if target is None or self.busy or self.closing:
                 return
+            previous = deepcopy(self.cfg["web_targets"])
             self.cfg["web_targets"] = web.store(web.forget(self.target_entries(), target))
-            self.save()
+            if not self.save():
+                self.cfg["web_targets"] = previous
+                return
             self.refresh_web_page()
 
         def refresh_web_page(self):
@@ -2614,11 +2622,17 @@ def create_window(app, loop, bridge=None):
             self.web_submit_btn.set_sensitive(not self.busy and chosen is not None)
             self.web_forget.set_sensitive(chosen is not None)
 
+        def require_registered_target(self, target):
+            if (target not in self.target_entries()
+                    or target not in web.entries(settings.load()["web_targets"])):
+                raise Hold("site_registration_changed")
+
         def read_target(self):
             target = self.selected_target()
             if target is None or self.busy:
                 return
             try:
+                self.require_registered_target(target)
                 method, url, reason = web.plan(target)
             except Hold as exc:
                 self.web_note.set_text(str(exc))
@@ -2632,11 +2646,12 @@ def create_window(app, loop, bridge=None):
             if target is None or self.busy:
                 return
             try:
+                self.require_registered_target(target)
                 web.plan(target, submit=True)
             except Hold as exc:
                 # Submitting without the separate right is refused, and said.
                 self.web_note.set_text(str(exc))
-                self.receipt("refused", "submitting to %s (submission_not_approved)" % target.url)
+                self.receipt("refused", "submitting to %s (%s)" % (target.url, str(exc)))
                 return
             self.web_note.set_text(tr("Plan only: %s (POST); no network request." % target.url,
                                       "Yalnızca plan: %s (POST); ağ isteği yok." % target.url,
@@ -3390,6 +3405,9 @@ def create_window(app, loop, bridge=None):
             return row.source if row is not None else None
 
         def register_source(self):
+            if self.busy or self.closing:
+                return None
+            previous = deepcopy(self.cfg["sources"])
             host = self.source_host.get_text().strip()
             entry = {"host": host, "kind": "hf" if self.source_kind.get_active() == 0 else "http",
                      "filter": self.source_filter.get_text().strip()}
@@ -3399,7 +3417,9 @@ def create_window(app, loop, bridge=None):
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return None
-            self.save()
+            if not self.save():
+                self.cfg["sources"] = previous
+                return None
             self.source_host.set_text("")
             self.source_filter.set_text("")
             self.refresh_source_list()
@@ -3409,8 +3429,9 @@ def create_window(app, loop, bridge=None):
 
         def forget_source(self):
             source = self.selected_source()
-            if source is None:
+            if source is None or self.busy or self.closing:
                 return None
+            previous = deepcopy(self.cfg["sources"])
             try:
                 self.cfg["sources"] = catalog_sources.forget(self.cfg.get("sources", []),
                                                             {"host": source.host,
@@ -3419,7 +3440,9 @@ def create_window(app, loop, bridge=None):
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return None
-            self.save()
+            if not self.save():
+                self.cfg["sources"] = previous
+                return None
             self.refresh_source_list()
             return source
 
