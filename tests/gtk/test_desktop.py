@@ -1897,6 +1897,9 @@ class ResumeQueueTests(DownloadFixture):
             finally:
                 release_cleanup.set()
                 release_server.set()
+                # Drain the fixture's HTTP handler before the window teardown
+                # asserts that no owned asyncio tasks remain.
+                self.drain_tasks()
         self.assertTrue(self.partial_file().exists())
         self.assertEqual(self.ui.downloads[-1]["state"], "RESUMABLE")
         self.assertTrue(self.ui.market_filter.get_sensitive())
