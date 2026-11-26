@@ -623,6 +623,39 @@ async def _whisper(model, wav, stem, *, checkpoint, model_identity=None):
         checkpoint()
 
 
+def require_playback_wav(path, *, checkpoint):
+    """Validate bounded PCM output before letting a playback child open it."""
+    checkpoint()
+    fd = None
+    try:
+        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or not 44 < info.st_size <= MAX_RECORDING:
+            raise Hold("synthesis_failed")
+        with os.fdopen(fd, "rb") as stream:
+            fd = None
+            with wave.open(stream, "rb") as wav:
+                frames = wav.getnframes()
+                channels, width = wav.getnchannels(), wav.getsampwidth()
+                if (channels != 1 or width != 2 or not 8000 <= wav.getframerate() <= 192000
+                        or frames <= 0 or frames * channels * width > info.st_size):
+                    raise Hold("synthesis_failed")
+                # Check the last advertised frame too, not just the header.
+                wav.setpos(frames - 1)
+                if len(wav.readframes(1)) != channels * width:
+                    raise Hold("synthesis_failed")
+            if _voice_identity(os.fstat(stream.fileno())) != _voice_identity(info):
+                raise Hold("synthesis_failed")
+        if _voice_identity(path.lstat()) != _voice_identity(info):
+            raise Hold("synthesis_failed")
+    except (OSError, EOFError, wave.Error, ValueError, OverflowError, struct.error):
+        raise Hold("synthesis_failed") from None
+    finally:
+        if fd is not None:
+            os.close(fd)
+    checkpoint()
+
+
 async def speak(speech, publish, *, checkpoint):
     checkpoint()
     model_path = selected_file(speech.voice_id, ".onnx")
@@ -652,9 +685,10 @@ async def speak(speech, publish, *, checkpoint):
                 synthesis.check()
                 await p.communicate(payload)
                 synthesis.check()
-                if p.returncode or not wav.is_file() or wav.stat().st_size <= 44:
+                if p.returncode:
                     raise Hold("synthesis_failed")
                 synthesis.check()
+            require_playback_wav(wav, checkpoint=synthesis.check)
 
         await await_with_deadline(synthesize, synthesis, interval=AUTH_POLL)
         synthesis_check()
