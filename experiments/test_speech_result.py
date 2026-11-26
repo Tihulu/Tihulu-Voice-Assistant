@@ -135,3 +135,27 @@ class SpeechResultTests(unittest.TestCase):
         self.job.cancel()
         with self.assertRaises(Refused):
             self.job.start_transcription("fixture","b"*64,"text-out",grant)
+
+    def test_neural_speech_receipt_exact_model_and_config(self):
+        from speech_result import SpeechResult,SpeechFixture
+        call=CapabilityCall("piper","1.8.0","neural_text_to_wav",
+                    (("artifact","text"),("digest","a"*64),("model_digest","b"*64),
+                     ("config_digest","c"*64),("language","tr"),("output","neural")))
+        req=call.request(self.ctx)
+        value=SpeechResult(req.target,"a"*64,"tr","neural",wav(),"b"*64,"c"*64)
+        for i,change in enumerate(({"model_digest":"d"*64},{"config_digest":"d"*64},{"model_digest":None})):
+            grant=self.g.fixture_grant("piper-bad"+str(i),req,60)
+            job=SpeechFixture(self.g,self.ctx,call,grant)
+            with self.assertRaises(Refused):
+                job.complete(replace(value,**change))
+        grant=self.g.fixture_grant("piper-good",req,60)
+        job=SpeechFixture(self.g,self.ctx,call,grant)
+        job.complete(value)
+        self.assertEqual(job.result()[4],sha256(value.data).hexdigest())
+        job.cancel()
+        with self.assertRaises(Refused):
+            job.result()
+
+    def test_espeak_cannot_accept_neural_model_metadata(self):
+        with self.assertRaises(Refused):
+            self.job.complete(replace(self.value,model_digest="b"*64,config_digest="c"*64))

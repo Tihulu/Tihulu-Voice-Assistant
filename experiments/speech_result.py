@@ -36,10 +36,12 @@ class SpeechResult:
     language: str
     output: str
     data: bytes
+    model_digest: str | None = None
+    config_digest: str | None = None
 
 class SpeechFixture:
     def __init__(self,gateway,context,call,grant,*,dependencies=()):
-        if type(gateway) is not FixtureGateway or type(call) is not CapabilityCall or (call.adapter,call.operation)!=("espeak_ng","text_to_wav"):
+        if type(gateway) is not FixtureGateway or type(call) is not CapabilityCall or (call.adapter,call.operation) not in (("espeak_ng","text_to_wav"),("piper","neural_text_to_wav")):
             raise Refused("speech_fixture")
         self._g,self._grant=gateway,grant
         self._req=call.request(context)
@@ -68,7 +70,9 @@ class SpeechFixture:
                 self._g.checkpoint(self._grant,self._req)
                 if (type(result) is not SpeechResult or result.target!=self._req.target
                         or result.source_digest!=self._args["digest"]
-                        or result.language!=self._args["language"] or result.output!=self._args["output"]):
+                        or result.language!=self._args["language"] or result.output!=self._args["output"]
+                        or result.model_digest!=self._args.get("model_digest")
+                        or result.config_digest!=self._args.get("config_digest")):
                     raise Refused("speech_provenance")
                 rate,count=pcm_info(result.data)
                 self._g.checkpoint(self._grant,self._req)
