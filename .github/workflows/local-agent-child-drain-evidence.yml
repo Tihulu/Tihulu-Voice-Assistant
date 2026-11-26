@@ -7,6 +7,7 @@ on:
       - 'experiments/local_agent_wave_run.py'
       - 'experiments/local_agent_resources.py'
       - 'experiments/fixtures/agent_child_drain_fixture.py'
+      - 'experiments/fixtures/agent_fixed_family_fixture.py'
       - '.github/workflows/local-agent-child-drain-evidence.yml'
 permissions:
   contents: read
@@ -31,3 +32,8 @@ jobs:
           PYTHONPATH: src:experiments
           PYTHONDONTWRITEBYTECODE: '1'
         run: /usr/bin/python3 experiments/fixtures/agent_child_drain_fixture.py
+      - name: Run fixed parent and child reap evidence
+        env:
+          PYTHONPATH: src:experiments
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: /usr/bin/python3 experiments/fixtures/agent_fixed_family_fixture.py
