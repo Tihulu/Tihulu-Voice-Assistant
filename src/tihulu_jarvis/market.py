@@ -944,27 +944,46 @@ class Transfer:
                 or published[6] != 1):
             raise Hold("partial_changed")
         tmp = None
+        tmp_owner = None
         try:
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
                                              dir=self.root, delete=False) as stream:
                 tmp = Path(stream.name)
+                tmp_owner = _artifact_identity(os.fstat(stream.fileno()))[:2]
                 json.dump(record, stream, sort_keys=True)
                 stream.flush()
+                # Capture exact bytes before sync; fsync does not change identity.
+                meta_identity = _artifact_identity(os.fstat(stream.fileno()))
                 os.fsync(stream.fileno())
             self._check_directory()
             self._assert_current()
             if not self.source.authorized(self._clock()):
                 return
-            if published != _artifact_identity(partial.lstat()):
+            if (published != _artifact_identity(partial.lstat())
+                    or meta_identity[6] != 1
+                    or meta_identity != _artifact_identity(tmp.lstat())):
                 raise Hold("partial_changed")
             os.link(tmp, metadata, follow_symlinks=False)
             _sync_directory(self.root)
+            self._check_directory()
+            linked_meta = _artifact_identity(metadata.lstat())
+            if (linked_meta[:4] != meta_identity[:4]
+                    or linked_meta[5] != meta_identity[5]
+                    or linked_meta[6] != 2
+                    or linked_meta != _artifact_identity(tmp.lstat())):
+                raise Hold("partial_changed")
             tmp.unlink()
+            tmp = None
             _sync_directory(self.root)
         finally:
-            if tmp is not None:
+            if tmp is not None and tmp_owner is not None:
                 self._check_directory()
-                tmp.unlink(missing_ok=True)
+                try:
+                    if _artifact_identity(tmp.lstat())[:2] == tmp_owner:
+                        tmp.unlink()
+                        _sync_directory(self.root)
+                except FileNotFoundError:
+                    pass
 
     def _finish_temp(self, *, keep):
         """Never overwrite another operation's partial or mask a cancellation."""

@@ -1439,6 +1439,27 @@ class PartialQueueIdentityTests(unittest.TestCase):
         self.assertEqual((self.transfer.root / "fixture-temp").read_bytes(), b"replacement")
         self.assertFalse(self.metadata.exists())
 
+    def test_partial_metadata_replacement_is_never_published_or_deleted(self):
+        self.transfer.temp = self.transfer.root / "fixture-temp"
+        self.transfer.temp.write_bytes(NEW[:3])
+        original = market.os.fsync
+        replaced = []
+        def replace_metadata(fd):
+            original(fd)
+            for path in self.transfer.root.iterdir():
+                if path.name.startswith("tmp") and path.is_file() and not replaced:
+                    replacement = path.with_name("replacement-meta")
+                    replacement.write_text("{}")
+                    replacement.replace(path)
+                    replaced.append(path)
+        with patch.object(market.os, "fsync", side_effect=replace_metadata):
+            self.transfer._finish_temp(keep=True)
+        self.assertEqual(len(replaced), 1)
+        self.assertEqual(replaced[0].read_text(), "{}")
+        self.assertTrue(self.payload.exists())
+        self.assertFalse(self.metadata.exists())
+        self.assertEqual(self.registry.partial_status(self.card.model_id)["state"], "UNVERIFIED")
+
     def test_partial_status_and_discard_refuse_shared_writable_directory(self):
         status = self.bound_partial()
         self.transfer.root.chmod(0o777)
