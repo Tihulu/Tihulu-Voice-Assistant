@@ -440,12 +440,20 @@ def create_window(app, loop, bridge=None):
             self.downloads = []
             self.download_entries = {}
             self.download_queue_error = ""
-            self.restore_download_queue()
+            recovery_at_start = self.registry_recovery_needed()
+            if recovery_at_start:
+                self.download_queue_error = tr("Registry recovery pending.",
+                    "Model kaydı kurtarması bekliyor.", "Registry-Wiederherstellung ausstehend.")
+            else:
+                self.restore_download_queue()
             self.build_downloads_page()
             self.build_profiles_page()
             self.build_catalog_page()
             try:
-                self.build_market_page()
+                if recovery_at_start:
+                    self.build_market_page(cards=(), recovery_error=self.download_queue_error)
+                else:
+                    self.build_market_page()
             except (Hold, OSError) as exc:
                 read_error = (read_error + " " if read_error else "") + str(exc)
             try:
@@ -481,6 +489,8 @@ def create_window(app, loop, bridge=None):
             self.chat_files = ChatFiles(self, toolbox, self.result_actions_slot, Gtk, tr)
             self.refresh()
             self.win.present()
+            if recovery_at_start:
+                self.start_registry_recovery()
 
         def apply_text_scale(self):
             """Apply one stylesheet for the stored scale, and nothing else.
@@ -1943,7 +1953,7 @@ def create_window(app, loop, bridge=None):
             self.update_labels()
             self.refresh()
 
-        def build_market_page(self):
+        def build_market_page(self, *, cards=None, recovery_error=""):
             # An owned publication/rollback may hold the registry lock.
             # Preserve the visible snapshot until that operation drains.
             if getattr(self, "registry_worker_active", False):
@@ -2010,16 +2020,14 @@ def create_window(app, loop, bridge=None):
             self.clear_staging_review()
             wanted = self.market_filter.get_active_text() or "stt"
             try:
-                cards = self.market.cards()
+                if cards is None:
+                    cards = self.market.cards()
             except (Hold, OSError) as exc:
-                self.market_note.set_text(tr(
-                    "Registry unavailable: ", "Model kaydı kullanılamıyor: ",
-                    "Registry nicht verfügbar: ") + str(exc))
-                self.storage_note.set_text(tr(
-                    "Storage unknown until recovery.", "Kurtarmaya kadar depolama bilinmiyor.",
-                    "Speicher bis zur Wiederherstellung unbekannt."))
-                self.refresh_market_buttons()
+                self.show_registry_hold(str(exc))
                 raise
+            if recovery_error:
+                self.show_registry_hold(recovery_error)
+                return
             rows = [c for c in cards if c.category == wanted]
             for card in sorted(rows, key=lambda c: (c.state, c.model_id)):
                 extra = ""
@@ -2049,13 +2057,84 @@ def create_window(app, loop, bridge=None):
             self.storage_note.set_text(self.storage_report(cards))
             self.refresh_market_buttons()
 
+        def show_registry_hold(self, reason):
+            self.market_note.set_text(tr(
+                "Registry unavailable: ", "Model kaydı kullanılamıyor: ",
+                "Registry nicht verfügbar: ") + reason)
+            self.storage_note.set_text(tr(
+                "Storage unknown until recovery.", "Kurtarmaya kadar depolama bilinmiyor.",
+                "Speicher bis zur Wiederherstellung unbekannt."))
+            self.refresh_market_buttons()
+
+        def registry_recovery_needed(self):
+            try:
+                return self.market.recovery_pending()
+            except OSError:
+                return True
+
         def refresh_market_view(self):
             if self.busy or self.closing:
+                return
+            if self.registry_recovery_needed() or self.download_queue_error:
+                self.start_registry_recovery()
                 return
             try:
                 self.build_market_page()
             except (Hold, OSError) as exc:
                 self.set_state("ready", str(exc))
+
+        def start_registry_recovery(self):
+            """Own local journal recovery until it drains, even on window close."""
+            if self.busy or self.closing:
+                return
+            completion, failure = [], []
+            pending = tr("Registry recovery pending.", "Model kaydı kurtarması bekliyor.",
+                         "Registry-Wiederherstellung ausstehend.")
+            # Revoke all displayed partial identities before the worker starts.
+            # Keep completed transfer history, not stale actionable queue rows.
+            self.downloads[:] = [entry for entry in self.downloads
+                                 if entry["state"] not in ("RESUMABLE", "UNVERIFIED")]
+            self.download_queue_error = pending
+            self.build_downloads_page()
+            self.build_market_page(cards=(), recovery_error=pending)
+
+            async def run(epoch):
+                self.registry_worker_active = True
+                self.market_filter.set_sensitive(False)
+                self.refresh_market_buttons()
+                worker = asyncio.create_task(asyncio.to_thread(self.market.recovery_snapshot))
+                snapshot = None
+                try:
+                    try:
+                        snapshot = await finish_owned(worker)
+                    except asyncio.CancelledError:
+                        # Recovery is transactional, not an optional transfer.
+                        # Read its actual outcome only after the worker drains.
+                        snapshot = worker.result()
+                except (Hold, OSError) as exc:
+                    failure.append(str(exc))
+                    raise
+                except Exception:
+                    failure.append("Local operation failed")
+                    raise
+                finally:
+                    self.registry_worker_active = False
+                    self.market_filter.set_sensitive(True)
+                    if snapshot is not None:
+                        cards, rows, error = snapshot
+                        self.restore_download_queue(rows=rows, error=error)
+                        self.build_market_page(cards=cards)
+                        completion.append(tr("Registry refreshed.", "Model kaydı yenilendi.",
+                                             "Registry aktualisiert."))
+                    else:
+                        reason = failure[0] if failure else "registry_recovery_required"
+                        self.download_queue_error = reason
+                        self.build_market_page(cards=(), recovery_error=reason)
+                    self.build_downloads_page()
+            self.submit(run, kind="update", label=tr(
+                "Recover model registry", "Model kaydını kurtar", "Modellregistry wiederherstellen"),
+                committed=lambda: completion[0] if completion else "",
+                worker_failure=lambda: failure[0] if failure else "")
 
         def storage_report(self, cards=None):
             """Aggregate one validated registry snapshot, not a second read."""
@@ -3593,14 +3672,15 @@ def create_window(app, loop, bridge=None):
                         committed=lambda: completion[0] if completion else "",
                         worker_failure=lambda: failure[0] if failure else "")
 
-        def restore_download_queue(self):
+        def restore_download_queue(self, *, rows=None, error=""):
             """Rebuild pending rows from one bounded registry snapshot."""
-            try:
-                rows = self.market.pending_partials()
-            except (Hold, OSError) as exc:
-                self.download_queue_error = str(exc)
-                return
-            self.download_queue_error = ""
+            if rows is None:
+                try:
+                    rows = self.market.pending_partials()
+                except (Hold, OSError) as exc:
+                    self.download_queue_error = str(exc)
+                    return
+            self.download_queue_error = error
             for model_id, total, status in rows:
                 verified = status["state"] == "RESUMABLE"
                 note = (tr("Prefix will be verified before resuming.",
