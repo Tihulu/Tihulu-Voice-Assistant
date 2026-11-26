@@ -1996,6 +1996,10 @@ def create_window(app, loop, bridge=None):
                     "Delete selected temporary file", "Seçili geçici dosyayı sil",
                     "Gewählte temporäre Datei löschen"), self.discard_staging)
                 self.staging_choice.connect("changed", lambda *_: self.refresh_staging_buttons())
+                self.archive_staging_scan = self.button(controls, tr(
+                    "Inspect incomplete archive copies", "Yarım kalan arşiv kopyalarını incele",
+                    "Unvollständige Archivkopien prüfen"),
+                    lambda: self.inspect_staging(archive=True))
 
             self.clear_staging_review()
             wanted = self.market_filter.get_active_text() or "stt"
@@ -3163,6 +3167,7 @@ def create_window(app, loop, bridge=None):
         def clear_staging_review(self):
             self.staging_model = None
             self.staging_context = None
+            self.staging_archive = False
             self.staging_rows = ()
             self.staging_choice.remove_all()
             self.staging_note.set_text(tr(
@@ -3174,27 +3179,36 @@ def create_window(app, loop, bridge=None):
             chosen = self.selected_card()
             index = self.staging_choice.get_active()
             self.staging_scan.set_sensitive(not self.busy and chosen is not None)
+            self.archive_staging_scan.set_sensitive(not self.busy and chosen is not None)
             self.staging_discard.set_sensitive(
                 not self.busy and chosen is not None and chosen == self.staging_model
                 and 0 <= index < len(self.staging_rows))
 
-        def inspect_staging(self):
+        def inspect_staging(self, *, archive=False):
             chosen = self.selected_card()
             if self.busy or chosen is None:
                 return
             self.clear_staging_review()
             try:
                 context = self.picker_context()
-                rows = self.market.staging_candidates(chosen)
+                rows = (self.market.archive_staging_candidates(chosen) if archive
+                        else self.market.staging_candidates(chosen))
                 if chosen != self.selected_card() or context != self.picker_context():
                     raise Hold("profile_changed")
                 self.staging_model, self.staging_context, self.staging_rows = chosen, context, rows
-                for name, identity in rows:
+                self.staging_archive = archive
+                for row in rows:
+                    name, identity = row[:2]
                     self.staging_choice.append_text("%s · %s" % (name[-8:], market.human_size(identity[2])))
                 self.staging_note.set_text(tr(
                     "%d inactive temporary files for %s. Select one to delete." % (len(rows), chosen),
                     "%s için %d etkin olmayan geçici dosya. Silmek için birini seçin." % (chosen, len(rows)),
                     "%d inaktive temporäre Dateien für %s. Eine zum Löschen auswählen." % (len(rows), chosen)))
+                if archive:
+                    self.staging_note.set_text(tr(
+                        "%d incomplete archive copies for %s. Verified revisions are excluded." % (len(rows), chosen),
+                        "%s için %d yarım arşiv kopyası. Doğrulanmış sürümler hariç." % (chosen, len(rows)),
+                        "%d unvollständige Archivkopien für %s. Geprüfte Revisionen ausgeschlossen." % (len(rows), chosen)))
             except (Hold, OSError) as exc:
                 self.clear_staging_review()
                 self.set_state("ready", str(exc))
@@ -3211,11 +3225,15 @@ def create_window(app, loop, bridge=None):
                 self.refresh_staging_buttons()
                 self.set_state("ready", "profile_changed")
                 return
-            name, identity = self.staging_rows[index]
+            row = self.staging_rows[index]
+            archive = self.staging_archive
             # A new scan and selection are required after every attempt.
             self.clear_staging_review()
             try:
-                self.market.discard_staging(chosen, name, identity)
+                if archive:
+                    self.market.discard_archive_staging(chosen, *row)
+                else:
+                    self.market.discard_staging(chosen, *row)
                 self.set_state("ready", tr("Temporary file deleted.", "Geçici dosya silindi.",
                                            "Temporäre Datei gelöscht."))
             except (Hold, OSError) as exc:
