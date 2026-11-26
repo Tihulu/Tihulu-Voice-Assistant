@@ -4,6 +4,8 @@ on:
     branches: ['**']
     paths:
       - 'experiments/application_engine_acceptance.py'
+      - 'experiments/conversion_result.py'
+      - 'experiments/capabilities.py'
       - '.github/workflows/application-engine-evidence.yml'
 permissions:
   contents: read
@@ -31,4 +33,5 @@ jobs:
       - name: Run fixed public synthetic engine cases
         env:
           PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: src:experiments
         run: /usr/bin/python3 experiments/application_engine_acceptance.py
