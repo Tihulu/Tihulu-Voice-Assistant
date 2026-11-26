@@ -441,6 +441,31 @@ class JanChoiceJournalTests(unittest.TestCase):
         import json
         settings._replace_text(settings._choice_journal(self.path), json.dumps(record, sort_keys=True))
 
+    def test_aligned_jan_recovery_preserves_journal_on_sync_failure(self):
+        self.stage()
+        journal = settings._choice_journal(self.path)
+        before = journal.read_bytes()
+        with patch.object(settings, "_sync_parent", side_effect=OSError("fixture")):
+            with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+                settings.recover_jan_choice(self.store, self.path)
+        self.assertEqual(journal.read_bytes(), before)
+        self.assertEqual(settings.load(self.path), self.old)
+        self.assertTrue(settings.recover_jan_choice(self.store, self.path))
+
+    def test_jan_clear_refuses_audio_journal_created_during_sync(self):
+        self.stage()
+        original = settings._sync_parent
+        audio_journal = self.path.with_name(self.path.name + ".audio-choice-journal")
+        def conflict(path):
+            original(path)
+            audio_journal.write_text("{}")
+        with patch.object(settings, "_sync_parent", side_effect=conflict):
+            with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+                settings.recover_jan_choice(self.store, self.path)
+        self.assertTrue(settings.choice_pending(self.path))
+        self.assertTrue(settings.audio_choice_pending(self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+
     def test_success_removes_journal_after_profile_commit(self):
         with self.store._mutation_lock():
             with settings.choice_transaction(self.new, self.path, expected=self.old,
