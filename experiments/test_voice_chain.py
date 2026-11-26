@@ -375,3 +375,46 @@ class NativeVoiceTransportTests(unittest.TestCase):
         preview=self.stt.review_preview(self.c,"turn","en",edited_text="Hello world")
         self.assertFalse(preview[2])
         self.assertEqual(preview[3],self.stt.prepare_review(self.c,"turn","en"))
+
+    def test_neural_voice_exact_reviewed_response_and_revocation(self):
+        turn,wire=self.start()
+        turn.begin_fixture_transport(wire)
+        turn.event("turn",1,"text","Hello")
+        turn.event("turn",2,"completed",None)
+        args=("1.8.0","en","text","audio","b"*64,"c"*64)
+        call=turn.prepare_neural_speech(*args)
+        req=call.request(self.ctx)
+        self.assertEqual(dict(call.args)["digest"],sha256(b"Hello").hexdigest())
+        grant=self.g.fixture_grant("piper",req,60)
+        voice,payload=turn.start_neural_speech(*args,grant)
+        self.assertEqual(payload,b"Hello")
+        voice.complete(SpeechResult(req.target,sha256(payload).hexdigest(),"en","audio",wav(),"b"*64,"c"*64))
+        self.assertEqual(voice.result()[4],sha256(wav()).hexdigest())
+        self.stt.cancel()
+        with self.assertRaises(Refused):
+            voice.result()
+
+    def test_neural_voice_wrong_grant_engine_model_config_or_language_denied(self):
+        turn,wire=self.start()
+        turn.begin_fixture_transport(wire)
+        turn.event("turn",1,"text","Hello")
+        turn.event("turn",2,"completed",None)
+        args=("1.8.0","en","text","audio","b"*64,"c"*64)
+        exact=turn.prepare_neural_speech(*args)
+        grant=self.g.fixture_grant("exact-piper",exact.request(self.ctx),60)
+        for bad in (("1.8.0","en","text","audio","d"*64,"c"*64),
+                    ("1.8.0","en","text","audio","b"*64,"d"*64),
+                    ("1.8.0","de","text","audio","b"*64,"c"*64)):
+            with self.assertRaises(Refused):
+                turn.start_neural_speech(*bad,grant)
+        old=turn.prepare_speech("1.50","en","text","audio")
+        old_grant=self.g.fixture_grant("espeak",old.request(self.ctx),60)
+        with self.assertRaises(Refused):
+            turn.start_neural_speech(*args,old_grant)
+        voice,_=turn.start_neural_speech(*args,grant)
+        voice.checkpoint()
+
+    def test_neural_voice_no_effect_before_completed_turn(self):
+        turn,_=self.start()
+        with self.assertRaises(Refused):
+            turn.prepare_neural_speech("1.8.0","en","text","audio","b"*64,"c"*64)
