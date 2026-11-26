@@ -142,3 +142,5 @@ CAP-04 browser preflight: exact fixed HTML digest, read-only fixture code/input 
 CAP-04 actual WebDriver window handle replaces synthetic tab token; require exact single window and unchanged HTML digest before every authorized fixed operation, reject unexpected DOM content before issuing receipt. Explicit denied host ceiling fixture negative and unchanged page, two additional actual checks (22 planned). Fixed synthetic CI only; no generic arbitrary tab control or atomic effect guarantee.
 
 CAP-04 terminal failure handling: revoked/expired ancestors close offline browser fixture at prepare/begin/active checkpoint, clear receipt and revoke all claims; enforce bounded operation count before planning. Three regression methods. No actual browser teardown on its own, real CI wrapper owns teardown; not production runtime.
+
+CAP-04 non-idempotent fixed local click fixture: repeat click increments a counter and changes DOM text; inspect exact counter and visible text after explicit host deny and ancestor revocation to distinguish an unintended repeat effect. No extra case count (22 planned). Trusted test-only observation, no generic selector or production operation.

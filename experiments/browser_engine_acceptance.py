@@ -21,7 +21,7 @@ from urllib.parse import urlsplit, parse_qs
 
 HTML=b"""<!doctype html><meta charset=utf-8><title>TIHULU Fixture</title>
 <p id="message">Public synthetic browser fixture</p>
-<button id="change" onclick="document.getElementById('message').textContent='Changed locally'">Change</button>
+<button id="change" onclick="this.dataset.count=String(Number(this.dataset.count||0)+1);document.getElementById('message').textContent=this.dataset.count==='1'?'Changed locally':'Unexpected repeated click'">Change</button>
 """
 
 class WebDriverError(RuntimeError):
@@ -228,8 +228,12 @@ def child(browser,driver,host_net,host_port):
                 denied=True
             else:
                 denied=False
-            record("browser-explicit-host-deny-no-effect",denied and
-                   command("GET",element("message")+"/text")=="Changed locally")
+            # Test-only observation of a non-idempotent effect. A second
+            # click would change both the counter and the visible text.
+            def single_click_observed():
+                return (command("GET",element("change")+"/attribute/data-count")=="1"
+                        and command("GET",element("message")+"/text")=="Changed locally")
+            record("browser-explicit-host-deny-no-effect",denied and single_click_observed())
             gate.revoke("open")
             try:
                 start("offline_click","revoked","change")
@@ -237,7 +241,7 @@ def child(browser,driver,host_net,host_port):
                 denied=True
             else:
                 denied=False
-            record("browser-revoked-parent-blocks-operation",denied)
+            record("browser-revoked-parent-blocks-operation",denied and single_click_observed())
             owned.close()
             try:
                 owned.result()
