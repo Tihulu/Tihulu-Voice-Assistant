@@ -3246,10 +3246,13 @@ def create_window(app, loop, bridge=None):
             if (self.busy or chosen is None or chosen != self.staging_model
                     or not 0 <= index < len(self.staging_rows)):
                 return
-            if self.staging_context != self.picker_context():
+            try:
+                if self.staging_context != self.picker_context():
+                    raise Hold("profile_changed")
+            except (Hold, OSError) as exc:
                 self.clear_staging_review()
                 self.refresh_staging_buttons()
-                self.set_state("ready", "profile_changed")
+                self.set_state("ready", str(exc))
                 return
             row = self.staging_rows[index]
             archive = self.staging_archive
