@@ -3322,6 +3322,25 @@ class CatalogFetchUITests(MarketFixture):
         self.assertEqual(self.ui.status.get_text(), "catalog_not_verified")
         self.assertEqual(self.ui.market.cards(), ())
 
+    def test_removed_catalog_host_cannot_be_used_by_stale_window(self):
+        opener, calls = self.opener()
+        self.allow("catalog.example.test")
+        cfg = settings.load()
+        cfg["allowed_hosts"] = []
+        settings.save(cfg)
+        with patch.object(catalog_fetch, "urlopen_opener", return_value=opener):
+            self.ui.catalog_url.set_text(self.url)
+            self.ui.fetch_catalog()
+        self.assertEqual(calls, [])
+        self.assertEqual(self.ui.status.get_text(), "catalog_host_not_allowed")
+
+    def test_failed_catalog_host_save_restores_previous_allowlist(self):
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.ui.catalog_hosts.set_text("catalog.example.test")
+        self.assertEqual(self.ui.catalog_hosts.get_text(), "")
+        self.assertEqual(self.ui.cfg["allowed_hosts"], [])
+        self.assertEqual(settings.load()["allowed_hosts"], [])
+
     def test_a_host_outside_the_allowlist_is_never_fetched(self):
         opener, calls = self.opener()
         self.allow("other.example.test")
@@ -6434,6 +6453,12 @@ class RecordCardTests(ApprovedSourcesTests):
         self.assertFalse(self.ui.source_record.get_sensitive())
         self.assertIsNone(self.ui.record_card())
         self.assertEqual(self.ui.status.get_text(), "source_registration_changed")
+        self.assertIsNone(self.ui.market.lookup_card(card.model_id))
+
+    def test_source_record_refuses_busy_settings_writer(self):
+        card = self.search()
+        with settings._write_guard(settings.config_path()):
+            self.assertIsNone(self.ui.record_card())
         self.assertIsNone(self.ui.market.lookup_card(card.model_id))
 
     def test_listing_card_cannot_be_recorded_after_external_source_removal(self):
