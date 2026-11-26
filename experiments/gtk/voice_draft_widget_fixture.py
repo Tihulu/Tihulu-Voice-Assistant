@@ -63,6 +63,35 @@ class RealGtkDraftTests(unittest.TestCase):
         self.assertEqual(b.get_text(b.get_start_iter(),b.get_end_iter(),True),"")
         self.assertEqual(self.widget.text(),"")
 
+    def test_refresh_clears_invalid_review_before_user_click(self):
+        button=self.widget.present(*self.args)
+        self.assertTrue(self.widget.refresh_review())
+        self.jobs[0].cancel()
+        self.assertFalse(self.widget.refresh_review())
+        b=self.widget.preview.get_buffer()
+        self.assertEqual(b.get_text(b.get_start_iter(),b.get_end_iter(),True),"")
+        self.assertTrue(self.widget.status.get_text().startswith("HOLD:"))
+        button.emit("clicked")
+        self.assertEqual(self.widget.text(),"")
+
+    def test_refresh_exact_expiry_removes_display(self):
+        from unittest.mock import patch
+        fixture=fixtures.VoiceComposerHandoffTests()
+        with patch("tihulu_jarvis.profiles.time.time",return_value=1000), \
+             patch("tihulu_jarvis.profiles.time.monotonic",return_value=200):
+            fixture.setUp()
+            self.context,self.args=fixture.ctx,fixture.args
+            button=self.widget.present(*self.args)
+            self.assertTrue(self.widget.refresh_review())
+        with patch("tihulu_jarvis.profiles.time.time",return_value=1060), \
+             patch("tihulu_jarvis.profiles.time.monotonic",return_value=260):
+            self.assertFalse(self.widget.refresh_review())
+            self.assertIn("expired",self.widget.status.get_text())
+            button.emit("clicked")
+            self.assertEqual(self.widget.text(),"")
+            b=self.widget.preview.get_buffer()
+            self.assertEqual(b.get_text(b.get_start_iter(),b.get_end_iter(),True),"")
+
 if __name__=="__main__":
     Gtk.init()
     unittest.main(verbosity=2)
