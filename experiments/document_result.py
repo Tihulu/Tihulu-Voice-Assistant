@@ -43,11 +43,13 @@ class DocumentResult:
     source_digest: str
     page: int
     blocks: tuple
+    render_digest: str | None = None
 
     def checked(self, call, request):
         args = dict(call.args)
         if (self.call_target != request.target or self.source_digest != args["digest"]
-                or type(self.page) is not int or self.page != args.get("page", 1)):
+                or type(self.page) is not int or self.page != args.get("page", 1)
+                or self.render_digest != args.get("render_digest")):
             raise Refused("result_provenance_mismatch")
         if type(self.blocks) is not tuple or not 1 <= len(self.blocks) <= MAX_BLOCKS:
             raise Refused("invalid_blocks")
@@ -55,12 +57,12 @@ class DocumentResult:
         for block in self.blocks:
             if type(block) is not TextBlock:
                 raise Refused("invalid_block")
-            total += block.checked(ocr=call.operation == "ocr_image")
+            total += block.checked(ocr=call.operation in ("ocr_image", "pdf_page_ocr"))
             if total > MAX_RESULT_BYTES:
                 raise Refused("output_limit")
         # Include identity/geometry/confidence in the output digest, not just text.
         encoded = json.dumps(
-            (request.target, self.source_digest, self.page,
+            (request.target, self.source_digest, self.page, self.render_digest,
              tuple((b.text, b.box, b.confidence) for b in self.blocks)),
             ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8")
         if len(encoded) > MAX_RESULT_BYTES:
@@ -72,7 +74,7 @@ class DocumentFixture:
     """One synthetic result for an exact authorized call; no arbitrary callbacks."""
     def __init__(self, gateway, grant, context, call):
         if (type(gateway) is not FixtureGateway or type(call) is not CapabilityCall
-                or call.operation not in ("ocr_image", "pdf_extract")):
+                or call.operation not in ("ocr_image", "pdf_extract", "pdf_page_ocr")):
             raise Refused("unsupported_document_text_fixture")
         self._gateway, self._grant, self._call = gateway, grant, call
         self._request = call.request(context)

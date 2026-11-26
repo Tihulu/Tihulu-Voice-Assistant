@@ -36,3 +36,5 @@ Separate detected, compatible, tested evidence per exact adapter/version/functio
 ## Actual engine output mapped to shared fixture result contract
 
 #291 ten raw engine smoke cases passed. Add six separate actual TSV/XHTML bbox cases: three OCR languages with real per-word confidence and geometry; three per-page Poppler word geometry results. Map into existing DocumentFixture with exact engine version, source SHA-256, page and immutable block output digest; compare normalized recognized text exactly and source bytes unchanged. The real document workflow now verifies unchanged shipped paths against frozen experimental base. 16 cases total; no private document or actual runtime authorization. This is not a sandbox/host adapter or acceptance of arbitrary PDF/TSV/XHTML input.
+
+PDF page OCR has a distinct typed call: original PDF artifact/digest, selected page, rendered image digest and OCR language. The result must preserve both digests and page; OCR confidence applies, ordinary PDF text extraction cannot claim raster provenance. Synthetic only; a live trusted renderer must establish the derivation before any real grant.
