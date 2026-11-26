@@ -3444,7 +3444,13 @@ def create_window(app, loop, bridge=None):
             card = self.source_cards.get_selected_row()
             self.source_search.set_sensitive(not self.busy and chosen is not None)
             self.source_forget.set_sensitive(chosen is not None)
-            self.source_record.set_sensitive(not self.busy and card is not None)
+            self.source_record.set_sensitive(not self.busy and chosen is not None and card is not None
+                                             and getattr(card, "source", None) == chosen)
+
+        def require_registered_source(self, source):
+            if (source not in self.source_entries()
+                    or source not in catalog_sources.entries(settings.load()["sources"])):
+                raise Hold("source_registration_changed")
 
         def search_source(self):
             """List a registered source's public metadata, bounded and verified.
@@ -3459,23 +3465,28 @@ def create_window(app, loop, bridge=None):
             if source is None:
                 return None
             url = catalog_sources.safe_url(source)
+            self.show_source_cards((), 0)
             try:
+                self.require_registered_source(source)
                 self.require_tools(("external_network", ("catalog", source.host)))
                 raw = self.loop.run_until_complete(
                     catalog_sources.fetch(source, self.source_opener()))
+                self.require_registered_source(source)
+                if self.selected_source() != source:
+                    raise Hold("source_registration_changed")
                 cards, refused = catalog_sources.cards(
                     json.loads(raw), source)
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return None
-            self.show_source_cards(cards, refused)
+            self.show_source_cards(cards, refused, source=source)
             return cards
 
         def source_opener(self):
             """The listing opener shares the catalog transport HOLD."""
             return catalog_fetch.urlopen_opener()
 
-        def show_source_cards(self, cards, refused):
+        def show_source_cards(self, cards, refused, *, source=None):
             rows, item = [], self.source_cards.get_first_child()
             while item is not None:
                 nxt = item.get_next_sibling()
@@ -3484,6 +3495,7 @@ def create_window(app, loop, bridge=None):
             for card in cards:
                 row = Gtk.ListBoxRow()
                 row.card = card
+                row.source = source
                 caption = "%s · %s · %s · %s · %d MiB" % (
                     card.display_name, card.category, card.artifact_format,
                     ",".join(card.languages) or "-",
@@ -3517,6 +3529,9 @@ def create_window(app, loop, bridge=None):
             if source is None or card is None:
                 return None
             try:
+                if getattr(row, "source", None) != source:
+                    raise Hold("source_registration_changed")
+                self.require_registered_source(source)
                 recorded = catalog_sources.registry_card(card, source)
                 known = self.market.lookup_card(recorded.model_id)
                 if known is not None and replace(known, revision=0) != replace(recorded, revision=0):
