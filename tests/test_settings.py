@@ -336,3 +336,91 @@ class JanChoiceJournalTests(unittest.TestCase):
                     jan_transition=(self.store, self.before, replace(self.after, name="changed"))):
                 self.fail("unexpected commit")
         self.assertFalse(settings.choice_pending(self.path))
+
+    def interrupt_child(self, phase):
+        import subprocess
+        import sys
+        code = """
+import os, sys
+from pathlib import Path
+from dataclasses import replace
+sys.path.insert(0, sys.argv[1])
+from tihulu_jarvis import settings, profiles
+path, phase = Path(sys.argv[2]), sys.argv[3]
+store = profiles.Store(path.parent / "profiles")
+before = store.load("local-only")
+after = replace(before, version=2, llm_model_id="new").checked()
+old = settings.load(path)
+new = {**old, "llm": "new"}
+if phase == "journal":
+    original = settings._replace_text
+    def stop(p, text):
+        original(p, text)
+        if p == settings._choice_journal(path):
+            os._exit(73)
+    settings._replace_text = stop
+with store._mutation_lock():
+    with settings.choice_transaction(new, path, expected=old,
+            jan_transition=(store, before, after)):
+        if phase == "settings":
+            os._exit(73)
+        if phase == "active":
+            original = store._write
+            def stop(p, text):
+                original(p, text)
+                if p == store._path(before.id):
+                    os._exit(73)
+            store._write = stop
+        store._save_locked(after)
+        if phase == "committed":
+            os._exit(73)
+sys.exit(99)
+"""
+        child = subprocess.run([sys.executable, "-c", code,
+            str(Path(settings.__file__).resolve().parent.parent), str(self.path), phase],
+            capture_output=True, text=True, timeout=20)
+        self.assertEqual(child.returncode, 73, child.stderr)
+        self.assertTrue(settings.choice_pending(self.path))
+
+    def test_real_process_death_after_journal(self):
+        self.interrupt_child("journal")
+        self.assertTrue(settings.recover_jan_choice(self.store, self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+        self.assertEqual(self.store.load(self.before.id), self.before)
+
+    def test_real_process_death_after_settings_publication(self):
+        self.interrupt_child("settings")
+        self.assertEqual(settings.load(self.path), self.new)
+        self.assertTrue(settings.recover_jan_choice(self.store, self.path))
+        self.assertEqual(settings.load(self.path), self.old)
+        self.assertEqual(self.store.load(self.before.id), self.before)
+
+    def test_real_process_death_after_active_profile_before_history(self):
+        self.interrupt_child("active")
+        self.assertFalse((self.store.history / "local-only-v2.json").exists())
+        self.assertTrue(settings.recover_jan_choice(self.store, self.path))
+        self.assertEqual(settings.load(self.path), self.new)
+        self.assertEqual(self.store.versions(self.before.id)[-1], self.after)
+
+    def test_real_process_death_after_profile_and_history(self):
+        self.interrupt_child("committed")
+        self.assertTrue(settings.recover_jan_choice(self.store, self.path))
+        self.assertFalse(settings.choice_pending(self.path))
+        self.assertEqual(settings.load(self.path), self.new)
+        self.assertEqual(self.store.load(self.before.id), self.after)
+
+    def test_recovery_preserves_replaced_identical_journal(self):
+        from unittest.mock import patch
+        self.stage()
+        settings._replace_text(self.path, settings._serialize(self.new))
+        original = settings._replace_text
+        journal = settings._choice_journal(self.path)
+        def replaced(path, text):
+            original(path, text)
+            if path == self.path:
+                original(journal, journal.read_text())
+        with patch.object(settings, "_replace_text", side_effect=replaced):
+            with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+                settings.recover_jan_choice(self.store, self.path)
+        self.assertTrue(journal.exists())
+        self.assertEqual(settings.load(self.path), self.old)
