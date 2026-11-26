@@ -10,7 +10,7 @@ import socket
 import subprocess
 import tempfile
 import sys
-from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus, turbo_short_args
+from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus, turbo_short_args, speech_corpus_profile
 from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
@@ -70,10 +70,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original",pip
                 or model_digest(stt_paths[1])!=MODEL_SHA):
             raise RuntimeError("invalid pinned STT model")
         print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
-    if (corpus not in ("original","expanded","targeted","turbo-expanded","mixed-preview","mixed-auto","mixed-auto-turbo","mixed-auto-piper")
-            or (corpus in ("expanded","mixed-preview","mixed-auto","mixed-auto-piper") and (not stt_paths or stt_profile!="small"))
-            or (corpus in ("targeted","turbo-expanded","mixed-auto-turbo") and (not stt_paths or stt_profile!="turbo-q5"))):
-        raise RuntimeError("invalid corpus profile")
+    mixed_preview,mixed_auto,mixed_extra=speech_corpus_profile(corpus,stt_profile,bool(stt_paths))
     if (corpus=="mixed-auto-piper")!=(piper_root is not None):
         raise RuntimeError("invalid neural mixed input profile")
     if piper_root is not None:
@@ -357,7 +354,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 else:
                     transcript.cancel()
                     qrecord("multilingual-stt-typed-receipt-"+case_id,False,reason="quality_gate_failed")
-            if corpus in ("mixed-preview","mixed-auto","mixed-auto-turbo","mixed-auto-piper"):
+            if mixed_preview:
                 if transcript is None or not all(quality):
                     job.cancel()
                     return 1
@@ -381,7 +378,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
             record("speech-revoke-invalidates-conversion-"+case_id,denied)
             if not all(results):
                 return 1
-        if corpus in ("mixed-preview","mixed-auto","mixed-auto-turbo","mixed-auto-piper"):
+        if mixed_preview:
             import io,wave
             from mixed_voice_review import MixedVoiceReview,split_pcm
             # All original short WAVs are real engine outputs, with known
@@ -467,7 +464,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 else:
                     denied=False
                 record("speech-revoke-invalidates-conversion-"+case_id,denied)
-        if corpus in ("mixed-auto","mixed-auto-turbo","mixed-auto-piper"):
+        if mixed_auto:
             # A fresh public fixture review session for the changed PCM bytes.
             # Do not revive or inherit the revoked original segment receipts.
             from language_detection import Detection,DetectionFixture,parse_detection,detection_observation
@@ -475,6 +472,8 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
             auto_gate=lifetime.track(FixtureGateway(auto_ctx,rules,clock=profiles.PolicyClock()))
             detectors=[]
             transcripts=[]
+            owner_choices={0:"tr"} if corpus=="mixed-auto-reviewed" else {}
+            reviewed=[]
             try:
                 for i,(piece,(_,lang,text)) in enumerate(zip(paused_pieces,samples)):
                     artifact="auto-segment-"+str(i)
@@ -504,26 +503,59 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     common=["/work/whisper-cli","-m","/work/model.bin","-f","/work/sample.wav","-t","2","-ng","-nt"]
                     raw=run(common+["-l","auto","-dl"],scope,wrapper=STT_WRAPPER,timeout=120,capture_stderr=True)
                     observed,score=None,None
+                    target="auto-text-"+str(i)
+                    manual=False
                     try:
                         observed,score=detection_observation(raw)
                         detected,ppm=parse_detection(raw)
                     except Refused as exc:
-                        detector.cancel()
-                        record("mixed-auto-real-detection-"+str(i),False,reason=str(exc),
+                        if i not in owner_choices or observed is None:
+                            detector.cancel()
+                            record("mixed-auto-real-detection-"+str(i),False,reason=str(exc),
+                                   observed_language=observed,confidence_ppm=score)
+                            continue
+                        # Explicit fixed public test operator choice, not
+                        # inference or automatic fallback.
+                        hold=detector.hold_observation(raw)
+                        try:
+                            detector.result()
+                        except Refused:
+                            denied=True
+                        else:
+                            denied=False
+                        record("mixed-reviewed-auto-held-"+str(i),denied and hold[:2]==(observed,score),
                                observed_language=observed,confidence_ppm=score)
-                        # Independent subsequent samples remain observable.
-                        # Never force the expected language or issue a child grant.
-                        continue
-                    correct=detected==lang and not list(out.iterdir()) and audio_path.read_bytes()==piece.data
-                    record("mixed-auto-real-detection-"+str(i),correct,detected=detected,confidence_ppm=ppm)
-                    if not correct:
-                        detector.cancel()
-                        continue
-                    detector.complete(Detection(req.target,piece.digest,MODEL_SHA,"auto-language-"+str(i),detected,ppm))
-                    target="auto-text-"+str(i)
-                    call=detector.prepare_transcription(target)
-                    req=call.request(auto_ctx)
-                    trans=detector.start_transcription(target,auto_gate.fixture_grant("transcribe-"+str(i),req,60))
+                        selected=owner_choices[i]
+                        call,review_req=detector.prepare_override(selected,target)
+                        req=call.request(auto_ctx)
+                        trans_grant=auto_gate.fixture_grant("transcribe-"+str(i),req,60)
+                        try:
+                            detector.start_override(selected,target,trans_grant,None)
+                        except Refused:
+                            denied=True
+                        else:
+                            denied=False
+                        record("mixed-reviewed-no-transcribe-before-owner-"+str(i),denied and not list(out.iterdir()))
+                        if not denied:
+                            return 1
+                        approval=auto_gate.fixture_grant("language-owner-"+str(i),review_req,60)
+                        trans=detector.start_override(selected,target,trans_grant,approval)
+                        reviewed.append((i,approval))
+                        detected=selected
+                        manual=True
+                    if not manual:
+                        correct=detected==lang and not list(out.iterdir()) and audio_path.read_bytes()==piece.data
+                        record("mixed-auto-real-detection-"+str(i),correct,detected=detected,confidence_ppm=ppm)
+                        if not correct:
+                            detector.cancel()
+                            continue
+                        detector.complete(Detection(req.target,piece.digest,MODEL_SHA,"auto-language-"+str(i),detected,ppm))
+                        call=detector.prepare_transcription(target)
+                        req=call.request(auto_ctx)
+                        trans=detector.start_transcription(target,auto_gate.fixture_grant("transcribe-"+str(i),req,60))
+                    else:
+                        record("mixed-reviewed-exact-owner-choice-"+str(i),detected==lang and
+                               dict(call.args)["digest"]==piece.digest and audio_path.read_bytes()==piece.data)
                     transcripts.append(trans)
                     trans.checkpoint()
                     decode=common+["-l",dict(call.args)["language"],"-otxt","-of","/work/out/transcript"]
@@ -555,7 +587,14 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                        [row.language for row in view.segments]==[lang for _,lang,_ in samples]
                        and view.text=="\n".join(t.result()[0].text for t in transcripts),
                        languages=[row.language for row in view.segments])
-                detectors[1].cancel()
+                if corpus=="mixed-auto-reviewed":
+                    if len(reviewed)!=1 or reviewed[0][0]!=0:
+                        return 1
+                    auto_gate.revoke(reviewed[0][1].identity)
+                    revoked_index=0
+                else:
+                    detectors[1].cancel()
+                    revoked_index=1
                 try:
                     mixed.preview()
                 except Refused:
@@ -563,13 +602,13 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 else:
                     denied=False
                 record("mixed-auto-revoke-invalidates-review",denied and all(t.result()[0].language==samples[i][1]
-                       for i,t in enumerate(transcripts) if i!=1))
+                       for i,t in enumerate(transcripts) if i!=revoked_index))
             finally:
                 for detector in detectors:
                     detector.cancel()
         record("speech-distinct-multilingual-output",len(digests)==len(samples))
         record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+case_id)).iterdir())==[speech_filename(case_id)] for case_id,_,_ in samples) and not list(output.iterdir()))
-    return 0 if len(results)==5+7*len(samples)+(22 if corpus in ("mixed-auto","mixed-auto-turbo","mixed-auto-piper") else 8 if corpus=="mixed-preview" else 0) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
+    return 0 if len(results)==5+7*len(samples)+mixed_extra and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
 
 if __name__=="__main__":
     raise SystemExit(main(*sys.argv[1:]))

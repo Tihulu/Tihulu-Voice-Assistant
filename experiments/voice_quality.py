@@ -60,3 +60,24 @@ def turbo_short_args(rate,frames):
             or rate!=22050 or not 0<frames<=rate*8):
         raise Refused("turbo_short_audio_limit")
     return ["-ac","500","-bs","1","-bo","1"]
+
+
+def speech_corpus_profile(corpus,stt_profile,has_stt):
+    """Single closed dispatch table for runner phases and expected case count."""
+    profiles={
+        "original":(False,False,0,None),
+        "expanded":(False,False,0,"small"),
+        "targeted":(False,False,0,"turbo-q5"),
+        "turbo-expanded":(False,False,0,"turbo-q5"),
+        "mixed-preview":(True,False,8,"small"),
+        "mixed-auto":(True,True,22,"small"),
+        "mixed-auto-turbo":(True,True,22,"turbo-q5"),
+        "mixed-auto-piper":(True,True,22,"small"),
+        "mixed-auto-reviewed":(True,True,24,"small"),
+    }
+    if type(corpus) is not str or corpus not in profiles or type(has_stt) is not bool:
+        raise RuntimeError("invalid corpus profile")
+    retain,auto,extra,required=profiles[corpus]
+    if required is not None and (not has_stt or required!=stt_profile):
+        raise RuntimeError("invalid corpus profile")
+    return retain,auto,extra
