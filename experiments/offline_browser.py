@@ -41,7 +41,6 @@ class OfflineBrowser:
         with self._lock:
             if type(call) is not CapabilityCall or self._active is not None:
                 raise Refused("browser_unavailable")
-            args=dict(call.args)
             op=call.operation
             if op=="offline_open":
                 valid=self._state=="new" and call==self._call(op)
@@ -60,6 +59,12 @@ class OfflineBrowser:
             self._claims.append((grant,request))
             self._active=op
             self._receipt=None
+
+    def checkpoint(self):
+        with self._lock:
+            if self._active is None or self._state=="closed":
+                raise Refused("browser_unavailable")
+            self._g.checkpoint_claimed_group(tuple(self._claims))
 
     def complete(self,text=None):
         with self._lock:
