@@ -847,6 +847,10 @@ class Transfer:
         self.card, self.state = saved, saved.state
         return saved
 
+    def request_publication_stop(self):
+        """Signal the owned worker synchronously before async cancellation drains."""
+        self._publication_stop.set()
+
     async def _publish_async(self, registered, *, replacing, threaded=False):
         """Opt-in worker for callers with a thread-safe authorization checkpoint.
 
@@ -861,7 +865,7 @@ class Transfer:
         try:
             return await asyncio.shield(worker)
         except asyncio.CancelledError:
-            self._publication_stop.set()
+            self.request_publication_stop()
             try:
                 await finish_owned(asyncio.gather(worker, return_exceptions=True))
             except asyncio.CancelledError:

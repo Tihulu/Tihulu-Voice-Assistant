@@ -3327,6 +3327,7 @@ def create_window(app, loop, bridge=None):
                 self.build_downloads_page()
 
             self.registry_worker_active = True
+            self.registry_worker_stop = transfer.request_publication_stop
             self.market_filter.set_sensitive(False)
             self.refresh_market_buttons()
             try:
@@ -3362,6 +3363,7 @@ def create_window(app, loop, bridge=None):
                 failure.append(str(exc))
 
         def finish_transfer_views(self, completion):
+            self.registry_worker_stop = None
             self.registry_worker_active = False
             self.market_filter.set_sensitive(True)
             self.build_downloads_page()
@@ -3519,6 +3521,7 @@ def create_window(app, loop, bridge=None):
                 entry["state"], entry["note"] = "DOWNLOADING", tr("Resuming…","Sürdürülüyor…",
                                                                  "Fortsetzung…")
                 self.registry_worker_active = True
+                self.registry_worker_stop = transfer.request_publication_stop
                 self.market_filter.set_sensitive(False)
                 self.refresh_market_buttons()
                 try:
@@ -3638,6 +3641,7 @@ def create_window(app, loop, bridge=None):
                 self.session.check(epoch)
                 checkpoint()
                 self.registry_worker_active = True
+                self.registry_worker_stop = stop.set
                 self.market_filter.set_sensitive(False)
                 self.refresh_market_buttons()
                 worker = asyncio.create_task(asyncio.to_thread(restore))
@@ -3659,6 +3663,7 @@ def create_window(app, loop, bridge=None):
                             failure.append(str(error))
                         elif not isinstance(error, Hold):
                             failure.append("Local operation failed")
+                    self.registry_worker_stop = None
                     self.registry_worker_active = False
                     self.market_filter.set_sensitive(True)
                     try:
@@ -3692,6 +3697,7 @@ def create_window(app, loop, bridge=None):
                          "total": source.size, "note": "", "resume": 0}
                 self.downloads.append(entry)
                 self.registry_worker_active = True
+                self.registry_worker_stop = transfer.request_publication_stop
                 self.market_filter.set_sensitive(False)
                 self.refresh_market_buttons()
                 try:
@@ -4349,7 +4355,13 @@ def create_window(app, loop, bridge=None):
             if self.stage != "stopping":
                 self.set_state("stopping_playback")
 
+        def signal_registry_stop(self):
+            signal = getattr(self, "registry_worker_stop", None)
+            if signal is not None:
+                signal()
+
         def hard_stop(self):
+            self.signal_registry_stop()
             self.drop_attachment_for_context_change()
             if hasattr(self, "chat_files"):
                 self.chat_files.reset()
@@ -4360,6 +4372,8 @@ def create_window(app, loop, bridge=None):
             self.interrupt(False)
 
         def interrupt(self, clear):
+            # The GTK callback is the stop boundary, not the next asyncio tick.
+            self.signal_registry_stop()
             self.dismiss_picker()
             self.clear_model_scan()
             if clear:
