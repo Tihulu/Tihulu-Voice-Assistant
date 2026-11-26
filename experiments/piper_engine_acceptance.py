@@ -15,6 +15,7 @@ from capabilities import CapabilityCall
 from speech_result import SpeechFixture,SpeechResult,MAX_WAV
 
 MODEL_SHA="2844717f524ab965d3fe86e60562cbb601d3e456836efcc2196cc3a14112a8fb"
+CONFIG_SHA="13ebd7810f1b61b5027583cf3131a0a233b6ea81c38f2200ebc4ff41c3cca039"
 VERSION="1.8.0"
 TEXT="Merhaba. Bugün güzel bir gün."
 PROBE="""import hashlib,json,os,socket,sys
@@ -75,7 +76,7 @@ def main(site,model,config):
     site,model,config=map(lambda p:Path(p).resolve(),(site,model,config))
     if (os.getuid()==0 or not site.is_dir() or not model.is_file() or not config.is_file()
             or not 0<model.stat().st_size<=70000000 or digest(model)!=MODEL_SHA
-            or not 0<config.stat().st_size<=16384):
+            or not 0<config.stat().st_size<=16384 or digest(config)!=CONFIG_SHA):
         raise RuntimeError("invalid pinned voice inputs")
     cfg=json.loads(config.read_text(encoding="utf-8"))
     if (cfg["audio"]["sample_rate"]!=22050 or cfg["espeak"]["voice"]!="tr"
