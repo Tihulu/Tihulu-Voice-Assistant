@@ -65,7 +65,8 @@ class VoiceQualityTests(unittest.TestCase):
             ("mixed-auto","small",(True,True,22)),
             ("mixed-auto-turbo","turbo-q5",(True,True,22)),
             ("mixed-auto-piper","small",(True,True,22)),
-            ("mixed-auto-reviewed","small",(True,True,24))):
+            ("mixed-auto-reviewed","small",(True,True,24)),
+            ("mixed-auto-reviewed-short","small",(True,True,24))):
             self.assertEqual(speech_corpus_profile(name,engine,True),expected)
             with self.assertRaises(RuntimeError):
                 speech_corpus_profile(name,"tiny",True)

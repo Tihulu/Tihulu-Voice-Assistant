@@ -9,6 +9,7 @@ import signal
 import socket
 import subprocess
 import tempfile
+import time
 import sys
 from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus, turbo_short_args, speech_corpus_profile
 from tihulu_jarvis import profiles
@@ -472,7 +473,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
             auto_gate=lifetime.track(FixtureGateway(auto_ctx,rules,clock=profiles.PolicyClock()))
             detectors=[]
             transcripts=[]
-            owner_choices={0:"tr"} if corpus=="mixed-auto-reviewed" else {}
+            owner_choices={0:"tr"} if corpus in ("mixed-auto-reviewed","mixed-auto-reviewed-short") else {}
             reviewed=[]
             try:
                 for i,(piece,(_,lang,text)) in enumerate(zip(paused_pieces,samples)):
@@ -501,7 +502,15 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     detectors.append(detector)
                     detector.checkpoint()
                     common=["/work/whisper-cli","-m","/work/model.bin","-f","/work/sample.wav","-t","2","-ng","-nt"]
-                    raw=run(common+["-l","auto","-dl"],scope,wrapper=STT_WRAPPER,timeout=120,capture_stderr=True)
+                    started=time.monotonic()
+                    try:
+                        raw=run(common+["-l","auto","-dl"],scope,wrapper=STT_WRAPPER,timeout=120,capture_stderr=True)
+                    except RuntimeError as exc:
+                        detector.cancel()
+                        record("mixed-auto-real-detection-"+str(i),False,reason=str(exc)[:2500],
+                               elapsed_seconds=round(time.monotonic()-started,3))
+                        continue
+                    print(json.dumps({"segment":i,"phase":"detect","elapsed_seconds":round(time.monotonic()-started,3)}),flush=True)
                     observed,score=None,None
                     target="auto-text-"+str(i)
                     manual=False
@@ -559,10 +568,19 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     transcripts.append(trans)
                     trans.checkpoint()
                     decode=common+["-l",dict(call.args)["language"],"-otxt","-of","/work/out/transcript"]
-                    if stt_profile=="turbo-q5":
+                    if stt_profile=="turbo-q5" or corpus=="mixed-auto-reviewed-short":
                         from speech_result import pcm_info
                         decode+=turbo_short_args(*pcm_info(piece.data))
-                    run(decode,scope,wrapper=STT_WRAPPER,timeout=120)
+                    started=time.monotonic()
+                    try:
+                        run(decode,scope,wrapper=STT_WRAPPER,timeout=120)
+                    except RuntimeError as exc:
+                        trans.cancel()
+                        detector.cancel()
+                        record("mixed-auto-real-quality-"+str(i),False,reason=str(exc)[:2500])
+                        return 1
+                    print(json.dumps({"segment":i,"phase":"transcribe","elapsed_seconds":round(time.monotonic()-started,3),
+                                      "decoder":"bounded-short" if "-ac" in decode else "default"}),flush=True)
                     path=out/"transcript.txt"
                     if path.is_symlink() or not path.is_file() or not 0<path.stat().st_size<=16384:
                         return 1
@@ -593,7 +611,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                        [row.language for row in view.segments]==[lang for _,lang,_ in samples]
                        and view.text=="\n".join(t.result()[0].text for t in transcripts),
                        languages=[row.language for row in view.segments])
-                if corpus=="mixed-auto-reviewed":
+                if corpus in ("mixed-auto-reviewed","mixed-auto-reviewed-short"):
                     if len(reviewed)!=1 or reviewed[0][0]!=0:
                         return 1
                     auto_gate.revoke(reviewed[0][1].identity)
