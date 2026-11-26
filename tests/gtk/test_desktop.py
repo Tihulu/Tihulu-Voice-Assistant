@@ -2323,6 +2323,32 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         self.pick_card(card.model_id)
         return card, path
 
+    def test_direct_picker_selection_uses_same_audio_journal(self):
+        path = self.weights("fixture-picker.bin")
+        self.ui.select_imported_audio("stt", str(path))
+        card = self.ui.market.card(path.name)
+        self.assertEqual(card.state, "ACTIVE")
+        self.assertEqual(settings.load()["stt"], str(path))
+        self.assertFalse(settings.audio_choice_pending())
+        self.assertEqual(self.ui.cfg["stt"], str(path))
+
+    def test_reimport_does_not_downgrade_selected_card(self):
+        path = self.weights("fixture-picker.bin")
+        self.ui.select_imported_audio("stt", str(path))
+        current = self.ui.market.card(path.name)
+        self.assertEqual(self.ui.register_choice("stt", str(path)), current)
+        self.assertEqual(self.ui.market.card(path.name), current)
+
+    def test_import_refuses_stale_settings_before_registry_write(self):
+        path = self.weights("fixture-new.bin")
+        changed = settings.load()
+        changed["text_scale"] = "large"
+        settings.save(changed)
+        with self.assertRaisesRegex(Hold, "settings_changed"):
+            self.ui.register_choice("stt", str(path))
+        self.assertIsNone(self.ui.market.lookup_card(path.name))
+        self.assertEqual(settings.load(), changed)
+
     def test_external_settings_change_refuses_stale_local_choice(self):
         card, path = self.prepare_stt()
         before = self.ui.cfg["stt"]

@@ -1589,7 +1589,11 @@ def create_window(app, loop, bridge=None):
             self.transcribe_button.set_sensitive(not self.busy and transcribe_ready and not audio_blocked)
             if hasattr(self, "chat_transcribe"):
                 self.chat_transcribe.set_sensitive(not self.busy and transcribe_ready and not audio_blocked)
-                if not stt_present:
+                if audio_blocked:
+                    note = tr("Audio model choice recovery required.",
+                              "Ses modeli seçimi kurtarması gerekli.",
+                              "Audiomodellauswahl muss wiederhergestellt werden.")
+                elif not stt_present:
                     note = tr("Select a local Whisper model in Installed models.",
                               "Kurulu modellerden yerel Whisper modeli seç.",
                               "Unter Installierte Modelle ein lokales Whisper-Modell wählen.")
@@ -1604,7 +1608,7 @@ def create_window(app, loop, bridge=None):
                 self.test_chat_button.set_sensitive(connected)
                 for widget, lang in self.previews.items():
                     # A preview speaks only the locale that is actually selected.
-                    widget.set_sensitive(lang in voices_present and allowed
+                    widget.set_sensitive(lang in voices_present and allowed and not audio_blocked
                                          and audio.tools_ready("piper","aplay"))
 
         def build_resources_page(self):
@@ -1889,6 +1893,9 @@ def create_window(app, loop, bridge=None):
 
         def register_choice(self, key, path):
             """Register a truthful card, then remember the local reference."""
+            if key not in ("stt", "tr", "en", "de"):
+                raise Hold("invalid_audio_choice_transition")
+            settings._require_no_choice(settings.config_path())
             category = "stt" if key == "stt" else "tts"
             engine = "whisper.cpp" if key == "stt" else "piper"
             card = market.from_file(str(audio.selected_file(path, ".bin" if key == "stt" else ".onnx")),
@@ -1898,14 +1905,33 @@ def create_window(app, loop, bridge=None):
                 # A voice must match the locale it is offered for.
                 audio.voice_for(path, key)
             known = self.market.lookup_card(card.model_id)
-            if known is not None and (known.owned_by_jarvis or known.shared_storage_owner
-                                      or known.storage_ref != card.storage_ref):
-                raise Hold("registry_import_conflict")
-            card = self.market.save_card(card, expected=known)
-            self.cfg.setdefault("market_refs", {})[card.storage_ref] = str(path)
-            self.save()
+            if known is not None:
+                if (known.owned_by_jarvis or known.shared_storage_owner
+                        or known.storage_ref != card.storage_ref
+                        or known.category != card.category or known.engine != card.engine
+                        or known.languages != card.languages or known.disk_size_bytes != card.disk_size_bytes
+                        or known.local_or_cloud != "local"
+                        or known.state not in ("REGISTERED", "TESTABLE", "ACTIVE")):
+                    raise Hold("registry_import_conflict")
+                # Re-import is not a downgrade of a previously selected card.
+                card = known
+            proposed = settings.checked(self.cfg)
+            proposed["market_refs"][card.storage_ref] = str(path)
+            with self.market.transfer_lease(card.model_id), self.market._write_guard():
+                if self.market.lookup_card(card.model_id) != known:
+                    raise Hold("registry_card_changed")
+                with settings.choice_transaction(proposed, expected=self.cfg):
+                    if known is None:
+                        card = self.market.save_card(card, expected=None)
+            self.cfg = proposed
             self.build_market_page()
             return card
+
+        def select_imported_audio(self, key, path):
+            """One picker selection uses the same durable preference as AI Market."""
+            card = self.register_choice(key, path)
+            self.use_card(card.model_id, expected=card)
+            self.build_market_page()
 
         def persist_jan_choice(self, card, expected):
             """Commit a local Jan selection without publishing a premature UI choice.
@@ -4126,16 +4152,10 @@ def create_window(app, loop, bridge=None):
                     p=file.get_path() if file else None
                     # A card is registered before the choice is applied, so an
                     # unsupported or unreadable file never becomes the active model.
-                    self.register_choice(key, p)
-                    if key=="stt":
-                        self.cfg["stt"]=str(audio.selected_file(p,".bin"))
-                    else:
-                        self.cfg["voices"][key]=audio.voice_for(p,key).id
-                    self.save()
-                    self.update_labels()
-                    self.refresh()
-                except Hold as exc:
-                    self.status.set_text(str(exc))
+                    self.select_imported_audio(key, p)
+                except (Hold, OSError) as exc:
+                    self.set_state("ready", str(exc) if isinstance(exc, Hold)
+                                   else "model_selection_write_failed")
                 finally:
                     d.destroy()
             self.show_owned_picker(dialog, response)
