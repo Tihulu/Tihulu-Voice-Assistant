@@ -111,3 +111,32 @@ class ConversionTests(unittest.TestCase):
         g.revoke("convert")
         with self.assertRaises(Refused):
             job.simulate_publication("fixture","destination",approved)
+
+
+    def test_publication_checks_exact_read_write_and_publish_ceilings(self):
+        _,_,preview = self.publication_fixture()
+        request = preview.prepare_publication("fixture","destination").request(self.ctx)
+        for missing in ("filesystem_read","filesystem_write","publish_artifact"):
+            rules = [profiles.Rule(a,(self.req.target,),"allow") for a in
+                     ("host_shell","filesystem_read","filesystem_write")]
+            rules += [profiles.Rule(a,(request.target,),"allow") for a in
+                      ("filesystem_read","filesystem_write","publish_artifact") if a!=missing]
+            g = FixtureGateway(self.ctx,tuple(rules),clock=profiles.PolicyClock())
+            conversion = g.fixture_grant("convert",self.req,60)
+            job = ConversionFixture(g,conversion,self.ctx,self.call)
+            job.complete(self.output)
+            with self.assertRaises(Refused):
+                g.fixture_grant("publish",request,60)
+
+    def test_publication_explicit_write_deny_cannot_be_overridden_by_allow(self):
+        _,_,preview = self.publication_fixture()
+        request = preview.prepare_publication("fixture","destination").request(self.ctx)
+        rules = [profiles.Rule(a,(),"allow") for a in
+                 ("host_shell","filesystem_read","filesystem_write","publish_artifact")]
+        rules.append(profiles.Rule("filesystem_write",(request.target,),"deny"))
+        g = FixtureGateway(self.ctx,tuple(rules),clock=profiles.PolicyClock())
+        conversion = g.fixture_grant("convert",self.req,60)
+        job = ConversionFixture(g,conversion,self.ctx,self.call)
+        job.complete(self.output)
+        with self.assertRaisesRegex(Refused,"explicit_deny"):
+            g.fixture_grant("publish",request,60)
