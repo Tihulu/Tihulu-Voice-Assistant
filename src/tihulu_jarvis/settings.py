@@ -210,6 +210,32 @@ def audio_integrity_level(cfg, slot):
     return "full"
 
 
+class ProfileSelectionGuard:
+    """Cache only a profile selection read from an unchanged settings inode.
+
+    A metadata change triggers a fresh bounded read; missing or unreadable
+    settings fail closed. Cosmetic changes do not invalidate the profile.
+    """
+
+    def __init__(self):
+        self._cached = None
+
+    def require(self, expected, path=None):
+        p = config_path() if path is None else Path(path)
+        try:
+            stamp = _choice_identity(p.lstat())
+            if self._cached is None or self._cached[:2] != (p, stamp):
+                current = load(p)["profile"]
+                if _choice_identity(p.lstat()) != stamp:
+                    raise Hold("profile_changed")
+                self._cached = (p, stamp, current)
+            if self._cached[2] != expected:
+                raise Hold("profile_changed")
+        except (Hold, OSError):
+            self._cached = None
+            raise Hold("profile_changed") from None
+
+
 def require_current_audio_selection(expected, path=None):
     """Refuse an old window after another writer changes persisted audio context.
 

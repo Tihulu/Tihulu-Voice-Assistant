@@ -273,6 +273,30 @@ class SettingsSnapshotBoundaryTests(unittest.TestCase):
         settings.save(cfg, self.path)
         self.assertEqual(settings.load(self.path), cfg)
 
+    def test_profile_guard_rechecks_replaced_settings_and_allows_cosmetic_change(self):
+        from unittest.mock import patch
+        cfg = {**settings.empty(), "profile": "strict"}
+        settings.save(cfg, self.path)
+        guard = settings.ProfileSelectionGuard()
+        with patch.object(settings, "load", wraps=settings.load) as read:
+            guard.require("strict", self.path)
+            guard.require("strict", self.path)
+            self.assertEqual(read.call_count, 1)
+            settings.save({**cfg, "text_scale": "large"}, self.path)
+            guard.require("strict", self.path)
+            self.assertEqual(read.call_count, 2)
+            settings.save({**cfg, "profile": "otherx"}, self.path)
+            with self.assertRaisesRegex(Hold, "profile_changed"):
+                guard.require("strict", self.path)
+
+    def test_profile_guard_refuses_missing_settings_after_cached_success(self):
+        settings.save({**settings.empty(), "profile": "strict"}, self.path)
+        guard = settings.ProfileSelectionGuard()
+        guard.require("strict", self.path)
+        self.path.unlink()
+        with self.assertRaisesRegex(Hold, "profile_changed"):
+            guard.require("strict", self.path)
+
     def test_integrity_levels_distinguish_recorded_metadata_from_legacy(self):
         cfg = settings.empty()
         self.assertEqual(settings.audio_integrity_level(cfg, "stt"), "unselected")

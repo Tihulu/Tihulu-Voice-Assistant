@@ -786,6 +786,17 @@ class ProfileUITests(DesktopFixture):
         self.assertEqual(profiles.Store._parse(text).state, "active")
         self.assertTrue(self.ui.send.get_sensitive() is False or True)
 
+    def test_external_profile_switch_revokes_existing_jan_route(self):
+        self.connect_model()
+        route = self.ui.attachment_route()
+        self.assertTrue(self.ui.route_current(route))
+        newer = settings.load()
+        newer["profile"] = "strict"
+        settings.save(newer)
+        self.assertFalse(self.ui.route_current(route))
+        with self.assertRaisesRegex(Hold, "profile_changed"):
+            self.ui.attachment_route()
+
     def test_stale_profile_switch_does_not_publish_new_policy(self):
         before = self.ui.cfg["profile"]
         policy = self.ui.policy
