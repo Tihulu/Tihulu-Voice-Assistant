@@ -2431,9 +2431,24 @@ class Registry:
         self._recover_publication()
         return saved
 
+    @staticmethod
+    def _recovery_identity(path):
+        try:
+            return _artifact_identity(path.lstat())
+        except FileNotFoundError:
+            return None
+
+    def _recovery_binding(self, journal, journal_identity, registry_identity, folder, directory):
+        """Bind a recovery decision to its exact journal, registry and directory."""
+        if (self._recovery_identity(journal) != journal_identity
+                or self._recovery_identity(self.path) != registry_identity
+                or _directory_identity(folder) != directory):
+            raise Hold("registry_recovery_changed")
+
     def _recover_publication(self):
         """Restore the old artifact or finalize the exact committed generation."""
         try:
+            journal_identity = self._recovery_identity(self.publication_journal)
             raw = _bounded_registry_text(self.publication_journal, 4096)
         except FileNotFoundError:
             return
@@ -2457,24 +2472,35 @@ class Registry:
                     or not valid_payload(record["incoming"])
                     or (record["previous"] is not None and not valid_payload(record["previous"]))):
                 raise Hold("publication_recovery_required")
+            registry_identity = self._recovery_identity(self.path)
             raw_registry = self._read_document()
             generation = _text_digest(raw_registry)
             cards, _ = self._parse(raw_registry)
             known = next((c for c in cards if c.model_id == record["model"]), None)
             target = self.root / "artifacts" / record["model"]
             backup = target.parent / ".publish-backup"
-            _directory_identity(target.parent)
+            directory = _directory_identity(target.parent)
             if known is None:
                 raise Hold("publication_recovery_required")
             previous, incoming = record["previous"], record["incoming"]
+            target_identity = self._recovery_identity(target)
+            backup_identity = self._recovery_identity(backup)
 
-            def observed(path):
-                if not _exists_entry(path):
+            def bound():
+                self._recovery_binding(self.publication_journal, journal_identity,
+                                       registry_identity, target.parent, directory)
+                if (self._recovery_identity(target) != target_identity
+                        or self._recovery_identity(backup) != backup_identity):
+                    raise Hold("publication_recovery_required")
+
+            def observed(path, identity):
+                if identity is None:
                     return None
-                size = path.lstat().st_size
+                size = identity[2]
                 return {"size": size, "digest": _verified_artifact(path, size)}
 
-            actual, retained = observed(target), observed(backup)
+            actual, retained = observed(target, target_identity), observed(backup, backup_identity)
+            bound()
             if retained is not None and (previous is None or retained != previous):
                 raise Hold("publication_recovery_required")
             if generation == record["old"]:
@@ -2501,11 +2527,17 @@ class Registry:
                         or actual != incoming):
                     raise Hold("publication_recovery_required")
                 _sync_directory(self.root)
+                bound()
                 if retained is not None:
                     backup.unlink()
             else:
                 raise Hold("publication_recovery_required")
+            # The intended unlink/replace may change link count and ctime.
+            # Capture the resulting namespace and check it after durability sync.
+            target_identity = self._recovery_identity(target)
+            backup_identity = self._recovery_identity(backup)
             _sync_directory(target.parent)
+            bound()
             self.publication_journal.unlink()
             _sync_directory(self.root)
         except (OSError, ValueError, TypeError, RecursionError, Hold):
@@ -2519,6 +2551,7 @@ class Registry:
         state is assumed; this is not a hostile same-UID sandbox.
         """
         try:
+            journal_identity = self._recovery_identity(self.removal_journal)
             raw = _bounded_registry_text(self.removal_journal, 4096)
         except FileNotFoundError:
             return
@@ -2538,14 +2571,24 @@ class Registry:
                            for key in ("digest", "old", "new"))
                     or record["old"] == record["new"]):
                 raise Hold("uninstall_recovery_required")
+            registry_identity = self._recovery_identity(self.path)
             registry_text = self._read_document()
             generation = _text_digest(registry_text)
             cards, _ = self._parse(registry_text)
             known = next((card for card in cards if card.model_id == record["model"]), None)
             target = self.root / "artifacts" / record["model"]
             backup = target.parent / ".uninstall-recovery"
-            _directory_identity(target.parent)
-            has_target, has_backup = _exists_entry(target), _exists_entry(backup)
+            directory = _directory_identity(target.parent)
+            target_identity = self._recovery_identity(target)
+            backup_identity = self._recovery_identity(backup)
+            has_target, has_backup = target_identity is not None, backup_identity is not None
+
+            def bound():
+                self._recovery_binding(self.removal_journal, journal_identity,
+                                       registry_identity, target.parent, directory)
+                if (self._recovery_identity(target) != target_identity
+                        or self._recovery_identity(backup) != backup_identity):
+                    raise Hold("uninstall_recovery_required")
 
             def verify(path):
                 if _verified_artifact(path, record["size"]) != record["digest"]:
@@ -2562,10 +2605,11 @@ class Registry:
                     raise Hold("uninstall_recovery_required")
                 if has_backup:
                     verify(backup)
+                    bound()
                     os.replace(backup, target)
                 else:
                     verify(target)
-                _sync_directory(target.parent)
+                    bound()
             elif generation == record["new"]:
                 if known is not None or has_target:
                     raise Hold("uninstall_recovery_required")
@@ -2573,10 +2617,15 @@ class Registry:
                 _sync_directory(self.root)
                 if has_backup:
                     verify(backup)
+                bound()
+                if has_backup:
                     backup.unlink()
-                _sync_directory(target.parent)
             else:
                 raise Hold("uninstall_recovery_required")
+            target_identity = self._recovery_identity(target)
+            backup_identity = self._recovery_identity(backup)
+            _sync_directory(target.parent)
+            bound()
             self.removal_journal.unlink()
             _sync_directory(self.root)
         except (OSError, ValueError, TypeError, RecursionError, Hold):
