@@ -83,3 +83,27 @@ class DraftDisplayTests(unittest.TestCase):
         thread.join()
         self.assertEqual(failures,["draft_display_thread"]*2)
         self.assertEqual(self.accept(d),d.preview.text)
+
+    def test_refresh_keeps_valid_display_and_invalidates_changed_context(self):
+        d=self.show()
+        self.assertIs(self.control.refresh(self.ctx,d,*self.args),d)
+        with self.assertRaises(Refused):
+            self.control.refresh(replace(self.ctx,route="changed"),d,*self.args)
+        with self.assertRaises(Refused):
+            self.accept(d)
+
+    def test_refresh_never_revives_revoked_display(self):
+        d=self.show()
+        self.jobs[0].cancel()
+        with self.assertRaises(Refused):
+            self.control.refresh(self.ctx,d,*self.args)
+        with self.assertRaises(Refused):
+            self.accept(d)
+
+    def test_cancelled_epoch_cannot_refresh_or_confirm(self):
+        d=self.show()
+        self.ctx.session.invalidate()
+        with self.assertRaises(Refused):
+            self.control.refresh(self.ctx,d,*self.args)
+        with self.assertRaises(Refused):
+            self.accept(d)
