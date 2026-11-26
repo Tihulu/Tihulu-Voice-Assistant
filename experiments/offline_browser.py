@@ -2,7 +2,7 @@
 """Offline fixture browser ownership and exact one-shot operations, no I/O."""
 from threading import Lock
 from hashlib import sha256
-from gateway import FixtureGateway, Refused, token
+from gateway import FixtureGateway, Refused, MAX_GRANTS
 from capabilities import CapabilityCall
 from adapter_protocol import text_bytes
 
@@ -24,10 +24,23 @@ class OfflineBrowser:
         args=self._args if element is None else self._args+(("element",element),)
         return CapabilityCall("firefox",self._version,operation,args).checked()
 
+    def _check_chain(self):
+        if not self._claims:
+            return
+        try:
+            self._g.checkpoint_claimed_group(tuple(self._claims))
+        except Refused:
+            self._close()
+            raise
+
     def prepare(self,operation,element=None):
         with self._lock:
             if self._state=="closed" or self._active is not None:
                 raise Refused("browser_unavailable")
+            self._check_chain()
+            if len(self._claims)>=MAX_GRANTS:
+                self._close()
+                raise Refused("browser_operation_limit")
             if operation=="offline_open":
                 if self._state!="new" or element is not None:
                     raise Refused("browser_open_denied")
@@ -41,6 +54,11 @@ class OfflineBrowser:
         with self._lock:
             if type(call) is not CapabilityCall or self._active is not None:
                 raise Refused("browser_unavailable")
+            call.checked()
+            self._check_chain()
+            if len(self._claims)>=MAX_GRANTS:
+                self._close()
+                raise Refused("browser_operation_limit")
             op=call.operation
             if op=="offline_open":
                 valid=self._state=="new" and call==self._call(op)
@@ -64,7 +82,7 @@ class OfflineBrowser:
         with self._lock:
             if self._active is None or self._state=="closed":
                 raise Refused("browser_unavailable")
-            self._g.checkpoint_claimed_group(tuple(self._claims))
+            self._check_chain()
 
     def complete(self,text=None):
         with self._lock:
