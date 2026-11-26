@@ -406,6 +406,16 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
                hashlib.sha256(rendered.read_bytes()).hexdigest()==rh,actual=text,result_sha256=receipt)
         # Fixed split and reorder operations, not arbitrary page selection or
         # runtime export authorization. Never write the original input.
+        from pdf_manipulation import PDFManipulation
+        split_ctx=Context("isolated-pdf-manipulation","session","profile",1,"local","LOCAL_ONLY")
+        split_call=CapabilityCall("poppler",pdf_version,"pdf_split",
+                    (("artifact","fixture-pdf"),("digest",source_hashes[pdf]),
+                     ("page_order",(1,2,3)),("output","fixture-parts")))
+        # Fixture grants only, no actual user permission.
+        split_gate=FixtureGateway(split_ctx,tuple(profiles.Rule(x,(),"allow")
+                    for x in ("host_shell","filesystem_read","filesystem_write")),clock=profiles.PolicyClock())
+        split_req=split_call.request(split_ctx)
+        split_job=PDFManipulation(split_gate,split_gate.fixture_grant("split",split_req,60),split_ctx,split_call)
         split = run(["/usr/bin/pdfseparate","-f","1","-l","3","/work/document.pdf",
                      "/work/out/selected-%d.pdf"])
         parts=[output/("selected-"+str(i)+".pdf") for i in (1,2,3)]
@@ -418,7 +428,14 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
                for p,text in zip(parts,TEXT.values())))
         if not split_ok:
             return 1
-        ph=[hashlib.sha256(p.read_bytes()).hexdigest() for p in parts]
+        split_job.complete(tuple(p.read_bytes() for p in parts))
+        ph=list(split_job.result())
+        merge_call=CapabilityCall("poppler",pdf_version,"pdf_merge",
+                    (("artifact","fixture-parts"),("digest",source_hashes[pdf]),
+                     ("page_order",(3,1,2)),("part_digests",(ph[2],ph[0],ph[1])),("output","fixture-merged")))
+        merge_req=merge_call.request(split_ctx)
+        merge_job=PDFManipulation(split_gate,split_gate.fixture_grant("merge",merge_req,60),
+                                  split_ctx,merge_call,parent=split_job)
         merged=output/"reordered.pdf"
         merge=run(["/usr/bin/pdfunite","/work/out/selected-3.pdf","/work/out/selected-1.pdf",
                    "/work/out/selected-2.pdf","/work/out/reordered.pdf"])
@@ -428,6 +445,10 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
         record("sandbox-pdf-reorder",merge_ok and page_count("/work/out/reordered.pdf")==["3"]
                and all(page_text("/work/out/reordered.pdf",p)==norm(expected[i])
                        for p,i in enumerate((2,0,1),1)))
+        if merge_ok:
+            merge_job.complete((merged.read_bytes(),))
+        record("sandbox-pdf-manipulation-typed-receipt",merge_ok and
+               merge_job.result()==(hashlib.sha256(merged.read_bytes()).hexdigest(),))
         record("sandbox-pdf-manipulation-sources-unchanged",
                ph==[hashlib.sha256(p.read_bytes()).hexdigest() for p in parts] and
                all(hashlib.sha256(p.read_bytes()).hexdigest()==h for p,h in source_hashes.items()))
@@ -474,7 +495,7 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
         else:
             office_job.cancel()
             record("sandbox-office-typed-receipt",False)
-    return 0 if len(results)==32 and all(r["status"]=="PASS" for r in results) else 1
+    return 0 if len(results)==33 and all(r["status"]=="PASS" for r in results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main())

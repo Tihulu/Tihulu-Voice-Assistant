@@ -5,6 +5,7 @@ on:
     paths:
       - 'experiments/engine_isolation_acceptance.py'
       - 'experiments/gateway.py'
+      - 'experiments/pdf_manipulation.py'
       - 'experiments/document_result.py'
       - 'experiments/document_geometry.py'
       - 'experiments/document_engine_acceptance.py'
