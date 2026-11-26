@@ -83,6 +83,25 @@ def child(host_net,host_port):
             return raw
         finally:
             conn.close()
+    # WAV file synthesis only; no PulseAudio server or shared memory.
+    config=Path("/tmp/pulse-client.conf")
+    config.write_text("autospawn = no\nenable-shm = no\n",encoding="ascii")
+    os.environ["PULSE_CLIENTCONFIG"]=str(config)
+    os.environ["PULSE_SERVER"]="unix:/tmp/no-pulse-server"
+    with tempfile.TemporaryFile() as version_out,tempfile.TemporaryFile() as version_err:
+        voice_version=subprocess.run(["/usr/bin/espeak-ng","--version"],stdin=subprocess.DEVNULL,
+                                     stdout=version_out,stderr=version_err,timeout=8,check=False)
+        version_out.seek(0)
+        version_err.seek(0)
+        info,detail=version_out.read(4097),version_err.read(4097)
+        if voice_version.returncode or len(info)>4096 or len(detail)>4096:
+            print(json.dumps({"case":"llm-speech-version","status":"HOLD",
+                              "exit":voice_version.returncode,"reason":detail.decode("utf-8","replace")[:1000]}),flush=True)
+            return 1
+        version=re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b",info.decode("utf-8"))
+        if not version:
+            return 1
+        version=version.group(1)
     with open("/tmp/llama.log","wb") as log:
         proc=subprocess.Popen(["/work/llama-server","--host","127.0.0.1","--port","8080",
                                "--model","/work/model.gguf","--alias",MODEL,
@@ -105,12 +124,6 @@ def child(host_net,host_port):
             rules=tuple(profiles.Rule(x,(),"allow") for x in
                         ("filesystem_read","filesystem_write","host_shell"))
             gate=FixtureGateway(ctx,rules,clock=profiles.PolicyClock())
-            voice_version=subprocess.run(["/usr/bin/espeak-ng","--version"],stdin=subprocess.DEVNULL,
-                                         stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=8,check=True)
-            version=re.search(r"\b(\d+\.\d+(?:\.\d+)?)\b",voice_version.stdout.decode("utf-8"))
-            if not version:
-                raise RuntimeError("speech version unavailable")
-            version=version.group(1)
             candidate=Candidate(MODEL,"llm","local","llama-"+ENGINE_REV,True,True,16,80)
             digests=[]
             for i,prompt in enumerate(PROMPTS):
