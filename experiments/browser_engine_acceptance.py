@@ -30,6 +30,11 @@ def child(browser,driver,host_net):
     record("browser-private-home",os.environ.get("HOME")=="/tmp" and not Path("/work/not-approved").exists())
     if not all(results):
         return 1
+    # The stock Ubuntu Firefox launcher is a shell script that needs which.
+    # CI provides the package binary via /usr, not a host alternatives tree.
+    if shutil.which("which") is None:
+        print(json.dumps({"case":"browser-launcher-dependency","status":"HOLD"}),flush=True)
+        return 1
     version=subprocess.run([browser,"--version"],stdin=subprocess.DEVNULL,
                            stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=8,check=False)
     print(json.dumps({"firefox_version_exit":version.returncode,
