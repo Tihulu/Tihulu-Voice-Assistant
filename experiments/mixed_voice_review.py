@@ -94,3 +94,40 @@ class MixedVoiceReview:
         digest=sha256(text_bytes(text)).hexdigest()
         gateway.checkpoint_claimed_group(tuple((grant,req) for _,grant,req,_,_ in bindings))
         return MixedPreview(self._digest,self._rate,tuple(rows),text,digest)
+
+
+def silence_boundaries(data):
+    """Conservative pause-based proposal for bounded PCM, not language identification.
+    Fixed 20ms windows, peak <= 64 PCM units, at least 600ms quiet.
+    Retain every frame, including silence. Ambiguous/no pause => HOLD.
+    """
+    rate,frames=pcm_info(data)
+    window=rate//50
+    if rate%50:
+        raise Refused("unsupported_pause_sample_rate")
+    quiet=[]
+    start=None
+    for pos in range(0,frames-window+1,window):
+        body=data[44+pos*2:44+(pos+window)*2]
+        silent=all(abs(value[0])<=64 for value in struct.iter_unpack("<h",body))
+        if silent and start is None:
+            start=pos
+        elif not silent and start is not None:
+            if pos-start>=30*window:
+                quiet.append((start,pos))
+            start=None
+    # Leading/trailing silence is not an interior boundary.
+    cuts=[0]
+    for start,end in quiet:
+        if start==0 or end>=frames:
+            continue
+        midpoint=(start+end)//2
+        cuts.append(midpoint)
+    cuts.append(frames)
+    if len(cuts)<3 or len(cuts)>9 or any(b-a<rate for a,b in zip(cuts,cuts[1:])):
+        raise Refused("pause_boundaries_ambiguous")
+    pieces=split_pcm(data,tuple(cuts))
+    # Require actual voiced samples on each side, not merely nonzero noise.
+    if any(not any(abs(v[0])>64 for v in struct.iter_unpack("<h",piece.data[44:])) for piece in pieces):
+        raise Refused("pause_segment_unvoiced")
+    return tuple(cuts)

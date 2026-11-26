@@ -76,3 +76,35 @@ class MixedVoiceTests(unittest.TestCase):
         jobs=self.make(languages=("tr","tr","tr"))
         with self.assertRaises(Refused):
             MixedVoiceReview(self.data,self.cuts,jobs,"a"*64)
+
+
+    def test_pause_proposal_preserves_all_pcm_frames(self):
+        from mixed_voice_review import silence_boundaries
+        voiced=b"\x00\x04"*24000
+        quiet=b"\0\0"*12800
+        data=wav(voiced+quiet+voiced+quiet+voiced)
+        cuts=silence_boundaries(data)
+        self.assertEqual(cuts,(0,30400,67200,97600))
+        self.assertEqual(b"".join(p.data[44:] for p in split_pcm(data,cuts)),data[44:])
+
+    def test_pause_proposal_holds_without_sufficient_interior_pause(self):
+        from mixed_voice_review import silence_boundaries
+        voiced=b"\x00\x04"*24000
+        for body in (voiced*2,voiced+b"\0\0"*8000+voiced,b"\0\0"*12800+voiced+b"\0\0"*12800):
+            with self.assertRaises(Refused):
+                silence_boundaries(wav(body))
+
+    def test_pause_proposal_holds_short_or_excessive_segments(self):
+        from mixed_voice_review import silence_boundaries
+        voiced=b"\x00\x04"*4000
+        quiet=b"\0\0"*12800
+        for body in (voiced+quiet+voiced, (b"\x00\x04"*16000+quiet)*9+b"\x00\x04"*16000):
+            with self.assertRaises(Refused):
+                silence_boundaries(wav(body))
+
+    def test_pause_proposal_holds_noise_only_segment(self):
+        from mixed_voice_review import silence_boundaries
+        voiced=b"\x00\x04"*24000
+        quiet=b"\x01\x00"*12800
+        data=wav(voiced+quiet+voiced)
+        self.assertEqual(silence_boundaries(data),(0,30400,60800))
