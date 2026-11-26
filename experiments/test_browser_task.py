@@ -74,3 +74,13 @@ class BrowserTaskTests(unittest.TestCase):
                            ("host_shell","browser_navigate","external_network")),clock=profiles.PolicyClock())
         with self.assertRaisesRegex(Refused,"offline"):
             g.fixture_grant("nav",self.plan.call("navigate",self.plan.pages[0]).request(ctx),60)
+
+    def test_revoked_earlier_snapshot_blocks_later_navigation(self):
+        self.task.navigate(self.plan.pages[0],self.grant("nav","navigate"))
+        self.task.snapshot(self.plan.pages[0],self.data,self.grant("snap","snapshot",digest=self.digest))
+        later = self.grant("later","navigate",1)
+        self.g.revoke("snap")
+        with self.assertRaises(Refused):
+            self.task.navigate(self.plan.pages[1],later)
+        # The synthetic child grant was not consumed.
+        self.assertEqual(self.g.claim(later,later.request),"SIMULATED_ALLOW")

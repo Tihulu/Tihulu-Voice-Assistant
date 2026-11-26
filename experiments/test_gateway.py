@@ -243,5 +243,38 @@ class GatewayTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused, "unknown_or_revoked_grant"):
             g.claim_dependent(child, r, parent, r)
 
+    def test_multi_dependency_claim_rejects_revoked_second_parent(self):
+        g = self.gateway()
+        r = Request(self.ctx, "engine", "target", "local")
+        a, b, child = [g.fixture_grant(n, r, 20) for n in ("a", "b", "child")]
+        g.claim(a, r)
+        g.claim(b, r)
+        g.revoke("b")
+        with self.assertRaises(Refused):
+            g.claim_with_dependencies(child, r, ((a,r),(b,r)))
+        self.assertEqual(g.claim(child,r),"SIMULATED_ALLOW")
+
+    def test_group_requires_distinct_claimed_grants(self):
+        g = self.gateway()
+        r = Request(self.ctx, "engine", "target", "local")
+        a, b = [g.fixture_grant(n,r,20) for n in ("a","b")]
+        g.claim(a,r)
+        for group in ((), ((a,r),(a,r)), ((a,r),(b,r)), [(a,r)]):
+            with self.assertRaises(Refused):
+                g.checkpoint_claimed_group(group)
+        g.claim(b,r)
+        self.assertEqual(g.checkpoint_claimed_group(((a,r),(b,r))),"SIMULATED_ALLOW")
+
+    def test_group_checks_all_deadlines_with_single_clock(self):
+        g = self.gateway()
+        r = Request(self.ctx,"engine","target","local")
+        a = g.fixture_grant("a",r,5)
+        b = g.fixture_grant("b",r,20)
+        g.claim(a,r)
+        g.claim(b,r)
+        self.wall = 106
+        with self.assertRaisesRegex(Refused,"expired"):
+            g.checkpoint_claimed_group(((b,r),(a,r)))
+
 if __name__ == "__main__":
     unittest.main()

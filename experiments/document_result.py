@@ -134,9 +134,7 @@ class DocumentFixture:
         with self._lock:
             call = self._summary_call(version, language)
             request = call.request(self._request.context)
-            self._gateway.claim(grant, request)
-            self._gateway.checkpoint(self._grant, self._request)
-            self._gateway.checkpoint(grant, request)
+            self._gateway.claim_dependent(grant, request, self._grant, self._request)
             return ("SIMULATED_ONLY", call.adapter, call.operation, request.target)
 
     def cancel(self):
