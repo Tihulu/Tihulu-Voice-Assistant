@@ -5,6 +5,7 @@ from tihulu_jarvis import profiles
 from gateway import Context, FixtureGateway, Refused
 from capabilities import CapabilityCall
 from document_result import DocumentFixture, DocumentResult, TextBlock
+from inference import Candidate
 
 
 class DocumentResultTests(unittest.TestCase):
@@ -156,3 +157,57 @@ class DocumentResultTests(unittest.TestCase):
         gateway.revoke("doc")
         with self.assertRaises(Refused):
             job.simulate_summary("fixture","tr",fresh)
+
+    def local_adapter_fixture(self):
+        gateway = FixtureGateway(self.ctx,(profiles.Rule("filesystem_read",(),"allow"),
+                                            profiles.Rule("host_shell",(),"allow")),
+                                 clock=profiles.PolicyClock())
+        grant = gateway.fixture_grant("doc",self.ocr.request(self.ctx),60)
+        job = DocumentFixture(gateway,grant,self.ctx,self.ocr)
+        job.complete(self.result_for(self.ocr))
+        candidate = Candidate("qwen-fixture","llm","local","jan",True,True,4096,80)
+        req = job.prepare_local_summary_adapter(candidate,"summary","fixture","tr")
+        return gateway,job,candidate,req
+
+    def test_local_adapter_exact_model_language_version_and_private_scope(self):
+        g,job,candidate,req = self.local_adapter_fixture()
+        self.assertEqual((req.action,req.classification,req.actor),("document_engine","private","local"))
+        grant = g.fixture_grant("summary",req,60)
+        for model,version,language in ((replace(candidate,identity="other"),"fixture","tr"),
+                                       (candidate,"other","tr"),(candidate,"fixture","de")):
+            with self.assertRaisesRegex(Refused,"request_mismatch"):
+                job.start_local_summary_adapter(model,"summary",version,language,grant)
+        adapter = job.start_local_summary_adapter(candidate,"summary","fixture","tr",grant)
+        adapter.event("summary",1,"text","Sentetik özet")
+        adapter.event("summary",2,"completed",None)
+        self.assertEqual(adapter.result(),"Sentetik özet".encode("utf-8"))
+
+    def test_local_adapter_rejects_cloud_and_ineligible_models(self):
+        g,job,candidate,req = self.local_adapter_fixture()
+        for bad in (replace(candidate,locality="cloud"),replace(candidate,provider="other"),
+                    replace(candidate,task="tts"),replace(candidate,healthy=False)):
+            with self.assertRaises(Refused):
+                job.prepare_local_summary_adapter(bad,"summary","fixture","tr")
+
+    def test_document_cancel_drops_partial_local_summary(self):
+        g,job,candidate,req = self.local_adapter_fixture()
+        adapter = job.start_local_summary_adapter(candidate,"summary","fixture","tr",
+                                                  g.fixture_grant("summary",req,60))
+        adapter.event("summary",1,"text","partial")
+        job.cancel()
+        with self.assertRaises(Refused):
+            adapter.event("summary",2,"completed",None)
+        self.assertEqual(adapter.state,"held")
+        with self.assertRaises(Refused):
+            adapter.result()
+
+    def test_completed_local_summary_still_requires_live_document_grant(self):
+        g,job,candidate,req = self.local_adapter_fixture()
+        adapter = job.start_local_summary_adapter(candidate,"summary","fixture","tr",
+                                                  g.fixture_grant("summary",req,60))
+        adapter.event("summary",1,"text","synthetic")
+        adapter.event("summary",2,"completed",None)
+        g.revoke("doc")
+        with self.assertRaises(Refused):
+            adapter.result()
+        self.assertEqual(adapter.state,"held")
