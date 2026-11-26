@@ -163,11 +163,33 @@ def main():
         record("sandbox-root-and-work-readonly",data["outside_denied"])
         record("sandbox-private-scratch",data["scratch_available"] and not (output/"fixture-private").exists())
         record("sandbox-pid-ipc-namespaces",data["pidns"]!=host_pid and data["ipcns"]!=host_ipc)
+        # A single buffered write can legally be short and the temporary
+        # object's destructor may suppress a flush error. Force a second
+        # unbuffered write after reaching the exact limit and verify EFBIG.
         oversized = run(["/usr/bin/python3","-I","-c",
-                         "open('/work/out/oversized','wb').write(b'x'*1048577)"])
+                         """import errno, os
+with open('/work/out/oversized','xb',buffering=0) as handle:
+    remaining = 1048576
+    while remaining:
+        count = handle.write(b'x'*min(remaining,65536))
+        if not count:
+            raise RuntimeError('unexpected short write')
+        remaining -= count
+    try:
+        handle.write(b'x')
+    except OSError as exc:
+        if exc.errno != errno.EFBIG:
+            raise
+        print('EFBIG')
+    else:
+        raise RuntimeError('file size limit bypassed')
+"""])
         large = output/"oversized"
-        record("sandbox-file-size-limit",oversized.returncode!=0 and large.is_file()
-               and large.stat().st_size<=1048576)
+        record("sandbox-file-size-limit",oversized.returncode==0
+               and oversized.stdout.strip()==b"EFBIG" and large.is_file()
+               and large.stat().st_size==1048576,
+               exit=oversized.returncode,size=large.stat().st_size if large.exists() else None,
+               stderr=oversized.stderr.decode("utf-8","replace")[:1000])
         try:
             run(["/usr/bin/python3","-I","-c","import os; os.write(1,b'x'*65537)"])
         except FixtureLimit as exc:
