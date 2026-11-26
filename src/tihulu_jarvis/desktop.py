@@ -4906,6 +4906,12 @@ def create_window(app, loop, bridge=None):
                     "Zuerst lokale Jan-API-Adresse eingeben."))
                 return
             async def run(epoch):
+                # Refuse stale preferences before contacting even the local
+                # endpoint. The compare-and-save below also covers changes
+                # made while the discovery request is in flight.
+                if (settings.checked(self.cfg) != self.saved_cfg
+                        or settings.load() != self.saved_cfg):
+                    raise Hold("settings_changed")
                 client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 models=await client.models()
                 checkpoint()
@@ -4922,6 +4928,10 @@ def create_window(app, loop, bridge=None):
                 except OSError:
                     raise Hold("settings_unwritable") from None
                 checkpoint()
+                # A cooperating writer may have committed another generation
+                # after our save returned. Never publish that stale inventory.
+                if settings.load() != proposed:
+                    raise Hold("settings_changed")
                 self.cfg = proposed
                 self.saved_cfg = deepcopy(proposed)
                 self.inventory=models
