@@ -72,6 +72,7 @@ class LocalAdapter:
         else:
             self._g.claim(grant,self._req)
         self._state="ready"
+        self._transport_started=False
         self._seq=0
         self._result=bytearray()
         self._lock=Lock()
@@ -80,6 +81,16 @@ class LocalAdapter:
             self._g.checkpoint_claimed_group(self._dependencies+((self._grant,self._req),))
         else:
             self._g.checkpoint(self._grant,self._req)
+
+    def begin_fixture_transport(self,data):
+        """One exact bounded private fixture request; no actual network grant."""
+        with self._lock:
+            if self._state!="ready" or self._transport_started:
+                raise Refused("transport_already_started")
+            self._checkpoint()
+            if type(data) is not bytes or not 0<len(data)<=MAX_TEXT or sha256(data).hexdigest()!=self.call.input_digest:
+                raise Refused("transport_input_mismatch")
+            self._transport_started=True
 
     @property
     def call(self):
