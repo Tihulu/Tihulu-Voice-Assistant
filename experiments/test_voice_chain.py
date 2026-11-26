@@ -196,3 +196,39 @@ class NativeVoiceTransportTests(unittest.TestCase):
         self.stt.cancel()
         with self.assertRaises(Refused):
             turn.begin_fixture_transport(wire)
+
+    def test_native_event_requires_started_transport(self):
+        turn,_=self.start()
+        with self.assertRaisesRegex(Refused,"native_voice_transport_required"):
+            turn.event("turn",1,"text","unverified")
+        with self.assertRaises(Refused):
+            turn.result()
+    def test_reserved_envelope_cannot_omit_language(self):
+        req,envelope,_=self.stt._turn_input(self.c,"turn","en",native_completion=True)
+        grant=self.g.fixture_grant("turn",req,60)
+        with self.assertRaises(Refused):
+            LocalAdapter(self.g,self.ctx,self.c,"turn","llm",envelope,grant,
+                         dependencies=((self.stt._grant,self.stt._req),))
+        turn,_=self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True)
+        self.assertEqual(turn.state,"ready")
+    def test_exact_parent_grant_identity_not_substitutable(self):
+        req,envelope,_=self.stt._turn_input(self.c,"turn","en",native_completion=True)
+        grant=self.g.fixture_grant("turn",req,60)
+        other=self.g.fixture_grant("other-stt",self.stt._req,60)
+        self.g.claim(other,self.stt._req)
+        with self.assertRaisesRegex(Refused,"invalid_voice_parent"):
+            LocalAdapter(self.g,self.ctx,self.c,"turn","llm",envelope,grant,
+                         dependencies=((other,self.stt._req),),response_language="en")
+        turn,_=self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True)
+        self.assertEqual(turn.state,"ready")
+    def test_forged_transcript_digest_denied_even_with_new_grant(self):
+        import json
+        _,envelope,_=self.stt._turn_input(self.c,"turn","en",native_completion=True)
+        obj=json.loads(envelope)
+        obj["transcript_digest"]="c"*64
+        bad=json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
+        req=local_request(self.ctx,prepare(self.c,"turn","llm",bad),dependent=True)
+        grant=self.g.fixture_grant("bad",req,60)
+        with self.assertRaises(Refused):
+            LocalAdapter(self.g,self.ctx,self.c,"turn","llm",bad,grant,
+                         dependencies=((self.stt._grant,self.stt._req),),response_language="en")

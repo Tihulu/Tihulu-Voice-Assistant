@@ -82,7 +82,8 @@ class TranscriptFixture:
         envelope={"kind":"voice_turn","artifact":value.output,
                    "source_digest":value.source_digest,"model_digest":value.model_digest,
                    "transcript_digest":result_digest,"input_language":value.language,
-                   "response_language":response_language,"transcript":value.text}
+                   "response_language":response_language,"transcript":value.text,
+                   "transcript_grant":self._grant.identity,"transcript_target":self._req.target}
         if type(native_completion) is not bool:
             raise Refused("invalid_native_voice_flag")
         wire=None
