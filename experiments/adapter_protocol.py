@@ -90,15 +90,19 @@ class LocalAdapter:
                     or operation!="llm" or type(dependencies) is not tuple or len(dependencies)!=1):
                 raise Refused("invalid_bound_language")
             required={"kind","artifact","source_digest","model_digest","transcript_digest",
-                      "input_language","response_language","transcript","transcript_grant","transcript_target"}
+                      "input_language","response_language","transcript","transcript_grant","transcript_target",
+                      "submitted_digest","edited"}
             if set(obj) not in (required,required|{"native_wire_digest"}):
                 raise Refused("invalid_voice_envelope")
             if json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")!=data:
                 raise Refused("invalid_voice_envelope")
             if (obj["response_language"]!=response_language or obj["input_language"] not in ("tr","en","de")
-                    or sha256(text_bytes(obj["transcript"])).hexdigest()!=obj["transcript_digest"]):
+                    or sha256(text_bytes(obj["transcript"])).hexdigest()!=obj["submitted_digest"]
+                    or type(obj["edited"]) is not bool
+                    or obj["edited"]!=(obj["submitted_digest"]!=obj["transcript_digest"])
+                    or not obj["transcript"].strip()):
                 raise Refused("voice_language_or_text_mismatch")
-            for key in ("source_digest","model_digest","transcript_digest","transcript_target"):
+            for key in ("source_digest","model_digest","transcript_digest","transcript_target","submitted_digest"):
                 if type(obj[key]) is not str or not re.fullmatch(r"[0-9a-f]{64}",obj[key]):
                     raise Refused("invalid_voice_digest")
             for key in ("artifact","transcript_grant"):

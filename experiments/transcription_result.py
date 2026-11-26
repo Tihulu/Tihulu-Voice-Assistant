@@ -76,7 +76,7 @@ class TranscriptFixture:
                 raise
             return self._result
 
-    def _turn_input(self,candidate,identity,response_language,*,native_completion=False):
+    def _turn_input(self,candidate,identity,response_language,*,native_completion=False,edited_text=None):
         from inference import Candidate
         from adapter_protocol import prepare,local_request,native_voice_payload,VOICE_NATIVE_MODEL,VOICE_NATIVE_PROVIDER
         if self._state!="completed" or self._result is None:
@@ -87,10 +87,16 @@ class TranscriptFixture:
         if type(response_language) is not str or response_language not in ("tr","en","de"):
             raise Refused("invalid_response_language")
         value,result_digest=self._result
+        submitted=value.text if edited_text is None else edited_text
+        submitted_bytes=text_bytes(submitted)
+        if not submitted.strip():
+            raise Refused("voice_empty_submission")
+        submitted_digest=sha256(submitted_bytes).hexdigest()
         envelope={"kind":"voice_turn","artifact":value.output,
                    "source_digest":value.source_digest,"model_digest":value.model_digest,
                    "transcript_digest":result_digest,"input_language":value.language,
-                   "response_language":response_language,"transcript":value.text,
+                   "response_language":response_language,"transcript":submitted,
+                   "submitted_digest":submitted_digest,"edited":submitted_digest!=result_digest,
                    "transcript_grant":self._grant.identity,"transcript_target":self._req.target}
         if type(native_completion) is not bool:
             raise Refused("invalid_native_voice_flag")
@@ -99,27 +105,37 @@ class TranscriptFixture:
             if (value.language!="en" or response_language!="en"
                     or candidate.identity!=VOICE_NATIVE_MODEL or candidate.provider!=VOICE_NATIVE_PROVIDER):
                 raise Refused("native_voice_profile_denied")
-            wire=native_voice_payload(value.text)
+            wire=native_voice_payload(submitted)
             envelope["native_wire_digest"]=sha256(wire).hexdigest()
         payload=json.dumps(envelope,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")
         call=prepare(candidate,identity,"llm",payload)
         return local_request(self._req.context,call,dependent=True),payload,wire
 
-    def prepare_local_turn(self,candidate,identity,response_language,*,native_completion=False):
+    def prepare_local_turn(self,candidate,identity,response_language,*,native_completion=False,edited_text=None):
         with self._lock:
-            req,_,_=self._turn_input(candidate,identity,response_language,native_completion=native_completion)
+            req,_,_=self._turn_input(candidate,identity,response_language,native_completion=native_completion,edited_text=edited_text)
             return req
 
-    def prepare_review(self,candidate,identity,response_language,*,native_completion=False):
+    def review_preview(self,candidate,identity,response_language,*,native_completion=False,edited_text=None):
+        """Exact visible submitted text and approval target; no grant or transport."""
         from gateway import voice_review_request
         with self._lock:
-            req,_,_=self._turn_input(candidate,identity,response_language,native_completion=native_completion)
+            req,payload,_=self._turn_input(candidate,identity,response_language,
+                  native_completion=native_completion,edited_text=edited_text)
+            obj=json.loads(payload)
+            return (obj["transcript"],obj["submitted_digest"],obj["edited"],
+                    voice_review_request(req,self._grant,self._req))
+
+    def prepare_review(self,candidate,identity,response_language,*,native_completion=False,edited_text=None):
+        from gateway import voice_review_request
+        with self._lock:
+            req,_,_=self._turn_input(candidate,identity,response_language,native_completion=native_completion,edited_text=edited_text)
             return voice_review_request(req,self._grant,self._req)
 
-    def start_local_turn(self,candidate,identity,response_language,grant,*,native_completion=False,review_grant=None):
+    def start_local_turn(self,candidate,identity,response_language,grant,*,native_completion=False,review_grant=None,edited_text=None):
         from adapter_protocol import LocalAdapter
         with self._lock:
-            _,payload,wire=self._turn_input(candidate,identity,response_language,native_completion=native_completion)
+            _,payload,wire=self._turn_input(candidate,identity,response_language,native_completion=native_completion,edited_text=edited_text)
             job=LocalAdapter(self._g,self._req.context,candidate,identity,"llm",
                              payload,grant,dependencies=((self._grant,self._req),),
                              response_language=response_language,review_grant=review_grant)
