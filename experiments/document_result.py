@@ -113,6 +113,32 @@ class DocumentFixture:
             result, digest = self._result
             return ("SIMULATED_ONLY", self._call.adapter, self._call.version, result, digest)
 
+    def _summary_call(self, version, language):
+        if self._state != "completed":
+            raise Refused("no_completed_result")
+        self._gateway.checkpoint(self._grant, self._request)
+        result, digest = self._result
+        args = dict(self._call.args)
+        return CapabilityCall("jan_local", version, "summarize_document",
+                              (("artifact", args["artifact"]), ("digest", result.source_digest),
+                               ("page", result.page), ("result_digest", digest),
+                               ("language", language))).checked()
+
+    def prepare_summary(self, version, language):
+        """Trusted fixture planning only; no grant or model invocation."""
+        with self._lock:
+            return self._summary_call(version, language)
+
+    def simulate_summary(self, version, language, grant):
+        """A distinct exact local grant; no text is sent to any model."""
+        with self._lock:
+            call = self._summary_call(version, language)
+            request = call.request(self._request.context)
+            self._gateway.claim(grant, request)
+            self._gateway.checkpoint(self._grant, self._request)
+            self._gateway.checkpoint(grant, request)
+            return ("SIMULATED_ONLY", call.adapter, call.operation, request.target)
+
     def cancel(self):
         with self._lock:
             self._result = None

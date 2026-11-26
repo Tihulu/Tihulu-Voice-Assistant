@@ -118,3 +118,41 @@ class DocumentResultTests(unittest.TestCase):
         _, job = self.fixture(self.pdf)
         with self.assertRaisesRegex(Refused,"result_provenance_mismatch"):
             job.complete(replace(self.result_for(self.pdf),render_digest="c"*64))
+
+
+    def test_local_summary_requires_distinct_exact_result_and_language_grant(self):
+        gateway, job = self.fixture(self.ocr)
+        with self.assertRaises(Refused):
+            job.prepare_summary("fixture","tr")
+        result = self.result_for(self.ocr)
+        job.complete(result)
+        call = job.prepare_summary("fixture","tr")
+        self.assertEqual(dict(call.args)["result_digest"],job.result()[4])
+        req = call.request(self.ctx)
+        # Exact scope is not a generic filesystem/host grant. A new owner
+        # fixture policy must explicitly cover the summary request.
+        with self.assertRaises(Refused):
+            gateway.fixture_grant("summary",req,60)
+
+    def test_local_summary_separate_grant_and_revocation(self):
+        req = self.ocr.request(self.ctx)
+        gateway = FixtureGateway(self.ctx, (profiles.Rule("filesystem_read",(),"allow"),
+                                            profiles.Rule("host_shell",(),"allow")),
+                                 clock=profiles.PolicyClock())
+        grant = gateway.fixture_grant("doc",req,60)
+        job = DocumentFixture(gateway,grant,self.ctx,self.ocr)
+        job.complete(self.result_for(self.ocr))
+        summary = job.prepare_summary("fixture","tr")
+        approved = gateway.fixture_grant("summary",summary.request(self.ctx),60)
+        for version,language in (("other","tr"),("fixture","de")):
+            with self.assertRaisesRegex(Refused,"request_mismatch"):
+                job.simulate_summary(version,language,approved)
+        with self.assertRaisesRegex(Refused,"request_mismatch"):
+            job.simulate_summary("fixture","tr",grant)
+        self.assertEqual(job.simulate_summary("fixture","tr",approved)[0],"SIMULATED_ONLY")
+        with self.assertRaisesRegex(Refused,"grant_already_claimed"):
+            job.simulate_summary("fixture","tr",approved)
+        fresh = gateway.fixture_grant("fresh",summary.request(self.ctx),60)
+        gateway.revoke("doc")
+        with self.assertRaises(Refused):
+            job.simulate_summary("fixture","tr",fresh)
