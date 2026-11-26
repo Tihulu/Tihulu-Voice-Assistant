@@ -29,6 +29,7 @@ def exchange(adapter, payload, response_id, reply):
         raise Refused("invalid_fixture_utf8") from None
     stream=LocalSSE(adapter,response_id)
     adapter.begin_fixture_transport(payload)
+    stream.start()
     captured=[]
     errors=[]
     try:
@@ -240,3 +241,9 @@ class LocalHTTPFixtureTests(unittest.TestCase):
         self.assertGreaterEqual(calls,3)
         with self.assertRaises(Refused):
             self.a.result()
+
+    def test_wrong_input_preflight_does_not_reserve_stream_owner(self):
+        with self.assertRaises(Refused):
+            exchange(self.a,b"wrong","response1",self.reply(self.sse()))
+        data,_=exchange(self.a,self.payload,"response1",self.reply(self.sse()))
+        self.assertEqual(data,"Merhaba, München".encode())

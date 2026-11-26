@@ -61,9 +61,8 @@ class LocalSSETests(unittest.TestCase):
             s.feed(self.event({"content":"x"}))
             if revoke:
                 g.revoke("stream")
-                s.feed(self.complete())
                 with self.assertRaises(Refused):
-                    s.finish()
+                    s.feed(self.complete())
             else:
                 with self.assertRaises(Refused):
                     s.feed(b"x"*32769)
@@ -79,3 +78,37 @@ class LocalSSETests(unittest.TestCase):
                 s.finish()
             with self.assertRaises(Refused):
                 a.result()
+
+    def test_second_reader_cannot_take_over_or_cancel(self):
+        _,a,s=self.make()
+        s.feed(self.event({"content":"first"}))
+        other=LocalSSE(a,"response1")
+        with self.assertRaisesRegex(Refused,"stream_owner_unavailable"):
+            other.feed(self.event({"content":"second"}))
+        other.abort()
+        s.feed(self.complete())
+        self.assertEqual(s.finish(),b"first")
+        s.abort()
+        self.assertEqual(a.result(),b"first")
+    def test_direct_events_and_frames_cannot_bypass_owned_parser(self):
+        _,a,s=self.make()
+        s.start()
+        for inject in (lambda:a.event("job",1,"text","forged"),lambda:a.frame(b"{}")):
+            with self.assertRaisesRegex(Refused,"stream_owner_mismatch"):
+                inject()
+        s.feed(self.event({"content":"real"})+self.complete())
+        self.assertEqual(s.finish(),b"real")
+    def test_partial_bytes_revocation_detected_without_complete_event(self):
+        g,a,s=self.make()
+        s.feed(b"data: ")
+        g.revoke("stream")
+        with self.assertRaises(Refused):
+            s.feed(b"x")
+        self.assertEqual(a.state,"cancelled")
+    def test_unattached_abort_does_not_cancel_adapter(self):
+        _,a,s=self.make()
+        s.abort()
+        self.assertEqual(a.state,"ready")
+        valid=LocalSSE(a,"response1")
+        valid.feed(self.event({"content":"ok"})+self.complete())
+        self.assertEqual(valid.finish(),b"ok")

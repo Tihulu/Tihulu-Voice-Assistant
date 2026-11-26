@@ -5,6 +5,7 @@ No endpoint, credential, network, model invocation or claim of Jan wire
 compatibility. The trusted fixture binds response identity independently.
 """
 import json
+from threading import Lock
 from gateway import Refused
 from adapter_protocol import LocalAdapter
 
@@ -36,10 +37,13 @@ class LocalSSE:
         self._finish=False
         self._done=False
         self._closed=False
+        self._owner=object()
+        self._attached=False
+        self._lock=Lock()
 
     def _event(self,kind,value):
         self._sequence+=1
-        self._adapter.event(self._adapter.call.identity,self._sequence,kind,value)
+        self._adapter.stream_event(self._owner,self._adapter.call.identity,self._sequence,kind,value)
 
     def _line(self,line):
         # Closed subset: exactly one data line per SSE event, followed by
@@ -84,42 +88,63 @@ class LocalSSE:
         else:
             raise Refused("unsupported_sse_delta")
 
-    def feed(self,data):
+    def _start_locked(self):
         if self._closed:
             raise Refused("terminal_sse")
-        try:
-            if type(data) is not bytes or not data or self._total+len(data)>MAX_STREAM:
-                raise Refused("sse_stream_limit")
-            self._total+=len(data)
-            self._buffer.extend(data)
-            while b"\n" in self._buffer:
-                raw,_,rest=self._buffer.partition(b"\n")
-                self._buffer=bytearray(rest)
-                if len(raw)>MAX_LINE:
+        if not self._attached:
+            self._adapter.attach_fixture_stream(self._owner)
+            self._attached=True
+
+    def start(self):
+        with self._lock:
+            self._start_locked()
+
+    def feed(self,data):
+        with self._lock:
+            self._start_locked()
+            try:
+                self._adapter.checkpoint_fixture_stream(self._owner)
+                if type(data) is not bytes or not data or self._total+len(data)>MAX_STREAM:
+                    raise Refused("sse_stream_limit")
+                self._total+=len(data)
+                self._buffer.extend(data)
+                while b"\n" in self._buffer:
+                    raw,_,rest=self._buffer.partition(b"\n")
+                    self._buffer=bytearray(rest)
+                    if len(raw)>MAX_LINE:
+                        raise Refused("sse_line_limit")
+                    self._line(bytes(raw).removesuffix(b"\r"))
+                if len(self._buffer)>MAX_LINE:
                     raise Refused("sse_line_limit")
-                self._line(bytes(raw).removesuffix(b"\r"))
-            if len(self._buffer)>MAX_LINE:
-                raise Refused("sse_line_limit")
-        except Refused:
-            self.abort()
-            raise
+                self._adapter.checkpoint_fixture_stream(self._owner)
+            except Refused:
+                self._abort_locked()
+                raise
 
     def finish(self):
-        if self._closed:
-            raise Refused("terminal_sse")
-        try:
-            if self._buffer or self._pending is not None or not self._done or not self._finish:
-                raise Refused("truncated_sse")
-            self._event("completed",None)
-            result=self._adapter.result()
-            self._closed=True
-            return result
-        except Refused:
-            self.abort()
-            raise
+        with self._lock:
+            self._start_locked()
+            try:
+                self._adapter.checkpoint_fixture_stream(self._owner)
+                if self._buffer or self._pending is not None or not self._done or not self._finish:
+                    raise Refused("truncated_sse")
+                self._event("completed",None)
+                result=self._adapter.result()
+                self._closed=True
+                return result
+            except Refused:
+                self._abort_locked()
+                raise
 
-    def abort(self):
+    def _abort_locked(self):
+        if self._closed:
+            return
         self._buffer.clear()
         self._pending=None
         self._closed=True
-        self._adapter.cancel()
+        if self._attached:
+            self._adapter.abort_fixture_stream(self._owner)
+
+    def abort(self):
+        with self._lock:
+            self._abort_locked()
