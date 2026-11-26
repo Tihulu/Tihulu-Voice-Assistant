@@ -1081,6 +1081,42 @@ class MarketInventoryTests(MarketFixture):
         self.assertEqual(self.ui.store.snapshot(profile[0].id), profile)
         self.assertEqual(settings.load(), newer)
 
+    def test_setup_selector_updates_profile_and_settings(self):
+        self.backend.inventory = ("fixture-chat", "fixture-other")
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        old = self.ui.store.load(self.ui.cfg["profile"])
+        self.ui.models.set_active(1)
+        self.assertEqual(self.ui.cfg["llm"], "fixture-other")
+        self.assertEqual(settings.load()["llm"], "fixture-other")
+        updated = self.ui.store.load(old.id)
+        self.assertEqual(updated.llm_model_id, "fixture-other")
+        self.assertEqual(updated.version, old.version + 1)
+        self.assertEqual(self.ui.market.card("fixture-other").state, "REGISTERED")
+
+    def test_setup_selector_restores_visible_choice_after_write_failure(self):
+        self.backend.inventory = ("fixture-chat", "fixture-other")
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        old = settings.load()
+        profile = self.ui.store.snapshot(self.ui.cfg["profile"])
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            self.ui.models.set_active(1)
+        self.assertEqual(self.ui.models.get_active_text(), "fixture-chat")
+        self.assertEqual(self.ui.cfg["llm"], old["llm"])
+        self.assertEqual(settings.load(), old)
+        self.assertEqual(self.ui.store.snapshot(profile[0].id), profile)
+        self.assertEqual(self.ui.status.get_text(), "settings_unwritable")
+
+    def test_discovery_restores_existing_choice_without_profile_mutation(self):
+        old = self.ui.store.snapshot(self.ui.cfg["profile"])
+        self.backend.inventory = ("fixture-chat",)
+        self.click(self.ui.reload)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.models.get_active_text(), "fixture-chat")
+        self.assertEqual(self.ui.store.snapshot(old[0].id), old)
+        self.assertEqual(self.ui.market.cards(), ())
+
     def test_registered_jan_model_can_be_selected_again(self):
         self.backend.inventory = ("fixture-qwen", "fixture-llama")
         self.ui.url.set_text("http://127.0.0.1:9876")
