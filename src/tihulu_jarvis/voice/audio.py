@@ -2,6 +2,7 @@
 # Distributed without warranty; see LICENSE for the full terms.
 """Explicit, on-demand local capture, Whisper transcription and Piper playback."""
 import asyncio
+import fcntl
 import json
 import hashlib
 import hmac
@@ -219,12 +220,50 @@ async def terminate(p):
         await p.wait()
 
 
+def _sealed_sidecar(fd, identity, checkpoint):
+    """Copy only the bounded Piper JSON into an immutable Linux memfd."""
+    if not 0 < identity[2] <= 1048576:
+        raise Hold("voice_locale_unverified")
+    sealed = None
+    try:
+        sealed = os.memfd_create("tihulu-piper-config", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
+        remaining = identity[2]
+        while remaining:
+            checkpoint()
+            block = os.read(fd, min(65536, remaining))
+            if not block:
+                raise Hold("model_file_changed")
+            remaining -= len(block)
+            view = memoryview(block)
+            while view:
+                written = os.write(sealed, view)
+                if written <= 0:
+                    raise Hold("audio_model_descriptor_unavailable")
+                view = view[written:]
+        if os.read(fd, 1) or _voice_identity(os.fstat(fd)) != identity:
+            raise Hold("model_file_changed")
+        seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
+        fcntl.fcntl(sealed, fcntl.F_ADD_SEALS, seals)
+        if fcntl.fcntl(sealed, fcntl.F_GET_SEALS) & seals != seals:
+            raise Hold("audio_model_descriptor_unavailable")
+        os.lseek(sealed, 0, os.SEEK_SET)
+        checkpoint()
+        result, sealed = sealed, None
+        return result
+    except (OSError, AttributeError):
+        raise Hold("audio_model_descriptor_unavailable") from None
+    finally:
+        if sealed is not None:
+            os.close(sealed)
+
+
 @contextmanager
 def _pinned_model_arguments(name, args, checkpoint):
     """Hand inherited read-only model descriptors to Linux audio engines.
 
-    This pins the inode across pathname replacement, not against writes to
-    the same inode. Existing identity/authorization checkpoints still apply.
+    Weights are pinned against pathname replacement, not in-place writes.
+    The small Piper JSON is copied into a sealed immutable memfd.
+    Existing identity/authorization checkpoints still apply.
     No original-path fallback is permitted if descriptor handoff is unavailable.
     """
     argv = list(map(str, args))
@@ -240,7 +279,7 @@ def _pinned_model_arguments(name, args, checkpoint):
             if not model.is_absolute():
                 raise Hold("invalid_audio_model_arguments")
 
-            def pin(path):
+            def pin(path, *, seal=False):
                 checkpoint()
                 identity = _runtime_identity(path)
                 try:
@@ -255,6 +294,10 @@ def _pinned_model_arguments(name, args, checkpoint):
                     raise Hold("audio_model_descriptor_unavailable") from None
                 originals.append((path, identity))
                 checkpoint()
+                if seal:
+                    immutable = _sealed_sidecar(fd, identity, checkpoint)
+                    descriptors.append(immutable)
+                    return "/proc/self/fd/%d" % immutable
                 return alias
 
             argv[index] = pin(model)
@@ -262,12 +305,14 @@ def _pinned_model_arguments(name, args, checkpoint):
                 if "--config" in argv or "-c" in argv:
                     raise Hold("invalid_audio_model_arguments")
                 config = model.with_name(model.name + ".json")
-                argv[index + 1:index + 1] = ["--config", pin(config)]
+                argv[index + 1:index + 1] = ["--config", pin(config, seal=True)]
             checkpoint()
             for path, identity in originals:
                 if _runtime_identity(path) != identity:
                     raise Hold("model_file_changed")
-        yield tuple(argv), tuple(descriptors)
+        # Keep source FDs until spawn, but inherit only the exact argument FDs.
+        inherited = tuple(fd for fd in descriptors if "/proc/self/fd/%d" % fd in argv)
+        yield tuple(argv), inherited
     finally:
         for fd in descriptors:
             os.close(fd)
