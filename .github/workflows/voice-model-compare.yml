@@ -5,6 +5,7 @@ on:
     paths:
       - 'src/tihulu_jarvis/voice/audio.py'
       - 'tools/voice_model_compare.py'
+      - 'tools/voice_wav_acceptance.py'
       - '.github/workflows/voice-model-compare.yml'
 permissions:
   contents: read
