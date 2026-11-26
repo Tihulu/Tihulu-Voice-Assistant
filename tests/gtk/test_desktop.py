@@ -6394,6 +6394,28 @@ class RecordCardTests(ApprovedSourcesTests):
         self.ui.source_cards.select_row(self.cards()[0])
         return self.cards()[0].card
 
+    def test_listing_card_cannot_be_recorded_under_another_source(self):
+        card = self.search()
+        self.ui.source_host.set_text("example.com")
+        self.ui.source_filter.set_text("different")
+        self.ui.register_source()
+        other = next(row for row in self.rows() if row.source.host == "example.com")
+        self.ui.source_list.select_row(other)
+        self.ui.source_cards.select_row(self.cards()[0])
+        self.assertFalse(self.ui.source_record.get_sensitive())
+        self.assertIsNone(self.ui.record_card())
+        self.assertEqual(self.ui.status.get_text(), "source_registration_changed")
+        self.assertIsNone(self.ui.market.lookup_card(card.model_id))
+
+    def test_listing_card_cannot_be_recorded_after_external_source_removal(self):
+        card = self.search()
+        cfg = settings.load()
+        cfg["sources"] = []
+        settings.save(cfg)
+        self.assertIsNone(self.ui.record_card())
+        self.assertEqual(self.ui.status.get_text(), "source_registration_changed")
+        self.assertIsNone(self.ui.market.lookup_card(card.model_id))
+
     def test_a_searched_card_is_recorded_and_shown_in_the_market(self):
         card = self.search()
         self.assertTrue(self.ui.source_record.get_sensitive())
