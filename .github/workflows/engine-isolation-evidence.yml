@@ -33,7 +33,7 @@ jobs:
       - name: Prepare disposable tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y bubblewrap ffmpeg poppler-utils tesseract-ocr tesseract-ocr-tur tesseract-ocr-deu tesseract-ocr-eng python3-pil python3-reportlab fonts-dejavu-core
+          sudo apt-get install --no-install-recommends -y bubblewrap ffmpeg poppler-utils tesseract-ocr tesseract-ocr-tur tesseract-ocr-deu tesseract-ocr-eng python3-pil python3-reportlab fonts-dejavu-core libreoffice-writer
           bwrap --version
           uname -r
           test "$(id -u)" -ne 0

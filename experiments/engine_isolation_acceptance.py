@@ -130,6 +130,15 @@ def main():
             image.save(path)
             images[lang] = path
         source_hashes = {p:hashlib.sha256(p.read_bytes()).hexdigest() for p in (pdf,*images.values())}
+        office_source = root/"office.txt"
+        office_text = "Synthetic fixture report. Istanbul, Berlin, London."
+        office_source.write_text(office_text+"\n",encoding="utf-8")
+        office_hash = hashlib.sha256(office_source.read_bytes()).hexdigest()
+        # Minimal explicit font configuration; never bind host /etc or HOME.
+        font_config = root/"fonts.conf"
+        font_config.write_text('<?xml version="1.0"?><fontconfig>'
+                               '<dir>/usr/share/fonts/truetype/dejavu</dir>'
+                               '<cachedir>/tmp/font-cache</cachedir></fontconfig>',encoding="utf-8")
         prefix = ["/usr/bin/bwrap","--unshare-all","--die-with-parent","--new-session",
                   "--cap-drop","ALL","--clearenv","--ro-bind","/usr","/usr"]
         # Ubuntu merged-/usr layout. Refuse rather than mount an unreviewed
@@ -146,9 +155,12 @@ def main():
         prefix += ["--proc","/proc","--dev","/dev","--tmpfs","/tmp",
                    "--dir","/work","--ro-bind",str(source),"/work/input.wav",
                    "--ro-bind",str(pdf),"/work/document.pdf",
+                   "--ro-bind",str(office_source),"/work/office.txt",
+                   "--ro-bind",str(font_config),"/work/fonts.conf",
                    "--bind",str(output),"/work/out","--chdir","/work",
                    "--setenv","PATH","/usr/bin","--setenv","HOME","/tmp",
                    "--setenv","LC_ALL","C.UTF-8",
+                   "--setenv","FONTCONFIG_FILE","/work/fonts.conf",
                    # Ubuntu 22.04 BLAS/LAPACK alternatives normally resolve via
                    # /etc/ld.so.cache. Keep /etc hidden; only fixed read-only
                    # library directories inside the already mounted /usr.
@@ -344,7 +356,50 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
             record("sandbox-ocr-"+lang,passed,actual=text,result_sha256=receipt)
         record("sandbox-document-sources-unchanged",all(
                hashlib.sha256(p.read_bytes()).hexdigest()==h for p,h in source_hashes.items()))
-    return 0 if len(results)==23 and all(r["status"]=="PASS" for r in results) else 1
+        if not all(row["status"]=="PASS" for row in results):
+            return 1
+        office_version = run(["/usr/bin/libreoffice","--version"])
+        if office_version.returncode:
+            print(json.dumps({"case":"sandbox-office-version","status":"HOLD",
+                              "stderr":office_version.stderr.decode("utf-8","replace")[:1000]}),flush=True)
+            return 1
+        ov = office_version.stdout.decode().strip().split()[1]
+        office_call = CapabilityCall("libreoffice",ov,"text_to_pdf",
+                         (("artifact","fixture-office-text"),("digest",office_hash),
+                          ("output","fixture-office-pdf")))
+        office_ctx = Context("isolated-office","session","profile",1,"local","LOCAL_ONLY")
+        office_req = office_call.request(office_ctx)
+        office_gate = FixtureGateway(office_ctx,tuple(profiles.Rule(x,(office_req.target,),"allow")
+                      for x in ("host_shell","filesystem_read","filesystem_write")),
+                      clock=profiles.PolicyClock())
+        office_grant = office_gate.fixture_grant("office",office_req,60)
+        office_job = ConversionFixture(office_gate,office_grant,office_ctx,office_call)
+        office_target = output/"office.pdf"
+        if office_target.exists() or office_target.is_symlink():
+            office_job.cancel()
+            return 1
+        office_gate.checkpoint(office_grant,office_req)
+        proc = run(["/usr/bin/libreoffice","-env:UserInstallation=file:///tmp/office-profile",
+                    "--headless","--nologo","--nodefault","--norestore","--convert-to",
+                    "pdf:writer_pdf_Export","--outdir","/work/out","/work/office.txt"])
+        ok = (proc.returncode==0 and not office_target.is_symlink() and office_target.is_file()
+              and 0 < office_target.stat().st_size <= MAX_OUTPUT
+              and office_target.read_bytes().startswith(b"%PDF-"))
+        record("sandbox-office-pdf-export",ok,exit=proc.returncode,
+               stdout=proc.stdout.decode("utf-8","replace")[:1000],
+               stderr=proc.stderr.decode("utf-8","replace")[:1000])
+        extracted = run(["/usr/bin/pdftotext","-enc","UTF-8","/work/out/office.pdf","-"]) if ok else None
+        preserved = (extracted is not None and extracted.returncode==0
+                     and norm(extracted.stdout.decode("utf-8"))==norm(office_text))
+        record("sandbox-office-text-preserved",preserved)
+        if ok and preserved and hashlib.sha256(office_source.read_bytes()).hexdigest()==office_hash:
+            data = office_target.read_bytes()
+            office_job.complete(ConversionResult(office_req.target,office_hash,"fixture-office-pdf","pdf",data))
+            record("sandbox-office-typed-receipt",office_job.result()[4]==hashlib.sha256(data).hexdigest())
+        else:
+            office_job.cancel()
+            record("sandbox-office-typed-receipt",False)
+    return 0 if len(results)==26 and all(r["status"]=="PASS" for r in results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main())
