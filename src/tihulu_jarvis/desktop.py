@@ -3912,20 +3912,20 @@ def create_window(app, loop, bridge=None):
                 return
             self.forget_inventory()
             async def run(epoch):
+                self.require_discovery_settings()
                 client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 cards = await market.from_models(client, languages=(), now=0.0)
                 checkpoint()
+                self.require_discovery_settings()
+                # Registry discovery is evidence, not model activation. It may
+                # survive a later route-save failure, but must not enable chat.
                 inventory = self.market.record_jan_inventory(cards)
-                checkpoint()
-                self.cfg["endpoint"] = route[3]
-                self.inventory = inventory
-                self.models.remove_all()
-                for model_id in self.inventory:
-                    self.models.append_text(model_id)
-                if self.cfg["llm"] in self.inventory:
-                    self.models.set_active(self.inventory.index(self.cfg["llm"]))
-                self.save()
-                self.build_market_page()
+                try:
+                    checkpoint()
+                    self.commit_discovery_route(route, inventory, preserve_choice=True,
+                                                checkpoint=checkpoint)
+                finally:
+                    self.build_market_page()
                 self.refresh()
             self.submit(run, label=tr("Discover model inventory", "Model listesini keşfet",
                                       "Modellbestand suchen"))
@@ -4902,6 +4902,34 @@ def create_window(app, loop, bridge=None):
                     self.analysis.open_pending(epoch)
             task.add_done_callback(finished)
 
+        def require_discovery_settings(self):
+            if (settings.checked(self.cfg) != self.saved_cfg
+                    or settings.load() != self.saved_cfg):
+                raise Hold("settings_changed")
+
+        def commit_discovery_route(self, route, models, *, preserve_choice, checkpoint):
+            self.require_discovery_settings()
+            proposed = settings.checked(self.cfg)
+            proposed["endpoint"] = route[3]
+            previous = proposed["llm"]
+            if not preserve_choice and previous not in models:
+                proposed["llm"] = ""
+            try:
+                settings.save(proposed, expected=self.saved_cfg)
+            except OSError:
+                raise Hold("settings_unwritable") from None
+            checkpoint()
+            if settings.load() != proposed:
+                raise Hold("settings_changed")
+            self.cfg = proposed
+            self.saved_cfg = deepcopy(proposed)
+            self.inventory = models
+            self.models.remove_all()
+            for model_id in models:
+                self.models.append_text(model_id)
+            if previous in models:
+                self.models.set_active(models.index(previous))
+
         def discover(self):
             if self.busy:
                 return
@@ -4915,40 +4943,12 @@ def create_window(app, loop, bridge=None):
                     "Zuerst lokale Jan-API-Adresse eingeben."))
                 return
             async def run(epoch):
-                # Refuse stale preferences before contacting even the local
-                # endpoint. The compare-and-save below also covers changes
-                # made while the discovery request is in flight.
-                if (settings.checked(self.cfg) != self.saved_cfg
-                        or settings.load() != self.saved_cfg):
-                    raise Hold("settings_changed")
+                self.require_discovery_settings()
                 client, checkpoint, route = self.bound_jan(epoch, discovery=True)
-                models=await client.models()
+                models = await client.models()
                 checkpoint()
-                proposed = settings.checked(self.cfg)
-                if proposed != self.saved_cfg:
-                    raise Hold("settings_changed")
-                proposed["endpoint"] = route[3]
-                previous = proposed["llm"]
-                # Publish the inventory only after the exact local route
-                # preference has committed; never expose an unsaved route.
-                proposed["llm"] = previous if previous in models else ""
-                try:
-                    settings.save(proposed, expected=self.saved_cfg)
-                except OSError:
-                    raise Hold("settings_unwritable") from None
-                checkpoint()
-                # A cooperating writer may have committed another generation
-                # after our save returned. Never publish that stale inventory.
-                if settings.load() != proposed:
-                    raise Hold("settings_changed")
-                self.cfg = proposed
-                self.saved_cfg = deepcopy(proposed)
-                self.inventory=models
-                self.models.remove_all()
-                for m in models:
-                    self.models.append_text(m)
-                if previous in models:
-                    self.models.set_active(models.index(previous))
+                self.commit_discovery_route(route, models, preserve_choice=False,
+                                            checkpoint=checkpoint)
                 if not models:
                     raise Hold("no_installed_chat_models")
             self.submit(run, label=tr("Discover local models", "Yerel modelleri keşfet",
