@@ -11,7 +11,7 @@ import subprocess
 import tempfile
 import time
 import sys
-from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus, turbo_short_args, speech_corpus_profile
+from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename, targeted_corpus, turbo_short_args, speech_corpus_profile, neural_sample_allowed
 from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
@@ -72,7 +72,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original",pip
             raise RuntimeError("invalid pinned STT model")
         print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
     mixed_preview,mixed_auto,mixed_extra=speech_corpus_profile(corpus,stt_profile,bool(stt_paths))
-    if (corpus in ("mixed-auto-piper","mixed-auto-piper-short"))!=(piper_root is not None):
+    if (corpus in ("mixed-auto-piper","mixed-auto-piper-short","expanded-piper-small"))!=(piper_root is not None):
         raise RuntimeError("invalid neural mixed input profile")
     if piper_root is not None:
         from whisper_engine_acceptance import WRAPPER as STT_WRAPPER_FOR_PIPER
@@ -82,7 +82,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original",pip
         if not site.is_dir():
             raise RuntimeError("missing pinned neural site")
     samples=tuple((lang,lang,text) for lang,text in TEXT.items())
-    if corpus in ("expanded","turbo-expanded","expanded-small-short"):
+    if corpus in ("expanded","turbo-expanded","expanded-small-short","expanded-piper-small"):
         samples+=expanded_corpus()
     elif corpus=="targeted":
         samples=targeted_corpus()
@@ -181,7 +181,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original",pip
                 if (not neural_model.is_file() or not neural_config.is_file()
                         or not 0<neural_model.stat().st_size<=70000000 or not 0<neural_config.stat().st_size<=16384
                         or piper_digest(neural_model)!=model_pin or piper_digest(neural_config)!=config_pin
-                        or text!=reference):
+                        or not neural_sample_allowed(corpus,case_id,lang,text,reference)):
                     raise RuntimeError("invalid pinned neural voice inputs")
                 cfg=json.loads(neural_config.read_text(encoding="utf-8"))
                 if (cfg["audio"]["sample_rate"]!=22050 or cfg["espeak"]["voice"]!=phoneme_voice
