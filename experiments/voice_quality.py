@@ -74,6 +74,7 @@ def speech_corpus_profile(corpus,stt_profile,has_stt):
         "mixed-preview":(True,False,8,"small"),
         "mixed-auto":(True,True,22,"small"),
         "mixed-auto-turbo":(True,True,22,"turbo-q5"),
+        "mixed-auto-turbo-bounded-detect":(True,True,22,"turbo-q5"),
         "mixed-auto-piper":(True,True,22,"small"),
         "mixed-auto-piper-short":(True,True,22,"small"),
         "mixed-auto-reviewed":(True,True,24,"small"),
@@ -98,3 +99,10 @@ def neural_sample_allowed(corpus,case_id,language,text,reference):
     if case_id==language and text==reference:
         return True
     return corpus=="expanded-piper-small" and (case_id,language,text) in expanded_corpus()
+
+
+def bounded_detection_args(corpus,rate,frames):
+    """Only the separate patched disposable Turbo detector opts in."""
+    if corpus!="mixed-auto-turbo-bounded-detect":
+        return []
+    return turbo_short_args(rate,frames)[:2]

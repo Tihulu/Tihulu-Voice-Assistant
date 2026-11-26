@@ -104,3 +104,15 @@ class VoiceQualityTests(unittest.TestCase):
             self.assertFalse(neural_sample_allowed("expanded-piper-small",lang,lang,text,"original"))
         self.assertFalse(neural_sample_allowed("expanded-piper-small","tr","tr",None,"original"))
         self.assertFalse(neural_sample_allowed("other","tr","tr","original","original"))
+
+    def test_turbo_bounded_detection_is_separate_and_duration_limited(self):
+        from voice_quality import speech_corpus_profile,bounded_detection_args
+        self.assertEqual(speech_corpus_profile("mixed-auto-turbo-bounded-detect","turbo-q5",True),(True,True,22))
+        self.assertEqual(bounded_detection_args("mixed-auto-turbo-bounded-detect",22050,22050*8),["-ac","500"])
+        self.assertEqual(bounded_detection_args("mixed-auto-turbo",22050,22050*8),[])
+        for rate,frames in ((22050,22050*8+1),(22050,0),(16000,16000),(True,1)):
+            with self.assertRaises(Refused):
+                bounded_detection_args("mixed-auto-turbo-bounded-detect",rate,frames)
+        for model,available in (("small",True),("turbo-q5",False)):
+            with self.assertRaises(RuntimeError):
+                speech_corpus_profile("mixed-auto-turbo-bounded-detect",model,available)
