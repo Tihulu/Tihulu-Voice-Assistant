@@ -1797,10 +1797,13 @@ class Registry:
         except Hold:
             raise Hold("rollback_artifact_unverified") from None
         if current.artifact_digest == candidate.artifact_digest:
+            identity = _artifact_identity(target.lstat())
             if _verified_artifact(target, candidate.disk_size_bytes,
                                   checkpoint=checkpoint) != candidate.artifact_digest:
                 raise Hold("rollback_artifact_unverified")
             checkpoint()
+            if identity != _artifact_identity(target.lstat()):
+                raise Hold("rollback_artifact_unverified")
             return self.save_card(restored)
         archive = self._archive_path(candidate)
         try:

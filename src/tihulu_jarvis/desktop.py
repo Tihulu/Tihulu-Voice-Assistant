@@ -2321,13 +2321,16 @@ def create_window(app, loop, bridge=None):
             return getattr(self, "turn_note", "") or tr("a local turn", "yerel tur",
                                                         "eine lokale Runde")
 
-        def finish_task(self, board_id, t, message, *, invalidated=False, committed=False):
+        def finish_task(self, board_id, t, message, *, invalidated=False, committed=False,
+                        worker_failed=False):
             """Publish a terminal state only after the owned task has drained."""
             try:
                 row = self.board.get(board_id)
                 state = "failed" if message else "done"
                 if committed:
                     state = "done"
+                elif worker_failed:
+                    state = "failed"
                 elif t.cancelled() or invalidated:
                     state = "cancelled"
                     message = row.reason or message or "Stopped"
@@ -3579,6 +3582,7 @@ def create_window(app, loop, bridge=None):
             # stop flag, never GTK widgets or callbacks.
             stop = Event()
             completion = []
+            failure = []
             restored_note = tr("Previous revision restored.",
                                "Önceki sürüm geri yüklendi.",
                                "Vorherige Revision wiederhergestellt.")
@@ -3608,8 +3612,14 @@ def create_window(app, loop, bridge=None):
                 finally:
                     # The worker cannot outlive the owner's busy state.
                     # A late stop after a committed generation is not a rollback.
-                    if worker.done() and not worker.cancelled() and worker.exception() is None:
-                        completion.append(restored_note)
+                    if worker.done() and not worker.cancelled():
+                        error = worker.exception()
+                        if error is None:
+                            completion.append(restored_note)
+                        elif isinstance(error, Hold) and str(error) != "turn_cancelled":
+                            failure.append(str(error))
+                        elif not isinstance(error, Hold):
+                            failure.append("Local operation failed")
                     self.rollback_worker_active = False
                     self.market_filter.set_sensitive(True)
                     try:
@@ -3622,7 +3632,8 @@ def create_window(app, loop, bridge=None):
             self.submit(run, kind="update",
                         label=tr("Restore model revision", "Model sürümünü geri yükle",
                                  "Modellrevision wiederherstellen"),
-                        committed=lambda: completion[0] if completion else "")
+                        committed=lambda: completion[0] if completion else "",
+                        worker_failure=lambda: failure[0] if failure else "")
 
         def update_selected_card(self):
             """Re-fetch the approved source of an installed item, keeping history."""
@@ -4105,7 +4116,7 @@ def create_window(app, loop, bridge=None):
             except Hold:
                 return False
 
-        def submit(self, work, *, kind="turn", label=None, committed=lambda: ""):
+        def submit(self, work, *, kind="turn", label=None, committed=None, worker_failure=None):
             if self.busy or self.closing:
                 return
             task_label = label if label is not None else self.turn_label()
@@ -4140,20 +4151,21 @@ def create_window(app, loop, bridge=None):
                     message="Local operation failed"
                 self.busy=False
                 self.finish=self.playback=None
-                committed_note = committed()
-                self.finish_task(board_id, t, committed_note or message,
+                committed_note = committed() if committed is not None else ""
+                failure_note = worker_failure() if worker_failure is not None else ""
+                self.finish_task(board_id, t, committed_note or failure_note or message,
                                  invalidated=epoch != self.session.epoch,
-                                 committed=bool(committed_note))
+                                 committed=bool(committed_note), worker_failed=bool(failure_note))
                 self.active_task = None
-                if hasattr(self, "market_list"):
+                if committed is not None:
                     self.refresh_market_buttons()
                 self.refresh_activity()
                 # A turn that stated its own outcome keeps it: a generic
                 # "ready" must not overwrite "reply muted; shown as text".
                 if not message and self.turn_outcome:
                     message = self.turn_outcome
-                if committed_note:
-                    self.set_state("ready", committed_note)
+                if committed_note or failure_note:
+                    self.set_state("ready", committed_note or failure_note)
                 elif epoch==self.session.epoch:
                     self.set_state("ready",message)
                 else:

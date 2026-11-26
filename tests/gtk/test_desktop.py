@@ -1979,6 +1979,30 @@ class RevisionHistoryUITests(MarketFixture):
         self.assertEqual(self.ui.market.card(card.model_id).display_name, card.display_name)
         self.assertEqual(self.ui.status.get_text(), "Previous revision restored.")
 
+    def test_rollback_stop_does_not_hide_recovery_failure(self):
+        from threading import Event
+        card = self.ui.register_choice("stt", str(self.weights("fixture-stt.bin")))
+        self.revise(card.model_id, "Newer")
+        self.ui.build_market_page()
+        self.pick_card(card.model_id)
+        entered, release = Event(), Event()
+        def delayed(*args, **kwargs):
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("fixture deadline")
+            raise Hold("publication_recovery_required")
+        with patch.object(self.ui.market, "rollback", side_effect=delayed):
+            try:
+                self.click(self.ui.market_rollback)
+                self.until(entered.is_set)
+                self.ui.interrupt(False)
+                release.set()
+                self.until(lambda: not self.ui.busy)
+            finally:
+                release.set()
+        self.assertEqual(self.ui.status.get_text(), "publication_recovery_required")
+        self.assertEqual(self.ui.market.card(card.model_id).display_name, "Newer")
+
     def test_rollback_without_history_stays_refused(self):
         self.ui.market.save_card(market.ModelCard(
             model_id="fixture-lonely", display_name="Lonely", category="llm").checked())
