@@ -87,3 +87,20 @@ class VoiceQualityTests(unittest.TestCase):
         for model,available in (("small",False),("turbo-q5",True),("tiny",True)):
             with self.assertRaises(RuntimeError):
                 speech_corpus_profile("expanded-small-short",model,available)
+
+    def test_expanded_neural_profile_is_model_bound(self):
+        from voice_quality import speech_corpus_profile
+        self.assertEqual(speech_corpus_profile("expanded-piper-small","small",True),(False,False,0))
+        for model,available in (("small",False),("turbo-q5",True),("tiny",True)):
+            with self.assertRaises(RuntimeError):
+                speech_corpus_profile("expanded-piper-small",model,available)
+
+    def test_neural_expansion_only_accepts_exact_public_samples(self):
+        from voice_quality import neural_sample_allowed,expanded_corpus
+        for identity,lang,text in expanded_corpus():
+            self.assertTrue(neural_sample_allowed("expanded-piper-small",identity,lang,text,"original"))
+            self.assertFalse(neural_sample_allowed("mixed-auto-piper",identity,lang,text,"original"))
+            self.assertFalse(neural_sample_allowed("expanded-piper-small",identity,lang,text+"!","original"))
+            self.assertFalse(neural_sample_allowed("expanded-piper-small",lang,lang,text,"original"))
+        self.assertFalse(neural_sample_allowed("expanded-piper-small","tr","tr",None,"original"))
+        self.assertFalse(neural_sample_allowed("other","tr","tr","original","original"))
