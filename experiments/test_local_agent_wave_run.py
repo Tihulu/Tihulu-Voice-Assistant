@@ -47,9 +47,11 @@ class WaveRunTests(unittest.TestCase):
     def test_inventory_and_context_change_before_start(self):
         for ctx,models in ((replace(self.ctx,generation=2),self.models),
                            (self.ctx,(replace(self.models[0],rank=81),))):
+            self.setUp()
             with self.assertRaises(Refused):
                 self.run.start("plan",self.grants["plan"],ctx,models)
-        self.start("plan")
+            with self.assertRaises(Refused):
+                self.start("plan")
     def test_parent_revocation_blocks_child_and_final_result(self):
         self.start("plan")
         self.finish("plan")
@@ -78,3 +80,34 @@ class WaveRunTests(unittest.TestCase):
         with patch("tihulu_jarvis.profiles.time.time",return_value=1060),patch("tihulu_jarvis.profiles.time.monotonic",return_value=260):
             with self.assertRaises(Refused):
                 self.finish("plan")
+
+    def test_completed_peer_not_a_parent_until_next_wave(self):
+        self.start("plan")
+        self.finish("plan")
+        self.start("a")
+        self.finish("a")
+        self.g.revoke("a")
+        # Same-wave peer is independent of the revoked sibling. The final
+        # barrier still requires all earlier waves, including that sibling.
+        self.start("b")
+        self.finish("b")
+        with self.assertRaises(Refused):
+            self.start("review")
+
+    def test_changed_inventory_during_running_revokes_owned_and_cannot_resume(self):
+        self.start("plan")
+        changed=(replace(self.models[0],healthy=False),)
+        with self.assertRaises(Refused):
+            self.run.complete("plan",self.ctx,changed)
+        with self.assertRaises(Refused):
+            self.finish("plan")
+        with self.assertRaises(Refused):
+            self.g.checkpoint(self.grants["plan"],self.run.request("plan"))
+        self.g.checkpoint(self.grants["a"],self.run.request("a"))
+
+    def test_changed_context_during_running_is_terminal(self):
+        self.start("plan")
+        with self.assertRaises(Refused):
+            self.run.complete("plan",replace(self.ctx,generation=2),self.models)
+        with self.assertRaises(Refused):
+            self.finish("plan")
