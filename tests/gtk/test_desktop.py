@@ -6210,6 +6210,26 @@ class MuteTests(DesktopTests):
         self.until(lambda: not self.ui.busy)
         self.assertIn("audio output muted", self.ui.state_row.get_text())
 
+    def test_explicit_input_language_is_dispatched_to_microphone_transcription(self):
+        self.connect_model()
+        self.assertEqual(self.ui.stt_language.get_active_id(), "auto")
+        self.ui.stt_language.set_active_id("tr")
+        seen = []
+
+        async def listen(model, finish, publish, *, checkpoint, language):
+            seen.append(language)
+            return await self.backend.listen(model, finish, publish, checkpoint=checkpoint)
+
+        self.ui.mute.set_active(True)
+        with patch.object(desktop.audio, "listen", side_effect=listen):
+            self.begin_voice()
+            self.assertFalse(self.ui.stt_language.get_sensitive())
+            self.click(self.ui.finish_btn)
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(seen, ["tr"])
+        self.assertTrue(self.ui.stt_language.get_sensitive())
+        self.assertNotIn("stt_language", settings.load())
+
     def test_muted_voice_input_works_without_piper_or_voice_files(self):
         self.connect_model()
         self.ui.cfg["voices"] = {}

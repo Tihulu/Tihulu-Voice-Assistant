@@ -395,6 +395,16 @@ def create_window(app, loop, bridge=None):
             self.preview_locales = {}
             self.voice_setup_note = Gtk.Label(xalign=0, wrap=True)
             models.append(self.voice_setup_note)
+            models.append(Gtk.Label(label=tr(
+                "Speech input language (this window only; Auto is default)",
+                "Ses giriş dili (bu pencere için; varsayılan otomatik)",
+                "Spracheingabe (nur dieses Fenster; Standard automatisch)"), xalign=0))
+            self.stt_language = Gtk.ComboBoxText()
+            for key, title in (("auto", tr("Auto detect", "Otomatik algıla", "Automatisch erkennen")),
+                               ("tr", "Türkçe"), ("en", "English"), ("de", "Deutsch")):
+                self.stt_language.append(key, title)
+            self.stt_language.set_active_id("auto")
+            models.append(self.stt_language)
             self.model_scan_result = self.model_scan_context = None
             self.model_scan = self.button(models, tr(
                 "Find existing audio models in a folder", "Klasörde mevcut ses modellerini bul",
@@ -1615,7 +1625,7 @@ def create_window(app, loop, bridge=None):
             self.cancel.set_visible(self.cancel.get_sensitive())
             self.hard.set_visible(self.hard.get_sensitive())
             for w in (self.reload,self.url,self.models,*self.pickers,self.test_chat_button,
-                      self.transcribe_button,*self.previews):
+                      self.transcribe_button,self.stt_language,*self.previews):
                 w.set_sensitive(not self.busy)
             transcribe_ready = stt_present and audio.tools_ready("whisper-cli")
             self.transcribe_button.set_sensitive(not self.busy and transcribe_ready and not audio_blocked)
@@ -4673,6 +4683,7 @@ def create_window(app, loop, bridge=None):
                 self.require_audio_choice()
                 self.require_tools(("filesystem_read", ("recording",)), selected=True)
                 model = self.cfg["stt"]
+                language = audio.checked_stt_language(self.stt_language.get_active_id())
                 context = self.picker_context()
                 selection = self.tool_checkpoint("filesystem_read", ("recording",),
                                                  self.session.epoch, selected=True,
@@ -4697,7 +4708,8 @@ def create_window(app, loop, bridge=None):
                         checkpoint=checkpoint)
                 self.set_state("transcribing")
                 raw = await audio.transcribe(model, path, runner=self.transcribe_runner,
-                                             checkpoint=checked_model, expected_identity=identity)
+                                             checkpoint=checked_model, expected_identity=identity,
+                                             **({"language": language} if language != "auto" else {}))
                 checked_model()
                 checkpoint()
                 self.bubble("Recording", raw)
@@ -5364,6 +5376,11 @@ def create_window(app, loop, bridge=None):
                     "Sesli sohbete başlamadan önce metin ekini kaldır.",
                     "Textanhang vor dem Sprachchat entfernen."))
                 return
+            try:
+                language = audio.checked_stt_language(self.stt_language.get_active_id())
+            except Hold as exc:
+                self.set_state("ready", str(exc))
+                return
             async def run(epoch):
                 def progress(stage):
                     if epoch == self.session.epoch and not self.playback_stopping:
@@ -5413,7 +5430,8 @@ def create_window(app, loop, bridge=None):
                     checked_model = await self.runtime_model_proofs.bind(
                         stt_choice, self.saved_cfg["market_refs"], digests=self.saved_cfg.get("audio_digests", {}),
                         checkpoint=check_voice_grant)
-                    text=await audio.listen(stt_choice,self.finish,progress, checkpoint=checked_model)
+                    text=await audio.listen(stt_choice,self.finish,progress, checkpoint=checked_model,
+                                            **({"language": language} if language != "auto" else {}))
                     checked_model()
                 # Already captured samples cannot be undone. Refuse to display
                 # or dispatch the returned transcription after revocation.
