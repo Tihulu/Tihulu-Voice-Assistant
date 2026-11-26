@@ -68,6 +68,7 @@ def speech_corpus_profile(corpus,stt_profile,has_stt):
         "original":(False,False,0,None),
         "expanded":(False,False,0,"small"),
         "expanded-small-short":(False,False,0,"small"),
+        "expanded-piper-small":(False,False,0,"small"),
         "targeted":(False,False,0,"turbo-q5"),
         "turbo-expanded":(False,False,0,"turbo-q5"),
         "mixed-preview":(True,False,8,"small"),
@@ -84,3 +85,16 @@ def speech_corpus_profile(corpus,stt_profile,has_stt):
     if required is not None and (not has_stt or required!=stt_profile):
         raise RuntimeError("invalid corpus profile")
     return retain,auto,extra
+
+
+def neural_sample_allowed(corpus,case_id,language,text,reference):
+    """Only predeclared fixture identities; no arbitrary text admission."""
+    if any(type(v) is not str for v in (corpus,case_id,language,text,reference)):
+        return False
+    if language not in ("tr","en","de"):
+        return False
+    if corpus not in ("mixed-auto-piper","mixed-auto-piper-short","expanded-piper-small"):
+        return False
+    if case_id==language and text==reference:
+        return True
+    return corpus=="expanded-piper-small" and (case_id,language,text) in expanded_corpus()
