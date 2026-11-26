@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from tihulu_jarvis import resources
 from tihulu_jarvis.voice import audio
+from tihulu_jarvis.voice.m1 import Hold
 
 
 class ConfigureTests(unittest.TestCase):
@@ -72,3 +73,23 @@ class WhisperResourceDispatchTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(observed, [("whisper-cli", ("-m", Path("/fixture/model.bin"),
             "-f", Path("/fixture/input.wav"), "-l", "auto", "-t", "3", "-ng",
             "-otxt", "-of", Path("/fixture/output")))])
+
+
+    async def test_explicit_input_language_reaches_whisper_and_invalid_is_refused(self):
+        observed = []
+        @asynccontextmanager
+        async def child(name, *args, **kwargs):
+            observed.append(args[args.index("-l") + 1])
+            class Process:
+                async def wait(self):
+                    return 0
+            yield Process()
+        with patch.object(audio, "child", child), patch.object(audio, "tools_ready", return_value=True):
+            for lang in ("auto", "tr", "en", "de"):
+                await audio._whisper(Path("/fixture/model.bin"), Path("/fixture/input.wav"),
+                                     Path("/fixture/output"), checkpoint=lambda: None, language=lang)
+            for bad in ("th", "--translate", None):
+                with self.assertRaisesRegex(Hold, "invalid_stt_language"):
+                    await audio._whisper(Path("/fixture/model.bin"), Path("/fixture/input.wav"),
+                                         Path("/fixture/output"), checkpoint=lambda: None, language=bad)
+        self.assertEqual(observed, ["auto", "tr", "en", "de"])

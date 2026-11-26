@@ -73,12 +73,12 @@ async def run(args):
             results.append(row)
             print(json.dumps(row, ensure_ascii=False), flush=True)
 
-        async def transcribe(case, path, expected, threshold):
+        async def transcribe(case, path, expected, threshold, language="auto"):
             started = time.monotonic()
             stages = []
             try:
                 actual = await audio.transcribe(str(args.model), str(path), publish=stages.append,
-                                                checkpoint=lambda: None)
+                                                checkpoint=lambda: None, language=language)
                 error = wer(expected, actual)
                 report(case, "PASS" if error <= threshold and stages == ["transcribing"] else "FAIL",
                        expected=expected, actual=actual, wer=round(error, 4),
@@ -98,6 +98,7 @@ async def run(args):
             convert(raw, wav)
             clips[lang] = wav
             await transcribe("espeak-" + lang, wav, expected, .5)
+            await transcribe("espeak-forced-" + lang, wav, expected, .5, language=lang)
 
         # These are deliberately separate stress criteria, not claims that
         # automatic single-language detection handles code switching.
@@ -213,7 +214,7 @@ def main():
         setattr(args, attr, getattr(args, attr).resolve(strict=True))
     results = asyncio.run(run(args))
     args.report.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return 0 if len(results) == 16 and all(x["status"] == "PASS" for x in results) else 1
+    return 0 if len(results) == 19 and all(x["status"] == "PASS" for x in results) else 1
 
 
 if __name__ == "__main__":

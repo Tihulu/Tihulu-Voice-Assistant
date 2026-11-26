@@ -514,8 +514,18 @@ async def _capture(wav, finish, publish, *, checkpoint):
         raise Hold("capture_timeout") from None
 
 
-async def listen(model, finish, publish, *, checkpoint):
+STT_LANGUAGES = ("auto", "tr", "en", "de")
+
+
+def checked_stt_language(language):
+    if not isinstance(language, str) or language not in STT_LANGUAGES:
+        raise Hold("invalid_stt_language")
+    return language
+
+
+async def listen(model, finish, publish, *, checkpoint, language="auto"):
     checkpoint()
+    language = checked_stt_language(language)
     model = selected_file(model, ".bin")
     model_identity = _runtime_identity(model)
     checkpoint = _bind_runtime_model(model, checkpoint, expected_identity=model_identity)
@@ -528,7 +538,8 @@ async def listen(model, finish, publish, *, checkpoint):
         if not await validate_signal(wav, checkpoint=checkpoint):
             raise Hold("no_speech_signal")
         return await _transcription_stage(model, wav, stem, None, publish,
-                                          checkpoint=checkpoint, model_identity=model_identity)
+                                          checkpoint=checkpoint, model_identity=model_identity,
+                                          language=language)
 
 
 MAX_TRANSCRIPT = 64000
@@ -557,9 +568,10 @@ def recording_identity(recording, *, checkpoint):
 
 
 async def transcribe(model, recording, runner=None, publish=None, *, checkpoint,
-                     expected_identity=None):
+                     expected_identity=None, language="auto"):
     """Transcribe a bounded private copy of an explicitly selected recording."""
     checkpoint()
+    language = checked_stt_language(language)
     model = selected_file(model, ".bin")
     model_identity = _runtime_identity(model)
     checkpoint = _bind_runtime_model(model, checkpoint, expected_identity=model_identity)
@@ -583,10 +595,12 @@ async def transcribe(model, recording, runner=None, publish=None, *, checkpoint,
         if not await validate_signal(snapshot, checkpoint=checkpoint):
             raise Hold("no_speech_signal")
         return await _transcription_stage(model, snapshot, stem, runner, publish,
-                                          checkpoint=checkpoint, model_identity=model_identity)
+                                          checkpoint=checkpoint, model_identity=model_identity,
+                                          language=language)
 
 
-async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint, model_identity=None):
+async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint,
+                               model_identity=None, language="auto"):
     # Start the budget before status publication and queued process creation.
     deadline = OperationDeadline(120, checkpoint)
 
@@ -596,7 +610,8 @@ async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint,
             publish("transcribing")
         deadline.check()
         if runner is None:
-            await _whisper(model, wav, stem, checkpoint=deadline.check, model_identity=model_identity)
+            await _whisper(model, wav, stem, checkpoint=deadline.check,
+                           model_identity=model_identity, language=language)
         else:
             await runner(model, wav, stem)
         deadline.check()
@@ -634,13 +649,14 @@ def whisper_resource_args(profile, cores_count=None):
     return args
 
 
-async def _whisper(model, wav, stem, *, checkpoint, model_identity=None):
+async def _whisper(model, wav, stem, *, checkpoint, model_identity=None, language="auto"):
     checkpoint()
+    language = checked_stt_language(language)
     if not tools_ready("whisper-cli"):
         raise Hold("transcription_backend_missing")
     options = whisper_resource_args(PROFILE)
     checkpoint()
-    async with child("whisper-cli", "-m", model, "-f", wav, "-l", "auto",
+    async with child("whisper-cli", "-m", model, "-f", wav, "-l", language,
                      *options, "-otxt", "-of", stem, checkpoint=checkpoint, model_identity=model_identity) as p:
         checkpoint()
         if await p.wait():
