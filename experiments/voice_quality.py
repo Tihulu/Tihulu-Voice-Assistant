@@ -40,3 +40,9 @@ def expanded_corpus():
         ("de-2","de","Bitte lies diese kurze Nachricht vor."),
         ("de-3","de","Ich möchte morgen früh das Wetter prüfen."),
     )
+
+def speech_filename(identity):
+    """Closed fixture sample identity, not a caller-supplied filesystem path."""
+    if type(identity) is not str or not re.fullmatch(r"(?:tr|en|de)(?:-[23])?",identity):
+        raise Refused("invalid_speech_sample_identity")
+    return identity+".wav"

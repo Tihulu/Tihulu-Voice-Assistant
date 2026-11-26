@@ -10,7 +10,7 @@ import socket
 import subprocess
 import tempfile
 import sys
-from voice_quality import word_errors, acceptable, expanded_corpus
+from voice_quality import word_errors, acceptable, expanded_corpus, speech_filename
 from tihulu_jarvis import profiles
 from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
@@ -158,7 +158,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
             scope[scope.index(str(source))]=str(lang_source)
             scope[scope.index(str(output))]=str(lang_output)
             digest=hashlib.sha256(payload).hexdigest()
-            dest=lang_output/(lang+".wav")
+            dest=lang_output/speech_filename(case_id)
             call=CapabilityCall("espeak_ng",version.group(1),"text_to_wav",
                     (("artifact","fixture-text-"+case_id),("digest",digest),("language",lang),
                      ("output","fixture-audio-"+case_id)))
@@ -178,7 +178,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
                 return 1
             job.checkpoint()
             run(["/usr/bin/espeak-ng","-v",lang,"-s","150","-f","/work/text.txt",
-                 "-w","/work/out/"+case_id+".wav"],scope)
+                 "-w","/work/out/"+dest.name],scope)
             if dest.is_symlink() or not dest.is_file() or not 44<dest.stat().st_size<=MAX_WAV:
                 job.cancel()
                 record("speech-wav-"+case_id,False)
@@ -311,7 +311,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
             if not all(results):
                 return 1
         record("speech-distinct-multilingual-output",len(digests)==len(samples))
-        record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+case_id)).iterdir())==[case_id+".wav"] for case_id,_,_ in samples) and not list(output.iterdir()))
+        record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+case_id)).iterdir())==[speech_filename(case_id)] for case_id,_,_ in samples) and not list(output.iterdir()))
     return 0 if len(results)==5+7*len(samples) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
 
 if __name__=="__main__":
