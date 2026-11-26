@@ -1,0 +1,170 @@
+# SPDX-License-Identifier: AGPL-3.0-only
+"""Actual disposable Firefox WebDriver smoke test, no owner browser or internet.
+
+Fixed local HTML, private browser profile, isolated network namespace. This
+does not authorize runtime browsing, arbitrary URLs, user actions or scripts.
+"""
+import hashlib
+import http.client
+import json
+import os
+from pathlib import Path
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+HTML=b"""<!doctype html><meta charset=utf-8><title>TIHULU Fixture</title>
+<p id="message">Public synthetic browser fixture</p>
+<button id="change" onclick="document.getElementById('message').textContent='Changed locally'">Change</button>
+"""
+
+def child(browser,driver,host_net):
+    results=[]
+    def record(case,ok,**details):
+        results.append(bool(ok))
+        print(json.dumps(dict(case=case,status="PASS" if ok else "FAIL",**details)),flush=True)
+    record("browser-separate-network-namespace",os.readlink("/proc/self/ns/net")!=host_net)
+    record("browser-private-home",os.environ.get("HOME")=="/tmp" and not Path("/work/not-approved").exists())
+    if not all(results):
+        return 1
+    def command(method,path,payload=None):
+        conn=http.client.HTTPConnection("127.0.0.1",4444,timeout=8)
+        try:
+            body=None if payload is None else json.dumps(payload,separators=(",",":")).encode()
+            conn.request(method,path,body=body,headers={"Content-Type":"application/json"})
+            response=conn.getresponse()
+            data=response.read(65537)
+            if response.status!=200 or len(data)>65536:
+                raise RuntimeError("webdriver status "+str(response.status)+": "+data[:500].decode("utf-8","replace"))
+            result=json.loads(data)
+            if type(result) is not dict or "value" not in result:
+                raise RuntimeError("invalid webdriver response")
+            return result["value"]
+        finally:
+            conn.close()
+    with open("/tmp/geckodriver.log","wb") as log:
+        proc=subprocess.Popen([driver,"--host","127.0.0.1","--port","4444","--log","warn"],
+                              stdin=subprocess.DEVNULL,stdout=log,stderr=log)
+        session=None
+        try:
+            deadline=time.monotonic()+10
+            while True:
+                if proc.poll() is not None or time.monotonic()>=deadline:
+                    raise RuntimeError("webdriver unavailable")
+                try:
+                    if command("GET","/status").get("ready"):
+                        break
+                except (OSError,RuntimeError,http.client.HTTPException):
+                    pass
+                time.sleep(.1)
+            value=command("POST","/session",{"capabilities":{"alwaysMatch":{
+                "browserName":"firefox","moz:firefoxOptions":{"binary":browser,
+                    "args":["-headless","-no-remote"],
+                    "prefs":{"browser.shell.checkDefaultBrowser":False,
+                             "browser.startup.page":0,"datareporting.policy.dataSubmissionEnabled":False,
+                             "toolkit.telemetry.enabled":False}}}}})
+            session=value.get("sessionId")
+            if type(session) is not str or not re.fullmatch(r"[a-fA-F0-9-]{1,64}",session):
+                raise RuntimeError("unexpected session id")
+            base="/session/"+session
+            caps=value.get("capabilities",{})
+            profile=caps.get("moz:profile","")
+            record("browser-private-profile",caps.get("browserName")=="firefox" and
+                   type(profile) is str and profile.startswith("/tmp/"),
+                   version=caps.get("browserVersion","unknown"))
+            if not all(results):
+                return 1
+            command("POST",base+"/url",{"url":"file:///work/fixture.html"})
+            record("browser-exact-local-navigation",command("GET",base+"/url")=="file:///work/fixture.html"
+                   and command("GET",base+"/title")=="TIHULU Fixture")
+            def element(identity):
+                value=command("POST",base+"/element",{"using":"css selector","value":"#"+identity})
+                element_id=value.get("element-6066-11e4-a52e-4f735466cecf")
+                if type(element_id) is not str or not re.fullmatch(r"[a-fA-F0-9-]{1,64}",element_id):
+                    raise RuntimeError("unexpected element id")
+                return base+"/element/"+element_id
+            record("browser-real-dom-text",command("GET",element("message")+"/text")==
+                   "Public synthetic browser fixture")
+            if not all(results):
+                return 1
+            command("POST",element("change")+"/click",{})
+            record("browser-fixed-local-click",command("GET",element("message")+"/text")=="Changed locally")
+            command("DELETE",base)
+            session=None
+            record("browser-session-closed",True)
+        finally:
+            if session:
+                try:
+                    command("DELETE","/session/"+session)
+                except (OSError,RuntimeError,http.client.HTTPException):
+                    pass
+            proc.terminate()
+            try:
+                proc.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                proc.wait(timeout=3)
+    return 0 if len(results)==7 and all(results) else 1
+
+def main():
+    tools=[]
+    for name in ("firefox","geckodriver"):
+        found=shutil.which(name)
+        if not found:
+            print(json.dumps({"case":"browser-tool-availability","status":"HOLD","missing":name}))
+            return 1
+        path=Path(found).resolve()
+        if not str(path).startswith("/usr/") or not path.is_file():
+            print(json.dumps({"case":"browser-tool-availability","status":"HOLD","tool":name}))
+            return 1
+        tools.append(str(path))
+    if os.getuid()==0:
+        raise RuntimeError("root fixture prohibited")
+    with tempfile.TemporaryDirectory(prefix="jarvis-browser-") as temp:
+        root=Path(temp)
+        page=root/"fixture.html"
+        page.write_bytes(HTML)
+        marker=root/"not-approved"
+        marker.write_text("public hidden marker",encoding="ascii")
+        uid,gid=os.getuid(),os.getgid()
+        (root/"passwd").write_text(f"fixture:x:{uid}:{gid}:Fixture:/tmp:/usr/sbin/nologin\n")
+        (root/"group").write_text(f"fixture:x:{gid}:\n")
+        (root/"nsswitch.conf").write_text("passwd: files\ngroup: files\nhosts: files\n")
+        (root/"fonts.conf").write_text('<?xml version="1.0"?><fontconfig>'
+            '<dir>/usr/share/fonts/truetype/dejavu</dir><cachedir>/tmp/font-cache</cachedir></fontconfig>')
+        prefix=["/usr/bin/bwrap","--unshare-all","--die-with-parent","--new-session",
+                "--cap-drop","ALL","--clearenv","--ro-bind","/usr","/usr"]
+        for name in ("bin","sbin","lib","lib64"):
+            path=Path("/"+name)
+            if path.is_symlink():
+                target=os.readlink(path)
+                if target not in ("usr/"+name,"/usr/"+name):
+                    raise RuntimeError("unexpected system layout")
+                prefix+=["--symlink",target,"/"+name]
+            elif path.exists():
+                raise RuntimeError("non-merged system layout")
+        prefix+=["--proc","/proc","--dev","/dev","--tmpfs","/dev/shm","--tmpfs","/tmp",
+                 "--dir","/work","--dir","/etc",
+                 "--ro-bind",str(page),"/work/fixture.html",
+                 "--ro-bind",str(Path(__file__).resolve()),"/work/runner.py",
+                 "--ro-bind",str(root/"passwd"),"/etc/passwd",
+                 "--ro-bind",str(root/"group"),"/etc/group",
+                 "--ro-bind",str(root/"nsswitch.conf"),"/etc/nsswitch.conf",
+                 "--ro-bind",str(root/"fonts.conf"),"/work/fonts.conf",
+                 "--setenv","HOME","/tmp","--setenv","PATH","/usr/bin:/usr/local/bin",
+                 "--setenv","LC_ALL","C.UTF-8","--setenv","FONTCONFIG_FILE","/work/fonts.conf",
+                 "--setenv","MOZ_HEADLESS","1","--setenv","USER","fixture",
+                 "--chdir","/work","--remount-ro","/"]
+        host_net=os.readlink("/proc/self/ns/net")
+        result=subprocess.run(prefix+["--","/usr/bin/python3","-I","/work/runner.py","--child",*tools,host_net],
+                              stdin=subprocess.DEVNULL,timeout=90,check=False,
+                              env={"PATH":"/usr/bin:/bin","LC_ALL":"C.UTF-8"})
+        unchanged=hashlib.sha256(page.read_bytes()).digest()==hashlib.sha256(HTML).digest()
+        print(json.dumps({"case":"browser-source-unchanged","status":"PASS" if unchanged else "FAIL"}),flush=True)
+        return 0 if result.returncode==0 and unchanged else 1
+
+if __name__=="__main__":
+    raise SystemExit(child(*sys.argv[2:]) if len(sys.argv)==5 and sys.argv[1]=="--child" else main())
