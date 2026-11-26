@@ -43,3 +43,9 @@ class VoiceQualityTests(unittest.TestCase):
         for bad in ("../tr","tr/2","tr-4","TR",None):
             with self.assertRaises(Refused):
                 speech_filename(bad)
+
+    def test_targeted_turbo_corpus_preserves_failed_examples(self):
+        from voice_quality import targeted_corpus,expanded_corpus
+        by_id={s[0]:s for s in expanded_corpus()}
+        self.assertEqual(targeted_corpus(),(by_id["tr-3"],by_id["de-2"],
+                                      ("en","en","Hello. Today is a beautiful day.")))

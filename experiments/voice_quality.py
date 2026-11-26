@@ -46,3 +46,8 @@ def speech_filename(identity):
     if type(identity) is not str or not re.fullmatch(r"(?:tr|en|de)(?:-[23])?",identity):
         raise Refused("invalid_speech_sample_identity")
     return identity+".wav"
+
+def targeted_corpus():
+    """Preserve the two failed Small utterances and one passing EN control."""
+    by_id={sample[0]:sample for sample in expanded_corpus()}
+    return (by_id["tr-3"],by_id["de-2"],("en","en","Hello. Today is a beautiful day."))
