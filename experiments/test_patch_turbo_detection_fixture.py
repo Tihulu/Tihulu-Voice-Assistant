@@ -15,3 +15,17 @@ class TurboDetectionSourcePatchTests(unittest.TestCase):
         for bad in ("",ANCHOR,ANCHOR+ANCHOR+later,later+ANCHOR,ANCHOR+later+later,INSERT+ANCHOR+later):
             with self.assertRaises(ValueError):
                 patched_source(bad)
+
+    def test_context300_patch_does_not_modify_default_comparison(self):
+        from patch_turbo_detection_fixture import INSERT_300
+        original=ANCHOR+"state->exp_n_audio_ctx = params.audio_ctx;\n"
+        patched=patched_source(original,300)
+        self.assertEqual(patched.replace(INSERT_300,"",1),original)
+        self.assertIn("params.audio_ctx == 300",INSERT_300)
+        self.assertIn("n_samples > 5 * WHISPER_SAMPLE_RATE",INSERT_300)
+        self.assertIn(INSERT,patched_source(original))
+        for bad in (True,0,301,"300"):
+            with self.assertRaises(ValueError):
+                patched_source(original,bad)
+        with self.assertRaises(ValueError):
+            patched_source(patched,500)
