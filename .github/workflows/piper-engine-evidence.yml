@@ -14,7 +14,7 @@ permissions:
 jobs:
   piper:
     runs-on: ubuntu-22.04
-    timeout-minutes: 12
+    timeout-minutes: 18
     strategy:
       fail-fast: false
       matrix:
@@ -28,12 +28,12 @@ jobs:
             revision: a08e8fa47faf6681ecc42a79cfa95369430cbcf6
             voice: en/en_US/lessac/medium/en_US-lessac-medium
             model_sha: 5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f
-            config_sha: ''
+            config_sha: 'efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0'
           - language: de
             revision: 5227e415beb85e92d953cfba376bfc72104bc7ff
             voice: de/de_DE/thorsten/medium/de_DE-thorsten-medium
             model_sha: 7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819
-            config_sha: ''
+            config_sha: '34342a789afa94f724419fac8ce5f1387f12f5968644ef5894866145e463e004'
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -54,7 +54,7 @@ jobs:
           CONFIG_SHA: ${{ matrix.config_sha }}
         run: |
           sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y bubblewrap python3-venv curl libgomp1
+          sudo apt-get install --no-install-recommends -y bubblewrap python3-venv curl libgomp1 cmake build-essential
           test "$(id -u)" -ne 0
           mkdir -p "$RUNNER_TEMP/piper-fixture/wheels" "$RUNNER_TEMP/piper-fixture/site"
           /usr/bin/python3 -m venv "$RUNNER_TEMP/piper-fixture/venv"
@@ -63,11 +63,18 @@ jobs:
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 120 --max-filesize 70000000 -o "$RUNNER_TEMP/piper-fixture/voice.onnx" "https://huggingface.co/rhasspy/piper-voices/resolve/$VOICE_REV/$VOICE_PATH.onnx"
           echo "$MODEL_SHA  $RUNNER_TEMP/piper-fixture/voice.onnx" | sha256sum -c -
           curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 16384 -o "$RUNNER_TEMP/piper-fixture/voice.json" "https://huggingface.co/rhasspy/piper-voices/resolve/$VOICE_REV/$VOICE_PATH.onnx.json"
-          if test -n "$CONFIG_SHA"; then
-            echo "$CONFIG_SHA  $RUNNER_TEMP/piper-fixture/voice.json" | sha256sum -c -
-          else
-            sha256sum "$RUNNER_TEMP/piper-fixture/voice.json"
-          fi
+          echo "$CONFIG_SHA  $RUNNER_TEMP/piper-fixture/voice.json" | sha256sum -c -
+      - name: Prepare pinned public Whisper Small for neural voice roundtrip
+        run: |
+          mkdir "$RUNNER_TEMP/piper-stt"
+          git init "$RUNNER_TEMP/piper-stt/source"
+          git -C "$RUNNER_TEMP/piper-stt/source" -c credential.helper= fetch --depth 1 https://github.com/ggml-org/whisper.cpp.git 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          git -C "$RUNNER_TEMP/piper-stt/source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/piper-stt/source" rev-parse HEAD)" = 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 180 --max-filesize 500000000 -o "$RUNNER_TEMP/piper-stt/model.bin" 'https://huggingface.co/ggerganov/whisper.cpp/resolve/fb5ed9369c26eaf08392504d8446da431e0fffb9/ggml-small.bin'
+          echo "1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b  $RUNNER_TEMP/piper-stt/model.bin" | sha256sum -c -
+          cmake -S "$RUNNER_TEMP/piper-stt/source" -B "$RUNNER_TEMP/piper-stt/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build "$RUNNER_TEMP/piper-stt/build" --target whisper-cli -j 2
       - name: Actual neural TTS in private CPU fixture
         env:
           PYTHONPATH: src:experiments
@@ -75,3 +82,4 @@ jobs:
           VOICE_LANGUAGE: ${{ matrix.language }}
         run: |
           /usr/bin/python3 experiments/piper_engine_acceptance.py "$RUNNER_TEMP/piper-fixture/site" "$RUNNER_TEMP/piper-fixture/voice.onnx" "$RUNNER_TEMP/piper-fixture/voice.json" "$VOICE_LANGUAGE"
+          /usr/bin/python3 experiments/piper_engine_acceptance.py "$RUNNER_TEMP/piper-fixture/site" "$RUNNER_TEMP/piper-fixture/voice.onnx" "$RUNNER_TEMP/piper-fixture/voice.json" "$VOICE_LANGUAGE" "$RUNNER_TEMP/piper-stt/build/bin/whisper-cli" "$RUNNER_TEMP/piper-stt/model.bin"
