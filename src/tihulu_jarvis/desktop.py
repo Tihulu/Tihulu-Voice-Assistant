@@ -5373,11 +5373,15 @@ def create_window(app, loop, bridge=None):
                 def grow(piece):
                     if epoch == self.session.epoch:
                         self.extend(answer,"JARVIS",piece)
+                def reset_attempt():
+                    if epoch == self.session.epoch and answer.get_parent() == self.log:
+                        self.growing[answer] = ""
+                        answer.set_text("JARVIS\n")
                 try:
                     result,_=await self.session.reply(text,backend,
                                                       epoch,on_delta=grow,route=route,
                                                       attachment=item,model=self.cfg["llm"],
-                                                      authorize=permitted)
+                                                      authorize=permitted, on_retry=reset_attempt)
                     self.session.check(epoch)
                 except (Hold, asyncio.CancelledError) as exc:
                     # Earlier authorized deltas cannot be unseen, but a

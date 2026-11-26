@@ -59,6 +59,49 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(seen, [])
         self.assertEqual(session.history, ())
 
+    async def test_retry_resets_stream_and_refuses_late_previous_attempt_delta(self):
+        session = Session()
+        seen, callbacks = [], []
+
+        class Backend:
+            async def chat(self, messages, on_delta):
+                callbacks.append(on_delta)
+                if len(callbacks) == 1:
+                    on_delta("Hello how are you?")
+                    return "Hello how are you?"
+                with self_test.assertRaisesRegex(Hold, "stream_attempt_closed"):
+                    callbacks[0]("late first attempt")
+                on_delta("Merhaba!")
+                return "Merhaba!"
+
+        self_test = self
+        result, _ = await session.own(lambda e: session.reply(
+            "naber nasilsin", Backend(), e, on_delta=seen.append,
+            on_retry=lambda: seen.append("RESET")))
+        self.assertEqual(result, "Merhaba!")
+        self.assertEqual(seen, ["Hello how are you?", "RESET", "Merhaba!"])
+        self.assertEqual(session.history[-1].content, "Merhaba!")
+        with self.assertRaisesRegex(Hold, "stream_attempt_closed"):
+            callbacks[-1]("late after completion")
+
+    async def test_retry_without_reset_callback_does_not_append_second_stream(self):
+        session = Session()
+        seen, callbacks = [], []
+
+        class Backend:
+            async def chat(self, messages, on_delta):
+                callbacks.append(on_delta)
+                if len(callbacks) == 1:
+                    on_delta("Hello how are you?")
+                    return "Hello how are you?"
+                return "Merhaba!"
+
+        result, _ = await session.own(lambda e: session.reply(
+            "naber nasilsin", Backend(), e, on_delta=seen.append))
+        self.assertEqual(result, "Merhaba!")
+        self.assertEqual(seen, ["Hello how are you?"])
+        self.assertIsNone(callbacks[1])
+
     async def test_text_chat_does_not_require_a_voice(self):
         session=Session()
         responses=iter(["Hello how are you?", "Merhaba, nasılsın?"])

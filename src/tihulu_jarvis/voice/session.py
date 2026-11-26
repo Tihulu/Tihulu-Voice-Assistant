@@ -92,7 +92,7 @@ class Session:
         return system
 
     async def reply(self, user, jan, epoch, voices=None, on_delta=None, *, route=None,
-                    attachment=None, model=None, authorize=lambda: True):
+                    attachment=None, model=None, authorize=lambda: True, on_retry=None):
         self.check(epoch)
         self.require_route(route)
         history = self.history
@@ -107,11 +107,17 @@ class Session:
                 refused = True
                 raise Hold("attachment_context_changed")
 
-        def guarded_delta(piece):
-            checkpoint()
-            if not safe_text(piece):
-                raise Hold("invalid_response_text")
-            on_delta(piece)
+        active_attempt = None
+
+        def delta_for(attempt):
+            def guarded_delta(piece):
+                checkpoint()
+                if active_attempt != attempt:
+                    raise Hold("stream_attempt_closed")
+                if not safe_text(piece):
+                    raise Hold("invalid_response_text")
+                on_delta(piece)
+            return guarded_delta
 
         if voices is not None:
             if attachment is not None:
@@ -133,8 +139,19 @@ class Session:
         for attempt in range(2):
             checkpoint()
             system = self._text_instruction(decision, attempt)
-            result = await (jan.chat((Message("system",system),*history,message), on_delta=guarded_delta)
-                            if streaming else jan((Message("system",system),*history,message)))
+            request = (Message("system",system),*history,message)
+            # A caller without a reset callback cannot distinguish retry
+            # deltas from the rejected draft. Keep that retry whole.
+            active_attempt = attempt
+            try:
+                if streaming and (attempt == 0 or on_retry is not None):
+                    result = await jan.chat(request, on_delta=delta_for(attempt))
+                elif streaming:
+                    result = await jan.chat(request, on_delta=None)
+                else:
+                    result = await jan(request)
+            finally:
+                active_attempt = None
             checkpoint()
             if (safe_text(result) and result.strip() and len(result)<=32000
                     and not re.search(r"</?(?:think|analysis)\b",result,re.I)
@@ -143,4 +160,8 @@ class Session:
                 self._history_route = route
                 self.has_attachment_history = self.has_attachment_history or attachment is not None
                 return result, None
+            if attempt == 0 and streaming and on_retry is not None:
+                checkpoint()
+                on_retry()
+                checkpoint()
         raise Hold("response_rejected_after_one_retry")
