@@ -62,3 +62,33 @@ class OwnedFamilyTests(unittest.TestCase):
         with self.assertRaises(Refused):
             self.member("late")
         self.leave(a)
+
+    def test_cancel_then_nonzero_exit_remains_drained(self):
+        a=self.member("a")
+        self.f.run.stop()
+        self.assertEqual(self.f.exit(self.h,1),"PENDING")
+        self.assertEqual(self.leave(a),"DRAINED")
+    def test_stop_drops_retained_root_payload_immediately(self):
+        a=self.member("a")
+        self.f.exit(self.h,payload=b"private-fixture")
+        self.f.run.stop()
+        self.assertIsNone(self.f.run._root_exits["plan"][2])
+        self.assertEqual(self.leave(a),"DRAINED")
+    def test_stale_root_event_revokes_before_member_exit(self):
+        a=self.member("a")
+        stale=replace(self.f.ctx,generation=2)
+        self.assertEqual(self.f.run.observe_exit(self.h,0,stale,self.f.models,payload=b"stale"),"PENDING")
+        with self.assertRaises(Refused):
+            self.f.g.checkpoint(self.f.grants["plan"],self.f.run.request("plan"))
+        self.assertEqual(self.leave(a),"DRAINED")
+    def test_stale_member_event_cannot_be_revived_by_fresh_root(self):
+        a=self.member("a")
+        stale=replace(self.f.ctx,generation=2)
+        self.assertEqual(self.f.run.observe_member_exit(a,stale,self.f.models),"PENDING")
+        self.assertEqual(self.f.exit(self.h),"DRAINED")
+    def test_member_expiry_revokes_other_live_workers(self):
+        a,b=self.member("a"),self.member("b")
+        self.f.g.revoke("owned-plan")
+        self.assertEqual(self.leave(a),"PENDING")
+        self.assertEqual(self.f.exit(self.h),"PENDING")
+        self.assertEqual(self.leave(b),"DRAINED")

@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from threading import current_thread
 from gateway import Refused,token
 from local_agent_resources import ResourceLedger
-from local_agent_wave_run import WaveRun
+from local_agent_wave_run import WaveRun,MAX_RESULT_BYTES
 
 @dataclass(frozen=True,eq=False)
 class OwnedWorker:
@@ -77,6 +77,9 @@ class ManagedWave:
         self._thread()
         self._stopping=True
         self._run.cancel()
+        # Retain terminal evidence, not stale result bytes.
+        for worker,(handle,status,payload) in tuple(self._root_exits.items()):
+            self._root_exits[worker]=(handle,status,None)
         return tuple(entry[0] for entry in self._owned.values())
 
     def pending(self):
@@ -126,11 +129,18 @@ class ManagedWave:
         if entry is None or entry[0] is not member or entry[1]:
             raise Refused("managed_member_unknown")
         family[member.identity]=(member,True)
+        if not self._stopping:
+            try:
+                self._run.validate_plan(context,candidates)
+                handle,grant,_=self._owned[member.worker]
+                self._run.checkpoint_worker(handle.worker,context,candidates,completion_grant=grant)
+            except Refused:
+                self.stop()
         root=self._root_exits.get(member.worker)
         if root is None or any(not done for _,done in family.values()):
             return "PENDING"
-        handle,code,payload=root
-        return self._finish_exit(handle,code,context,candidates,payload)
+        handle,status,payload=root
+        return self._finish_exit(handle,status,context,candidates,payload)
 
     def observe_exit(self,handle,exit_code,context,candidates,*,payload=None):
         self._thread()
@@ -145,24 +155,33 @@ class ManagedWave:
             raise Refused("managed_exit_duplicate")
         # A root exit is not a family exit. Keep the reservation and stop
         # on root failure even if members still require terminal observation.
-        if exit_code!=0:
+        status="DRAINED" if self._stopping else ("FAILED" if exit_code!=0 else "COMPLETED")
+        if status=="FAILED":
             self.stop()
         if any(not done for _,done in self._families[handle.worker].values()):
-            # Bound retained results before waiting for descendants.
-            if payload is not None and (type(payload) is not bytes or not 0<len(payload)<=16384):
-                self.stop()
+            if not self._stopping:
+                try:
+                    self._run.checkpoint_worker(handle.worker,context,candidates,completion_grant=entry[1])
+                except Refused:
+                    self.stop()
+                    status="DRAINED"
+            if self._stopping:
                 payload=None
-            self._root_exits[handle.worker]=(handle,exit_code,payload)
+            elif payload is not None and (type(payload) is not bytes or not 0<len(payload)<=MAX_RESULT_BYTES):
+                self.stop()
+                status="FAILED"
+                payload=None
+            self._root_exits[handle.worker]=(handle,status,payload)
             return "PENDING"
-        return self._finish_exit(handle,exit_code,context,candidates,payload)
+        return self._finish_exit(handle,status,context,candidates,payload)
 
-    def _finish_exit(self,handle,exit_code,context,candidates,payload):
+    def _finish_exit(self,handle,status,context,candidates,payload):
         _,grant,reservation=self._owned[handle.worker]
         try:
-            if exit_code!=0:
+            if status=="FAILED":
                 self.stop()
                 return "FAILED"
-            if self._stopping:
+            if self._stopping or status=="DRAINED":
                 return "DRAINED"
             try:
                 self._run.complete(handle.worker,context,candidates,payload=payload,
