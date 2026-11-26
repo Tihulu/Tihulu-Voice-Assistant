@@ -1959,6 +1959,12 @@ def create_window(app, loop, bridge=None):
             if previous_digest is not None and previous_digest != inspected[1].digest:
                 raise Hold("model_digest_mismatch")
             digests[card.storage_ref] = inspected[1].digest
+            if key != "stt":
+                voices = proposed.setdefault("voice_digests", {})
+                previous_voice = voices.get(card.storage_ref)
+                if previous_voice is not None and previous_voice != inspected[2][2]:
+                    raise Hold("voice_digest_mismatch")
+                voices[card.storage_ref] = inspected[2][2]
             with self.market.transfer_lease(card.model_id), self.market._write_guard():
                 if self.market.lookup_card(card.model_id) != known:
                     raise Hold("registry_card_changed")
@@ -4097,6 +4103,12 @@ def create_window(app, loop, bridge=None):
                                              if k in self.cfg["market_refs"]}
                 if not self.cfg["audio_digests"]:
                     self.cfg.pop("audio_digests")
+                sidecars = {k: v for k, v in self.cfg.get("voice_digests", {}).items()
+                            if k in self.cfg.get("audio_digests", {})}
+                if sidecars:
+                    self.cfg["voice_digests"] = sidecars
+                else:
+                    self.cfg.pop("voice_digests", None)
                 self.save()
                 self.build_market_page()
             except Hold as exc:
@@ -4268,6 +4280,16 @@ def create_window(app, loop, bridge=None):
                     d.destroy()
             self.show_owned_picker(dialog, response)
 
+        def bind_registered_voice(self, speech, checkpoint):
+            refs = self.saved_cfg["market_refs"]
+            sidecars = self.saved_cfg.get("voice_digests", {})
+            matches = [sidecars[ref] for ref, path in refs.items()
+                       if path == speech.voice_id and ref in sidecars]
+            if len(matches) > 1:
+                raise Hold("model_reference_unverified")
+            return audio.bind_voice_digest(speech.voice_id, speech.language,
+                                           matches[0] if matches else None, checkpoint=checkpoint)
+
         def preview(self, lang):
             if self.busy or lang not in ("tr", "en", "de"):
                 return
@@ -4300,7 +4322,8 @@ def create_window(app, loop, bridge=None):
                     checked_model = await self.runtime_model_proofs.bind(
                         speech.voice_id, self.saved_cfg["market_refs"], digests=self.saved_cfg.get("audio_digests", {}),
                         checkpoint=checkpoint)
-                    await audio.speak(speech, progress, checkpoint=checked_model)
+                    checked_voice = self.bind_registered_voice(speech, checked_model)
+                    await audio.speak(speech, progress, checkpoint=checked_voice)
             self.submit(run, label=tr("Voice preview", "Ses önizlemesi", "Stimmprobe"))
 
         def test_chat(self):
@@ -5112,6 +5135,7 @@ def create_window(app, loop, bridge=None):
                     checked_voice = await self.runtime_model_proofs.bind(
                         speech.voice_id, self.saved_cfg["market_refs"], digests=self.saved_cfg.get("audio_digests", {}),
                         checkpoint=check_voice_grant)
+                    checked_voice = self.bind_registered_voice(speech, checked_voice)
                     playback = loop.create_task(audio.speak(speech, progress, checkpoint=checked_voice))
                     self.playback = playback
                     try:

@@ -3,6 +3,8 @@
 """Explicit, on-demand local capture, Whisper transcription and Piper playback."""
 import asyncio
 import json
+import hashlib
+import hmac
 import math
 import os
 import shutil
@@ -145,20 +147,36 @@ def inspect_voice(value, lang, *, checkpoint=lambda: None, expected_identity=Non
     finally:
         if fd is not None:
             os.close(fd)
-    proof = (config, identity)
+    proof = (config, identity, hashlib.sha256(raw).hexdigest())
     require_voice_proof(proof, checkpoint=checkpoint)
     return Voice(str(p), lang), proof
 
 
 def require_voice_proof(proof, *, checkpoint=lambda: None):
     checkpoint()
-    config, identity = proof
+    config, identity, _ = proof
     try:
         if _voice_identity(config.lstat()) != identity:
             raise Hold("voice_locale_unverified")
     except OSError:
         raise Hold("voice_locale_unverified") from None
     checkpoint()
+
+
+def bind_voice_digest(value, lang, expected, *, checkpoint):
+    """Validate the same bounded JSON bytes used for locale verification."""
+    checkpoint()
+    if expected is None:
+        return checkpoint
+    _, proof = inspect_voice(value, lang, checkpoint=checkpoint)
+    if not hmac.compare_digest(proof[2], expected):
+        raise Hold("voice_digest_mismatch")
+
+    def bound():
+        require_voice_proof(proof, checkpoint=checkpoint)
+
+    bound()
+    return bound
 
 
 def voice_for(value, lang):
