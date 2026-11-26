@@ -2501,6 +2501,23 @@ class LocalSelectionConsistencyUITests(MarketFixture):
                          hashlib.sha256(path.read_bytes()).hexdigest())
         self.assertIn("Full hash recorded", self.ui.labels["stt"].get_text())
 
+    def test_unregister_unselected_audio_removes_only_its_integrity_metadata(self):
+        first = self.weights("selected-keep.bin")
+        second = self.weights("unselected-remove.bin")
+        second.write_bytes(b"other model")
+        self.ui.select_imported_audio("stt", str(first))
+        a = self.ui.market.card(first.name)
+        b = self.ui.register_choice("stt", str(second))
+        self.pick_card(b.model_id)
+        self.ui.forget_selected_card()
+        self.assertIsNone(self.ui.market.lookup_card(b.model_id))
+        self.assertTrue(second.is_file())
+        cfg = settings.load()
+        self.assertEqual(cfg["stt"], str(first))
+        self.assertIn(a.storage_ref, cfg["audio_digests"])
+        self.assertNotIn(b.storage_ref, cfg["audio_digests"])
+        self.assertNotIn(b.storage_ref, cfg["market_refs"])
+
     def test_unregister_refuses_selected_audio_without_dropping_integrity(self):
         path = self.weights("runtime-selected.bin")
         self.ui.select_imported_audio("stt", str(path))

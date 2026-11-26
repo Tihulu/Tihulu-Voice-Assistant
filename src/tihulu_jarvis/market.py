@@ -2435,6 +2435,12 @@ class Registry:
     @_registry_locked
     def unregister(self, model_id, *, expected=None):
         """Remove a registry entry. This never deletes a file by itself."""
+        return self._unregister_locked(model_id, expected=expected)
+
+    def _unregister_locked(self, model_id, *, expected=None):
+        """Internal mutation; caller owns model lease and registry write guard."""
+        if getattr(self._guard_state, "pid", None) != os.getpid():
+            raise Hold("registry_lock_required")
         card = self.card(model_id)
         if expected is not None and card != expected:
             raise Hold("registry_card_changed")
