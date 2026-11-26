@@ -1545,6 +1545,7 @@ class Registry:
         self.removal_journal = self.root / ".uninstall-journal.json"
         self.publication_journal = self.root / ".publish-journal.json"
         self._guard_state = threading.local()
+        self._lease_state = threading.local()
         # A directory of append-only revision logs; not the history() method.
         self.revisions = self.root / "revisions"
         self.revisions.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -2235,10 +2236,22 @@ class Registry:
             if fd is not None:
                 os.close(fd)
             raise Hold("transfer_lock_unavailable") from None
+        leases = getattr(self._lease_state, "held", None)
+        if leases is None:
+            leases = self._lease_state.held = {}
+        token = (os.getpid(), fd)
+        leases[model_id] = token
         try:
             yield
         finally:
+            if leases.get(model_id) == token:
+                leases.pop(model_id, None)
             os.close(fd)
+
+    def _require_model_lease(self, model_id):
+        token = getattr(self._lease_state, "held", {}).get(model_id)
+        if token is None or token[0] != os.getpid():
+            raise Hold("model_lease_required")
 
     def _staging_directory(self):
         folder = self.root / "transfers"
@@ -2441,6 +2454,7 @@ class Registry:
         """Internal mutation; caller owns model lease and registry write guard."""
         if getattr(self._guard_state, "pid", None) != os.getpid():
             raise Hold("registry_lock_required")
+        self._require_model_lease(model_id)
         card = self.card(model_id)
         if expected is not None and card != expected:
             raise Hold("registry_card_changed")
