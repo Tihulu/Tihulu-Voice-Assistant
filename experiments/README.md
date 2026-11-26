@@ -28,3 +28,7 @@ Firefox and Brave navigate/snapshot operations bind task-owned profile, tab, can
 ## CAP-03 search result contract (fixture only)
 
 Exact public query UTF-8 bytes and provider version bound to the shared one-use grant. Bounded query/hit counts/snippets, strict restricted URL and display text, duplicate refusal, separate empty outcome, no navigation rights from result metadata, live cancellation/revocation. Search snippets remain untrusted and are not verified page citations. Five tests; no network/provider/API credentials or runtime activation. Classification is trusted-fixture-only, not a private-query disclosure detector.
+
+## CAP-05/06 engine inventory readiness (fixture only)
+
+Separate detected, compatible, tested evidence per exact adapter/version/function. Unknown and contradictory evidence refused or explicitly unavailable; a tested observation never means authorized or available. No scanner, subprocess, desktop window lookup or grant creation. Four tests. Real engine discovery, signed/verified executable identity, live permission, installation ownership and OS isolation remain open. Settings must render these states separately.
