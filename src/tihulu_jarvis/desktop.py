@@ -1791,11 +1791,15 @@ def create_window(app, loop, bridge=None):
                           "idle_release": int(self.resource_idle.get_value())}
             try:
                 resources.effective(stored)
-                self.cfg["resources"] = stored
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return
-            self.save()
+            previous = deepcopy(self.cfg["resources"])
+            self.cfg["resources"] = stored
+            if not self.save():
+                self.cfg["resources"] = previous
+                self.sync_preference_widgets()
+                return
             self.apply_resource_profile()
             self.refresh_resources_note()
             self.refresh()
@@ -1844,21 +1848,28 @@ def create_window(app, loop, bridge=None):
             """Store the choice immediately; a restart is never required."""
             if self.syncing_preferences:
                 return
+            previous = self.cfg["show_spoken_text"]
             self.cfg["show_spoken_text"] = bool(self.settings_spoken.get_active())
-            self.save()
+            if not self.save():
+                self.cfg["show_spoken_text"] = previous
+                self.sync_preference_widgets()
 
         def choose_text_scale(self, *_):
             """Store and apply the chosen scale immediately, never at restart."""
             if self.syncing_preferences:
                 return
+            previous = self.cfg["text_scale"]
             try:
                 self.cfg["text_scale"] = a11y.checked(
                     "large" if self.settings_scale.get_active() == 1 else "normal")
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return
+            if not self.save():
+                self.cfg["text_scale"] = previous
+                self.sync_preference_widgets()
+                return
             self.apply_text_scale()
-            self.save()
 
         def save(self):
             try:
@@ -3210,6 +3221,8 @@ def create_window(app, loop, bridge=None):
 
         def forget_choices(self):
             """Erase the stored choices, and state what it did not erase."""
+            if self.busy or self.closing or self.owned_picker is not None:
+                return
             # Keep the active policy, and reset preferences in one locked write.
             profile = self.store_active_profile_id()
             try:
@@ -3219,9 +3232,12 @@ def create_window(app, loop, bridge=None):
                 return
             self.cfg = proposed
             self.saved_cfg = deepcopy(proposed)
-            self.settings_scale.set_active(0)
-            self.settings_spoken.set_active(False)
-            self.apply_text_scale()
+            self.runtime_model_proofs = market.RuntimeModelProofs()
+            self.drop_attachment_for_context_change()
+            self.clear_model_scan()
+            self.url.set_text(proposed["endpoint"])
+            self.forget_inventory()
+            self.sync_preference_widgets()
             self.refresh()
             outcome = tr("Local choices forgotten." if removed else "No stored choices to forget.",
                          "Yerel seçimler unutuldu." if removed else "Unutulacak saklı seçim yok.",
