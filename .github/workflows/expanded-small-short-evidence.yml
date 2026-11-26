@@ -1,0 +1,63 @@
+name: Disposable expanded Small bounded short decoder quality comparison
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'experiments/speech_engine_acceptance.py'
+      - 'experiments/mixed_voice_review.py'
+      - 'experiments/language_detection.py'
+      - 'experiments/voice_quality.py'
+      - 'experiments/speech_result.py'
+      - 'experiments/transcription_result.py'
+      - 'experiments/gateway.py'
+      - '.github/workflows/expanded-small-short-evidence.yml'
+permissions:
+  contents: read
+jobs:
+  multilingual:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 18
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - profile: small
+            sha: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b
+            max_bytes: 500000000
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify exact head and unchanged shipped paths
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git diff --exit-code d4b756351b1552aa5806c89e39eda3b5b82aa337 HEAD -- src packaging tools tests pyproject.toml data
+      - name: Prepare disposable pinned public dependencies
+        env:
+          STT_PROFILE: ${{ matrix.profile }}
+          STT_SHA: ${{ matrix.sha }}
+          STT_MAX: ${{ matrix.max_bytes }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y bubblewrap cmake build-essential curl espeak-ng ffmpeg
+          test "$(id -u)" -ne 0
+          mkdir "$RUNNER_TEMP/multilingual-stt"
+          git init "$RUNNER_TEMP/multilingual-stt/source"
+          git -C "$RUNNER_TEMP/multilingual-stt/source" -c credential.helper= fetch --depth 1 https://github.com/ggml-org/whisper.cpp.git 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          git -C "$RUNNER_TEMP/multilingual-stt/source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/multilingual-stt/source" rev-parse HEAD)" = 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 180 --max-filesize "$STT_MAX" -o "$RUNNER_TEMP/multilingual-stt/model.bin" "https://huggingface.co/ggerganov/whisper.cpp/resolve/fb5ed9369c26eaf08392504d8446da431e0fffb9/ggml-$STT_PROFILE.bin"
+          echo "$STT_SHA  $RUNNER_TEMP/multilingual-stt/model.bin" | sha256sum -c -
+          cmake -S "$RUNNER_TEMP/multilingual-stt/source" -B "$RUNNER_TEMP/multilingual-stt/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build "$RUNNER_TEMP/multilingual-stt/build" --target whisper-cli -j 2
+      - name: Actual nine-utterance Small short decoder quality comparison
+        env:
+          PYTHONPATH: src:experiments
+          PYTHONDONTWRITEBYTECODE: '1'
+          STT_PROFILE: ${{ matrix.profile }}
+        run: |
+          /usr/bin/python3 experiments/speech_engine_acceptance.py "$RUNNER_TEMP/multilingual-stt/build/bin/whisper-cli" "$RUNNER_TEMP/multilingual-stt/model.bin" "$STT_PROFILE" expanded-small-short
