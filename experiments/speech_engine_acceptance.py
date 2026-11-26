@@ -82,7 +82,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original",pip
         if not site.is_dir():
             raise RuntimeError("missing pinned neural site")
     samples=tuple((lang,lang,text) for lang,text in TEXT.items())
-    if corpus in ("expanded","turbo-expanded"):
+    if corpus in ("expanded","turbo-expanded","expanded-small-short"):
         samples+=expanded_corpus()
     elif corpus=="targeted":
         samples=targeted_corpus()
@@ -320,11 +320,11 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 transcript.checkpoint()
                 args=["/work/whisper-cli","-m","/work/model.bin","-f","/work/sample.wav",
                      "-l",lang,"-t","2","-ng","-nt","-otxt","-of","/work/out/transcript"]
-                if stt_profile=="turbo-q5":
+                if stt_profile=="turbo-q5" or corpus=="expanded-small-short":
                     # Separate explicitly labeled short-audio decoder profile.
                     # Preserve CPU, wall, grant and output ceilings.
                     args+=turbo_short_args(receipt[5],receipt[6])
-                    print(json.dumps({"case_id":case_id,"decoder":"turbo-short-greedy","extra_args":args[-6:]}),flush=True)
+                    print(json.dumps({"case_id":case_id,"decoder":"turbo-short-greedy" if stt_profile=="turbo-q5" else "small-short-greedy","extra_args":args[-6:]}),flush=True)
                 try:
                     run(args,stt_scope,wrapper=STT_WRAPPER,timeout=120)
                 except RuntimeError as exc:
