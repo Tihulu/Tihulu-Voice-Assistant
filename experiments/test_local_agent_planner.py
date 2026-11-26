@@ -60,3 +60,15 @@ class LocalAgentPlannerTests(unittest.TestCase):
         self.assertEqual(a,b)
         for ctx,mode in ((replace(self.ctx,generation=2),"balanced"),(self.ctx,"economy")):
             self.assertNotEqual(a.digest,plan_agents(ctx,self.workers,self.models,8192,preference=mode).digest)
+
+    def test_balanced_economy_performance_are_explicit_heuristics(self):
+        worker=(Worker("one",(),0,"execute"),)
+        self.assertEqual(plan_agents(self.ctx,worker,self.models,8192,preference="balanced").waves[0][0].model,"qwen-small")
+        self.assertEqual(plan_agents(self.ctx,worker,self.models,8192,preference="performance").waves[0][0].model,"qwen-large")
+        self.assertEqual(plan_agents(self.ctx,worker,self.models,8192,preference="economy").waves[0][0].model,"qwen-small")
+
+    def test_inventory_changes_even_unselected_candidate_change_digest(self):
+        original=plan_agents(self.ctx,self.workers,self.models,8192)
+        changed=plan_agents(self.ctx,self.workers,(self.small,self.large,replace(self.cloud,rank=99)),8192)
+        self.assertEqual(original.waves,changed.waves)
+        self.assertNotEqual(original.digest,changed.digest)
