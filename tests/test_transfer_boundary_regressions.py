@@ -1341,6 +1341,58 @@ class PartialQueueIdentityTests(unittest.TestCase):
         self.assertTrue(self.metadata.exists())
         return self.registry.partial_status(self.card.model_id)
 
+    def test_partial_publication_rechecks_payload_after_hash(self):
+        self.transfer.temp = self.transfer.root / "fixture-temp"
+        self.transfer.temp.write_bytes(NEW[:3])
+        original = self.registry._payload_record
+        def mutate(path, **kwargs):
+            result = original(path, **kwargs)
+            Path(path).write_bytes(b"bad")
+            return result
+        with patch.object(self.registry, "_payload_record", side_effect=mutate):
+            self.transfer._finish_temp(keep=True)
+        self.assertFalse(self.payload.exists())
+        self.assertFalse(self.metadata.exists())
+
+    def test_partial_publication_rechecks_expiry_after_hash(self):
+        self.transfer.temp = self.transfer.root / "fixture-temp"
+        self.transfer.temp.write_bytes(NEW[:3])
+        original = self.registry._payload_record
+        def expire(path, **kwargs):
+            result = original(path, **kwargs)
+            self.transfer._clock = lambda: 1e13
+            return result
+        with patch.object(self.registry, "_payload_record", side_effect=expire):
+            self.transfer._finish_temp(keep=True)
+        self.assertFalse(self.payload.exists())
+        self.assertFalse(self.metadata.exists())
+
+    def test_partial_publication_syncs_after_both_alias_removals(self):
+        with patch.object(market, "_sync_directory", wraps=market._sync_directory) as sync:
+            status = self.bound_partial()
+        self.assertEqual(status["state"], "RESUMABLE")
+        self.assertEqual(self.payload.stat().st_nlink, 1)
+        self.assertEqual(self.metadata.stat().st_nlink, 1)
+        self.assertGreaterEqual(sum(call.args == (self.transfer.root,)
+                                    for call in sync.call_args_list), 4)
+
+    def test_partial_cleanup_preserves_replacement_directory(self):
+        self.transfer.temp = self.transfer.root / "fixture-temp"
+        self.transfer.temp.write_bytes(NEW[:3])
+        old = self.transfer.root.with_name("old-transfers")
+        original = self.registry._payload_record
+        def redirect(path, **kwargs):
+            result = original(path, **kwargs)
+            self.transfer.root.rename(old)
+            self.transfer.root.mkdir(mode=0o700)
+            self.transfer.temp.write_bytes(b"replacement")
+            return result
+        with patch.object(self.registry, "_payload_record", side_effect=redirect):
+            self.transfer._finish_temp(keep=True)
+        self.assertEqual((old / "fixture-temp").read_bytes(), NEW[:3])
+        self.assertEqual((self.transfer.root / "fixture-temp").read_bytes(), b"replacement")
+        self.assertFalse(self.metadata.exists())
+
     def test_bound_candidate_is_resumable_and_discard_removes_pair(self):
         status = self.bound_partial()
         self.assertEqual(status["state"], "RESUMABLE")

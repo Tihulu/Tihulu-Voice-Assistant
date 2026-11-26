@@ -917,12 +917,32 @@ class Transfer:
         if (not stat.S_ISREG(info.st_mode) or not 0 < info.st_size < DIGEST_LIMIT
                 or (self.source.size and info.st_size >= self.source.size)):
             return
+        identity = _artifact_identity(info)
+        if info.st_nlink != 1:
+            raise Hold("partial_file_untrusted")
         payload = self.registry._payload_record(temp)
+        self._check_directory()
+        self._assert_current()
+        if not self.source.authorized(self._clock()):
+            return
+        if identity != _artifact_identity(temp.lstat()):
+            raise Hold("partial_changed")
         record = {**self._partial_binding(), **payload}
-        # A crash between the two publications leaves an untrusted partial;
-        # resume never accepts bytes without the complete matching record.
+        # A crash between the two publications leaves an untrusted partial.
+        # Sync the payload name before removing its temporary alias.
         os.link(temp, partial, follow_symlinks=False)
         _sync_directory(self.root)
+        linked = _artifact_identity(partial.lstat())
+        if (linked[:4] != identity[:4] or linked[5] != identity[5]
+                or linked[6] != 2 or linked != _artifact_identity(temp.lstat())):
+            raise Hold("partial_changed")
+        self._check_directory()
+        temp.unlink()
+        _sync_directory(self.root)
+        published = _artifact_identity(partial.lstat())
+        if (published[:4] != identity[:4] or published[5] != identity[5]
+                or published[6] != 1):
+            raise Hold("partial_changed")
         tmp = None
         try:
             with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8",
@@ -931,10 +951,19 @@ class Transfer:
                 json.dump(record, stream, sort_keys=True)
                 stream.flush()
                 os.fsync(stream.fileno())
+            self._check_directory()
+            self._assert_current()
+            if not self.source.authorized(self._clock()):
+                return
+            if published != _artifact_identity(partial.lstat()):
+                raise Hold("partial_changed")
             os.link(tmp, metadata, follow_symlinks=False)
+            _sync_directory(self.root)
+            tmp.unlink()
             _sync_directory(self.root)
         finally:
             if tmp is not None:
+                self._check_directory()
                 tmp.unlink(missing_ok=True)
 
     def _finish_temp(self, *, keep):
@@ -944,9 +973,9 @@ class Transfer:
         temp = Path(self.temp)
         try:
             self._check_directory()
-        except Hold:
-            # The pathname is no longer ours. Do not delete or preserve bytes
-            # in a replacement directory. Explicit inspection can recover them.
+            initial = temp.lstat()
+        except (Hold, OSError):
+            # The pathname is no longer ours. Preserve replacement directories.
             self.temp = None
             return
         try:
@@ -957,8 +986,12 @@ class Transfer:
             pass
         finally:
             try:
-                temp.unlink(missing_ok=True)
-            except OSError:
+                self._check_directory()
+                actual = temp.lstat()
+                if (actual.st_dev, actual.st_ino) == (initial.st_dev, initial.st_ino):
+                    temp.unlink()
+                    _sync_directory(self.root)
+            except (Hold, OSError):
                 pass
             self.temp = None
 
