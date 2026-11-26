@@ -57,6 +57,26 @@ def file_digest(path):
             h.update(block)
     return h.hexdigest()
 
+PIPER_MODEL_SHA="5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f"
+PIPER_CONFIG_SHA="efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0"
+PIPER_CHILD="""import resource,sys,json,wave
+from pathlib import Path
+from importlib.metadata import version
+resource.setrlimit(resource.RLIMIT_FSIZE,(1048576,1048576))
+sys.path.insert(0,'/work/piper-site')
+from piper import PiperVoice
+if version('piper-tts')!='1.8.0' or version('onnxruntime')!='1.22.1':
+    raise RuntimeError('piper dependency version mismatch')
+voice=PiperVoice.load('/work/piper.onnx',config_path='/work/piper.json',use_cuda=False,download_dir='/tmp')
+if voice.session.get_providers()!=['CPUExecutionProvider']:
+    raise RuntimeError('piper CPU provider mismatch')
+text=Path('/tmp/chain-neural-text.txt').read_text(encoding='utf-8')
+with open('/tmp/chain-neural-wav.wav','xb') as handle:
+    with wave.open(handle,'wb') as wav:
+        voice.synthesize_wav(text,wav)
+print(json.dumps({'engine':'piper','provider':'CPUExecutionProvider'}))
+"""
+
 def child(host_net,host_port,mode="basic"):
     sys.path.insert(0,"/work/code")
     from tihulu_jarvis import profiles
@@ -123,7 +143,7 @@ def child(host_net,host_port,mode="basic"):
     rules=tuple(profiles.Rule(x,(),"allow") for x in ("filesystem_read","filesystem_write","host_shell"))
     gate=FixtureGateway(ctx,rules,clock=profiles.PolicyClock())
     stt=None
-    if mode=="voice-chain":
+    if mode in ("voice-chain","neural-chain"):
         audio=Path("/work/sample.wav").read_bytes()
         pinned=(file_digest("/work/stt.bin")==STT_SHA
                 and hashlib.sha1(("blob "+str(len(audio))+"\0").encode()+audio).hexdigest()==STT_BLOB)
@@ -331,7 +351,59 @@ def child(host_net,host_port,mode="basic"):
                        tokens=len(edit_tokens))
                 # No automatic speech generation for this edited response.
                 record("voice-chain-edited-no-auto-tts",not Path("/tmp/"+edit_id+"-wav.wav").exists())
+                neural=None
+                if mode=="neural-chain":
+                    pinned=(file_digest("/work/piper.onnx")==PIPER_MODEL_SHA
+                            and file_digest("/work/piper.json")==PIPER_CONFIG_SHA)
+                    record("voice-chain-neural-pinned-inputs",pinned)
+                    if not pinned:
+                        return 1
+                    params=("1.8.0","en","chain-neural-text","chain-neural-wav",PIPER_MODEL_SHA,PIPER_CONFIG_SHA)
+                    neural_call=corrected.prepare_neural_speech(*params)
+                    neural_req=neural_call.request(ctx)
+                    neural_grant=gate.fixture_grant("chain-neural",neural_req,60)
+                    neural,text=corrected.start_neural_speech(*params,neural_grant)
+                    neural_source=Path("/tmp/chain-neural-text.txt")
+                    neural_dest=Path("/tmp/chain-neural-wav.wav")
+                    with neural_source.open("xb") as handle:
+                        handle.write(text)
+                    neural.checkpoint()
+                    with tempfile.TemporaryFile() as out,tempfile.TemporaryFile() as err:
+                        env=dict(os.environ,OMP_NUM_THREADS="2",OPENBLAS_NUM_THREADS="2")
+                        process=subprocess.run(["/usr/bin/python3","-I","-B","-c",PIPER_CHILD],
+                            stdin=subprocess.DEVNULL,stdout=out,stderr=err,timeout=25,check=False,env=env)
+                        out.seek(0)
+                        err.seek(0)
+                        result_info=out.read(4097)
+                        detail=err.read(65537)
+                        if process.returncode or len(result_info)>4096 or len(detail)>65536:
+                            neural.cancel()
+                            raise RuntimeError("piper child exit="+str(process.returncode)+": "+detail.decode("utf-8","replace")[-1000:])
+                    if (neural_dest.is_symlink() or not neural_dest.is_file()
+                            or not 44<neural_dest.stat().st_size<=MAX_WAV or neural_source.read_bytes()!=corrected.result()
+                            or file_digest("/work/piper.onnx")!=PIPER_MODEL_SHA or file_digest("/work/piper.json")!=PIPER_CONFIG_SHA):
+                        neural.cancel()
+                        return 1
+                    audio_data=neural_dest.read_bytes()
+                    neural.complete(SpeechResult(neural_req.target,hashlib.sha256(text).hexdigest(),"en",
+                                    "chain-neural-wav",audio_data,PIPER_MODEL_SHA,PIPER_CONFIG_SHA))
+                    neural_receipt=neural.result()
+                    record("voice-chain-neural-real-output",json.loads(result_info)=={"engine":"piper","provider":"CPUExecutionProvider"}
+                           and neural_receipt[4]==hashlib.sha256(audio_data).hexdigest(),
+                           rate=neural_receipt[5],frames=neural_receipt[6])
                 gate.revoke(edit_review.identity)
+                if neural is not None:
+                    try:
+                        neural.result()
+                    except Refused:
+                        neural_denied=True
+                    else:
+                        neural_denied=False
+                    record("voice-chain-neural-review-revoke",neural_denied)
+                    for path in (neural_source,neural_dest):
+                        path.unlink(missing_ok=True)
+                    record("voice-chain-neural-staging-cleanup",all(not path.exists() and not path.is_symlink()
+                           for path in (neural_source,neural_dest)))
                 try:
                     corrected.result()
                 except Refused:
@@ -364,6 +436,8 @@ def child(host_net,host_port,mode="basic"):
                 for identity in ("turn0","turn1","chain-turn"):
                     discard_voice(identity)
                 Path("/tmp/chain-transcript.txt").unlink(missing_ok=True)
+                for path in ("/tmp/chain-neural-text.txt","/tmp/chain-neural-wav.wav"):
+                    Path(path).unlink(missing_ok=True)
             finally:
                 proc.terminate()
             try:
@@ -372,7 +446,7 @@ def child(host_net,host_port,mode="basic"):
                 proc.kill()
                 proc.wait(timeout=3)
     record("llm-server-stopped",proc.poll() is not None)
-    return 0 if len(results)==(30 if mode=="voice-chain" else 17) and all(results) else 1
+    return 0 if len(results)==(34 if mode=="neural-chain" else 30 if mode=="voice-chain" else 17) and all(results) else 1
 
 def main(binary,model,*stt_inputs):
     binary,model=Path(binary).resolve(),Path(model).resolve()
@@ -380,14 +454,21 @@ def main(binary,model,*stt_inputs):
         raise RuntimeError("invalid fixture inputs")
     if model.stat().st_size>2*1024*1024 or hashlib.sha256(model.read_bytes()).hexdigest()!=MODEL_SHA:
         raise RuntimeError("model digest mismatch")
-    if stt_inputs and len(stt_inputs)!=3:
+    if stt_inputs and len(stt_inputs) not in (3,6):
         raise RuntimeError("invalid voice-chain fixture inputs")
-    stt_paths=tuple(Path(p).resolve() for p in stt_inputs)
+    stt_paths=tuple(Path(p).resolve() for p in stt_inputs[:3])
+    piper_paths=tuple(Path(p).resolve() for p in stt_inputs[3:])
     if stt_paths:
         cli,stt_model,sample=stt_paths
         if (not all(p.is_file() for p in stt_paths) or not 0<sample.stat().st_size<=1048576
                 or not 0<stt_model.stat().st_size<=85000000 or file_digest(stt_model)!=STT_SHA):
             raise RuntimeError("invalid pinned STT inputs")
+    if piper_paths:
+        site,voice_model,voice_config=piper_paths
+        if (not site.is_dir() or not voice_model.is_file() or not voice_config.is_file()
+                or not 0<voice_model.stat().st_size<=70000000 or file_digest(voice_model)!=PIPER_MODEL_SHA
+                or not 0<voice_config.stat().st_size<=16384 or file_digest(voice_config)!=PIPER_CONFIG_SHA):
+            raise RuntimeError("invalid pinned neural voice inputs")
     with tempfile.TemporaryDirectory(prefix="jarvis-llm-") as tmp:
         root=Path(tmp)
         marker=root/"not-approved"
@@ -422,6 +503,9 @@ def main(binary,model,*stt_inputs):
         if stt_paths:
             for p,destination in zip(stt_paths,("/work/whisper-cli","/work/stt.bin","/work/sample.wav")):
                 prefix[-2:-2]=["--ro-bind",str(p),destination]
+        if piper_paths:
+            for p,destination in zip(piper_paths,("/work/piper-site","/work/piper.onnx","/work/piper.json")):
+                prefix[-2:-2]=["--ro-bind",str(p),destination]
         host_net=os.readlink("/proc/self/ns/net")
         with socket.socket() as listener:
             listener.bind(("127.0.0.1",0))
@@ -430,7 +514,7 @@ def main(binary,model,*stt_inputs):
             if port=="8080":
                 raise RuntimeError("port collision")
             proc=subprocess.Popen(prefix+["--","/usr/bin/python3","-I","/work/runner.py","--child",host_net,port,
-                                         "voice-chain" if stt_paths else "basic"],
+                                         "neural-chain" if piper_paths else "voice-chain" if stt_paths else "basic"],
                                   stdin=subprocess.DEVNULL,start_new_session=True,
                                   env={"PATH":"/usr/bin:/bin","LC_ALL":"C.UTF-8"})
             try:

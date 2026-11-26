@@ -1,0 +1,73 @@
+name: Disposable reviewed local LLM to neural voice evidence
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'experiments/llama_engine_acceptance.py'
+      - 'experiments/gateway.py'
+      - 'experiments/adapter_protocol.py'
+      - 'experiments/capabilities.py'
+      - 'experiments/speech_result.py'
+      - 'experiments/transcription_result.py'
+      - 'experiments/inference.py'
+      - 'experiments/piper-fixture-requirements.txt'
+      - '.github/workflows/neural-voice-chain-evidence.yml'
+permissions:
+  contents: read
+jobs:
+  cpu-llm:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify exact head and unchanged shipped paths
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git diff --exit-code d4b756351b1552aa5806c89e39eda3b5b82aa337 HEAD -- src packaging tools tests pyproject.toml data
+      - name: Prepare fixed public dependencies on disposable runner
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y bubblewrap cmake build-essential curl espeak-ng python3-venv libgomp1
+          test "$(id -u)" -ne 0
+          mkdir "$RUNNER_TEMP/llama-fixture"
+          git init "$RUNNER_TEMP/llama-fixture/source"
+          git -C "$RUNNER_TEMP/llama-fixture/source" -c credential.helper= fetch --depth 1 https://github.com/ggml-org/llama.cpp.git 4762ad7316dcdec20016ab5985fb46a27902204d
+          git -C "$RUNNER_TEMP/llama-fixture/source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/llama-fixture/source" rev-parse HEAD)" = 4762ad7316dcdec20016ab5985fb46a27902204d
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 2097152 -o "$RUNNER_TEMP/llama-fixture/model.gguf" 'https://huggingface.co/ggml-org/models-moved/resolve/688f41ddf8f3622d08c6954a061ff12999b6c8d8/tinyllamas/stories260K.gguf'
+          echo "047bf46455a544931cff6fef14d7910154c56afbc23ab1c5e56a72e69912c04b  $RUNNER_TEMP/llama-fixture/model.gguf" | sha256sum -c -
+      - name: Build pinned CPU engine
+        run: |
+          cmake -S "$RUNNER_TEMP/llama-fixture/source" -B "$RUNNER_TEMP/llama-fixture/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DLLAMA_CURL=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_SERVER=ON
+          cmake --build "$RUNNER_TEMP/llama-fixture/build" --target llama-server -j 2
+      - name: Prepare pinned public STT dependency for integrated voice fixture
+        run: |
+          mkdir "$RUNNER_TEMP/voice-stt"
+          git init "$RUNNER_TEMP/voice-stt/source"
+          git -C "$RUNNER_TEMP/voice-stt/source" -c credential.helper= fetch --depth 1 https://github.com/ggml-org/whisper.cpp.git 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          git -C "$RUNNER_TEMP/voice-stt/source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/voice-stt/source" rev-parse HEAD)" = 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          test "$(git hash-object "$RUNNER_TEMP/voice-stt/source/samples/jfk.wav")" = 3184d372cd2f8b804d3a540c70ec50d927b335d2
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 120 --max-filesize 85000000 -o "$RUNNER_TEMP/voice-stt/model.bin" 'https://huggingface.co/ggerganov/whisper.cpp/resolve/fb5ed9369c26eaf08392504d8446da431e0fffb9/ggml-tiny.bin'
+          echo "be07e048e1e599ad46341c8d2a135645097a538221678b7acdd1b1919c6e1b21  $RUNNER_TEMP/voice-stt/model.bin" | sha256sum -c -
+          cmake -S "$RUNNER_TEMP/voice-stt/source" -B "$RUNNER_TEMP/voice-stt/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build "$RUNNER_TEMP/voice-stt/build" --target whisper-cli -j 2
+      - name: Prepare pinned public English neural voice
+        run: |
+          mkdir -p "$RUNNER_TEMP/chain-piper/wheels" "$RUNNER_TEMP/chain-piper/site"
+          /usr/bin/python3 -m venv "$RUNNER_TEMP/chain-piper/venv"
+          "$RUNNER_TEMP/chain-piper/venv/bin/python" -m pip --isolated download --index-url https://pypi.org/simple --only-binary=:all: --require-hashes --dest "$RUNNER_TEMP/chain-piper/wheels" -r experiments/piper-fixture-requirements.txt
+          "$RUNNER_TEMP/chain-piper/venv/bin/python" -m pip --isolated install --no-index --find-links "$RUNNER_TEMP/chain-piper/wheels" --only-binary=:all: --require-hashes --target "$RUNNER_TEMP/chain-piper/site" -r experiments/piper-fixture-requirements.txt
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 120 --max-filesize 70000000 -o "$RUNNER_TEMP/chain-piper/voice.onnx" 'https://huggingface.co/rhasspy/piper-voices/resolve/a08e8fa47faf6681ecc42a79cfa95369430cbcf6/en/en_US/lessac/medium/en_US-lessac-medium.onnx'
+          echo "5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f  $RUNNER_TEMP/chain-piper/voice.onnx" | sha256sum -c -
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 16384 -o "$RUNNER_TEMP/chain-piper/voice.json" 'https://huggingface.co/rhasspy/piper-voices/resolve/a08e8fa47faf6681ecc42a79cfa95369430cbcf6/en/en_US/lessac/medium/en_US-lessac-medium.onnx.json'
+          echo "efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0  $RUNNER_TEMP/chain-piper/voice.json" | sha256sum -c -
+      - name: Actual reviewed local inference and separately granted neural speech
+        run: |
+          /usr/bin/python3 experiments/llama_engine_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" "$RUNNER_TEMP/voice-stt/build/bin/whisper-cli" "$RUNNER_TEMP/voice-stt/model.bin" "$RUNNER_TEMP/voice-stt/source/samples/jfk.wav" "$RUNNER_TEMP/chain-piper/site" "$RUNNER_TEMP/chain-piper/voice.onnx" "$RUNNER_TEMP/chain-piper/voice.json"
