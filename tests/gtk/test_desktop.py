@@ -2046,6 +2046,69 @@ class UpdateUITests(DownloadFixture):
         self.assertIn("ACTIVE", self.download_rows()[0])
         self.assertIn("Updated.", self.download_rows()[0])
 
+    def test_update_publication_worker_keeps_ui_responsive_and_drains(self):
+        from threading import Event, get_ident
+        url, payload = self.loopback_server()
+        first = self.installed_with_terms(url, hashlib.sha256(payload).hexdigest(),
+                                         len(payload))
+        self.pick_card(first.model_id)
+        entered, release, drained = Event(), Event(), Event()
+        owner = get_ident()
+        original = market.Transfer._publish
+        def delayed(transfer, *args, **kwargs):
+            try:
+                if get_ident() == owner:
+                    raise AssertionError("publication ran on GTK thread")
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("fixture deadline")
+                return original(transfer, *args, **kwargs)
+            finally:
+                drained.set()
+        with patch.object(market.Transfer, "_publish", delayed):
+            try:
+                self.click(self.ui.market_update)
+                self.until(entered.is_set)
+                self.assertTrue(self.ui.busy)
+                self.assertFalse(self.ui.market_filter.get_sensitive())
+                self.ui.interrupt(False)
+                self.assertTrue(self.ui.busy)
+                release.set()
+                self.until(lambda: not self.ui.busy)
+            finally:
+                release.set()
+        self.assertTrue(drained.is_set())
+        self.assertEqual(self.ui.market.card(first.model_id), first)
+        self.assertTrue(self.ui.market_filter.get_sensitive())
+        self.assertEqual(self.ui.downloads[-1]["state"], "CANCELLED")
+
+    def test_update_late_stop_reports_actual_committed_result(self):
+        from threading import Event
+        url, payload = self.loopback_server()
+        first = self.installed_with_terms(url, hashlib.sha256(payload).hexdigest(),
+                                         len(payload))
+        self.pick_card(first.model_id)
+        entered, release = Event(), Event()
+        original = market.Transfer._publish
+        def delayed(transfer, *args, **kwargs):
+            result = original(transfer, *args, **kwargs)
+            entered.set()
+            if not release.wait(5):
+                raise AssertionError("fixture deadline")
+            return result
+        with patch.object(market.Transfer, "_publish", delayed):
+            try:
+                self.click(self.ui.market_update)
+                self.until(entered.is_set)
+                self.ui.interrupt(False)
+                release.set()
+                self.until(lambda: not self.ui.busy)
+            finally:
+                release.set()
+        self.assertEqual(self.ui.market.card(first.model_id).revision, first.revision + 1)
+        self.assertEqual(self.ui.status.get_text(), "Updated.")
+        self.assertEqual(self.ui.downloads[-1]["state"], "ACTIVE")
+
     def test_update_of_an_uninstalled_item_is_not_offered(self):
         url, payload = self.loopback_server()
         card = self.discovered_with_terms(url, hashlib.sha256(payload).hexdigest(),
