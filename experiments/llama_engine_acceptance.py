@@ -156,6 +156,16 @@ def child(host_net,host_port,mode="basic"):
             stt.cancel()
             return 1
         stt.complete(Transcript(req.target,digest,STT_SHA,"en","chain-transcript",text))
+    def discard_voice(identity):
+        # Only fixed fixture-owned names within the private tmpfs. Unlink,
+        # not secure erasure or arbitrary user-file cleanup.
+        if identity not in ("turn0","turn1","chain-turn"):
+            raise RuntimeError("unknown fixture staging identity")
+        paths=(Path("/tmp/"+identity+"-text.txt"),Path("/tmp/"+identity+"-wav.wav"))
+        for path in paths:
+            path.unlink(missing_ok=True)
+        return all(not p.exists() and not p.is_symlink() for p in paths)
+
     with open("/tmp/llama.log","wb") as log:
         proc=subprocess.Popen(["/work/llama-server","--host","127.0.0.1","--port","8080",
                                "--model","/work/model.gguf","--alias",MODEL,
@@ -245,6 +255,7 @@ def child(host_net,host_port,mode="basic"):
                 else:
                     revoked=False
                 record("llm-revoked-result-"+str(i),revoked)
+                record("llm-revoked-private-staging-"+str(i),discard_voice(identity))
             record("llm-distinct-real-results",len(set(digests))==2)
             if stt is not None:
                 identity="chain-turn"
@@ -282,20 +293,31 @@ def child(host_net,host_port,mode="basic"):
                     except Refused:
                         denied+=1
                 record("voice-chain-transitive-revoke",denied==3)
+                transcript_path=Path("/tmp/chain-transcript.txt")
+                transcript_path.unlink(missing_ok=True)
+                record("voice-chain-revoked-private-staging",discard_voice(identity)
+                       and not transcript_path.exists() and not transcript_path.is_symlink())
         except (ValueError,RuntimeError,OSError,http.client.HTTPException,subprocess.SubprocessError) as exc:
             print(json.dumps({"case":"llm-runtime","status":"HOLD","reason":str(exc)[:1000]}),flush=True)
             with open("/tmp/llama.log","rb") as detail:
                 print(detail.read(4096).decode("utf-8","replace"),flush=True)
             return 1
         finally:
-            proc.terminate()
+            # Always terminate the server even if explicit staging cleanup
+            # fails; namespace teardown remains the last containment layer.
+            try:
+                for identity in ("turn0","turn1","chain-turn"):
+                    discard_voice(identity)
+                Path("/tmp/chain-transcript.txt").unlink(missing_ok=True)
+            finally:
+                proc.terminate()
             try:
                 proc.wait(timeout=3)
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=3)
     record("llm-server-stopped",proc.poll() is not None)
-    return 0 if len(results)==(21 if mode=="voice-chain" else 15) and all(results) else 1
+    return 0 if len(results)==(24 if mode=="voice-chain" else 17) and all(results) else 1
 
 def main(binary,model,*stt_inputs):
     binary,model=Path(binary).resolve(),Path(model).resolve()
