@@ -188,6 +188,26 @@ class SettingsSnapshotBoundaryTests(unittest.TestCase):
                 self.fail("unexpected commit")
         self.assertEqual(settings.load(self.path), newer)
 
+    def test_stale_plain_save_and_forget_preserve_newer_settings(self):
+        before = settings.empty()
+        newer = settings.empty()
+        newer["text_scale"] = "large"
+        settings.save(newer, self.path)
+        for action in (lambda: settings.save(before, self.path, expected=before),
+                       lambda: settings.forget(self.path, expected=before)):
+            with self.assertRaisesRegex(Hold, "settings_changed"):
+                action()
+            self.assertEqual(settings.load(self.path), newer)
+
+    def test_current_snapshot_allows_plain_save_and_forget(self):
+        before = settings.empty()
+        newer = settings.empty()
+        newer["text_scale"] = "large"
+        settings.save(newer, self.path, expected=before)
+        self.assertEqual(settings.load(self.path), newer)
+        self.assertTrue(settings.forget(self.path, expected=newer))
+        self.assertEqual(settings.load(self.path), before)
+
     def test_current_snapshot_allows_choice(self):
         before = settings.empty()
         settings.save(before, self.path)

@@ -2442,6 +2442,18 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         self.assertIsNone(self.ui.market.lookup_card(path.name))
         self.assertEqual(settings.load(), changed)
 
+    def test_external_settings_change_refuses_stale_plain_save_and_forget(self):
+        newer = settings.load()
+        newer["text_scale"] = "large"
+        settings.save(newer)
+        self.ui.cfg["show_spoken_text"] = True
+        self.assertFalse(self.ui.save())
+        self.assertEqual(self.ui.status.get_text(), "settings_changed")
+        self.assertEqual(settings.load(), newer)
+        self.ui.forget_choices()
+        self.assertEqual(self.ui.settings_note.get_text(), "settings_changed")
+        self.assertEqual(settings.load(), newer)
+
     def test_external_settings_change_refuses_stale_local_choice(self):
         card, path = self.prepare_stt()
         before = self.ui.cfg["stt"]
