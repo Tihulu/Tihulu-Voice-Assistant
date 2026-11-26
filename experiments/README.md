@@ -16,3 +16,7 @@ Closed catalog for OCR, PDF extract/render/export, public search, Firefox/Brave 
 ## CAP-01/02 document evidence contract (fixture only)
 
 Typed synthetic OCR and PDF text output: exact call target, source digest, requested page, immutable normalized integer boxes, OCR confidence 0–100 only, UTF-8/control/size and count limits. The output digest includes geometry and confidence; one completion, live gateway checks before accepting and publishing, cancel/revoke drops results. No real document parser, file access, OCR binary or export effect. No claim of recognizing actual documents. Five tests, existing synthetic suite remains intact.
+
+## CAP-01/02 real engine smoke evidence (CI only)
+
+Separate disposable runner, fixed self-generated public documents, no user paths, no desktop entrypoint or runtime grant. Actual Tesseract TR/EN/DE PNG OCR; ReportLab text-layer PDF with Poppler per-page extraction; scan-only PDF render and OCR fallback; corrupt/encrypted refusal. Ten fixed cases, exact normalized text criterion, source digests and version evidence. Apt packages installed only in CI. This is not adversarial parser isolation, real user-document acceptance, production adapter integration or authorization for activation. No output document shipped.

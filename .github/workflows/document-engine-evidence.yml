@@ -1,0 +1,33 @@
+name: Disposable document engine evidence
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'experiments/document_engine_acceptance.py'
+      - '.github/workflows/document-engine-evidence.yml'
+permissions:
+  contents: read
+jobs:
+  real-document-fixtures:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify exact head and unchanged shipped code
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - name: Prepare disposable fixture engines
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y tesseract-ocr tesseract-ocr-tur tesseract-ocr-eng tesseract-ocr-deu poppler-utils python3-pil python3-reportlab fonts-dejavu-core
+          dpkg-query -W tesseract-ocr tesseract-ocr-tur tesseract-ocr-eng tesseract-ocr-deu poppler-utils python3-pil python3-reportlab fonts-dejavu-core
+      - name: Run fixed public synthetic fixtures
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          OMP_THREAD_LIMIT: '2'
+        run: /usr/bin/python3 experiments/document_engine_acceptance.py
