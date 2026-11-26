@@ -254,13 +254,9 @@ def from_file(path, category, model_id=None, engine="unknown", shared_storage_ow
     return card
 
 
-def inspect_file(path, category, model_id=None, engine="unknown", shared_storage_owner="",
-                 owned_by_jarvis=False, languages=(), display_name=None, *, checkpoint=lambda: None):
-    """Hash one pinned regular file, returning a proof for later publication."""
+def import_file_identity(path):
+    """Capture the selected regular inode before dispatching a disk worker."""
     p = Path(path)
-    checkpoint()
-    if category not in CATEGORIES:
-        raise Hold("unknown_model_category")
     if not p.is_absolute():
         raise Hold("model_file_not_found")
     try:
@@ -269,9 +265,23 @@ def inspect_file(path, category, model_id=None, engine="unknown", shared_storage
         raise Hold("model_file_not_found") from None
     if not stat.S_ISREG(info.st_mode):
         raise Hold("model_file_not_found")
-    size = info.st_size
-    if not 0 < size <= DIGEST_LIMIT:
+    if not 0 < info.st_size <= DIGEST_LIMIT:
         raise Hold("model_size_out_of_range")
+    return _artifact_identity(info)
+
+
+def inspect_file(path, category, model_id=None, engine="unknown", shared_storage_owner="",
+                 owned_by_jarvis=False, languages=(), display_name=None, *, checkpoint=lambda: None,
+                 expected_identity=None):
+    """Hash one pinned regular file, returning a proof for later publication."""
+    p = Path(path)
+    checkpoint()
+    if category not in CATEGORIES:
+        raise Hold("unknown_model_category")
+    identity = import_file_identity(p)
+    if expected_identity is not None and identity != expected_identity:
+        raise Hold("model_file_changed")
+    size = identity[2]
     steps = _artifact_hash_steps(p, size, checkpoint=checkpoint)
     try:
         while True:
@@ -280,7 +290,7 @@ def inspect_file(path, category, model_id=None, engine="unknown", shared_storage
         proof = done.value
     finally:
         steps.close()
-    if proof.identity != _artifact_identity(info):
+    if proof.identity != identity:
         raise Hold("model_file_changed")
     require_import_proof(proof, checkpoint=checkpoint)
     checksum = proof.digest

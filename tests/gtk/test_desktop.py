@@ -2395,6 +2395,28 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         self.assertNotEqual(settings.load()["stt"], str(path))
         self.assertFalse(settings.audio_choice_pending())
 
+    def test_audio_import_refuses_weights_replaced_before_worker_dispatch(self):
+        path = self.weights("fixture-worker.bin")
+        self.ui.start_audio_import("stt", str(path))
+        replacement = path.with_suffix(".replacement")
+        replacement.write_bytes(path.read_bytes())
+        replacement.replace(path)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "model_file_changed")
+        self.assertIsNone(self.ui.market.lookup_card(path.name))
+
+    def test_audio_import_refuses_sidecar_replaced_before_worker_dispatch(self):
+        path = self.weights("tr-worker.onnx")
+        sidecar = path.with_name(path.name + ".json")
+        sidecar.write_text('{"language":{"code":"tr"}}')
+        self.ui.start_audio_import("tr", str(path))
+        replacement = sidecar.with_suffix(".replacement")
+        replacement.write_bytes(sidecar.read_bytes())
+        replacement.replace(sidecar)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "voice_locale_unverified")
+        self.assertIsNone(self.ui.market.lookup_card(path.name))
+
     def test_audio_import_worker_selects_verified_model(self):
         path = self.weights("fixture-worker.bin")
         self.ui.start_audio_import("stt", str(path))

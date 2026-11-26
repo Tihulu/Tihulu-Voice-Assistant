@@ -1892,7 +1892,8 @@ def create_window(app, loop, bridge=None):
                 label.set_text(Path(p).name if p else "—")
 
         @staticmethod
-        def inspect_audio_import(key, path, *, checkpoint=lambda: None):
+        def inspect_audio_import(key, path, *, checkpoint=lambda: None,
+                                 expected_weights=None, expected_voice=None):
             """Disk-only inspection, with no GTK or registry effects."""
             if key not in ("stt", "tr", "en", "de"):
                 raise Hold("invalid_audio_choice_transition")
@@ -1902,10 +1903,11 @@ def create_window(app, loop, bridge=None):
             card, proof = market.inspect_file(
                 str(audio.selected_file(path, ".bin" if key == "stt" else ".onnx")),
                 category, engine=engine, languages=(() if key == "stt" else (key,)),
-                checkpoint=checkpoint)
+                checkpoint=checkpoint, expected_identity=expected_weights)
             voice_proof = None
             if key != "stt":
-                _, voice_proof = audio.inspect_voice(path, key, checkpoint=checkpoint)
+                _, voice_proof = audio.inspect_voice(path, key, checkpoint=checkpoint,
+                                                      expected_identity=expected_voice)
             market.require_import_proof(proof, checkpoint=checkpoint)
             return card, proof, voice_proof
 
@@ -1978,6 +1980,8 @@ def create_window(app, loop, bridge=None):
                 if key not in ("stt", "tr", "en", "de"):
                     raise Hold("invalid_audio_choice_transition")
                 path = str(audio.selected_file(path, ".bin" if key == "stt" else ".onnx"))
+                weights_identity = market.import_file_identity(path)
+                voice_identity = None if key == "stt" else audio.voice_config_identity(path)
             except (Hold, OSError) as exc:
                 self.set_state("ready", str(exc))
                 return
@@ -1994,7 +1998,8 @@ def create_window(app, loop, bridge=None):
                 checkpoint()
                 self.registry_worker_stop = stop.set
                 worker = asyncio.create_task(asyncio.to_thread(
-                    self.inspect_audio_import, key, path, checkpoint=checkpoint))
+                    self.inspect_audio_import, key, path, checkpoint=checkpoint,
+                    expected_weights=weights_identity, expected_voice=voice_identity))
                 try:
                     try:
                         inspected = await asyncio.shield(worker)
