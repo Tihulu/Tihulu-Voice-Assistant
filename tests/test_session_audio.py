@@ -3,6 +3,7 @@
 import asyncio
 import struct
 import tempfile
+import shutil
 import unittest
 import wave
 from pathlib import Path
@@ -83,6 +84,7 @@ class LocalChoicesTests(unittest.TestCase):
 class TranscribeFileTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.tmp)
         model = self.tmp / "fixture-whisper.bin"
         model.write_bytes(b"synthetic weights fixture\n")
         self.model = str(model)
@@ -109,6 +111,35 @@ class TranscribeFileTests(unittest.IsolatedAsyncioTestCase):
                                         publish=seen.append, checkpoint=lambda: None)
         self.assertEqual(result, "Merhaba!")
         self.assertEqual(seen, ["transcribing"])
+
+    async def test_speech_after_initial_31_seconds_is_transcribed(self):
+        payload = bytes(32 * 16000 * 2) + struct.pack("<hh", 1250, -1250) * 1600
+        clip = self.recording(payload)
+        result = await audio.transcribe(self.model, str(clip),
+                                        await self.fixture_runner("Merhaba!"),
+                                        checkpoint=lambda: None)
+        self.assertEqual(result, "Merhaba!")
+
+    async def test_long_silent_recording_still_refused(self):
+        clip = self.recording(bytes(32 * 16000 * 2))
+        calls = []
+
+        async def runner(*args):
+            calls.append(args)
+
+        with self.assertRaisesRegex(Hold, "no_speech_signal"):
+            await audio.transcribe(self.model, str(clip), runner, checkpoint=lambda: None)
+        self.assertEqual(calls, [])
+
+    async def test_invalid_engine_output_is_reported_precisely(self):
+        clip = self.recording()
+        for payload in (b"\xff", b"a" * (audio.MAX_TRANSCRIPT + 1)):
+            with self.subTest(size=len(payload)):
+                async def runner(model, wav, stem):
+                    stem.with_suffix(".txt").write_bytes(payload)
+
+                with self.assertRaisesRegex(Hold, "invalid_transcript"):
+                    await audio.transcribe(self.model, str(clip), runner, checkpoint=lambda: None)
 
     async def test_a_rejected_recording_never_reaches_the_engine(self):
         calls = []
