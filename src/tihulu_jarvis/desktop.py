@@ -401,7 +401,10 @@ def create_window(app, loop, bridge=None):
                 "Spracheingabe (nur dieses Fenster; Standard automatisch)"), xalign=0))
             self.stt_language = Gtk.ComboBoxText()
             for key, title in (("auto", tr("Auto detect", "Otomatik algıla", "Automatisch erkennen")),
-                               ("tr", "Türkçe"), ("en", "English"), ("de", "Deutsch")):
+                               ("tr", "Türkçe"), ("en", "English"), ("de", "Deutsch"),
+                               ("segmented", tr("Mixed speech (experimental, pauses, max 60s)",
+                                                "Karışık konuşma (deneysel, duraklamalı, en çok 60 sn)",
+                                                "Gemischt (experimentell, Pausen, max. 60 s)"))):
                 self.stt_language.append(key, title)
             self.stt_language.set_active_id("auto")
             models.append(self.stt_language)
