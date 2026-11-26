@@ -76,3 +76,33 @@ class OfflineBrowserTests(unittest.TestCase):
         self.b.close()
         with self.assertRaises(Refused):
             self.b.prepare("offline_read","message")
+
+    def test_revoked_open_blocks_preparation_and_closes_receipt(self):
+        self.opened()
+        self.begin("offline_read","read","message")
+        self.b.complete("before")
+        self.g.revoke("open")
+        with self.assertRaises(Refused):
+            self.b.prepare("offline_click","change")
+        with self.assertRaises(Refused):
+            self.b.result()
+    def test_active_checkpoint_revocation_closes_operation(self):
+        self.opened()
+        self.begin("offline_click","click","change")
+        self.g.revoke("open")
+        with self.assertRaises(Refused):
+            self.b.checkpoint()
+        with self.assertRaises(Refused):
+            self.b.complete()
+        with self.assertRaises(Refused):
+            self.b.prepare("offline_read","message")
+    def test_operation_budget_fails_closed(self):
+        from gateway import MAX_GRANTS
+        self.opened()
+        for index in range(MAX_GRANTS-1):
+            self.begin("offline_read","read"+str(index),"message")
+            self.b.complete("fixture")
+        with self.assertRaisesRegex(Refused,"browser_operation_limit"):
+            self.b.prepare("offline_read","message")
+        with self.assertRaises(Refused):
+            self.b.result()
