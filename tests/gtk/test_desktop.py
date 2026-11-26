@@ -6235,6 +6235,25 @@ class ResourceProfileTests(SettingsPageTests):
         self.assertEqual(self.ui.cfg.get("resources"), {"profile": "balance"})
         self.assertIn("Balance", self.ui.resource_note.get_text())
 
+    def test_resource_status_distinguishes_preferences_from_runtime(self):
+        self.ui.refresh_resources_note()
+        note = self.ui.resource_note.get_text()
+        self.assertIn("Requested:", note)
+        self.assertIn("not verified or enforced", note)
+        self.assertIn("no owned turn is pending", note)
+        self.assertNotIn("no engine is running", note)
+
+    def test_invalid_resource_combo_does_not_change_persisted_choice(self):
+        before = settings.load()
+        self.ui.resource_profile.set_active(-1)
+        self.assertEqual(settings.load(), before)
+        self.assertEqual(self.ui.resource_profile.get_active(), 1)
+        self.ui.resource_profile.set_active(3)
+        before = settings.load()
+        self.ui.resource_gpu.set_active(-1)
+        self.assertEqual(settings.load(), before)
+        self.assertGreaterEqual(self.ui.resource_gpu.get_active(), 0)
+
     def test_choosing_a_profile_applies_it_now(self):
         self.ui.resource_profile.set_active(0)          # performance
         self.until(lambda: self.ui.cfg["resources"] == {"profile": "performance"})
@@ -6254,7 +6273,7 @@ class ResourceProfileTests(SettingsPageTests):
         # The thread count is the machine's: this machine's share of its cores.
         self.assertEqual(stored, {"profile": "custom", "idle_release": 45,
                                   "keep_warm": True, "gpu": "cuda",
-                                  "threads": 6 * (resources.cores() or 8) // 8})
+                                  "threads": resources.preset("balance").threads_for(resources.cores())})
         # A restart honours it, because it is stored and re-validated.
         self.ui.win.close()
         self.until(lambda: not self.app.get_windows())
@@ -6342,11 +6361,11 @@ class VoiceResourceTests(ResourceProfileTests):
     def test_the_threads_a_local_engine_gets_are_stated_before_use(self):
         self.ui.resource_profile.set_active(0)
         self.until(lambda: self.ui.cfg["resources"] == {"profile": "performance"})
-        self.assertIn("%d threads" % (resources.cores() or 1),
+        self.assertIn("%d threads" % resources.preset("performance").threads_for(resources.cores()),
                       self.ui.resource_note.get_text())
         self.ui.resource_profile.set_active(2)
         self.until(lambda: self.ui.cfg["resources"] == {"profile": "resource_optimized"})
-        self.assertIn("%d threads" % max(1, int((resources.cores() or 1) * 0.5)),
+        self.assertIn("%d threads" % resources.preset("resource_optimized").threads_for(resources.cores()),
                       self.ui.resource_note.get_text())
 
     def tearDown(self):
