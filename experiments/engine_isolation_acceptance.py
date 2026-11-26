@@ -67,7 +67,12 @@ def main():
                    "--dir","/work","--ro-bind",str(source),"/work/input.wav",
                    "--bind",str(output),"/work/out","--chdir","/work",
                    "--setenv","PATH","/usr/bin","--setenv","HOME","/tmp",
-                   "--setenv","LC_ALL","C.UTF-8"]
+                   "--setenv","LC_ALL","C.UTF-8",
+                   # Ubuntu 22.04 BLAS/LAPACK alternatives normally resolve via
+                   # /etc/ld.so.cache. Keep /etc hidden; only fixed read-only
+                   # library directories inside the already mounted /usr.
+                   "--setenv","LD_LIBRARY_PATH",
+                   "/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack"]
         def run(args):
             return subprocess.run(prefix+["--"]+args,stdin=subprocess.DEVNULL,
                                   stdout=subprocess.PIPE,stderr=subprocess.PIPE,
@@ -96,7 +101,15 @@ def main():
                and target.read_bytes().startswith(b"fLaC")
                and hashlib.sha256(source.read_bytes()).hexdigest()==before,
                exit=conversion.returncode,stderr=conversion.stderr.decode("utf-8","replace")[:1000])
-    return 0 if len(results)==5 and all(r["status"]=="PASS" for r in results) else 1
+        if conversion.returncode == 0 and target.is_file():
+            decoded = run(["/usr/bin/ffmpeg","-nostdin","-v","error","-i","/work/out/converted.flac",
+                           "-map","0:a:0","-f","s16le","-acodec","pcm_s16le","-"])
+            record("sandbox-ffmpeg-lossless-roundtrip",decoded.returncode==0 and decoded.stdout==pcm
+                   and hashlib.sha256(source.read_bytes()).hexdigest()==before,
+                   exit=decoded.returncode)
+        else:
+            record("sandbox-ffmpeg-lossless-roundtrip",False,reason="conversion_failed")
+    return 0 if len(results)==6 and all(r["status"]=="PASS" for r in results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main())
