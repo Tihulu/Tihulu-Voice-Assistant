@@ -56,8 +56,11 @@ def convert(src, dst):
 
 
 def digest(path):
+    sha = hashlib.sha256()
     with path.open("rb") as f:
-        return hashlib.file_digest(f, "sha256").hexdigest()
+        for block in iter(lambda: f.read(65536), b""):
+            sha.update(block)
+    return sha.hexdigest()
 
 
 async def run(args):
@@ -87,12 +90,33 @@ async def run(args):
         human = root / "human.wav"
         convert(args.human_wav, human)
         await transcribe("human-en", human, HUMAN, .25)
+        clips = {}
         for lang, expected in CASES.items():
             raw, wav = root / (lang + "-raw.wav"), root / (lang + ".wav")
             subprocess.run(["espeak-ng", "-v", lang, "-s", "145", "-w", str(raw), expected],
                            check=True, timeout=30)
             convert(raw, wav)
+            clips[lang] = wav
             await transcribe("espeak-" + lang, wav, expected, .5)
+
+        # These are deliberately separate stress criteria, not claims that
+        # automatic single-language detection handles code switching.
+        mixed = root / "mixed.wav"
+        delayed = root / "delayed.wav"
+        with wave.open(str(mixed), "wb") as out:
+            out.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+            for lang in ("tr", "en", "de"):
+                with wave.open(str(clips[lang]), "rb") as clip:
+                    out.writeframes(clip.readframes(clip.getnframes()))
+                out.writeframes(bytes(16000))
+        with wave.open(str(delayed), "wb") as out:
+            out.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
+            out.writeframes(bytes(32 * 32000))
+            with wave.open(str(clips["en"]), "rb") as clip:
+                out.writeframes(clip.readframes(clip.getnframes()))
+        await transcribe("mixed-tr-en-de", mixed,
+                         " ".join(CASES[lang] for lang in ("tr", "en", "de")), .5)
+        await transcribe("speech-after-32s", delayed, CASES["en"], .5)
 
         silence = root / "silence.wav"
         with wave.open(str(silence), "wb") as w:
@@ -110,47 +134,54 @@ async def run(args):
 
         # A real aplay process sends audio to a deliberately configured null
         # device. Observe/copy only the private output at the playback boundary.
-        output, roundtrip = root / "piper.wav", root / "roundtrip.wav"
         config = root / "alsa.conf"
         config.write_text("pcm.!default { type null }\n", encoding="utf-8")
         original_child = audio.child
-        children, stages = [], []
+        for lang, voice in (("en", args.voice), ("tr", args.voice_tr), ("de", args.voice_de)):
+            output, roundtrip = root / (lang + "-piper.wav"), root / (lang + "-roundtrip.wav")
+            children, stages = [], []
 
-        @asynccontextmanager
-        async def observe(name, *argv, **kwargs):
-            children.append(name)
-            if name == "aplay":
-                shutil.copyfile(argv[-1], output)
-            async with original_child(name, *argv, **kwargs) as proc:
-                yield proc
+            @asynccontextmanager
+            async def observe(name, *argv, **kwargs):
+                children.append(name)
+                if name == "aplay":
+                    shutil.copyfile(argv[-1], output)
+                async with original_child(name, *argv, **kwargs) as proc:
+                    yield proc
 
-        try:
-            with patch.object(audio, "child", observe), patch.dict(os.environ, {"ALSA_CONFIG_PATH": str(config)}):
-                await audio.speak(SpeechRequest(CASES["en"], "en", str(args.voice)),
-                                  stages.append, checkpoint=lambda: None)
-            report("piper-null-playback", "PASS" if stages == ["synthesizing", "speaking"]
-                   and children == ["piper", "aplay"] and output.is_file() else "FAIL",
-                   children=children, stages=stages)
-            convert(output, roundtrip)
-            await transcribe("piper-roundtrip-en", roundtrip, CASES["en"], .5)
-        except (Hold, asyncio.TimeoutError, OSError, subprocess.CalledProcessError) as exc:
-            report("piper-null-playback", "FAIL", reason=str(exc) or type(exc).__name__,
-                   children=children, stages=stages)
-            report("piper-roundtrip-en", "HOLD", reason="synthesis_or_playback_failed")
+            try:
+                with patch.object(audio, "child", observe), patch.dict(os.environ, {"ALSA_CONFIG_PATH": str(config)}):
+                    await audio.speak(SpeechRequest(CASES[lang], lang, str(voice)),
+                                      stages.append, checkpoint=lambda: None)
+                report("piper-null-playback-" + lang,
+                       "PASS" if stages == ["synthesizing", "speaking"]
+                       and children == ["piper", "aplay"] and output.is_file() else "FAIL",
+                       children=children, stages=stages, wav_sha256=digest(output))
+            except (Hold, asyncio.TimeoutError, OSError) as exc:
+                report("piper-null-playback-" + lang, "FAIL",
+                       reason=str(exc) or type(exc).__name__, children=children, stages=stages)
+                report("piper-roundtrip-" + lang, "HOLD", reason="synthesis_or_playback_failed")
+                continue
+            try:
+                convert(output, roundtrip)
+            except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired):
+                report("piper-roundtrip-" + lang, "FAIL", reason="conversion_failed")
+                continue
+            await transcribe("piper-roundtrip-" + lang, roundtrip, CASES[lang], .5)
     audio.configure(None)
     return results
 
 
 def main():
     parser = argparse.ArgumentParser()
-    for name in ("model", "voice", "human-wav", "report"):
+    for name in ("model", "voice", "voice-tr", "voice-de", "human-wav", "report"):
         parser.add_argument("--" + name, required=True, type=Path)
     args = parser.parse_args()
-    for attr in ("model", "voice", "human_wav"):
+    for attr in ("model", "voice", "voice_tr", "voice_de", "human_wav"):
         setattr(args, attr, getattr(args, attr).resolve(strict=True))
     results = asyncio.run(run(args))
     args.report.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return 0 if len(results) == 7 and all(x["status"] == "PASS" for x in results) else 1
+    return 0 if len(results) == 13 and all(x["status"] == "PASS" for x in results) else 1
 
 
 if __name__ == "__main__":
