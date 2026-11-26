@@ -3141,6 +3141,9 @@ def create_window(app, loop, bridge=None):
             self.settings_audio_diagnose = self.button(recovery, tr(
                 "Inspect audio recovery", "Ses seçimi kurtarmasını incele",
                 "Audiowiederherstellung prüfen"), self.inspect_audio_recovery)
+            self.settings_audio_retry = self.button(recovery, tr(
+                "Retry audio recovery", "Ses kurtarmasını yeniden dene",
+                "Audiowiederherstellung erneut versuchen"), self.retry_audio_recovery)
             self.settings_choice_note = Gtk.Label(xalign=0, wrap=True)
             page.append(self.settings_choice_note)
             self.refresh_choice_recovery()
@@ -3151,6 +3154,9 @@ def create_window(app, loop, bridge=None):
             self.settings_choice_inspect.set_sensitive(available)
             self.settings_audio_diagnose.set_sensitive(self.audio_choice_blocked()
                                                        and not self.busy and not self.closing)
+            self.settings_audio_retry.set_sensitive(self.audio_choice_blocked()
+                and not pending and not self.registry_recovery_needed()
+                and not self.busy and not self.closing)
             self.settings_choice_confirm.set_sensitive(available and self.settings_choice_review is not None)
             self.settings_forget.set_sensitive(not self.busy and not pending and not self.audio_choice_blocked())
             self.settings_reload.set_sensitive(not self.busy and not self.closing
@@ -3177,6 +3183,58 @@ def create_window(app, loop, bridge=None):
             self.settings_choice_note.set_text(message + " " + tr(
                 "Inspection only. No journal or preference changed.", "Yalnızca inceleme. Günlük veya tercih değiştirilmedi.", "Nur Prüfung. Kein Journal und keine Auswahl geändert."))
             return state
+
+        def retry_audio_recovery(self):
+            if (self.busy or self.closing or self.owned_picker is not None
+                    or not self.audio_choice_blocked()):
+                return
+            if self.jan_choice_blocked() or self.registry_recovery_needed():
+                self.inspect_audio_recovery()
+                return
+            completed, failures = [], []
+
+            async def run(epoch):
+                # The recovery operation validates the exact journal and both
+                # generations under locks. A diagnostic is not authorization.
+                worker = asyncio.create_task(asyncio.to_thread(audio_choice.recover, self.market))
+                try:
+                    try:
+                        recovered = await finish_owned(worker)
+                    except asyncio.CancelledError:
+                        recovered = worker.result()
+                except (Hold, OSError) as exc:
+                    failures.append(str(exc))
+                    self.settings_choice_note.set_text(str(exc))
+                    raise
+                if not recovered:
+                    raise Hold("audio_recovery_no_pending")
+                try:
+                    current = settings.reload_preferences(self.saved_cfg)
+                    if any(self.cfg.get(k) != self.saved_cfg.get(k)
+                           for k in (self.cfg.keys() | self.saved_cfg.keys()) - settings.RELOADABLE):
+                        raise Hold("settings_changed_restart_required")
+                    self.profile_selection_guard.require(current["profile"])
+                except (Hold, OSError):
+                    # Recovery itself committed; do not silently adopt a new
+                    # route or policy if a concurrent writer changed it.
+                    completed.append(tr("Audio choice recovered; restart required.",
+                        "Ses seçimi kurtarıldı; yeniden başlatmak gerekli.",
+                        "Audioauswahl wiederhergestellt; Neustart erforderlich."))
+                else:
+                    self.cfg = current
+                    self.saved_cfg = deepcopy(current)
+                    self.runtime_model_proofs = market.RuntimeModelProofs()
+                    self.clear_model_scan()
+                    self.sync_preference_widgets()
+                    completed.append(tr("Audio choice recovered from disk.",
+                        "Ses seçimi diskten kurtarıldı.",
+                        "Audioauswahl vom Datenträger wiederhergestellt."))
+                self.settings_choice_note.set_text(completed[0])
+
+            self.submit(run, kind="update", label=tr("Recover audio selection",
+                "Ses seçimini kurtar", "Audioauswahl wiederherstellen"),
+                committed=lambda: completed[0] if completed else "",
+                worker_failure=lambda: failures[0] if failures else "")
 
         def inspect_choice_recovery(self):
             if self.busy or self.closing or not self.jan_choice_blocked():
