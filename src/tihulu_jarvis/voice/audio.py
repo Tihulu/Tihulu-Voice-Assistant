@@ -377,14 +377,19 @@ def has_signal(path, *, checkpoint=lambda: None):
             if (w.getnchannels(),w.getsampwidth(),w.getframerate()) != (1,2,16000):
                 return False
             # Require at least 100 ms of non-silent frames; this is not a VAD
-            # quality guarantee. Never transcribe a silent/truncated capture.
+            # quality guarantee. A selected recording can be much longer
+            # than the 30-second microphone capture. Scan up to the existing
+            # selected-file byte limit, not just its initial 31 seconds.
             hits = 0
-            for _ in range(1550):
+            silence = bytes(640)
+            for _ in range(MAX_RECORDING // 640):
                 checkpoint()
                 block = w.readframes(320)
                 checkpoint()
                 if len(block) < 640:
                     break
+                if block == silence:
+                    continue
                 rms = math.sqrt(sum(x*x for (x,) in struct.iter_unpack("<h", block)) / 320)
                 hits += rms >= 90
                 if hits >= 5:
@@ -566,9 +571,16 @@ async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint,
             await runner(model, wav, stem)
         deadline.check()
         output = stem.with_suffix(".txt")
-        if not output.is_file() or output.stat().st_size > MAX_TRANSCRIPT:
-            raise Hold("invalid_transcript")
-        text = output.read_text(encoding="utf-8").strip()
+        try:
+            if not output.is_file():
+                raise Hold("invalid_transcript")
+            with output.open("rb") as stream:
+                payload = stream.read(MAX_TRANSCRIPT + 1)
+            if len(payload) > MAX_TRANSCRIPT:
+                raise Hold("invalid_transcript")
+            text = payload.decode("utf-8").strip()
+        except (OSError, UnicodeError):
+            raise Hold("invalid_transcript") from None
         if not text or len(text) > 16000 or not any(ch.isalnum() for ch in text):
             raise Hold("empty_transcript")
         deadline.check()
