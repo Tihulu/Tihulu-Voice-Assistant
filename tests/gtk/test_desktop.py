@@ -2332,6 +2332,60 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         self.assertFalse(settings.audio_choice_pending())
         self.assertEqual(self.ui.cfg["stt"], str(path))
 
+    def test_audio_import_worker_is_cancellable_and_drains_before_idle(self):
+        from threading import Event, get_ident
+        path = self.weights("fixture-worker.bin")
+        entered, release, drained = Event(), Event(), Event()
+        gtk_thread = get_ident()
+        original = self.ui.inspect_audio_import
+        def delayed(*args, **kwargs):
+            try:
+                self.assertNotEqual(get_ident(), gtk_thread)
+                entered.set()
+                if not release.wait(5):
+                    raise AssertionError("fixture deadline")
+                kwargs["checkpoint"]()
+                return original(*args, **kwargs)
+            finally:
+                drained.set()
+        with patch.object(self.ui, "inspect_audio_import", side_effect=delayed):
+            try:
+                self.ui.start_audio_import("stt", str(path))
+                self.until(entered.is_set)
+                self.ui.hard_stop()
+                self.assertTrue(self.ui.busy)
+                self.assertTrue(self.ui.board.busy())
+                self.assertFalse(drained.is_set())
+            finally:
+                release.set()
+            self.until(lambda: not self.ui.busy)
+        self.assertTrue(drained.is_set())
+        self.assertIsNone(self.ui.market.lookup_card(path.name))
+        self.assertEqual(self.ui.board.rows[-1].state, "cancelled")
+
+    def test_audio_import_worker_refuses_replaced_weights_before_commit(self):
+        path = self.weights("fixture-worker.bin")
+        original = self.ui.inspect_audio_import
+        def changed(*args, **kwargs):
+            inspected = original(*args, **kwargs)
+            replacement = path.with_suffix(".replacement")
+            replacement.write_bytes(path.read_bytes())
+            replacement.replace(path)
+            return inspected
+        with patch.object(self.ui, "inspect_audio_import", side_effect=changed):
+            self.ui.start_audio_import("stt", str(path))
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "model_file_changed")
+        self.assertIsNone(self.ui.market.lookup_card(path.name))
+
+    def test_audio_import_worker_selects_verified_model(self):
+        path = self.weights("fixture-worker.bin")
+        self.ui.start_audio_import("stt", str(path))
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.market.card(path.name).state, "ACTIVE")
+        self.assertEqual(settings.load()["stt"], str(path))
+        self.assertEqual(self.ui.status.get_text(), "Model selected.")
+
     def test_reimport_does_not_downgrade_selected_card(self):
         path = self.weights("fixture-picker.bin")
         self.ui.select_imported_audio("stt", str(path))
