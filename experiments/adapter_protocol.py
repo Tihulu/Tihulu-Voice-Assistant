@@ -8,7 +8,8 @@ from dataclasses import dataclass
 from hashlib import sha256
 import json
 from threading import Lock
-from gateway import Request, Refused, token
+from gateway import Grant, Request, Refused, token
+import re
 from inference import Candidate, Envelope
 
 MAX_TEXT=16384
@@ -75,25 +76,53 @@ class LocalAdapter:
             raise Refused("local_candidate_required")
         self._call=prepare(candidate,identity,operation,data)
         self._wire_digest=self._call.input_digest
-        if response_language is not None:
-            if (type(response_language) is not str or response_language not in ("tr","en","de")
-                    or operation!="llm" or not dependencies):
+        self._native_voice=False
+        # A reserved voice envelope cannot silently downgrade to a generic
+        # invocation just by omitting the optional language parameter.
+        try:
+            obj=json.loads(data)
+        except (ValueError,UnicodeError,RecursionError):
+            obj=None
+        voice=type(obj) is dict and obj.get("kind")=="voice_turn"
+        if response_language is not None or voice:
+            if (not voice or type(response_language) is not str or response_language not in ("tr","en","de")
+                    or operation!="llm" or type(dependencies) is not tuple or len(dependencies)!=1):
                 raise Refused("invalid_bound_language")
-            try:
-                obj=json.loads(data)
-            except (ValueError,UnicodeError):
-                raise Refused("invalid_bound_language") from None
-            if (type(obj) is not dict or obj.get("kind")!="voice_turn"
-                    or obj.get("response_language")!=response_language):
-                raise Refused("voice_language_mismatch")
+            required={"kind","artifact","source_digest","model_digest","transcript_digest",
+                      "input_language","response_language","transcript","transcript_grant","transcript_target"}
+            if set(obj) not in (required,required|{"native_wire_digest"}):
+                raise Refused("invalid_voice_envelope")
+            if json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode("utf-8")!=data:
+                raise Refused("invalid_voice_envelope")
+            if (obj["response_language"]!=response_language or obj["input_language"] not in ("tr","en","de")
+                    or sha256(text_bytes(obj["transcript"])).hexdigest()!=obj["transcript_digest"]):
+                raise Refused("voice_language_or_text_mismatch")
+            for key in ("source_digest","model_digest","transcript_digest","transcript_target"):
+                if type(obj[key]) is not str or not re.fullmatch(r"[0-9a-f]{64}",obj[key]):
+                    raise Refused("invalid_voice_digest")
+            for key in ("artifact","transcript_grant"):
+                if type(obj[key]) is not str:
+                    raise Refused("invalid_voice_identity")
+                token(obj[key])
+            parent=dependencies[0]
+            if type(parent) is not tuple or len(parent)!=2:
+                raise Refused("invalid_voice_parent")
+            parent_grant,parent_req=parent
+            if (type(parent_grant) is not Grant or type(parent_req) is not Request
+                    or parent_grant.identity!=obj["transcript_grant"] or parent_req.target!=obj["transcript_target"]
+                    or parent_grant.request!=parent_req or parent_req.context!=context
+                    or parent_req.action!="application_engine" or parent_req.actor!="local"
+                    or parent_req.classification!="private"):
+                raise Refused("invalid_voice_parent")
             if "native_wire_digest" in obj:
-                if (response_language!="en" or obj.get("input_language")!="en"
+                if (response_language!="en" or obj["input_language"]!="en"
                         or candidate.identity!=VOICE_NATIVE_MODEL or candidate.provider!=VOICE_NATIVE_PROVIDER):
                     raise Refused("native_voice_profile_denied")
-                digest=sha256(native_voice_payload(obj.get("transcript"))).hexdigest()
+                digest=sha256(native_voice_payload(obj["transcript"])).hexdigest()
                 if obj["native_wire_digest"]!=digest:
                     raise Refused("native_voice_wire_mismatch")
                 self._wire_digest=digest
+                self._native_voice=True
         self._response_language=response_language
         self._g,self._grant=gateway,grant
         if type(dependencies) is not tuple:
@@ -183,6 +212,8 @@ class LocalAdapter:
             raise Refused("terminal_call")
         try:
             self._checkpoint()
+            if self._native_voice and not self._transport_started:
+                raise Refused("native_voice_transport_required")
             if (type(identity) is not str or identity!=self.call.identity or type(sequence) is not int
                     or sequence!=self._seq+1 or sequence>256
                     or type(kind) is not str or kind not in ("text","completed","failed")):
