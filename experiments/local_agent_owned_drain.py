@@ -197,6 +197,13 @@ class ManagedWave:
             del self._families[handle.worker]
             self._root_exits.pop(handle.worker,None)
 
+    def inputs(self,handle,context,candidates):
+        """Only the exact still-live root receives direct dependency data."""
+        self.checkpoint(handle,context,candidates)
+        if handle.worker in self._root_exits:
+            raise Refused("managed_root_exited")
+        return self._run.inputs(handle.worker,context,candidates)
+
     def output(self,worker,context,candidates):
         self._thread()
         if self._stopping or self._owned:
