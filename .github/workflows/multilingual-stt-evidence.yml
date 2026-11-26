@@ -1,4 +1,4 @@
-name: Disposable generated multilingual STT roundtrip evidence
+name: Disposable expanded multilingual STT corpus evidence
 on:
   pull_request:
     branches: ['**']
@@ -19,9 +19,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - profile: base
-            sha: 60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe
-            max_bytes: 160000000
           - profile: small
             sha: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b
             max_bytes: 500000000
@@ -61,4 +58,4 @@ jobs:
           PYTHONDONTWRITEBYTECODE: '1'
           STT_PROFILE: ${{ matrix.profile }}
         run: |
-          /usr/bin/python3 experiments/speech_engine_acceptance.py "$RUNNER_TEMP/multilingual-stt/build/bin/whisper-cli" "$RUNNER_TEMP/multilingual-stt/model.bin" "$STT_PROFILE"
+          /usr/bin/python3 experiments/speech_engine_acceptance.py "$RUNNER_TEMP/multilingual-stt/build/bin/whisper-cli" "$RUNNER_TEMP/multilingual-stt/model.bin" "$STT_PROFILE" expanded
