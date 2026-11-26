@@ -6265,6 +6265,19 @@ class MuteTests(DesktopTests):
         self.assertTrue(self.ui.stt_language.get_sensitive())
         self.assertEqual(settings.load()["stt_language"], "tr")
 
+    def test_live_external_language_change_prevents_voice_dispatch(self):
+        self.connect_model()
+        self.begin_voice()
+        before = len(self.backend.requests)
+        current = settings.load()
+        settings.save({**current, "stt_language": "de"}, expected=current)
+        self.click(self.ui.finish_btn)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(self.backend.requests), before)
+        self.assertEqual(self.ui.session.history, ())
+        self.assertEqual(self.backend.speeches, [])
+        self.assertIn("audio_settings_changed", self.ui.status.get_text())
+
     def test_input_language_save_failure_and_reload_restore_visible_choice(self):
         self.ui.stt_language.set_active_id("de")
         before = settings.load()

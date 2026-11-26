@@ -40,6 +40,20 @@ class SpeechInputLanguageTests(unittest.TestCase):
             with self.subTest(bad=bad), self.assertRaises(Hold):
                 settings.checked({"stt_language": bad})
 
+    def test_live_audio_context_refuses_changed_input_language(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "models.json"
+            before = settings.empty()
+            settings.save(before, path)
+            settings.require_current_audio_selection(before, path)
+            changed = settings.checked({**before, "stt_language": "tr"})
+            settings.save(changed, path, expected=before)
+            with self.assertRaisesRegex(Hold, "audio_settings_changed_restart_required"):
+                settings.require_current_audio_selection(before, path)
+            settings.require_current_audio_selection(changed, path)
+            settings.save({**changed, "show_spoken_text": True}, path, expected=changed)
+            settings.require_current_audio_selection(changed, path)
+
     def test_saved_language_round_trip_and_reload(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "models.json"

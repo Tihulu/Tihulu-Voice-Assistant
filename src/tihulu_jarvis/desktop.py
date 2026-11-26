@@ -4739,7 +4739,9 @@ def create_window(app, loop, bridge=None):
                     raise Hold("profile_changed")
                 checkpoint = self.tool_checkpoint("filesystem_read", ("recording",),
                                                  epoch, selected=True,
-                                                 selection=lambda: self.cfg["stt"], expected=model,
+                                                 selection=lambda: (self.cfg["stt"], self.cfg.get("stt_language", "auto"),
+                                                                    self.stt_language.get_active_id()),
+                                                 expected=(model, language, language),
                                                  expected_generation=(context[0], context[4]))
                 checkpoint()
                 checked_model = await self.runtime_model_proofs.bind(
@@ -5442,7 +5444,9 @@ def create_window(app, loop, bridge=None):
                     self.session.check(epoch)
                     self.require_audio_choice()
                     if (not self.route_current(capture_route)
-                            or self.cfg["stt"] != stt_choice or self.cfg["voices"] != voice_choices):
+                            or self.cfg["stt"] != stt_choice or self.cfg["voices"] != voice_choices
+                            or self.cfg.get("stt_language", "auto") != language
+                            or self.stt_language.get_active_id() != language):
                         raise Hold("profile_changed")
                     decision, reason = capture_live.evaluate("local_audio_device", ("push_to_talk",))
                     if decision != profiles.ALLOW:
