@@ -262,6 +262,17 @@ class SettingsSnapshotBoundaryTests(unittest.TestCase):
                 settings.save(bad, self.path)
         self.assertEqual(settings.load(self.path), cfg)
 
+    def test_scoped_audio_reference_accepts_same_weights_at_distinct_paths(self):
+        from tihulu_jarvis import audio_refs
+        digest = "a" * 64
+        first = "sha256-" + digest[:32]
+        second = audio_refs.scoped(digest, "second.onnx")
+        cfg = {**settings.empty(), "market_refs": {first: "/fixture/tr.onnx", second: "/fixture/en.onnx"},
+               "audio_digests": {first: digest, second: digest},
+               "voice_digests": {first: "b" * 64, second: "c" * 64}}
+        settings.save(cfg, self.path)
+        self.assertEqual(settings.load(self.path), cfg)
+
     def test_integrity_levels_distinguish_recorded_metadata_from_legacy(self):
         cfg = settings.empty()
         self.assertEqual(settings.audio_integrity_level(cfg, "stt"), "unselected")

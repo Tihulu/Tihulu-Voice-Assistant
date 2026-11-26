@@ -2468,6 +2468,25 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         settings.save(newer)
         self.ui.require_audio_choice()
 
+    def test_identical_voice_weights_keep_independent_config_and_path(self):
+        first = self.weights("identical-tr.onnx")
+        second = self.weights("identical-en.onnx")
+        second.write_bytes(first.read_bytes())
+        first.with_name(first.name + ".json").write_text('{"language":{"code":"tr"}}')
+        second.with_name(second.name + ".json").write_text('{"language":{"code":"en"}}')
+        self.ui.select_imported_audio("tr", str(first))
+        self.ui.select_imported_audio("en", str(second))
+        cfg = settings.load()
+        a = self.ui.market.card(first.name)
+        b = self.ui.market.card(second.name)
+        self.assertNotEqual(a.storage_ref, b.storage_ref)
+        self.assertEqual(cfg["market_refs"][a.storage_ref], str(first))
+        self.assertEqual(cfg["market_refs"][b.storage_ref], str(second))
+        self.assertEqual(cfg["audio_digests"][a.storage_ref], cfg["audio_digests"][b.storage_ref])
+        self.assertNotEqual(cfg["voice_digests"][a.storage_ref], cfg["voice_digests"][b.storage_ref])
+        self.ui.select_imported_audio("en", str(second))
+        self.assertEqual(settings.load(), cfg)
+
     def test_explicit_reselection_upgrades_legacy_audio_reference(self):
         path = self.weights("legacy-upgrade.bin")
         card = market.from_file(str(path), "stt", engine="whisper.cpp")

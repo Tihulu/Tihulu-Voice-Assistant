@@ -44,6 +44,15 @@ class RuntimeModelProofTests(unittest.IsolatedAsyncioTestCase):
             await self.cache.bind(str(self.path), self.refs, digests={ref: incorrect},
                                   checkpoint=lambda: None)
 
+    async def test_scoped_reference_validates_full_digest(self):
+        import hashlib
+        from tihulu_jarvis import audio_refs
+        digest = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        ref = audio_refs.scoped(digest, "second.bin")
+        guard = await self.cache.bind(str(self.path), {ref: str(self.path)},
+                                      digests={ref: digest}, checkpoint=lambda: None)
+        guard()
+
     async def test_full_digest_accepts_matching_content(self):
         import hashlib
         digest = hashlib.sha256(self.path.read_bytes()).hexdigest()

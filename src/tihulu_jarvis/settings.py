@@ -11,7 +11,7 @@ import stat
 from contextlib import contextmanager
 from pathlib import Path
 
-from . import catalog_sources, files, queries, resources, web
+from . import audio_refs, catalog_sources, files, queries, resources, web
 from .voice.m1 import Hold
 
 LOCALES = ("tr", "en", "de")
@@ -59,7 +59,7 @@ def checked(obj):
     for ref, digest in digests.items():
         if (ref not in clean or not isinstance(digest, str)
                 or not re.fullmatch(r"[0-9a-f]{64}", digest)
-                or ref != "sha256-" + digest[:32]):
+                or not audio_refs.matches(ref, digest)):
             raise Hold("invalid_local_settings")
     if digests:
         out["audio_digests"] = dict(digests)
@@ -200,7 +200,7 @@ def audio_integrity_level(cfg, slot):
     matches = [ref for ref, value in cfg["market_refs"].items() if value == path]
     if not matches:
         return "legacy"
-    if len(matches) != 1 or not re.fullmatch(r"sha256-[0-9a-f]{32}", matches[0]):
+    if len(matches) != 1 or not audio_refs.valid(matches[0]):
         return "ambiguous"
     ref = matches[0]
     if ref not in cfg.get("audio_digests", {}):
