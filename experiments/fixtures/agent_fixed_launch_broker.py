@@ -10,7 +10,8 @@ from threading import current_thread
 from gateway import Refused
 from local_agent_launch import LaunchBoundary
 
-_CHILD="import sys; sys.stdin.buffer.read(1)"
+_CHILD="import sys; sys.stdin.buffer.read(1); sys.stdout.buffer.write(b\"fixed-child-exited\"); sys.stdout.buffer.flush()"
+_EXPECTED=b"fixed-child-exited"
 
 class FixedChildBroker:
     def __init__(self,boundary):
@@ -38,7 +39,7 @@ class FixedChildBroker:
             raise
         try:
             child=subprocess.Popen([sys.executable,"-I","-S","-c",_CHILD],
-                                   stdin=subprocess.PIPE,stdout=subprocess.DEVNULL,
+                                   stdin=subprocess.PIPE,stdout=subprocess.PIPE,
                                    stderr=subprocess.DEVNULL,close_fds=True,
                                    env={"LC_ALL":"C"})
         except BaseException:
@@ -59,6 +60,12 @@ class FixedChildBroker:
     def pending(self):
         self._thread()
         return tuple(self._children)
+
+    def inputs(self,ticket,context,candidates):
+        self._thread()
+        if not any(t is ticket for t in self._children):
+            raise Refused("fixed_child_unknown")
+        return self._boundary.inputs(ticket,context,candidates)
 
     def stop(self):
         self._thread()
@@ -86,9 +93,17 @@ class FixedChildBroker:
         if child.stdin is not None and not child.stdin.closed:
             child.stdin.close()
         try:
+            # Fixed child writes at most 18 bytes, no descendants. Waiting
+            # before bounded pipe read is not safe for arbitrary programs.
+            payload=child.stdout.read(len(_EXPECTED)+1)
+            if code==0 and payload!=_EXPECTED:
+                self.stop()
+                self._boundary.observe_reaped(ticket,code,context,candidates)
+                raise Refused("fixed_child_result_invalid")
             return self._boundary.observe_reaped(ticket,code,context,candidates,
-                                                 payload=b"fixed-child-exited")
+                                                 payload=payload if code==0 else None)
         finally:
+            child.stdout.close()
             # Under this fixed single-child contract, wait has reaped the
             # only process; never call this path for a general process tree.
             del self._children[ticket]
