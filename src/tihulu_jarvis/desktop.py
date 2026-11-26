@@ -217,6 +217,7 @@ def create_window(app, loop, bridge=None):
                 read_error = (read_error + " " if read_error else "") + str(e)
             self.saved_cfg = deepcopy(self.cfg)
             self.runtime_model_proofs = market.RuntimeModelProofs()
+            self.profile_selection_guard = settings.ProfileSelectionGuard()
             self.look = LOOK
             self.scale_provider = None
             self.apply_text_scale()
@@ -868,9 +869,17 @@ def create_window(app, loop, bridge=None):
                 raise Hold(audio_choice.REASON)
             settings.require_current_audio_selection(self.saved_cfg)
 
+        def profile_selection_current(self, expected):
+            try:
+                self.profile_selection_guard.require(expected)
+                return True
+            except Hold:
+                return False
+
         def attachment_route(self):
             if self.jan_choice_blocked():
                 raise Hold("llm_choice_recovery_required")
+            self.profile_selection_guard.require(self.cfg.get("profile"))
             profile, stamp = self.store.snapshot(self.cfg.get("profile"))
             if profile.state != "active":
                 raise Hold("profile_not_active")
@@ -4493,6 +4502,7 @@ def create_window(app, loop, bridge=None):
                 if action == "local_audio_device" or (action == "filesystem_read" and scope == ("recording",)):
                     self.require_audio_choice()
                 if (self.closing or self.cfg.get("profile") != active
+                        or not self.profile_selection_current(active)
                         or selection() != expected or not self.store.is_current(active, stamp)):
                     raise Hold("profile_changed")
             def check():
@@ -4511,6 +4521,7 @@ def create_window(app, loop, bridge=None):
             profile, stamp = self.store.snapshot(active)
             def unchanged():
                 return (self.cfg.get("profile") == active
+                        and self.profile_selection_current(active)
                         and self.store.is_current(active, stamp))
             for action, scope in requests:
                 try:
@@ -4606,6 +4617,7 @@ def create_window(app, loop, bridge=None):
             # of parsing the JSON repeatedly for every streamed text delta.
             return (not self.closing and not self.jan_choice_blocked()
                     and self.cfg.get("profile") == route[0]
+                    and self.profile_selection_current(route[0])
                     and self.url.get_text().strip() == route[3]
                     and self.cfg["llm"] == route[4]
                     and self.store.is_current(route[0], route[5]))
