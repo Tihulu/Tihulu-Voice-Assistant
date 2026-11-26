@@ -54,7 +54,7 @@ STT_MODELS={
     "turbo-q5":("394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2",574041195),
 }
 
-def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
+def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original",piper_root=None):
     if os.getuid()==0:
         raise RuntimeError("root fixture prohibited")
     stt_paths=None
@@ -70,10 +70,19 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
                 or model_digest(stt_paths[1])!=MODEL_SHA):
             raise RuntimeError("invalid pinned STT model")
         print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
-    if (corpus not in ("original","expanded","targeted","turbo-expanded","mixed-preview","mixed-auto","mixed-auto-turbo")
-            or (corpus in ("expanded","mixed-preview","mixed-auto") and (not stt_paths or stt_profile!="small"))
+    if (corpus not in ("original","expanded","targeted","turbo-expanded","mixed-preview","mixed-auto","mixed-auto-turbo","mixed-auto-piper")
+            or (corpus in ("expanded","mixed-preview","mixed-auto","mixed-auto-piper") and (not stt_paths or stt_profile!="small"))
             or (corpus in ("targeted","turbo-expanded","mixed-auto-turbo") and (not stt_paths or stt_profile!="turbo-q5"))):
         raise RuntimeError("invalid corpus profile")
+    if (corpus=="mixed-auto-piper")!=(piper_root is not None):
+        raise RuntimeError("invalid neural mixed input profile")
+    if piper_root is not None:
+        from whisper_engine_acceptance import WRAPPER as STT_WRAPPER_FOR_PIPER
+        from piper_engine_acceptance import voice_profile,SYNTH,digest as piper_digest
+        piper_root=Path(piper_root).resolve()
+        site=piper_root/"site"
+        if not site.is_dir():
+            raise RuntimeError("missing pinned neural site")
     samples=tuple((lang,lang,text) for lang,text in TEXT.items())
     if corpus in ("expanded","turbo-expanded"):
         samples+=expanded_corpus()
@@ -166,7 +175,26 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
             scope[scope.index(str(output))]=str(lang_output)
             digest=hashlib.sha256(payload).hexdigest()
             dest=lang_output/speech_filename(case_id)
-            call=CapabilityCall("espeak_ng",version.group(1),"text_to_wav",
+            model_pin=config_pin=None
+            if piper_root is not None:
+                model_pin,config_pin,phoneme_voice,reference=voice_profile(lang)
+                neural_model=piper_root/(lang+".onnx")
+                neural_config=piper_root/(lang+".json")
+                if (not neural_model.is_file() or not neural_config.is_file()
+                        or not 0<neural_model.stat().st_size<=70000000 or not 0<neural_config.stat().st_size<=16384
+                        or piper_digest(neural_model)!=model_pin or piper_digest(neural_config)!=config_pin
+                        or text!=reference):
+                    raise RuntimeError("invalid pinned neural voice inputs")
+                cfg=json.loads(neural_config.read_text(encoding="utf-8"))
+                if (cfg["audio"]["sample_rate"]!=22050 or cfg["espeak"]["voice"]!=phoneme_voice
+                        or cfg["phoneme_type"]!="espeak"):
+                    raise RuntimeError("voice configuration mismatch")
+                call=CapabilityCall("piper","1.8.0","neural_text_to_wav",
+                      (("artifact","fixture-text-"+case_id),("digest",digest),
+                       ("model_digest",model_pin),("config_digest",config_pin),
+                       ("language",lang),("output","fixture-audio-"+case_id)))
+            else:
+                call=CapabilityCall("espeak_ng",version.group(1),"text_to_wav",
                     (("artifact","fixture-text-"+case_id),("digest",digest),("language",lang),
                      ("output","fixture-audio-"+case_id)))
             req=call.request(ctx)
@@ -184,7 +212,25 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
                 job.cancel()
                 return 1
             job.checkpoint()
-            run(["/usr/bin/espeak-ng","-v",lang,"-s","150","-f","/work/text.txt",
+            if piper_root is not None:
+                neural_scope=scope.copy()
+                neural_scope[-2:-2]=["--ro-bind",str(site),"/work/site",
+                    "--ro-bind",str(neural_model),"/work/voice.onnx",
+                    "--ro-bind",str(neural_config),"/work/voice.json",
+                    "--setenv","OPENBLAS_NUM_THREADS","2","--setenv","OMP_NUM_THREADS","2"]
+                # SYNTH has its own fixed resource ceilings. Keep the original
+                # per-sample grant TTL, no inherited audio device or network.
+                synthesis=json.loads(run(["/usr/bin/python3","-I","-B","-c",SYNTH],neural_scope,
+                                         wrapper=STT_WRAPPER_FOR_PIPER,timeout=120))
+                raw_output=lang_output/"voice.wav"
+                if (synthesis!={"piper":"1.8.0","onnxruntime":"1.22.1","providers":["CPUExecutionProvider"]}
+                        or raw_output.is_symlink() or not raw_output.is_file() or dest.exists()
+                        or piper_digest(neural_model)!=model_pin or piper_digest(neural_config)!=config_pin):
+                    job.cancel()
+                    return 1
+                raw_output.rename(dest)
+            else:
+                run(["/usr/bin/espeak-ng","-v",lang,"-s","150","-f","/work/text.txt",
                  "-w","/work/out/"+dest.name],scope)
             if dest.is_symlink() or not dest.is_file() or not 44<dest.stat().st_size<=MAX_WAV:
                 job.cancel()
@@ -196,7 +242,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
             if not unchanged:
                 job.cancel()
                 return 1
-            job.complete(SpeechResult(req.target,digest,lang,"fixture-audio-"+case_id,data))
+            job.complete(SpeechResult(req.target,digest,lang,"fixture-audio-"+case_id,data,model_pin,config_pin))
             receipt=job.result()
             result_digest=hashlib.sha256(data).hexdigest()
             record("speech-real-wav-"+case_id,receipt[4]==result_digest,
