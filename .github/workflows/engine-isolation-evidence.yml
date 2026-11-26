@@ -1,4 +1,4 @@
-name: Disposable engine isolation feasibility
+name: Disposable engine isolation feasibility (Ubuntu 22.04)
 on:
   pull_request:
     branches: ['**']
@@ -9,7 +9,7 @@ permissions:
   contents: read
 jobs:
   isolation:
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-22.04
     timeout-minutes: 8
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -28,5 +28,7 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install --no-install-recommends -y bubblewrap ffmpeg
           bwrap --version
+          uname -r
+          test "$(id -u)" -ne 0
       - name: Verify unprivileged fixture isolation without weakening runner security
         run: /usr/bin/python3 experiments/engine_isolation_acceptance.py
