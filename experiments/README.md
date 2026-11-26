@@ -148,3 +148,5 @@ CAP-04 non-idempotent fixed local click fixture: repeat click increments a count
 Gateway dense-chain performance: #349 199/199 tests but 64-operation limit test consumed ~24–25s whole suite because group checks re-evaluated shared ancestors. Deduplicate exact grant/request evaluation within one lock/time observation; repeated forged grant/request and unclaimed/revoked ancestor still denied. Four regression methods including exact validation count. No production changes or relaxed policy.
 
 CAP-08 local speech: exact single-language eSpeak NG text-to-WAV request and canonical bounded mono PCM receipt (source/language/output/hash/rate/frame count). Six synthetic tests for provenance, malformed/truncated/silent audio, cancellation and policy. No actual audio device, voice playback, Piper or runtime activation.
+
+CAP-08 actual eSpeak NG stock TTS in disposable offline bubblewrap, fixed public TR/EN/DE sentences, exact preclaim, canonical PCM receipt and source preservation, distinct outputs and no audio device. Eleven planned real cases. No Piper/Whisper, intelligibility or owner microphone/speaker acceptance. No external network at inference time.

@@ -1,0 +1,38 @@
+name: Disposable isolated multilingual speech evidence
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'experiments/speech_engine_acceptance.py'
+      - 'experiments/speech_result.py'
+      - 'experiments/gateway.py'
+      - 'experiments/capabilities.py'
+      - '.github/workflows/speech-engine-evidence.yml'
+permissions:
+  contents: read
+jobs:
+  speech:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify exact head and unchanged shipped paths
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git diff --exit-code d4b756351b1552aa5806c89e39eda3b5b82aa337 HEAD -- src packaging tools tests pyproject.toml data
+      - name: Prepare disposable stock tools
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y bubblewrap espeak-ng
+          test "$(id -u)" -ne 0
+      - name: Actual offline speech fixture
+        env:
+          PYTHONPATH: src:experiments
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: /usr/bin/python3 experiments/speech_engine_acceptance.py
