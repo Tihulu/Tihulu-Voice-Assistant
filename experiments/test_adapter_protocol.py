@@ -1,4 +1,5 @@
 import unittest
+import json
 from dataclasses import replace
 from hashlib import sha256
 from tihulu_jarvis import profiles
@@ -136,3 +137,60 @@ class AdapterTests(unittest.TestCase):
         with patch.object(self.g,"claim",side_effect=revoke):
             with self.assertRaises(Refused):
                 approved_payload(self.g,grant,self.ctx,env)
+
+    def frame(self,grant,sequence,kind,value,**changes):
+        obj={"grant":grant.identity,"target":grant.request.target,"identity":"job",
+             "sequence":sequence,"kind":kind,"value":value}
+        obj.update(changes)
+        return json.dumps(obj,ensure_ascii=False).encode("utf-8")
+
+    def test_strict_stream_multilingual_frames(self):
+        a=self.adapter()
+        for i,text in enumerate(("Merhaba ","Guten Tag ","Hello"),1):
+            a.frame(self.frame(self.grant,i,"text",text))
+        a.frame(self.frame(self.grant,4,"completed",None))
+        self.assertEqual(a.result(),b"Merhaba Guten Tag Hello")
+        with self.assertRaises(Refused):
+            a.frame(self.frame(self.grant,5,"text","late"))
+
+    def test_stale_stream_invocation_cannot_enter_new_call(self):
+        a=self.adapter()
+        old=self.frame(self.grant,1,"text","old")
+        a.cancel()
+        fresh=self.g.fixture_grant("fresh",self.grant.request,60)
+        b=self.adapter(grant=fresh)
+        with self.assertRaisesRegex(Refused,"stream_invocation_mismatch"):
+            b.frame(old)
+        self.assertEqual(b.state,"held")
+        with self.assertRaises(Refused):
+            b.result()
+
+    def test_stream_malformed_duplicate_or_unapproved_fields_fail_closed(self):
+        for i,raw in enumerate((b'{"grant":"x","grant":"y"}',b'[]',b'\xff',b'x'*32769,
+                                self.frame(self.grant,1,"text","x",tool_calls=[]))):
+            grant=self.g.fixture_grant("frame"+str(i),self.grant.request,60)
+            a=self.adapter(grant=grant)
+            with self.assertRaises(Refused):
+                a.frame(raw)
+            self.assertEqual(a.state,"held")
+
+    def test_stream_wrong_target_or_sequence_discards_partial_result(self):
+        for i,changes in enumerate(({"target":"0"*64},{"sequence":3},{"kind":"tool_call"})):
+            grant=self.g.fixture_grant("mismatch"+str(i),self.grant.request,60)
+            a=self.adapter(grant=grant)
+            a.frame(self.frame(grant,1,"text","partial"))
+            obj={"grant":grant.identity,"target":grant.request.target,"identity":"job",
+                 "sequence":2,"kind":"text","value":"next"}
+            obj.update(changes)
+            with self.assertRaises(Refused):
+                a.frame(json.dumps(obj).encode())
+            with self.assertRaises(Refused):
+                a.result()
+
+    def test_call_is_readonly_and_revocation_refuses_frame(self):
+        a=self.adapter()
+        with self.assertRaises(AttributeError):
+            a.call=replace(a.call,identity="other")
+        self.g.revoke(self.grant.identity)
+        with self.assertRaises(Refused):
+            a.frame(self.frame(self.grant,1,"text","x"))

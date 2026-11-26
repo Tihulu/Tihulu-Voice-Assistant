@@ -12,9 +12,10 @@ from gateway import Request, Refused, token
 from inference import Candidate, Envelope
 
 MAX_TEXT=16384
+MAX_FRAME=32768
 
 def text_bytes(value):
-    if not isinstance(value,str) or not value or len(value)>MAX_TEXT:
+    if type(value) is not str or not value or len(value)>MAX_TEXT:
         raise Refused("invalid_text")
     if any((ord(c)<32 and c not in "\n\t") or 127<=ord(c)<=159
            or 0xd800<=ord(c)<=0xdfff for c in value):
@@ -60,7 +61,7 @@ class LocalAdapter:
     def __init__(self,gateway,context,candidate,identity,operation,data,grant,*,dependencies=()):
         if type(candidate) is not Candidate or candidate.locality!="local":
             raise Refused("local_candidate_required")
-        self.call=prepare(candidate,identity,operation,data)
+        self._call=prepare(candidate,identity,operation,data)
         self._g,self._grant=gateway,grant
         if type(dependencies) is not tuple:
             raise Refused("invalid_dependency_group")
@@ -81,20 +82,60 @@ class LocalAdapter:
             self._g.checkpoint(self._grant,self._req)
 
     @property
+    def call(self):
+        return self._call
+
+    @property
     def state(self):
         with self._lock:
             return self._state
     def event(self,identity,sequence,kind,value):
         with self._lock:
             return self._event(identity,sequence,kind,value)
+    def frame(self, raw):
+        """Strict offline normalized frame, not Jan/OpenAI wire compatibility.
+
+        The exact invocation grant prevents late events from a previous call
+        with the same model/request identity entering a new call.
+        """
+        with self._lock:
+            if self._state not in ("ready","running"):
+                raise Refused("terminal_call")
+            try:
+                self._checkpoint()
+                if type(raw) is not bytes or not 0<len(raw)<=MAX_FRAME:
+                    raise Refused("invalid_stream_frame")
+                def unique(pairs):
+                    obj={}
+                    for key,value in pairs:
+                        if key in obj:
+                            raise Refused("duplicate_stream_field")
+                        obj[key]=value
+                    return obj
+                try:
+                    obj=json.loads(raw.decode("utf-8"),object_pairs_hook=unique)
+                except (ValueError,UnicodeError,RecursionError) as exc:
+                    raise Refused("invalid_stream_frame") from exc
+                if (type(obj) is not dict or set(obj)!={"grant","target","identity","sequence","kind","value"}
+                        or type(obj["grant"]) is not str or obj["grant"]!=self._grant.identity
+                        or type(obj["target"]) is not str or obj["target"]!=self._req.target
+                        or type(obj["identity"]) is not str or obj["identity"]!=self.call.identity
+                        or type(obj["kind"]) is not str):
+                    raise Refused("stream_invocation_mismatch")
+                return self._event(obj["identity"],obj["sequence"],obj["kind"],obj["value"])
+            except Refused:
+                self._result.clear()
+                self._state="held"
+                raise
+
     def _event(self,identity,sequence,kind,value):
         if self._state not in ("ready","running"):
             raise Refused("terminal_call")
         try:
             self._checkpoint()
-            if (identity!=self.call.identity or type(sequence) is not int
+            if (type(identity) is not str or identity!=self.call.identity or type(sequence) is not int
                     or sequence!=self._seq+1 or sequence>256
-                    or kind not in ("text","completed","failed")):
+                    or type(kind) is not str or kind not in ("text","completed","failed")):
                 raise Refused("invalid_event")
             if kind=="text":
                 if self.call.operation=="tts":
