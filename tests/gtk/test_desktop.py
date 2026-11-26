@@ -2440,6 +2440,43 @@ class StagingCleanupUITests(MarketFixture):
         self.assertEqual(sum(path.exists() for path in (first, second)), 1)
         self.assertFalse(self.ui.staging_discard.get_sensitive())
 
+    def archive_stage(self, model="fixture-staging"):
+        folder = Path(self.market_home, "artifact-revisions", model)
+        folder.mkdir(mode=0o700, parents=True, exist_ok=True)
+        fd, name = tempfile.mkstemp(prefix=".archive-", dir=folder)
+        os.close(fd)
+        path = Path(name)
+        path.write_bytes(b"incomplete archive")
+        return path
+
+    def test_archive_review_only_deletes_explicitly_selected_copy(self):
+        candidate = self.archive_stage()
+        revision = candidate.parent / ("a" * 64)
+        revision.write_bytes(b"verified revision fixture")
+        other = self.archive_stage("other-staging")
+        linked = self.archive_stage()
+        os.link(linked, linked.parent / ("b" * 64))
+        self.click(self.ui.archive_staging_scan)
+        self.assertEqual(len(self.ui.staging_rows), 1)
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+        self.ui.staging_choice.set_active(0)
+        self.click(self.ui.staging_discard)
+        self.assertFalse(candidate.exists())
+        self.assertTrue(revision.exists() and other.exists() and linked.exists())
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+
+    def test_switching_staging_scope_invalidates_archive_selection(self):
+        archive = self.archive_stage()
+        transfer = self.stage()
+        self.click(self.ui.archive_staging_scan)
+        self.ui.staging_choice.set_active(0)
+        self.click(self.ui.staging_scan)
+        self.assertFalse(self.ui.staging_discard.get_sensitive())
+        self.ui.staging_choice.set_active(0)
+        self.click(self.ui.staging_discard)
+        self.assertFalse(transfer.exists())
+        self.assertTrue(archive.exists())
+
     def test_switching_model_invalidates_review(self):
         stage = self.stage()
         self.click(self.ui.staging_scan)
