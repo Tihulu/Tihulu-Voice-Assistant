@@ -41,6 +41,19 @@ try:
 except OSError:
     data['readonly'] = True
 data['netns'] = os.readlink('/proc/self/ns/net')
+data['pidns'] = os.readlink('/proc/self/ns/pid')
+data['ipcns'] = os.readlink('/proc/self/ns/ipc')
+data['outside_denied'] = True
+for path in ('/fixture-forbidden','/work/fixture-forbidden'):
+    try:
+        with open(path,'x') as handle:
+            handle.write('synthetic')
+        data['outside_denied'] = False
+    except OSError:
+        pass
+with open('/tmp/fixture-private','x') as handle:
+    handle.write('private scratch')
+data['scratch_available'] = open('/tmp/fixture-private').read() == 'private scratch'
 status = dict(line.split(':',1) for line in open('/proc/self/status') if ':' in line)
 data['caps_dropped'] = all(int(status[key].strip(),16)==0
                            for key in ('CapEff','CapPrm','CapAmb'))
@@ -78,7 +91,7 @@ def main():
             out.setparams((1,2,16000,0,"NONE","not compressed"))
             out.writeframes(pcm)
         before = hashlib.sha256(source.read_bytes()).hexdigest()
-        prefix = ["bwrap","--unshare-all","--die-with-parent","--new-session",
+        prefix = ["/usr/bin/bwrap","--unshare-all","--die-with-parent","--new-session",
                   "--cap-drop","ALL","--clearenv","--ro-bind","/usr","/usr"]
         # Ubuntu merged-/usr layout. Refuse rather than mount an unreviewed
         # host directory on a different distribution.
@@ -100,14 +113,16 @@ def main():
                    # /etc/ld.so.cache. Keep /etc hidden; only fixed read-only
                    # library directories inside the already mounted /usr.
                    "--setenv","LD_LIBRARY_PATH",
-                   "/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack"]
+                   "/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack",
+                   "--remount-ro","/"]
         def run(args, timeout=20):
             argv = prefix+["--","/usr/bin/python3","-I","-c",LIMIT_WRAPPER]+args
             # Regular files avoid unbounded PIPE buffering in the host.
             with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
                 with subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,
                                       start_new_session=True,
-                                      env={**os.environ,"JARVIS_FIXTURE_HOST_MARKER":"synthetic-only"}) as proc:
+                                      env={"PATH":"/usr/bin:/bin","LC_ALL":"C.UTF-8",
+                                           "JARVIS_FIXTURE_HOST_MARKER":"synthetic-only"}) as proc:
                     try:
                         proc.wait(timeout=timeout)
                     except subprocess.TimeoutExpired:
@@ -128,6 +143,8 @@ def main():
             listener.bind(("127.0.0.1",0))
             listener.listen(1)
             host_ns = os.readlink("/proc/self/ns/net")
+            host_pid = os.readlink("/proc/self/ns/pid")
+            host_ipc = os.readlink("/proc/self/ns/ipc")
             probe = run(["/usr/bin/python3","-I","-c",PROBE,str(marker),
                          str(listener.getsockname()[1])])
         if probe.returncode:
@@ -143,6 +160,9 @@ def main():
         record("sandbox-capabilities-dropped",data["caps_dropped"])
         record("sandbox-host-environment-hidden",data["host_env_hidden"])
         record("sandbox-process-resource-limits",data["limits"])
+        record("sandbox-root-and-work-readonly",data["outside_denied"])
+        record("sandbox-private-scratch",data["scratch_available"] and not (output/"fixture-private").exists())
+        record("sandbox-pid-ipc-namespaces",data["pidns"]!=host_pid and data["ipcns"]!=host_ipc)
         oversized = run(["/usr/bin/python3","-I","-c",
                          "open('/work/out/oversized','wb').write(b'x'*1048577)"])
         large = output/"oversized"
@@ -210,7 +230,7 @@ def main():
         else:
             job.cancel()
             record("sandbox-typed-conversion-receipt",False,reason="conversion_failed")
-    return 0 if len(results)==13 and all(r["status"]=="PASS" for r in results) else 1
+    return 0 if len(results)==16 and all(r["status"]=="PASS" for r in results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main())
