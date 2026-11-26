@@ -244,6 +244,11 @@ def _jan_record(store, before, after, current, proposed):
             "new_profile": _profile_digest(store, after)}
 
 
+def _choice_identity(info):
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns,
+            info.st_ctime_ns, info.st_mode, info.st_nlink)
+
+
 def _read_choice(p):
     try:
         path = _choice_journal(p)
@@ -266,15 +271,19 @@ def _read_choice(p):
                        for k in ("old_settings", "new_settings", "old_profile", "new_profile"))
                 or record["old_profile"] == record["new_profile"]):
             raise Hold("llm_choice_recovery_required")
-        return record, raw
+        stamp = _choice_identity(info)
+        if _choice_identity(path.lstat()) != stamp:
+            raise Hold("llm_choice_recovery_required")
+        return record, raw, stamp
     except (Hold, OSError, ValueError, TypeError, RecursionError):
         raise Hold("llm_choice_recovery_required") from None
 
 
-def _clear_choice(p, raw):
+def _clear_choice(p, raw, stamp):
     journal = _choice_journal(p)
     try:
-        if _read_text(journal) != raw:
+        _, current, identity = _read_choice(p)
+        if current != raw or identity != stamp:
             raise Hold("llm_choice_recovery_required")
         journal.unlink()
         _sync_parent(journal)
@@ -295,9 +304,12 @@ def recover_jan_choice(store, path=None):
     with store._mutation_lock(), _write_guard(p):
         if not choice_pending(p):
             return False
-        record, raw = _read_choice(p)
+        record, raw, journal_stamp = _read_choice(p)
         try:
+            settings_stamp = _choice_identity(p.lstat())
             current = load(p)
+            if _choice_identity(p.lstat()) != settings_stamp:
+                raise Hold("llm_choice_recovery_required")
             profile, stamp = store.snapshot(record["profile"])
             old = {**current, "llm": record["old_model"]}
             new = {**current, "llm": record["new_model"]}
@@ -309,7 +321,9 @@ def recover_jan_choice(store, path=None):
             generation = _profile_digest(store, profile)
             if generation == record["old_profile"]:
                 if current != old:
-                    if not store.is_current(profile.id, stamp) or _read_choice(p) != (record, raw):
+                    if (not store.is_current(profile.id, stamp)
+                            or _read_choice(p) != (record, raw, journal_stamp)
+                            or _choice_identity(p.lstat()) != settings_stamp):
                         raise Hold("llm_choice_recovery_required")
                     _replace_text(p, _serialize(old))
             elif generation == record["new_profile"] and current == new:
@@ -322,7 +336,7 @@ def recover_jan_choice(store, path=None):
             expected = old if generation == record["old_profile"] else new
             if load(p) != expected:
                 raise Hold("llm_choice_recovery_required")
-            _clear_choice(p, raw)
+            _clear_choice(p, raw, journal_stamp)
             return True
         except (Hold, OSError, ValueError, TypeError, RecursionError):
             raise Hold("llm_choice_recovery_required") from None
@@ -389,7 +403,7 @@ def choice_transaction(obj, path=None, *, expected=None, jan_transition=None):
             raise Hold("settings_unreadable") from None
         if expected is not None and current != checked(expected):
             raise Hold("settings_changed")
-        record = journal_text = None
+        record = journal_text = journal_stamp = None
         if jan_transition is not None:
             store, before, after = jan_transition
             if store.load(before.id) != before:
@@ -398,6 +412,9 @@ def choice_transaction(obj, path=None, *, expected=None, jan_transition=None):
             journal_text = json.dumps(record, sort_keys=True)
             try:
                 _replace_text(_choice_journal(p), journal_text)
+                observed, raw, journal_stamp = _read_choice(p)
+                if observed != record or raw != journal_text:
+                    raise Hold("llm_choice_recovery_required")
             except OSError:
                 raise Hold("settings_unwritable") from None
         try:
@@ -425,12 +442,12 @@ def choice_transaction(obj, path=None, *, expected=None, jan_transition=None):
                 except (Hold, OSError):
                     unchanged = False
                 if unchanged:
-                    _clear_choice(p, journal_text)
+                    _clear_choice(p, journal_text, journal_stamp)
             raise
         if record is not None:
             if store.load(after.id) != after or load(p) != checked(obj):
                 raise Hold("llm_choice_recovery_required")
-            _clear_choice(p, journal_text)
+            _clear_choice(p, journal_text, journal_stamp)
 
 
 def _sync_parent(p):
