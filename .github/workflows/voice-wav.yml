@@ -11,7 +11,15 @@ permissions:
 jobs:
   real-wav:
     runs-on: ubuntu-24.04
-    timeout-minutes: 18
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model: base
+            sha256: 60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe
+          - model: small
+            sha256: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -22,6 +30,9 @@ jobs:
           EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
       - name: Prepare disposable CPU audio engines
+        env:
+          MODEL: ${{ matrix.model }}
+          SHA256: ${{ matrix.sha256 }}
         run: |
           set -eu
           sudo apt-get update -qq
@@ -40,8 +51,8 @@ jobs:
           "$root/venv/bin/pip" freeze
           echo "$root/build/bin" >> "$GITHUB_PATH"
           echo "$root/venv/bin" >> "$GITHUB_PATH"
-          curl --fail --location --retry 2 --max-time 180 -o "$root/ggml-base.bin" 'https://huggingface.co/ggerganov/whisper.cpp/resolve/fb5ed9369c26eaf08392504d8446da431e0fffb9/ggml-base.bin'
-          printf '%s  %s\n' 60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe "$root/ggml-base.bin" | sha256sum -c -
+          curl --fail --location --retry 2 --max-time 300 -o "$root/ggml-$MODEL.bin" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$MODEL.bin"
+          printf '%s  %s\n' "$SHA256" "$root/ggml-$MODEL.bin" | sha256sum -c -
           url='https://huggingface.co/rhasspy/piper-voices/resolve/a08e8fa47faf6681ecc42a79cfa95369430cbcf6/en/en_US/lessac/low/en_US-lessac-low.onnx'
           curl --fail --location --retry 2 --max-time 180 -o "$root/en_US-lessac-low.onnx" "$url"
           printf '%s  %s\n' f7d01dde371555732c4c314111ac79672b1a5ce2fc19266ab42178fd8df7f375 "$root/en_US-lessac-low.onnx" | sha256sum -c -
@@ -59,11 +70,12 @@ jobs:
         env:
           PYTHONPATH: src
           PYTHONDONTWRITEBYTECODE: '1'
+          MODEL: ${{ matrix.model }}
         run: |
           root="$RUNNER_TEMP/jarvis-voice-qa"
           python3 --version
           espeak-ng --version
-          python3 tools/voice_wav_acceptance.py --model "$root/ggml-base.bin" --voice "$root/en_US-lessac-low.onnx" --voice-tr "$root/tr_TR-dfki-medium.onnx" --voice-de "$root/de_DE-thorsten-low.onnx" --human-wav "$root/whisper/samples/jfk.wav" --report "$root/report.json"
+          python3 tools/voice_wav_acceptance.py --model "$root/ggml-$MODEL.bin" --voice "$root/en_US-lessac-low.onnx" --voice-tr "$root/tr_TR-dfki-medium.onnx" --voice-de "$root/de_DE-thorsten-low.onnx" --human-wav "$root/whisper/samples/jfk.wav" --report "$root/report.json"
       - name: Print bounded synthetic/public evidence
         if: always()
         run: |
