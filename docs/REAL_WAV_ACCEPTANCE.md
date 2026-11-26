@@ -34,3 +34,7 @@ Speech input language is now persisted as an optional validated preference. Auto
 ## Capture and corrupt-input extension
 
 36 cases per model (72 full executions): retain all prior 31, add explicit TR/EN/DE virtual-microphone recognition using identical PCM inputs to auto mode, actual arecord silence refusal before transcription, and truncated voiced WAV refusal before inference. No microphone device, no system config changes, no relaxed prior thresholds. Verify both auto and forced paths separately.
+
+## Mixed Piper diagnostic evidence
+
+#275 Small lost the entire English block in both mixed-Piper paths (WER 43.24%, English recall 0). The cause is not yet established: pause partitioning versus segment recognition. Observe real Whisper invocations and log segment frame counts, hashes and bounded output text only for these public/synthetic fixtures. Preserve the original 500ms mixed fixture and add a 1000ms-gap segmented comparison using the same generated clips, without changing production split thresholds or waiving failures. 37 full cases per model (74 executions). If the wider gap passes while the original fails, that is diagnostic evidence, not acceptance of the original.

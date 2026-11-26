@@ -90,7 +90,9 @@ def language_recall(references, actual):
     return {lang: counts[lang] / total for lang, total in totals.items()}
 
 
-def concatenate_clips(paths, target):
+def concatenate_clips(paths, target, *, gap_ms=500):
+    if type(gap_ms) is not int or not 0 <= gap_ms <= 2000:
+        raise ValueError("invalid fixture gap")
     with wave.open(str(target), "wb") as out:
         out.setparams((1, 2, 16000, 0, "NONE", "not compressed"))
         for path in paths:
@@ -98,7 +100,7 @@ def concatenate_clips(paths, target):
                 if (clip.getnchannels(), clip.getsampwidth(), clip.getframerate()) != (1, 2, 16000):
                     raise ValueError("incompatible fixture")
                 out.writeframes(clip.readframes(clip.getnframes()))
-            out.writeframes(bytes(16000))
+            out.writeframes(bytes(gap_ms * 32))
 
 
 def noisy_pcm(data, *, snr_db=15, seed=270):
@@ -153,10 +155,25 @@ async def run(args):
 
         async def transcribe(case, path, expected, threshold, language="auto", references=None):
             started = time.monotonic()
-            stages = []
+            stages, segments = [], []
+            original = audio._whisper
+
+            async def observe_segment(model, wav, stem, **kwargs):
+                with wave.open(str(wav), "rb") as clip:
+                    row = {"frames": clip.getnframes(), "rate": clip.getframerate(),
+                           "wav_sha256": digest(Path(wav))}
+                segments.append(row)
+                await original(model, wav, stem, **kwargs)
+                output = Path(stem).with_suffix(".txt")
+                if output.is_file() and output.stat().st_size <= audio.MAX_TRANSCRIPT:
+                    row["text"] = output.read_text(encoding="utf-8", errors="replace")
+
             try:
-                actual = await audio.transcribe(str(args.model), str(path), publish=stages.append,
-                                                checkpoint=lambda: None, language=language)
+                # Only synthetic/public fixtures. Observe real per-segment
+                # invocations without modifying engine flags or boundaries.
+                with patch.object(audio, "_whisper", observe_segment):
+                    actual = await audio.transcribe(str(args.model), str(path), publish=stages.append,
+                                                    checkpoint=lambda: None, language=language)
                 error = wer(expected, actual)
                 recall = language_recall(references, actual) if references else {}
                 passed = (error <= threshold and stages == ["transcribing"]
@@ -165,9 +182,10 @@ async def run(args):
                        expected=expected, actual=actual, wer=round(error, 4),
                        language_recall={k: round(v, 4) for k, v in recall.items()},
                        threshold=threshold, seconds=round(time.monotonic()-started, 2),
-                       wav_sha256=digest(path), stages=stages)
+                       wav_sha256=digest(path), stages=stages, segments=segments)
             except (Hold, asyncio.TimeoutError) as exc:
-                report(case, "FAIL", reason=str(exc) or type(exc).__name__, stages=stages)
+                report(case, "FAIL", reason=str(exc) or type(exc).__name__, stages=stages,
+                       segments=segments)
 
         human = root / "human.wav"
         convert(args.human_wav, human)
@@ -343,8 +361,13 @@ async def run(args):
             await transcribe("mixed-piper-auto", mixed_piper, mixed_text, .5, references=references)
             await transcribe("mixed-piper-segmented", mixed_piper, mixed_text, .5,
                              language="segmented", references=references)
+            wide_gap = root / "mixed-piper-1000ms.wav"
+            concatenate_clips([piper_clips[lang] for lang, _ in references], wide_gap,
+                              gap_ms=1000)
+            await transcribe("mixed-piper-segmented-1000ms", wide_gap, mixed_text, .5,
+                             language="segmented", references=references)
         else:
-            for case in ("mixed-piper-auto", "mixed-piper-segmented"):
+            for case in ("mixed-piper-auto", "mixed-piper-segmented", "mixed-piper-segmented-1000ms"):
                 report(case, "HOLD", reason="missing_piper_fixture")
     audio.configure(None)
     return results
@@ -359,7 +382,7 @@ def main():
         setattr(args, attr, getattr(args, attr).resolve(strict=True))
     results = asyncio.run(run(args))
     args.report.write_text(json.dumps(results, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-    return 0 if len(results) == 36 and all(x["status"] == "PASS" for x in results) else 1
+    return 0 if len(results) == 37 and all(x["status"] == "PASS" for x in results) else 1
 
 
 if __name__ == "__main__":
