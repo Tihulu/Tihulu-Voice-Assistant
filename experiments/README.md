@@ -116,3 +116,5 @@ CAP-04 first actual Firefox WebDriver fixture: disposable Ubuntu22.04 runner-pro
 CAP-08 strict fixture HTTP EOF/length and SSE event framing: fixed response headers, absolute receive deadline, bounded whole stream, no duplicate length/chunking/trailing body, one data line plus required blank separator, validate UTF-8 and expected response id before opening socket. Four new regressions. Synthetic closed subset; no real backend or production transport claim.
 
 CAP-04 #334 actual Firefox smoke: namespace/private home/source unchanged PASS; session failed with browser exit127. Successor adds exact in-sandbox version probe and bounded geckodriver diagnostics, fixed read-only /usr loader paths, private XDG runtime dir. No security relaxation or owner paths. Preserve #334 failure.
+
+CAP-06 after successful #331 Office startup/export, recheck the changed Office-specific mount/environment before launch: generated config/identity and host marker/shadow scope, read-only config and input, caps plus PID/IPC/network namespaces. Three actual cases (36 planned), refuse Office if any fail. Existing 1 MiB output limit remains. No runtime activation.
