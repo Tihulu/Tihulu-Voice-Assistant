@@ -6,7 +6,6 @@ import http.client
 import json
 import socket
 from threading import Thread
-from hashlib import sha256
 import time
 import unittest
 from tihulu_jarvis import profiles
@@ -21,15 +20,22 @@ class NoConnect(http.client.HTTPConnection):
 
 def exchange(adapter, payload, response_id, reply):
     """Trusted CI fixture peer; no caller-selected address or credentials."""
-    adapter.begin_fixture_transport(payload)
+    # Validate input and expected response identity before acquiring a socket.
+    if type(payload) is not bytes:
+        raise Refused("transport_input_mismatch")
+    try:
+        text=payload.decode("utf-8")
+    except UnicodeError:
+        raise Refused("invalid_fixture_utf8") from None
     stream=LocalSSE(adapter,response_id)
+    adapter.begin_fixture_transport(payload)
     captured=[]
     errors=[]
     client,peer=socket.socketpair()
     client.settimeout(2)
     peer.settimeout(2)
     body=json.dumps({"model":adapter.call.model,"stream":True,
-                     "messages":[{"role":"user","content":payload.decode("utf-8")}]},
+                     "messages":[{"role":"user","content":text}]},
                     ensure_ascii=False,separators=(",",":")).encode("utf-8")
     def serve():
         try:
@@ -58,23 +64,46 @@ def exchange(adapter, payload, response_id, reply):
     try:
         conn.request("POST","/v1/chat/completions",body=body,headers={
             "Content-Type":"application/json","Accept":"text/event-stream","Connection":"close"})
-        response=conn.getresponse()
-        lengths=response.headers.get_all("Content-Length") or []
-        if (response.status!=200 or response.getheader("Content-Type")!="text/event-stream"
-                or response.getheader("Transfer-Encoding") is not None or len(lengths)!=1
-                or not lengths[0].isascii() or not lengths[0].isdigit()
-                or len(lengths[0])>6 or not 0<int(lengths[0])<=MAX_STREAM):
-            raise Refused("fixture_http_response_denied")
-        remaining=int(lengths[0])
+        # Closed HTTP fixture response: bound the whole byte stream, including
+        # headers, and require exact EOF. No chunking, redirects, trailers or
+        # extra bytes hidden after Content-Length. This is not general HTTP.
         deadline=time.monotonic()+2
-        while remaining:
-            if time.monotonic()>=deadline:
+        raw=bytearray()
+        while True:
+            remaining=deadline-time.monotonic()
+            if remaining<=0:
                 raise Refused("fixture_http_deadline")
-            data=response.read(min(31,remaining))
+            client.settimeout(remaining)
+            data=client.recv(4096)
             if not data:
-                raise Refused("fixture_http_truncated")
-            remaining-=len(data)
-            stream.feed(data)
+                break
+            raw.extend(data)
+            if len(raw)>MAX_STREAM+8192:
+                raise Refused("fixture_http_limit")
+            if b"\r\n\r\n" not in raw and len(raw)>8192:
+                raise Refused("fixture_http_header_limit")
+        header,sep,body_bytes=bytes(raw).partition(b"\r\n\r\n")
+        if not sep or len(header)>8192:
+            raise Refused("fixture_http_response_denied")
+        lines=header.split(b"\r\n")
+        if lines[0]!=b"HTTP/1.1 200 OK":
+            raise Refused("fixture_http_response_denied")
+        fields={}
+        for line in lines[1:]:
+            name,colon,value=line.partition(b": ")
+            key=name.lower()
+            if (not colon or not key or key in fields
+                    or key not in (b"content-type",b"content-length",b"connection")):
+                raise Refused("fixture_http_response_denied")
+            fields[key]=value
+        length=fields.get(b"content-length",b"")
+        if (fields.get(b"content-type")!=b"text/event-stream"
+                or fields.get(b"connection")!=b"close" or not length.isdigit()
+                or len(length)>6 or not 0<int(length)<=MAX_STREAM
+                or len(body_bytes)!=int(length)):
+            raise Refused("fixture_http_response_denied")
+        for offset in range(0,len(body_bytes),31):
+            stream.feed(body_bytes[offset:offset+31])
         thread.join(timeout=3)
         if thread.is_alive() or errors or len(captured)!=1:
             raise Refused("fixture_peer_incomplete")
@@ -147,3 +176,23 @@ class LocalHTTPFixtureTests(unittest.TestCase):
             with self.assertRaises(Refused):
                 exchange(self.a,self.payload,"response1",self.reply(self.sse()))
             pair.assert_not_called()
+
+    def test_trailing_http_body_bytes_denied(self):
+        body=self.sse()
+        with self.assertRaises(Refused):
+            exchange(self.a,self.payload,"response1",self.reply(body+b"late",length=len(body)))
+        with self.assertRaises(Refused):
+            self.a.result()
+    def test_duplicate_length_and_transfer_encoding_denied(self):
+        for extra in ("Content-Length: 1\r\n","Transfer-Encoding: chunked\r\n"):
+            self.setUp()
+            with self.assertRaises(Refused):
+                exchange(self.a,self.payload,"response1",self.reply(self.sse(),extra=extra))
+    def test_invalid_utf8_or_response_identity_never_opens_socket(self):
+        from unittest.mock import patch
+        with patch("socket.socketpair") as pair:
+            for payload,identity in ((b"\xff","response1"),(self.payload,"bad id")):
+                with self.assertRaises(Refused):
+                    exchange(self.a,payload,identity,self.reply(self.sse()))
+            pair.assert_not_called()
+        self.assertEqual(self.a.state,"ready")
