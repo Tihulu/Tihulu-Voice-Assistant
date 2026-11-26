@@ -117,9 +117,15 @@ def main():
         digests=set()
         for lang,text in TEXT.items():
             payload=text.encode("utf-8")
-            source.write_bytes(payload)
+            lang_source=root/("text-"+lang+".txt")
+            lang_source.write_bytes(payload)
+            lang_output=root/("voice-"+lang)
+            lang_output.mkdir(mode=0o700)
+            scope=prefix.copy()
+            scope[scope.index(str(source))]=str(lang_source)
+            scope[scope.index(str(output))]=str(lang_output)
             digest=hashlib.sha256(payload).hexdigest()
-            dest=output/(lang+".wav")
+            dest=lang_output/(lang+".wav")
             call=CapabilityCall("espeak_ng",version.group(1),"text_to_wav",
                     (("artifact","fixture-text-"+lang),("digest",digest),("language",lang),
                      ("output","fixture-audio-"+lang)))
@@ -130,14 +136,22 @@ def main():
                 job.cancel()
                 return 1
             job.checkpoint()
+            scope_probe=json.loads(run(["/usr/bin/python3","-I","-c",
+                "import hashlib,json; from pathlib import Path; print(json.dumps({'digest':hashlib.sha256(Path('/work/text.txt').read_bytes()).hexdigest(),'work':sorted(p.name for p in Path('/work').iterdir()),'out':list(Path('/work/out').iterdir())}))"],scope))
+            scoped=(scope_probe=={"digest":digest,"work":["out","text.txt"],"out":[]})
+            record("speech-exact-private-language-scope-"+lang,scoped)
+            if not scoped:
+                job.cancel()
+                return 1
+            job.checkpoint()
             run(["/usr/bin/espeak-ng","-v",lang,"-s","150","-f","/work/text.txt",
-                 "-w","/work/out/"+lang+".wav"])
+                 "-w","/work/out/"+lang+".wav"],scope)
             if dest.is_symlink() or not dest.is_file() or not 44<dest.stat().st_size<=MAX_WAV:
                 job.cancel()
                 record("speech-wav-"+lang,False)
                 return 1
             data=dest.read_bytes()
-            unchanged=source.read_bytes()==payload
+            unchanged=lang_source.read_bytes()==payload
             record("speech-source-preserved-"+lang,unchanged)
             if not unchanged:
                 job.cancel()
@@ -197,8 +211,8 @@ def main():
             if not all(results):
                 return 1
         record("speech-distinct-multilingual-output",len(digests)==3)
-        record("speech-exact-output-set",sorted(p.name for p in output.iterdir())==["de.wav","en.wav","tr.wav"])
-    return 0 if len(results)==23 and all(results) else 1
+        record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+lang)).iterdir())==[lang+".wav"] for lang in TEXT) and not list(output.iterdir()))
+    return 0 if len(results)==26 and all(results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main())
