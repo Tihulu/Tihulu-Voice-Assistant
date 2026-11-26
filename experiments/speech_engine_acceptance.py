@@ -468,7 +468,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
         if corpus=="mixed-manual-piper-short":
             # Public generated fixture with known joins, no inserted pauses
             # in the manual path. This is not automatic boundary detection.
-            from manual_mixed_boundary import boundary_preview,verify_boundary_preview
+            from manual_mixed_boundary import boundary_preview,verify_boundary_preview,inspect_manual_review
             pause_data=mixed_data
             proposed=tuple(cuts)
             shown=boundary_preview(pause_data,proposed)
@@ -645,8 +645,10 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                        languages=[row.language for row in view.segments])
                 if corpus=="mixed-manual-piper-short":
                     edit=(0,view.segments[0].transcript_digest,"Public fixture correction.")
-                    edited=mixed.edit_preview((edit,))
-                    record("mixed-manual-edit-bound-to-original",edited.segments[0].original==view.segments[0] and
+                    edit_outcome=inspect_manual_review(pause_data,proposed,shown,tuple(transcripts),MODEL_SHA,(edit,))
+                    edited=edit_outcome.preview
+                    record("mixed-manual-edit-bound-to-original",edit_outcome.status=="READY" and edited is not None and
+                           edited.segments[0].original==view.segments[0] and
                            edited.segments[0].submitted_text==edit[2] and edited.segments[0].edited and
                            edited.text=="\n".join((edit[2],*(r.text for r in view.segments[1:]))) and
                            mixed.preview()==view)
@@ -667,13 +669,8 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 record("mixed-auto-revoke-invalidates-review",denied and all(t.result()[0].language==samples[i][1]
                        for i,t in enumerate(transcripts) if i!=revoked_index))
                 if corpus=="mixed-manual-piper-short":
-                    try:
-                        mixed.edit_preview((edit,))
-                    except Refused:
-                        denied=True
-                    else:
-                        denied=False
-                    record("mixed-manual-edit-revocation-denied",denied)
+                    edit_outcome=inspect_manual_review(pause_data,proposed,shown,tuple(transcripts),MODEL_SHA,(edit,))
+                    record("mixed-manual-edit-revocation-denied",edit_outcome.status=="HOLD" and edit_outcome.preview is None)
             finally:
                 for detector in detectors:
                     detector.cancel()
