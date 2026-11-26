@@ -295,6 +295,51 @@ def child(host_net,host_port,mode="basic"):
                 record("voice-chain-real-inference",result==content.encode("utf-8"),tokens=len(tokens))
                 voice,receipt,actual=synthesize(adapter,identity,result,digest)
                 record("voice-chain-real-speech",receipt[4]==actual,rate=receipt[5],frames=receipt[6])
+                # Second, independently reviewed edit of the same public
+                # transcript. The original full transcript is not sent.
+                edit_id="chain-edited"
+                edited="Ask what you can do for your country."
+                preview=stt.review_preview(candidate,edit_id,"en",native_completion=True,edited_text=edited)
+                edit_req=stt.prepare_local_turn(candidate,edit_id,"en",native_completion=True,edited_text=edited)
+                edit_grant=gate.fixture_grant(edit_id,edit_req,60)
+                try:
+                    stt.start_local_turn(candidate,edit_id,"en",edit_grant,native_completion=True,
+                                         review_grant=review,edited_text=edited)
+                except Refused:
+                    stale_denied=True
+                else:
+                    stale_denied=False
+                record("voice-chain-edit-old-review-denied",stale_denied)
+                if not stale_denied:
+                    return 1
+                edit_review=gate.fixture_grant("edit-review",preview[3],60)
+                corrected,edit_wire=stt.start_local_turn(candidate,edit_id,"en",edit_grant,native_completion=True,
+                                      review_grant=edit_review,edited_text=edited)
+                exact_edit=(preview[:3]==(edited,hashlib.sha256(edited.encode()).hexdigest(),True)
+                            and json.loads(edit_wire)["prompt"]==edited and verified.encode() not in edit_wire)
+                record("voice-chain-edited-wire-only",exact_edit)
+                if not exact_edit:
+                    return 1
+                corrected.begin_fixture_transport(edit_wire)
+                corrected.checkpoint_fixture_transport()
+                raw=request("POST","/completion",edit_wire)
+                corrected.checkpoint_fixture_transport()
+                edit_content,edit_tokens=parse_reply(raw)
+                corrected.event(edit_id,1,"text",edit_content)
+                corrected.event(edit_id,2,"completed",None)
+                record("voice-chain-edited-real-inference",corrected.result()==edit_content.encode("utf-8"),
+                       tokens=len(edit_tokens))
+                # No automatic speech generation for this edited response.
+                record("voice-chain-edited-no-auto-tts",not Path("/tmp/"+edit_id+"-wav.wav").exists())
+                gate.revoke(edit_review.identity)
+                try:
+                    corrected.result()
+                except Refused:
+                    edit_denied=True
+                else:
+                    edit_denied=False
+                record("voice-chain-edit-review-revoke-isolated",edit_denied and adapter.result()==result
+                       and voice.result()==receipt)
                 stt.cancel()
                 denied=0
                 for check in (stt.result,adapter.result,voice.result):
@@ -327,7 +372,7 @@ def child(host_net,host_port,mode="basic"):
                 proc.kill()
                 proc.wait(timeout=3)
     record("llm-server-stopped",proc.poll() is not None)
-    return 0 if len(results)==(25 if mode=="voice-chain" else 17) and all(results) else 1
+    return 0 if len(results)==(30 if mode=="voice-chain" else 17) and all(results) else 1
 
 def main(binary,model,*stt_inputs):
     binary,model=Path(binary).resolve(),Path(model).resolve()
