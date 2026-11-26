@@ -452,8 +452,15 @@ def forget(path=None, *, expected=None):
         return False
     with _write_guard(p):
         _require_no_choice(p)
-        if expected is not None and load(p) != checked(expected):
-            raise Hold("settings_changed")
+        if expected is not None:
+            try:
+                current = _decode(_read_text(p))
+            except FileNotFoundError:
+                return False
+            except (OSError, ValueError, RecursionError):
+                raise Hold("settings_unreadable") from None
+            if current != checked(expected):
+                raise Hold("settings_changed")
         try:
             p.unlink()
         except FileNotFoundError:
@@ -465,6 +472,32 @@ def forget(path=None, *, expected=None):
         except OSError:
             raise Hold("settings_recovery_required") from None
         return True
+
+
+def reset_choices(profile, *, expected, path=None):
+    """Reset desktop preferences and retain only the active profile atomically.
+
+    An already absent file is an idempotent reset, but a present newer file
+    is never overwritten. No cooperating writer can enter between deletion
+    and profile restoration because there is no delete/restore interval.
+    """
+    p = config_path() if path is None else Path(path)
+    proposed = empty()
+    proposed["profile"] = profile
+    text = _serialize(proposed)
+    with _write_guard(p):
+        _require_no_choice(p)
+        existed = True
+        try:
+            current = _decode(_read_text(p))
+        except FileNotFoundError:
+            existed = False
+        except (OSError, ValueError, RecursionError):
+            raise Hold("settings_unreadable") from None
+        if existed and current != checked(expected):
+            raise Hold("settings_changed")
+        _replace_text(p, text)
+    return existed, proposed
 
 
 def _serialize(obj):
