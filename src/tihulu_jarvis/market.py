@@ -247,22 +247,43 @@ def digest(path, limit=DIGEST_LIMIT):
 
 
 def from_file(path, category, model_id=None, engine="unknown", shared_storage_owner="",
-              owned_by_jarvis=False, languages=(), display_name=None):
-    """Register an existing, owner-supplied file read-only.
+              owned_by_jarvis=False, languages=(), display_name=None, *, checkpoint=lambda: None):
+    """Register an existing owner-supplied file read-only."""
+    card, _ = inspect_file(path, category, model_id, engine, shared_storage_owner,
+                           owned_by_jarvis, languages, display_name, checkpoint=checkpoint)
+    return card
 
-    Import never copies weights: it records provenance, size and digest.
-    """
+
+def inspect_file(path, category, model_id=None, engine="unknown", shared_storage_owner="",
+                 owned_by_jarvis=False, languages=(), display_name=None, *, checkpoint=lambda: None):
+    """Hash one pinned regular file, returning a proof for later publication."""
     p = Path(path)
+    checkpoint()
     if category not in CATEGORIES:
         raise Hold("unknown_model_category")
-    if not p.is_absolute() or not p.is_file():
+    if not p.is_absolute():
         raise Hold("model_file_not_found")
-    size = p.stat().st_size
+    try:
+        info = p.lstat()
+    except OSError:
+        raise Hold("model_file_not_found") from None
+    if not stat.S_ISREG(info.st_mode):
+        raise Hold("model_file_not_found")
+    size = info.st_size
     if not 0 < size <= DIGEST_LIMIT:
         raise Hold("model_size_out_of_range")
-    checksum, read_bytes = digest(p)
-    if read_bytes != size:
-        raise Hold("digest_incomplete")
+    steps = _artifact_hash_steps(p, size, checkpoint=checkpoint)
+    try:
+        while True:
+            next(steps)
+    except StopIteration as done:
+        proof = done.value
+    finally:
+        steps.close()
+    if proof.identity != _artifact_identity(info):
+        raise Hold("model_file_changed")
+    require_import_proof(proof, checkpoint=checkpoint)
+    checksum = proof.digest
     if shared_storage_owner and owned_by_jarvis:
         raise Hold("shared_and_owned_conflict")
     return ModelCard(
@@ -279,7 +300,18 @@ def from_file(path, category, model_id=None, engine="unknown", shared_storage_ow
         owned_by_jarvis=owned_by_jarvis,
         disk_size_bytes=size,
         state="REGISTERED",
-    ).checked()
+    ).checked(), proof
+
+
+def require_import_proof(proof, *, checkpoint=lambda: None):
+    """Cheap final identity check; never rehash on the GTK thread."""
+    checkpoint()
+    try:
+        if _artifact_identity(proof.path.lstat()) != proof.identity:
+            raise Hold("model_file_changed")
+    except OSError:
+        raise Hold("model_file_changed") from None
+    checkpoint()
 
 
 async def from_models(client, languages=(), now=0.0):
