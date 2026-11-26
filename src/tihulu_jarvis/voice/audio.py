@@ -81,7 +81,7 @@ def _runtime_identity(path):
         raise Hold("model_file_changed") from None
 
 
-def _bind_runtime_model(path, checkpoint):
+def _bind_runtime_model(path, checkpoint, *, expected_identity=None):
     """Bind the current regular inode to the lifetime of an audio operation.
 
     This is a metadata guard, not a persisted digest or an open-file handoff
@@ -89,6 +89,8 @@ def _bind_runtime_model(path, checkpoint):
     """
     checkpoint()
     identity = _runtime_identity(path)
+    if expected_identity is not None and identity != expected_identity:
+        raise Hold("model_file_changed")
 
     def check():
         checkpoint()
@@ -220,7 +222,7 @@ async def terminate(p):
         await p.wait()
 
 
-def _sealed_sidecar(fd, identity, checkpoint):
+def _sealed_sidecar(fd, identity, checkpoint, *, expected_digest=None):
     """Copy only the bounded Piper JSON into an immutable Linux memfd."""
     if not 0 < identity[2] <= 1048576:
         raise Hold("voice_locale_unverified")
@@ -228,12 +230,14 @@ def _sealed_sidecar(fd, identity, checkpoint):
     try:
         sealed = os.memfd_create("tihulu-piper-config", os.MFD_CLOEXEC | os.MFD_ALLOW_SEALING)
         remaining = identity[2]
+        digest = hashlib.sha256()
         while remaining:
             checkpoint()
             block = os.read(fd, min(65536, remaining))
             if not block:
                 raise Hold("model_file_changed")
             remaining -= len(block)
+            digest.update(block)
             view = memoryview(block)
             while view:
                 written = os.write(sealed, view)
@@ -242,6 +246,8 @@ def _sealed_sidecar(fd, identity, checkpoint):
                 view = view[written:]
         if os.read(fd, 1) or _voice_identity(os.fstat(fd)) != identity:
             raise Hold("model_file_changed")
+        if expected_digest is not None and not hmac.compare_digest(digest.hexdigest(), expected_digest):
+            raise Hold("voice_digest_mismatch")
         seals = fcntl.F_SEAL_WRITE | fcntl.F_SEAL_GROW | fcntl.F_SEAL_SHRINK | fcntl.F_SEAL_SEAL
         fcntl.fcntl(sealed, fcntl.F_ADD_SEALS, seals)
         if fcntl.fcntl(sealed, fcntl.F_GET_SEALS) & seals != seals:
@@ -258,7 +264,7 @@ def _sealed_sidecar(fd, identity, checkpoint):
 
 
 @contextmanager
-def _pinned_model_arguments(name, args, checkpoint):
+def _pinned_model_arguments(name, args, checkpoint, *, model_identity=None, voice_proof=None):
     """Hand inherited read-only model descriptors to Linux audio engines.
 
     Weights are pinned against pathname replacement, not in-place writes.
@@ -279,9 +285,11 @@ def _pinned_model_arguments(name, args, checkpoint):
             if not model.is_absolute():
                 raise Hold("invalid_audio_model_arguments")
 
-            def pin(path, *, seal=False):
+            def pin(path, *, seal=False, expected=None, digest=None):
                 checkpoint()
                 identity = _runtime_identity(path)
+                if expected is not None and identity != expected:
+                    raise Hold("model_file_changed")
                 try:
                     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
                     descriptors.append(fd)
@@ -295,17 +303,21 @@ def _pinned_model_arguments(name, args, checkpoint):
                 originals.append((path, identity))
                 checkpoint()
                 if seal:
-                    immutable = _sealed_sidecar(fd, identity, checkpoint)
+                    immutable = _sealed_sidecar(fd, identity, checkpoint, expected_digest=digest)
                     descriptors.append(immutable)
                     return "/proc/self/fd/%d" % immutable
                 return alias
 
-            argv[index] = pin(model)
+            argv[index] = pin(model, expected=model_identity)
             if name == "piper":
                 if "--config" in argv or "-c" in argv:
                     raise Hold("invalid_audio_model_arguments")
                 config = model.with_name(model.name + ".json")
-                argv[index + 1:index + 1] = ["--config", pin(config, seal=True)]
+                if voice_proof is not None and voice_proof[0] != config:
+                    raise Hold("voice_locale_unverified")
+                argv[index + 1:index + 1] = ["--config", pin(config, seal=True,
+                    expected=voice_proof[1] if voice_proof is not None else None,
+                    digest=voice_proof[2] if voice_proof is not None else None)]
             checkpoint()
             for path, identity in originals:
                 if _runtime_identity(path) != identity:
@@ -319,7 +331,8 @@ def _pinned_model_arguments(name, args, checkpoint):
 
 
 @asynccontextmanager
-async def child(name, *args, stdin=False, checkpoint=lambda: None):
+async def child(name, *args, stdin=False, checkpoint=lambda: None,
+                model_identity=None, voice_proof=None):
     # A desktop user chooses model data only. Executable names below are fixed;
     # neither transcripts nor model replies can select executables or flags.
     if name not in ("arecord","whisper-cli","piper","aplay"):
@@ -332,7 +345,8 @@ async def child(name, *args, stdin=False, checkpoint=lambda: None):
         # This runs in the scheduled spawn task, not merely before queuing it.
         env = {**os.environ, **spawn_environment()}
         checkpoint()
-        with _pinned_model_arguments(name, args, checkpoint) as (argv, descriptors):
+        with _pinned_model_arguments(name, args, checkpoint, model_identity=model_identity,
+                                     voice_proof=voice_proof) as (argv, descriptors):
             checkpoint()
             extra = {"pass_fds": descriptors} if descriptors else {}
             return await asyncio.create_subprocess_exec(binary, *argv,
@@ -468,7 +482,8 @@ async def _capture(wav, finish, publish, *, checkpoint):
 async def listen(model, finish, publish, *, checkpoint):
     checkpoint()
     model = selected_file(model, ".bin")
-    checkpoint = _bind_runtime_model(model, checkpoint)
+    model_identity = _runtime_identity(model)
+    checkpoint = _bind_runtime_model(model, checkpoint, expected_identity=model_identity)
     if not tools_ready("arecord","whisper-cli"):
         raise Hold("capture_backend_missing")
     with tempfile.TemporaryDirectory(prefix="tihulu-capture-") as tmp:
@@ -478,7 +493,7 @@ async def listen(model, finish, publish, *, checkpoint):
         if not await validate_signal(wav, checkpoint=checkpoint):
             raise Hold("no_speech_signal")
         return await _transcription_stage(model, wav, stem, None, publish,
-                                          checkpoint=checkpoint)
+                                          checkpoint=checkpoint, model_identity=model_identity)
 
 
 MAX_TRANSCRIPT = 64000
@@ -511,7 +526,8 @@ async def transcribe(model, recording, runner=None, publish=None, *, checkpoint,
     """Transcribe a bounded private copy of an explicitly selected recording."""
     checkpoint()
     model = selected_file(model, ".bin")
-    checkpoint = _bind_runtime_model(model, checkpoint)
+    model_identity = _runtime_identity(model)
+    checkpoint = _bind_runtime_model(model, checkpoint, expected_identity=model_identity)
     identity = recording_identity(recording, checkpoint=checkpoint)
     if expected_identity is not None and identity != expected_identity:
         raise Hold("recording_changed")
@@ -532,10 +548,10 @@ async def transcribe(model, recording, runner=None, publish=None, *, checkpoint,
         if not await validate_signal(snapshot, checkpoint=checkpoint):
             raise Hold("no_speech_signal")
         return await _transcription_stage(model, snapshot, stem, runner, publish,
-                                          checkpoint=checkpoint)
+                                          checkpoint=checkpoint, model_identity=model_identity)
 
 
-async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint):
+async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint, model_identity=None):
     # Start the budget before status publication and queued process creation.
     deadline = OperationDeadline(120, checkpoint)
 
@@ -545,7 +561,7 @@ async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint)
             publish("transcribing")
         deadline.check()
         if runner is None:
-            await _whisper(model, wav, stem, checkpoint=deadline.check)
+            await _whisper(model, wav, stem, checkpoint=deadline.check, model_identity=model_identity)
         else:
             await runner(model, wav, stem)
         deadline.check()
@@ -561,12 +577,12 @@ async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint)
     return await await_with_deadline(run, deadline, interval=AUTH_POLL)
 
 
-async def _whisper(model, wav, stem, *, checkpoint):
+async def _whisper(model, wav, stem, *, checkpoint, model_identity=None):
     checkpoint()
     if not tools_ready("whisper-cli"):
         raise Hold("transcription_backend_missing")
     async with child("whisper-cli", "-m", model, "-f", wav, "-l", "auto",
-                     "-otxt", "-of", stem, checkpoint=checkpoint) as p:
+                     "-otxt", "-of", stem, checkpoint=checkpoint, model_identity=model_identity) as p:
         checkpoint()
         if await p.wait():
             raise Hold("transcription_failed")
@@ -576,7 +592,8 @@ async def _whisper(model, wav, stem, *, checkpoint):
 async def speak(speech, publish, *, checkpoint):
     checkpoint()
     model_path = selected_file(speech.voice_id, ".onnx")
-    model_check = _bind_runtime_model(model_path, checkpoint)
+    model_identity = _runtime_identity(model_path)
+    model_check = _bind_runtime_model(model_path, checkpoint, expected_identity=model_identity)
     model, voice_proof = inspect_voice(speech.voice_id, speech.language, checkpoint=model_check)
 
     def synthesis_check():
@@ -595,7 +612,8 @@ async def speak(speech, publish, *, checkpoint):
             publish("synthesizing")
             synthesis.check()
             async with child("piper", "--model", model.id, "--output_file", wav,
-                             stdin=True, checkpoint=synthesis.check) as p:
+                             stdin=True, checkpoint=synthesis.check, model_identity=model_identity,
+                             voice_proof=voice_proof) as p:
                 payload = (speech.text + "\n").encode("utf-8")
                 synthesis.check()
                 await p.communicate(payload)
