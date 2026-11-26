@@ -786,6 +786,30 @@ class ProfileUITests(DesktopFixture):
         self.assertEqual(profiles.Store._parse(text).state, "active")
         self.assertTrue(self.ui.send.get_sensitive() is False or True)
 
+    def test_stale_profile_switch_does_not_publish_new_policy(self):
+        before = self.ui.cfg["profile"]
+        policy = self.ui.policy
+        self.save_profile(Profile(id="strict", name="Strict", based_on_mode="LOCAL_ONLY"))
+        newer = settings.load()
+        newer["text_scale"] = "large"
+        settings.save(newer)
+        with self.assertRaisesRegex(Hold, "settings_changed"):
+            self.ui.activate_profile("strict")
+        self.assertEqual(self.ui.cfg["profile"], before)
+        self.assertIs(self.ui.policy, policy)
+        self.assertEqual(settings.load(), newer)
+
+    def test_failed_profile_save_does_not_publish_new_policy(self):
+        before = settings.load()
+        policy = self.ui.policy
+        self.save_profile(Profile(id="strict", name="Strict", based_on_mode="LOCAL_ONLY"))
+        with patch.object(settings, "_replace_text", side_effect=OSError("fixture")):
+            with self.assertRaisesRegex(Hold, "settings_unwritable"):
+                self.ui.activate_profile("strict")
+        self.assertEqual(self.ui.cfg["profile"], before["profile"])
+        self.assertIs(self.ui.policy, policy)
+        self.assertEqual(settings.load(), before)
+
     def test_profile_switch_keeps_conversation_but_freezes_capability(self):
         self.connect_model()
         self.text("Merhaba!")

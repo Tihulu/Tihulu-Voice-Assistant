@@ -883,6 +883,19 @@ def create_window(app, loop, bridge=None):
                 raise Hold("profile_changed")
             if entry.state != "active":
                 raise Hold("profile_not_active")
+            proposed = settings.checked(self.cfg)
+            proposed["profile"] = entry.id
+            if persist:
+                # Commit before changing the effective policy or invalidating
+                # any existing conversation/attachment state.
+                try:
+                    if proposed != self.saved_cfg:
+                        settings.save(proposed, expected=self.saved_cfg)
+                    elif settings.load() != self.saved_cfg:
+                        raise Hold("settings_changed")
+                except OSError:
+                    raise Hold("settings_unwritable") from None
+                self.saved_cfg = deepcopy(proposed)
             self.dismiss_picker()
             self.search_recall_epoch += 1
             self.drop_attachment_for_context_change()
@@ -894,10 +907,8 @@ def create_window(app, loop, bridge=None):
                 self.chat_files.reset()
             if hasattr(self, "analysis"):
                 self.analysis.reset()
-            self.cfg["profile"] = entry.id
+            self.cfg = proposed
             self.policy = profiles.effective(entry)
-            if persist:
-                self.save()
             self.profile_note.set_text("%s · %s · %s" % (entry.name, entry.based_on_mode,
                                                           profiles.MODE_TEXT[entry.based_on_mode]))
             if not quiet:
