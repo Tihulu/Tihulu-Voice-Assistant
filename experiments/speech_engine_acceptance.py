@@ -72,7 +72,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original",pip
             raise RuntimeError("invalid pinned STT model")
         print(json.dumps({"stt_profile":stt_profile,"model_digest":MODEL_SHA}),flush=True)
     mixed_preview,mixed_auto,mixed_extra=speech_corpus_profile(corpus,stt_profile,bool(stt_paths))
-    if (corpus in ("mixed-auto-piper","mixed-auto-piper-short","expanded-piper-small"))!=(piper_root is not None):
+    if (corpus in ("mixed-auto-piper","mixed-auto-piper-short","expanded-piper-small","mixed-manual-piper-short"))!=(piper_root is not None):
         raise RuntimeError("invalid neural mixed input profile")
     if piper_root is not None:
         from whisper_engine_acceptance import WRAPPER as STT_WRAPPER_FOR_PIPER
@@ -465,6 +465,34 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 else:
                     denied=False
                 record("speech-revoke-invalidates-conversion-"+case_id,denied)
+        if corpus=="mixed-manual-piper-short":
+            # Public generated fixture with known joins, no inserted pauses
+            # in the manual path. This is not automatic boundary detection.
+            from manual_mixed_boundary import boundary_preview,verify_boundary_preview
+            pause_data=mixed_data
+            proposed=tuple(cuts)
+            shown=boundary_preview(pause_data,proposed)
+            paused_pieces=verify_boundary_preview(pause_data,proposed,shown)
+            record("mixed-manual-exact-boundaries",len(paused_pieces)==3 and
+                   b"".join(p.data[44:] for p in paused_pieces)==pause_data[44:] and
+                   all(p.data==row[2] for p,row in zip(paused_pieces,retained)))
+            changed=(proposed[0],proposed[1]+1,*proposed[2:])
+            try:
+                verify_boundary_preview(pause_data,changed,shown)
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("mixed-manual-recut-denied",denied)
+            try:
+                MixedVoiceReview(pause_data,proposed,tuple(row[4] for row in retained),MODEL_SHA)
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("mixed-manual-revoked-original-denied",denied)
+            if not all(results):
+                return 1
         if mixed_auto:
             # A fresh public fixture review session for the changed PCM bytes.
             # Do not revive or inherit the revoked original segment receipts.
@@ -570,7 +598,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     transcripts.append(trans)
                     trans.checkpoint()
                     decode=common+["-l",dict(call.args)["language"],"-otxt","-of","/work/out/transcript"]
-                    if stt_profile=="turbo-q5" or corpus in ("mixed-auto-reviewed-short","mixed-auto-piper-short"):
+                    if stt_profile=="turbo-q5" or corpus in ("mixed-auto-reviewed-short","mixed-auto-piper-short","mixed-manual-piper-short"):
                         from speech_result import pcm_info
                         decode+=(turbo_context300_args if corpus=="mixed-auto-turbo-context300" else turbo_short_args)(*pcm_info(piece.data))
                     started=time.monotonic()
@@ -602,6 +630,8 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     record("mixed-auto-fresh-ordered-review",False,reason="segment_detection_hold")
                     return 1
                 from mixed_voice_review import inspect_mixed_review
+                if corpus=="mixed-manual-piper-short":
+                    verify_boundary_preview(pause_data,proposed,shown)
                 outcome=inspect_mixed_review(pause_data,proposed,tuple(transcripts),MODEL_SHA)
                 if outcome.status!="READY":
                     record("mixed-auto-fresh-ordered-review",False,reason=outcome.reason,
@@ -613,6 +643,13 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                        [row.language for row in view.segments]==[lang for _,lang,_ in samples]
                        and view.text=="\n".join(t.result()[0].text for t in transcripts),
                        languages=[row.language for row in view.segments])
+                if corpus=="mixed-manual-piper-short":
+                    edit=(0,view.segments[0].transcript_digest,"Public fixture correction.")
+                    edited=mixed.edit_preview((edit,))
+                    record("mixed-manual-edit-bound-to-original",edited.segments[0].original==view.segments[0] and
+                           edited.segments[0].submitted_text==edit[2] and edited.segments[0].edited and
+                           edited.text=="\n".join((edit[2],*(r.text for r in view.segments[1:]))) and
+                           mixed.preview()==view)
                 if corpus in ("mixed-auto-reviewed","mixed-auto-reviewed-short"):
                     if len(reviewed)!=1 or reviewed[0][0]!=0:
                         return 1
@@ -629,6 +666,14 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     denied=False
                 record("mixed-auto-revoke-invalidates-review",denied and all(t.result()[0].language==samples[i][1]
                        for i,t in enumerate(transcripts) if i!=revoked_index))
+                if corpus=="mixed-manual-piper-short":
+                    try:
+                        mixed.edit_preview((edit,))
+                    except Refused:
+                        denied=True
+                    else:
+                        denied=False
+                    record("mixed-manual-edit-revocation-denied",denied)
             finally:
                 for detector in detectors:
                     detector.cancel()
