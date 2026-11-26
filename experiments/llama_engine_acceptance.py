@@ -261,7 +261,17 @@ def child(host_net,host_port,mode="basic"):
                 identity="chain-turn"
                 req=stt.prepare_local_turn(candidate,identity,"en",native_completion=True)
                 grant=gate.fixture_grant(identity,req,60)
-                adapter,wire=stt.start_local_turn(candidate,identity,"en",grant,native_completion=True)
+                try:
+                    stt.start_local_turn(candidate,identity,"en",grant,native_completion=True)
+                except Refused:
+                    no_auto=True
+                else:
+                    no_auto=False
+                record("voice-chain-no-submit-without-review",no_auto)
+                if not no_auto:
+                    return 1
+                review=gate.fixture_grant("chain-review",stt.prepare_review(candidate,identity,"en",native_completion=True),60)
+                adapter,wire=stt.start_local_turn(candidate,identity,"en",grant,native_completion=True,review_grant=review)
                 verified=stt.result()[0].text
                 exact=json.loads(wire)["prompt"]==verified
                 try:
@@ -317,7 +327,7 @@ def child(host_net,host_port,mode="basic"):
                 proc.kill()
                 proc.wait(timeout=3)
     record("llm-server-stopped",proc.poll() is not None)
-    return 0 if len(results)==(24 if mode=="voice-chain" else 17) and all(results) else 1
+    return 0 if len(results)==(25 if mode=="voice-chain" else 17) and all(results) else 1
 
 def main(binary,model,*stt_inputs):
     binary,model=Path(binary).resolve(),Path(model).resolve()

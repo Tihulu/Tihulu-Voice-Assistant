@@ -3,6 +3,7 @@
 from dataclasses import dataclass
 from threading import Lock
 import math
+from hashlib import sha256
 import re
 from tihulu_jarvis import profiles
 
@@ -14,6 +15,7 @@ ACTIONS = {
     "engine": "filesystem_read", "agent": "host_shell",
     "catalog": "external_network", "transfer": "external_network",
     "publish": "publish_artifact",
+    "voice_review": "filesystem_read",
     "capture": "local_audio_device", "browser": "browser_navigate",
     "document_engine": "filesystem_read", "document_export": "filesystem_write",
     "application_ui": "host_shell", "application_engine": "host_shell",
@@ -95,6 +97,15 @@ class Grant:
     deadline: float
 
 
+def voice_review_request(turn_req,parent_grant,parent_req):
+    if (type(turn_req) is not Request or type(parent_grant) is not Grant or type(parent_req) is not Request
+            or parent_grant.request!=parent_req or turn_req.context!=parent_req.context
+            or turn_req.action!="document_engine" or turn_req.actor!="local" or turn_req.classification!="private"):
+        raise Refused("invalid_voice_review")
+    target=sha256(repr(("voice-review-v1",turn_req.target,parent_grant.identity,parent_req.target)).encode("ascii")).hexdigest()
+    return Request(turn_req.context,"voice_review",target,"owner","private").checked()
+
+
 class FixtureGateway:
     """One owner-created fixture context; no transport, callback or execution API.
 
@@ -164,6 +175,8 @@ class FixtureGateway:
             raise Refused("public_data_required")
         if req.action == "offline_browser" and req.classification != "private":
             raise Refused("private_offline_browser_required")
+        if req.action=="voice_review" and (req.actor!="owner" or req.classification!="private" or mode=="CLOUD_CHAT"):
+            raise Refused("owner_voice_review_required")
         if req.action == "capture" and req.classification != "private":
             raise Refused("private_capture_required")
         # A browser operation requires both the browser-specific and the
@@ -293,7 +306,7 @@ class FixtureGateway:
                 raise Refused("transcript_receipt_already_recorded")
             self._transcript_receipts[grant.identity]=receipt
 
-    def claim_voice_turn(self, grant, req, dependencies, receipt):
+    def claim_voice_turn(self, grant, req, dependencies, receipt, review_grant=None):
         """Atomically validate exact registered transcript and claim child."""
         with self._lock:
             now=self._clock.now()
@@ -306,7 +319,17 @@ class FixtureGateway:
                 raise Refused("voice_transcript_receipt_mismatch")
             if grant.identity in identities or grant.identity in self._claimed:
                 raise Refused("grant_already_claimed")
-            self._dependencies[grant.identity]=dependencies
+            if type(review_grant) is not Grant:
+                raise Refused("voice_review_required")
+            review_req=voice_review_request(req,*dependencies[0])
+            self._validate_locked(review_grant,review_req,now)
+            if review_grant.identity in self._claimed or review_grant.identity==grant.identity:
+                raise Refused("voice_review_already_used")
+            # Exact owner review and turn claim are consumed together. Both
+            # remain live ancestors; no separate race-prone approval lookup.
+            self._dependencies[review_grant.identity]=dependencies
+            self._claimed.add(review_grant.identity)
+            self._dependencies[grant.identity]=dependencies+((review_grant,review_req),)
             self._claimed.add(grant.identity)
             return "SIMULATED_ALLOW"
 

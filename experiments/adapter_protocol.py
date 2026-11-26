@@ -71,7 +71,7 @@ def native_voice_payload(text):
 
 class LocalAdapter:
     """Owner-side state machine, not a backend. All payloads synthetic."""
-    def __init__(self,gateway,context,candidate,identity,operation,data,grant,*,dependencies=(),response_language=None):
+    def __init__(self,gateway,context,candidate,identity,operation,data,grant,*,dependencies=(),response_language=None,review_grant=None):
         if type(candidate) is not Candidate or candidate.locality!="local":
             raise Refused("local_candidate_required")
         self._call=prepare(candidate,identity,operation,data)
@@ -133,7 +133,9 @@ class LocalAdapter:
         self._dependencies=dependencies
         self._req=local_request(context,self.call,dependent=bool(dependencies))
         if voice_receipt is not None:
-            self._g.claim_voice_turn(grant,self._req,dependencies,voice_receipt)
+            self._g.claim_voice_turn(grant,self._req,dependencies,voice_receipt,review_grant)
+        elif review_grant is not None:
+            raise Refused("unexpected_voice_review")
         elif dependencies:
             self._g.claim_with_dependencies(grant,self._req,dependencies)
         else:

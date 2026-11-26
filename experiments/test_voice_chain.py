@@ -83,7 +83,8 @@ class TranscriptVoiceChainTests(unittest.TestCase):
         self.stt.complete(self.value)
         req=self.stt.prepare_local_turn(self.c,"turn","de")
         grant=self.g.fixture_grant("turn",req,60)
-        return self.stt.start_local_turn(self.c,"turn","de",grant)
+        review=self.g.fixture_grant("review",self.stt.prepare_review(self.c,"turn","de"),60)
+        return self.stt.start_local_turn(self.c,"turn","de",grant,review_grant=review)
 
     def test_exact_transcript_turn_payload(self):
         import json
@@ -170,7 +171,8 @@ class NativeVoiceTransportTests(unittest.TestCase):
     def start(self):
         req=self.stt.prepare_local_turn(self.c,"turn","en",native_completion=True)
         grant=self.g.fixture_grant("turn",req,60)
-        return self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True)
+        review=self.g.fixture_grant("review",self.stt.prepare_review(self.c,"turn","en",native_completion=True),60)
+        return self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,review_grant=review)
     def test_exact_native_bytes_not_envelope(self):
         import json
         turn,wire=self.start()
@@ -209,7 +211,8 @@ class NativeVoiceTransportTests(unittest.TestCase):
         with self.assertRaises(Refused):
             LocalAdapter(self.g,self.ctx,self.c,"turn","llm",envelope,grant,
                          dependencies=((self.stt._grant,self.stt._req),))
-        turn,_=self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True)
+        review=self.g.fixture_grant("review",self.stt.prepare_review(self.c,"turn","en",native_completion=True),60)
+        turn,_=self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,review_grant=review)
         self.assertEqual(turn.state,"ready")
     def test_exact_parent_grant_identity_not_substitutable(self):
         req,envelope,_=self.stt._turn_input(self.c,"turn","en",native_completion=True)
@@ -219,7 +222,8 @@ class NativeVoiceTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused,"invalid_voice_parent"):
             LocalAdapter(self.g,self.ctx,self.c,"turn","llm",envelope,grant,
                          dependencies=((other,self.stt._req),),response_language="en")
-        turn,_=self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True)
+        review=self.g.fixture_grant("review",self.stt.prepare_review(self.c,"turn","en",native_completion=True),60)
+        turn,_=self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,review_grant=review)
         self.assertEqual(turn.state,"ready")
     def test_forged_transcript_digest_denied_even_with_new_grant(self):
         import json
@@ -274,3 +278,52 @@ class NativeVoiceTransportTests(unittest.TestCase):
         with self.assertRaisesRegex(Refused,"voice_transcript_receipt_mismatch"):
             LocalAdapter(self.g,self.ctx,self.c,"turn","llm",bad,grant,
                          dependencies=((other,self.stt._req),),response_language="en")
+
+    def test_no_automatic_submit_and_review_single_use(self):
+        req=self.stt.prepare_local_turn(self.c,"turn","en",native_completion=True)
+        grant=self.g.fixture_grant("turn",req,60)
+        with self.assertRaisesRegex(Refused,"voice_review_required"):
+            self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True)
+        review=self.g.fixture_grant("review",self.stt.prepare_review(self.c,"turn","en",native_completion=True),60)
+        turn,wire=self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,review_grant=review)
+        turn.begin_fixture_transport(wire)
+        second=self.g.fixture_grant("second",req,60)
+        with self.assertRaisesRegex(Refused,"voice_review_already_used"):
+            self.stt.start_local_turn(self.c,"turn","en",second,native_completion=True,review_grant=review)
+    def test_review_exact_model_identity_language_and_transport(self):
+        req=self.stt.prepare_local_turn(self.c,"turn","en",native_completion=True)
+        grant=self.g.fixture_grant("turn",req,60)
+        wrong=self.g.fixture_grant("wrong-review",self.stt.prepare_review(self.c,"other","en",native_completion=True),60)
+        with self.assertRaises(Refused):
+            self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,review_grant=wrong)
+        wrong_mode=self.g.fixture_grant("wrong-mode",self.stt.prepare_review(self.c,"turn","en"),60)
+        with self.assertRaises(Refused):
+            self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,review_grant=wrong_mode)
+        review_req=self.stt.prepare_review(self.c,"turn","en",native_completion=True)
+        for actor in ("local","cloud"):
+            with self.assertRaises(Refused):
+                self.g.fixture_grant("actor-"+actor,replace(review_req,actor=actor),60)
+    def test_revoke_review_invalidates_completed_turn_and_speech(self):
+        req=self.stt.prepare_local_turn(self.c,"turn","en",native_completion=True)
+        grant=self.g.fixture_grant("turn",req,60)
+        review=self.g.fixture_grant("review",self.stt.prepare_review(self.c,"turn","en",native_completion=True),60)
+        turn,wire=self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,review_grant=review)
+        turn.begin_fixture_transport(wire)
+        turn.event("turn",1,"text","Hello")
+        turn.event("turn",2,"completed",None)
+        call=turn.prepare_speech("1.50","en","text","audio")
+        speech_req=call.request(self.ctx)
+        speech_grant=self.g.fixture_grant("speech",speech_req,60)
+        voice,payload=turn.start_speech("1.50","en","text","audio",speech_grant)
+        voice.complete(SpeechResult(speech_req.target,sha256(payload).hexdigest(),"en","audio",wav()))
+        self.g.revoke(review.identity)
+        for result in (turn.result,voice.result):
+            with self.assertRaises(Refused):
+                result()
+    def test_revoked_review_before_submit(self):
+        req=self.stt.prepare_local_turn(self.c,"turn","en",native_completion=True)
+        grant=self.g.fixture_grant("turn",req,60)
+        review=self.g.fixture_grant("review",self.stt.prepare_review(self.c,"turn","en",native_completion=True),60)
+        self.g.revoke(review.identity)
+        with self.assertRaises(Refused):
+            self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,review_grant=review)
