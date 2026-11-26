@@ -51,6 +51,8 @@ class WaveRun:
         self._done=set()
         self._cancelled=False
         self._check(gateway.context,candidates)
+        if self._attempt is not None:
+            gateway.register_agent_attempt(self._attempt)
 
     def _thread(self):
         if current_thread() is not self._owner:
@@ -122,15 +124,23 @@ class WaveRun:
         if reservation is not None:
             self._reservations[worker]=reservation
 
+    def _event_owner(self,worker,completion_grant):
+        self._thread()
+        if self._attempt is not None:
+            if (type(worker) is not str or worker not in self._claims
+                    or worker in self._done or completion_grant is not self._claims[worker][0]):
+                raise Refused("agent_completion_attempt_mismatch")
+
     def complete(self,worker,context,candidates,*,payload=None,completion_grant=None):
+        # A foreign/late event must not invalidate a newer attempt with a
+        # stale context before its exact ownership has been established.
+        self._event_owner(worker,completion_grant)
         self._check(context,candidates)
         if type(worker) is not str or worker not in self._claims or worker in self._done:
             raise Refused("agent_worker_not_running")
         if payload is not None and (type(payload) is not bytes or not 0<len(payload)<=MAX_RESULT_BYTES):
             raise Refused("agent_result_invalid")
         grant,req=self._claims[worker]
-        if self._attempt is not None and completion_grant is not grant:
-            raise Refused("agent_completion_attempt_mismatch")
         self._gateway.checkpoint_claimed_group(((grant,req),))
         # In this synthetic API completion means the simulated worker ended.
         self._release(worker)
@@ -169,11 +179,10 @@ class WaveRun:
 
     def fail(self,worker,context,candidates,*,completion_grant=None):
         """Trusted simulated terminal failure; no automatic fallback/retry."""
+        self._event_owner(worker,completion_grant)
         self._check(context,candidates)
         if type(worker) is not str or worker not in self._claims or worker in self._done:
             raise Refused("agent_worker_not_running")
-        if self._attempt is not None and completion_grant is not self._claims[worker][0]:
-            raise Refused("agent_completion_attempt_mismatch")
         self.cancel()
 
     def result(self,context,candidates):
