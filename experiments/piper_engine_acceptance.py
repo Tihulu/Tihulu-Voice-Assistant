@@ -20,8 +20,8 @@ CONFIG_SHA="13ebd7810f1b61b5027583cf3131a0a233b6ea81c38f2200ebc4ff41c3cca039"
 VERSION="1.8.0"
 VOICES=MappingProxyType({
     "tr":("2844717f524ab965d3fe86e60562cbb601d3e456836efcc2196cc3a14112a8fb","13ebd7810f1b61b5027583cf3131a0a233b6ea81c38f2200ebc4ff41c3cca039","tr","Merhaba. Bugün güzel bir gün."),
-    "en":("5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f",None,"en-us","Hello. Today is a beautiful day."),
-    "de":("7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819",None,"de","Guten Tag. Heute ist ein schöner Tag."),
+    "en":("5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f","efe19c417bed055f2d69908248c6ba650fa135bc868b0e6abb3da181dab690a0","en-us","Hello. Today is a beautiful day."),
+    "de":("7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819","34342a789afa94f724419fac8ce5f1387f12f5968644ef5894866145e463e004","de","Guten Tag. Heute ist ein schöner Tag."),
 })
 
 def voice_profile(language):
@@ -82,18 +82,27 @@ def digest(path):
             h.update(block)
     return h.hexdigest()
 
-def main(site,model,config,language="tr"):
+def main(site,model,config,language="tr",*stt_inputs):
     model_sha,config_pin,phoneme_voice,text=voice_profile(language)
+    if stt_inputs:
+        from voice_quality import targeted_corpus
+        text=next(s[2] for s in targeted_corpus() if s[1]==language)
+        if len(stt_inputs)!=2:
+            raise RuntimeError("invalid STT roundtrip inputs")
     site,model,config=map(lambda p:Path(p).resolve(),(site,model,config))
     if (os.getuid()==0 or not site.is_dir() or not model.is_file() or not config.is_file()
             or not 0<model.stat().st_size<=70000000 or digest(model)!=model_sha
-            or not 0<config.stat().st_size<=16384 or (config_pin is not None and digest(config)!=config_pin)):
+            or not 0<config.stat().st_size<=16384 or digest(config)!=config_pin):
         raise RuntimeError("invalid pinned voice inputs")
     cfg=json.loads(config.read_text(encoding="utf-8"))
     if (cfg["audio"]["sample_rate"]!=22050 or cfg["espeak"]["voice"]!=phoneme_voice
             or cfg["phoneme_type"]!="espeak"):
         raise RuntimeError("voice config mismatch")
     config_sha=digest(config)
+    stt_paths=tuple(Path(p).resolve() for p in stt_inputs)
+    STT_SHA="1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b"
+    if stt_paths and (not all(p.is_file() for p in stt_paths) or not 0<stt_paths[1].stat().st_size<=500000000 or digest(stt_paths[1])!=STT_SHA):
+        raise RuntimeError("invalid pinned STT model")
     source_sha=hashlib.sha256(text.encode()).hexdigest()
     results=[]
     def record(case,ok,**extra):
@@ -117,15 +126,16 @@ def main(site,model,config,language="tr"):
                 prefix+=["--symlink",target,"/"+name]
             elif p.exists():
                 raise RuntimeError("non-merged system layout")
+        system_prefix=prefix.copy()
         prefix+=["--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/work",
                  "--ro-bind",str(site),"/work/site","--ro-bind",str(model),"/work/voice.onnx",
                  "--ro-bind",str(config),"/work/voice.json","--ro-bind",str(source),"/work/text.txt",
                  "--bind",str(out),"/work/out","--setenv","HOME","/tmp","--setenv","PATH","/usr/bin",
                  "--setenv","LC_ALL","C.UTF-8","--setenv","OPENBLAS_NUM_THREADS","2",
                  "--setenv","OMP_NUM_THREADS","2","--chdir","/work","--remount-ro","/"]
-        def run(code,*args,timeout=120):
+        def run(code,*args,timeout=120,scope=None,parse_json=True):
             with tempfile.TemporaryFile() as stdout,tempfile.TemporaryFile() as stderr:
-                proc=subprocess.Popen(prefix+["--","/usr/bin/python3","-I","-B","-c",code]+list(args),
+                proc=subprocess.Popen((prefix if scope is None else scope)+["--","/usr/bin/python3","-I","-B","-c",code]+list(args),
                     stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,start_new_session=True,
                     env={"PATH":"/usr/bin:/bin","LC_ALL":"C.UTF-8"})
                 try:
@@ -139,7 +149,7 @@ def main(site,model,config,language="tr"):
                 data,err=stdout.read(65537),stderr.read(65537)
                 if len(data)>65536 or len(err)>65536 or proc.returncode:
                     raise RuntimeError("piper child failed: "+err.decode("utf-8","replace")[:2000])
-                return json.loads(data)
+                return json.loads(data) if parse_json else data
         host=os.readlink("/proc/self/ns/net")
         with socket.socket() as listener:
             listener.bind(("127.0.0.1",0))
@@ -179,7 +189,73 @@ def main(site,model,config,language="tr"):
         receipt=job.result()
         record("piper-real-typed-pcm-receipt",receipt[4]==hashlib.sha256(data).hexdigest() and receipt[5]==22050,
                rate=receipt[5],frames=receipt[6])
+        transcript=None
+        if stt_paths:
+            from whisper_engine_acceptance import ENGINE_REV,WRAPPER as STT_WRAPPER
+            from transcription_result import Transcript
+            from voice_quality import word_errors,acceptable
+            stt_out=root/"stt-out"
+            stt_out.mkdir(mode=0o700)
+            # Do not mount Piper dependencies, text or neural voice model into STT.
+            stt_scope=system_prefix+["--proc","/proc","--dev","/dev","--tmpfs","/tmp","--dir","/work",
+                "--ro-bind",str(stt_paths[0]),"/work/whisper-cli","--ro-bind",str(stt_paths[1]),"/work/model.bin",
+                "--ro-bind",str(path),"/work/audio.wav","--bind",str(stt_out),"/work/out",
+                "--setenv","HOME","/tmp","--setenv","PATH","/usr/bin","--setenv","LC_ALL","C.UTF-8",
+                "--chdir","/work","--remount-ro","/"]
+            stt_probe="""import hashlib,json
+from pathlib import Path
+h=hashlib.sha256()
+with open('/work/model.bin','rb') as f:
+    for block in iter(lambda:f.read(1048576),b''):
+        h.update(block)
+print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/audio.wav').read_bytes()).hexdigest(),
+   'work':sorted(p.name for p in Path('/work').iterdir()),'out':list(Path('/work/out').iterdir()),
+   'devices':not Path('/dev/snd').exists() and not Path('/dev/dri').exists()}))
+"""
+            seen=run(stt_probe,scope=stt_scope,timeout=15)
+            scoped=seen=={"model":STT_SHA,"audio":receipt[4],"work":["audio.wav","model.bin","out","whisper-cli"],"out":[],"devices":True}
+            record("piper-stt-exact-private-scope",scoped)
+            if not scoped:
+                job.cancel()
+                return 1
+            stt_call=job.prepare_transcription(ENGINE_REV,STT_SHA,"recognized-text")
+            stt_req=stt_call.request(ctx)
+            stt_grant=gate.fixture_grant("piper-stt",stt_req,60)
+            transcript=job.start_transcription(ENGINE_REV,STT_SHA,"recognized-text",stt_grant)
+            transcript.checkpoint()
+            run(STT_WRAPPER,"/work/whisper-cli","-m","/work/model.bin","-f","/work/audio.wav",
+                "-l",language,"-t","2","-ng","-nt","-otxt","-of","/work/out/transcript",
+                scope=stt_scope,parse_json=False)
+            transcript_path=stt_out/"transcript.txt"
+            if transcript_path.is_symlink() or not transcript_path.is_file() or not 0<transcript_path.stat().st_size<=16384:
+                transcript.cancel()
+                job.cancel()
+                return 1
+            recognized=transcript_path.read_text(encoding="utf-8").strip()
+            errors,count=word_errors(text,recognized,language)
+            ok=acceptable(errors,count)
+            record("piper-stt-semantic",ok,errors=errors,reference_words=count,recognized=recognized[:200])
+            preserved=digest(stt_paths[1])==STT_SHA and path.read_bytes()==data and digest(source)==source_sha and sorted(p.name for p in stt_out.iterdir())==["transcript.txt"]
+            record("piper-stt-inputs-unchanged",preserved)
+            if not preserved:
+                transcript.cancel()
+                job.cancel()
+                return 1
+            if ok:
+                transcript.complete(Transcript(stt_req.target,receipt[4],STT_SHA,language,"recognized-text",recognized))
+                record("piper-stt-typed-receipt",transcript.result()[1]==hashlib.sha256(recognized.encode()).hexdigest())
+            else:
+                transcript.cancel()
+                record("piper-stt-typed-receipt",False,reason="quality_gate_failed")
         job.cancel()
+        if transcript is not None:
+            try:
+                transcript.result()
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("piper-stt-revoke-invalidates-child",denied)
         try:
             job.result()
         except Refused:
@@ -187,7 +263,7 @@ def main(site,model,config,language="tr"):
         else:
             denied=False
         record("piper-revoked-result-denied",denied)
-    return 0 if len(results)==9 and all(results) else 1
+    return 0 if len(results)==(14 if stt_paths else 9) and all(results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main(*sys.argv[1:]))

@@ -13,3 +13,9 @@ class PiperProfileTests(unittest.TestCase):
         for lang in ("auto","tr-en-de","../en","EN",None,[]):
             with self.assertRaises(Refused):
                 voice_profile(lang)
+
+    def test_all_config_digests_pinned(self):
+        for lang in ("tr","en","de"):
+            config=voice_profile(lang)[1]
+            self.assertEqual(len(config),64)
+            self.assertTrue(all(c in "0123456789abcdef" for c in config))
