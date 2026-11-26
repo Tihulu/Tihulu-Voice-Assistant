@@ -244,6 +244,7 @@ class NativeVoiceTransportTests(unittest.TestCase):
         obj=json.loads(envelope)
         obj["transcript"]="Changed text"
         obj["transcript_digest"]=sha256(b"Changed text").hexdigest()
+        obj["submitted_digest"]=obj["transcript_digest"]
         obj["native_wire_digest"]=sha256(native_voice_payload("Changed text")).hexdigest()
         bad=json.dumps(obj,ensure_ascii=False,sort_keys=True,separators=(",",":")).encode()
         req=local_request(self.ctx,prepare(self.c,"turn","llm",bad),dependent=True)
@@ -327,3 +328,50 @@ class NativeVoiceTransportTests(unittest.TestCase):
         self.g.revoke(review.identity)
         with self.assertRaises(Refused):
             self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,review_grant=review)
+
+    def test_review_preview_exact_corrected_text_only(self):
+        import json
+        edit="Hello corrected world"
+        preview=self.stt.review_preview(self.c,"turn","en",native_completion=True,edited_text=edit)
+        self.assertEqual(preview[:3],(edit,sha256(edit.encode()).hexdigest(),True))
+        req=self.stt.prepare_local_turn(self.c,"turn","en",native_completion=True,edited_text=edit)
+        grant=self.g.fixture_grant("turn",req,60)
+        review=self.g.fixture_grant("review",preview[3],60)
+        turn,wire=self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,
+                                              review_grant=review,edited_text=edit)
+        self.assertEqual(json.loads(wire)["prompt"],edit)
+        self.assertNotIn(b"Hello world",wire)
+        turn.begin_fixture_transport(wire)
+
+    def test_changed_edit_requires_new_exact_review(self):
+        edit="Corrected text"
+        req=self.stt.prepare_local_turn(self.c,"turn","en",native_completion=True,edited_text=edit)
+        grant=self.g.fixture_grant("turn",req,60)
+        review=self.g.fixture_grant("review",self.stt.prepare_review(self.c,"turn","en",native_completion=True,
+                                    edited_text="Other text"),60)
+        with self.assertRaises(Refused):
+            self.stt.start_local_turn(self.c,"turn","en",grant,native_completion=True,
+                                      review_grant=review,edited_text=edit)
+
+    def test_edit_retains_original_provenance_and_revoke(self):
+        import json
+        edit="Corrected text"
+        req,envelope,_=self.stt._turn_input(self.c,"turn","en",edited_text=edit)
+        obj=json.loads(envelope)
+        self.assertEqual(obj["transcript_digest"],sha256(b"Hello world").hexdigest())
+        self.assertEqual(obj["submitted_digest"],sha256(edit.encode()).hexdigest())
+        self.assertTrue(obj["edited"])
+        self.assertNotIn(b"Hello world",envelope)
+        grant=self.g.fixture_grant("turn",req,60)
+        review=self.g.fixture_grant("review",self.stt.prepare_review(self.c,"turn","en",edited_text=edit),60)
+        self.stt.cancel()
+        with self.assertRaises(Refused):
+            self.stt.start_local_turn(self.c,"turn","en",grant,review_grant=review,edited_text=edit)
+
+    def test_invalid_edit_and_noop_review(self):
+        for edit in (" ","bad\0","x"*17000):
+            with self.assertRaises(Refused):
+                self.stt.review_preview(self.c,"turn","en",edited_text=edit)
+        preview=self.stt.review_preview(self.c,"turn","en",edited_text="Hello world")
+        self.assertFalse(preview[2])
+        self.assertEqual(preview[3],self.stt.prepare_review(self.c,"turn","en"))
