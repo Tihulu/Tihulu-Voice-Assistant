@@ -45,20 +45,33 @@ def _read(p):
         stamp = settings._choice_identity(info)
         raw = settings._read_text(journal)
         rec = settings._unique_json(raw)
-        if (not isinstance(rec, dict)
-                or set(rec) != {"version", "model", "slot", "old", "new",
-                                "old_settings", "new_settings", "old_registry", "new_registry"}
-                or type(rec["version"]) is not int or rec["version"] != 1
-                or not isinstance(rec["model"], str)
+        common = {"version", "model", "old_settings", "new_settings", "old_registry", "new_registry"}
+        if (not isinstance(rec, dict) or type(rec.get("version")) is not int
+                or not isinstance(rec.get("model"), str)
                 or not re.fullmatch(r"[A-Za-z0-9][\w.:-]{0,127}", rec["model"])
-                or rec["slot"] not in ("stt", "tr", "en", "de")
-                or (rec["old"] is not None and
-                    (not isinstance(rec["old"], str) or len(rec["old"]) > 4096))
-                or (rec["slot"] == "stt" and rec["old"] is None)
-                or not isinstance(rec["new"], str) or not rec["new"] or len(rec["new"]) > 4096
-                or any(not isinstance(rec[k], str) or not re.fullmatch(r"[0-9a-f]{64}", rec[k])
+                or any(not isinstance(rec.get(k), str) or not re.fullmatch(r"[0-9a-f]{64}", rec[k])
                        for k in ("old_settings", "new_settings", "old_registry", "new_registry"))
                 or settings._choice_identity(journal.lstat()) != stamp):
+            raise Hold(REASON)
+        if rec["version"] == 1:
+            if (set(rec) != common | {"slot", "old", "new"}
+                    or rec["slot"] not in ("stt", "tr", "en", "de")
+                    or (rec["old"] is not None and
+                        (not isinstance(rec["old"], str) or len(rec["old"]) > 4096))
+                    or (rec["slot"] == "stt" and rec["old"] is None)
+                    or not isinstance(rec["new"], str) or not rec["new"] or len(rec["new"]) > 4096):
+                raise Hold(REASON)
+        elif rec["version"] == 2:
+            if (set(rec) != common | {"ref", "path", "digest", "voice_digest"}
+                    or not isinstance(rec["ref"], str) or not 0 < len(rec["ref"]) <= 64
+                    or not isinstance(rec["path"], str) or len(rec["path"]) > 4096
+                    or rec["old_registry"] == rec["new_registry"]
+                    or rec["old_settings"] == rec["new_settings"]
+                    or any(rec[k] is not None and
+                           (not isinstance(rec[k], str) or not re.fullmatch(r"[0-9a-f]{64}", rec[k]))
+                           for k in ("digest", "voice_digest"))):
+                raise Hold(REASON)
+        else:
             raise Hold(REASON)
         return rec, raw, stamp
     except (Hold, OSError, ValueError, TypeError, RecursionError):
@@ -72,11 +85,37 @@ def _clear(p, proof):
     settings._sync_parent(p)
 
 
+def _without_reference(cfg, ref):
+    cfg = settings.checked(cfg)
+    cfg["market_refs"].pop(ref, None)
+    for field in ("audio_digests", "voice_digests"):
+        cfg.get(field, {}).pop(ref, None)
+        if not cfg.get(field):
+            cfg.pop(field, None)
+    return settings.checked(cfg)
+
+
+def _unregister_pair(current, rec):
+    old = _without_reference(current, rec["ref"])
+    old["market_refs"][rec["ref"]] = rec["path"]
+    if rec["digest"] is not None:
+        old.setdefault("audio_digests", {})[rec["ref"]] = rec["digest"]
+    if rec["voice_digest"] is not None:
+        old.setdefault("voice_digests", {})[rec["ref"]] = rec["voice_digest"]
+    old = settings.checked(old)
+    if rec["path"] in ({old["stt"], *old["voices"].values()} - {""}):
+        raise Hold(REASON)
+    return old, _without_reference(old, rec["ref"])
+
+
 def _pair(p, rec):
     stamp = settings._choice_identity(p.lstat())
     current = settings.load(p)
-    old = _with_value(current, rec["slot"], rec["old"])
-    new = _with_value(current, rec["slot"], rec["new"])
+    if rec["version"] == 2:
+        old, new = _unregister_pair(current, rec)
+    else:
+        old = _with_value(current, rec["slot"], rec["old"])
+        new = _with_value(current, rec["slot"], rec["new"])
     if (settings._choice_identity(p.lstat()) != stamp
             or current not in (old, new)
             or settings._digest(settings._serialize(old)) != rec["old_settings"]
@@ -165,6 +204,66 @@ def recover(registry, path=None):
             return True
     except (Hold, OSError, ValueError, TypeError, RecursionError):
         raise Hold(REASON) from None
+
+
+def unregister(registry, expected_card, expected_settings, path=None):
+    """Remove a card, journaling only the exact unselected reference delta.
+
+    Registry-first publication retains verification metadata on uncertainty.
+    The version-2 record is recovered by the same exact-generation protocol.
+    No model data or unrelated settings are deleted.
+    """
+    p = settings.config_path() if path is None else Path(path)
+    model_id = expected_card.model_id
+    with registry.transfer_lease(model_id), registry._write_guard(require_clean=True), settings._write_guard(p):
+        settings._require_no_choice(p)
+        if registry.card(model_id) != expected_card:
+            raise Hold("registry_card_changed")
+        if expected_card.loaded:
+            raise Hold("model_loaded")
+        current = settings.load(p)
+        if current != settings.checked(expected_settings):
+            raise Hold("settings_changed")
+        ref = expected_card.storage_ref
+        value = current["market_refs"].get(ref)
+        if ref and value in ({current["stt"], *current["voices"].values()} - {""}):
+            raise Hold("audio_model_selected")
+        others = {c.storage_ref for c in registry.cards() if c.model_id != model_id}
+        proposed = _without_reference(current, ref) if ref and ref not in others else current
+        stamp = settings._choice_identity(p.lstat())
+        old_generation = registry.snapshot()[0]
+        cards, choices = registry._without_card(model_id)
+        new_generation = market._text_digest(registry._serialized(cards, choices))
+        proof = None
+        if proposed != current:
+            record = {"version": 2, "model": model_id, "ref": ref, "path": value,
+                      "digest": current.get("audio_digests", {}).get(ref),
+                      "voice_digest": current.get("voice_digests", {}).get(ref),
+                      "old_settings": settings._digest(settings._serialize(current)),
+                      "new_settings": settings._digest(settings._serialize(proposed)),
+                      "old_registry": old_generation, "new_registry": new_generation}
+            settings._replace_text(_journal(p), json.dumps(record, sort_keys=True))
+            proof = _read(p)
+            if proof[0] != record:
+                raise Hold(REASON)
+        if (registry.snapshot()[0] != old_generation or settings.load(p) != current
+                or settings._choice_identity(p.lstat()) != stamp
+                or (proof is not None and _read(p) != proof)):
+            raise Hold("settings_changed")
+        registry._unregister_locked(model_id, expected=expected_card)
+        market._sync_directory(registry.root)
+        if (registry.snapshot()[0] != new_generation or settings.load(p) != current
+                or settings._choice_identity(p.lstat()) != stamp
+                or (proof is not None and _read(p) != proof)):
+            raise Hold("unregister_recovery_required")
+        if proof is not None:
+            settings._replace_text(p, settings._serialize(proposed))
+            stamp = settings._choice_identity(p.lstat())
+            if (registry.snapshot()[0] != new_generation or settings.load(p) != proposed
+                    or settings._choice_identity(p.lstat()) != stamp):
+                raise Hold(REASON)
+            _clear(p, proof)
+        return proposed
 
 
 def commit(registry, expected_card, card, current, proposed, slot, path=None,

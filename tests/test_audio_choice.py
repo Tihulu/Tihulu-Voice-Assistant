@@ -28,6 +28,40 @@ class AudioChoiceTests(unittest.TestCase):
         return audio_choice.commit(self.registry, self.card, self.active,
                                    self.old, self.new, "stt", self.path)
 
+    def prepare_unselected_reference(self):
+        old = settings.checked(self.old)
+        old["stt"] = ""
+        settings.save(old, self.path)
+        return old
+
+    def test_unregister_journal_recovers_reference_after_registry_commit(self):
+        old = self.prepare_unselected_reference()
+        with patch.object(market, "_sync_directory", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                audio_choice.unregister(self.registry, self.card, old, self.path)
+        self.assertEqual(settings.load(self.path), old)
+        self.assertIsNone(self.registry.lookup_card(self.card.model_id))
+        self.assertTrue(settings.audio_choice_pending(self.path))
+        self.assertTrue(audio_choice.recover(self.registry, self.path))
+        self.assertNotIn("fixture-ref", settings.load(self.path)["market_refs"])
+        self.assertFalse(settings.audio_choice_pending(self.path))
+
+    def test_unregister_journal_preserves_reference_before_registry_commit(self):
+        old = self.prepare_unselected_reference()
+        with patch.object(self.registry, "_unregister_locked", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                audio_choice.unregister(self.registry, self.card, old, self.path)
+        self.assertTrue(settings.audio_choice_pending(self.path))
+        self.assertTrue(audio_choice.recover(self.registry, self.path))
+        self.assertEqual(settings.load(self.path), old)
+        self.assertEqual(self.registry.card(self.card.model_id), self.card)
+
+    def test_unregister_journal_never_prunes_selected_reference(self):
+        settings.save(self.new, self.path)
+        with self.assertRaisesRegex(Hold, "audio_model_selected"):
+            audio_choice.unregister(self.registry, self.card, self.new, self.path)
+        self.assertFalse(settings.audio_choice_pending(self.path))
+
     def test_success_commits_both(self):
         saved = self.commit()
         self.assertEqual(saved.state, "ACTIVE")
