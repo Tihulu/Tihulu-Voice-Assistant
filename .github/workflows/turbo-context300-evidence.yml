@@ -1,0 +1,57 @@
+name: Disposable Turbo Q5 six-second context comparison
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'experiments/speech_engine_acceptance.py'
+      - 'experiments/voice_quality.py'
+      - 'experiments/language_detection.py'
+      - 'experiments/mixed_voice_review.py'
+      - 'experiments/transcription_result.py'
+      - 'experiments/speech_result.py'
+      - 'experiments/gateway.py'
+      - 'experiments/patch_turbo_detection_fixture.py'
+      - '.github/workflows/turbo-context300-evidence.yml'
+permissions:
+  contents: read
+jobs:
+  turbo:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify exact head and unchanged shipped paths
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+          git diff --exit-code d4b756351b1552aa5806c89e39eda3b5b82aa337 HEAD -- src packaging tools tests pyproject.toml data
+      - name: Prepare pinned public Turbo dependency
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y bubblewrap cmake build-essential curl espeak-ng ffmpeg
+          test "$(id -u)" -ne 0
+          mkdir "$RUNNER_TEMP/turbo-stt"
+          git init "$RUNNER_TEMP/turbo-stt/source"
+          git -C "$RUNNER_TEMP/turbo-stt/source" -c credential.helper= fetch --depth 1 https://github.com/ggml-org/whisper.cpp.git 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          git -C "$RUNNER_TEMP/turbo-stt/source" checkout --detach FETCH_HEAD
+          test "$(git -C "$RUNNER_TEMP/turbo-stt/source" rev-parse HEAD)" = 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 240 --max-filesize 574041195 -o "$RUNNER_TEMP/turbo-stt/model.bin" 'https://huggingface.co/ggerganov/whisper.cpp/resolve/98aa99a0a9db05ae2342309f5096248665f7cba3/ggml-large-v3-turbo-q5_0.bin'
+          test "$(stat -c %s "$RUNNER_TEMP/turbo-stt/model.bin")" = 574041195
+          echo "394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2  $RUNNER_TEMP/turbo-stt/model.bin" | sha256sum -c -
+          /usr/bin/python3 experiments/patch_turbo_detection_fixture.py "$RUNNER_TEMP/turbo-stt/source/src/whisper.cpp" 300
+          git -C "$RUNNER_TEMP/turbo-stt/source" diff --check
+          test "$(git -C "$RUNNER_TEMP/turbo-stt/source" diff --name-only)" = src/whisper.cpp
+          git -C "$RUNNER_TEMP/turbo-stt/source" diff -- src/whisper.cpp
+          cmake -S "$RUNNER_TEMP/turbo-stt/source" -B "$RUNNER_TEMP/turbo-stt/build" -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DGGML_NATIVE=OFF -DGGML_OPENMP=OFF -DWHISPER_BUILD_TESTS=OFF -DWHISPER_BUILD_EXAMPLES=ON
+          cmake --build "$RUNNER_TEMP/turbo-stt/build" --target whisper-cli -j 2
+      - name: Actual paused mixed audio Turbo language comparison
+        env:
+          PYTHONPATH: src:experiments
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          /usr/bin/python3 experiments/speech_engine_acceptance.py "$RUNNER_TEMP/turbo-stt/build/bin/whisper-cli" "$RUNNER_TEMP/turbo-stt/model.bin" turbo-q5 mixed-auto-turbo-context300
