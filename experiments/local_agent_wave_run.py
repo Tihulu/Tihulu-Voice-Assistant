@@ -1,10 +1,23 @@
 # SPDX-License-Identifier: AGPL-3.0-only
 """Non-shipping agent wave lifecycle; fixture grants only, no effects."""
 from hashlib import sha256
+from dataclasses import dataclass
+from gateway import token
 from threading import current_thread
 from gateway import Context,FixtureGateway,Request,Refused
 from local_agent_planner import AgentPlan,plan_agents
 from local_agent_resources import ResourceLedger
+
+MAX_RESULT_BYTES=16384
+
+@dataclass(frozen=True)
+class AgentResult:
+    worker: str
+    plan_digest: str
+    grant_identity: str
+    request_target: str
+    payload_digest: str
+    size: int
 
 class WaveRun:
     """Trusted coordinator supplies current snapshots at every checkpoint.
@@ -28,6 +41,7 @@ class WaveRun:
         self._ledger=ledger
         self._run_id=run_id
         self._reservations={}
+        self._outputs={}
         self._claims={}
         self._done=set()
         self._cancelled=False
@@ -97,14 +111,42 @@ class WaveRun:
         if reservation is not None:
             self._reservations[worker]=reservation
 
-    def complete(self,worker,context,candidates):
+    def complete(self,worker,context,candidates,*,payload=None):
         self._check(context,candidates)
         if worker not in self._claims or worker in self._done:
             raise Refused("agent_worker_not_running")
-        self._gateway.checkpoint_claimed_group((self._claims[worker],))
+        if payload is not None and (type(payload) is not bytes or not 0<len(payload)<=MAX_RESULT_BYTES):
+            raise Refused("agent_result_invalid")
+        grant,req=self._claims[worker]
+        self._gateway.checkpoint_claimed_group(((grant,req),))
         # In this synthetic API completion means the simulated worker ended.
         self._release(worker)
+        if payload is not None:
+            receipt=AgentResult(worker,self._plan.digest,grant.identity,req.target,
+                                sha256(payload).hexdigest(),len(payload))
+            self._outputs[worker]=(receipt,payload)
         self._done.add(worker)
+
+    def inputs(self,worker,context,candidates):
+        """Return exact direct dependency receipts, only to a running child.
+        No interpretation of result bytes as commands or provider messages.
+        """
+        self._check(context,candidates)
+        if type(worker) is not str or worker not in self._claims or worker in self._done:
+            raise Refused("agent_worker_not_running")
+        parents=next(w.depends for w in self._workers if w.identity==worker)
+        if any(parent not in self._outputs for parent in parents):
+            raise Refused("agent_dependency_result_missing")
+        claims=(self._claims[worker],)+tuple(self._claims[p] for p in sorted(parents))
+        self._gateway.checkpoint_claimed_group(claims)
+        return tuple(self._outputs[p] for p in sorted(parents))
+
+    def output(self,worker,context,candidates):
+        """Read one terminal fixture result only after the whole run is valid."""
+        self.result(context,candidates)
+        if type(worker) is not str or worker not in self._outputs:
+            raise Refused("agent_result_missing")
+        return self._outputs[worker]
 
     def _release(self,worker):
         reservation=self._reservations.get(worker)
@@ -130,6 +172,7 @@ class WaveRun:
         self._thread()
         if not self._cancelled:
             self._cancelled=True
+            self._outputs.clear()
             for grant,req in self._claims.values():
                 self._gateway.revoke(grant.identity)
             # Only synthetic runs: no actual process is alive. A real broker
