@@ -40,7 +40,8 @@ ALLOWED_NEXT = {
     "APPROVED": ("QUEUED", "CANCELLED", "HOLD", "FAILED"),
     "QUEUED": ("DOWNLOADING", "CANCELLED", "HOLD", "FAILED"),
     "DOWNLOADING": ("VERIFIED", "CANCELLED", "FAILED"),
-    "VERIFIED": ("REGISTERED", "FAILED"),
+    # Verified staging is not yet an installed publication. It can be stopped.
+    "VERIFIED": ("REGISTERED", "CANCELLED", "FAILED"),
     "REGISTERED": ("TESTABLE", "FAILED"),
     "TESTABLE": ("ACTIVE", "HOLD", "FAILED"),
     "ACTIVE": ("REGISTERED", "HOLD", "FAILED"),

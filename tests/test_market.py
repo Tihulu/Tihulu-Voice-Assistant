@@ -82,6 +82,20 @@ class CardTests(unittest.TestCase):
         with self.assertRaisesRegex(Hold, "lifecycle_transition_rejected"):
             advance(cancelled, "REVIEWED")
 
+    def test_verified_staging_can_cancel_but_published_item_cannot(self):
+        current = card()
+        for state in ("REVIEWED", "APPROVED", "QUEUED", "DOWNLOADING", "VERIFIED"):
+            current = advance(current, state)
+        cancelled = advance(current, "CANCELLED")
+        self.assertFalse(cancelled.registered)
+        self.assertEqual(cancelled.state, "CANCELLED")
+        with self.assertRaisesRegex(Hold, "lifecycle_transition_rejected"):
+            advance(cancelled, "REGISTERED")
+        committed = advance(current, "REGISTERED")
+        self.assertTrue(committed.registered)
+        with self.assertRaisesRegex(Hold, "lifecycle_transition_rejected"):
+            advance(committed, "CANCELLED")
+
     def test_registering_an_already_installed_item_never_replaces_a_download(self):
         discovered = card(category="llm", installed=True, local_or_cloud="local")
         self.assertEqual(register_installed(discovered).state, "REGISTERED")
