@@ -6192,6 +6192,30 @@ class MuteTests(DesktopTests):
         self.until(lambda: not self.ui.busy)
         self.assertIn("audio output muted", self.ui.state_row.get_text())
 
+    def test_muted_voice_input_works_without_piper_or_voice_files(self):
+        self.connect_model()
+        self.ui.cfg["voices"] = {}
+        self.assertTrue(self.ui.save())
+
+        def tools_ready(*names):
+            return all(name in ("arecord", "whisper-cli") for name in names)
+
+        with patch.object(desktop.audio, "tools_ready", side_effect=tools_ready):
+            self.ui.refresh()
+            self.assertFalse(self.ui.talk.get_sensitive())
+            self.ui.mute.set_active(True)
+            self.assertTrue(self.ui.talk.get_sensitive())
+            self.assertIn("without Piper", self.ui.voice_setup_note.get_text())
+            self.backend.answers.append("Merhaba!\n\n```python\nx = 1\n```")
+            self.begin_voice()
+            self.click(self.ui.finish_btn)
+            self.until(lambda: not self.ui.busy)
+            self.assertEqual(self.backend.speeches, [])
+            self.assertIn("x = 1", self.ui.session.history[-1].content)
+            self.assertEqual(self.ui.status.get_text(), "Reply muted; shown as text.")
+            self.ui.mute.set_active(False)
+            self.assertFalse(self.ui.talk.get_sensitive())
+
     def test_mute_is_state_and_never_a_preference(self):
         self.ui.mute.set_active(True)
         self.until(lambda: "audio output muted" in self.ui.state_row.get_text())

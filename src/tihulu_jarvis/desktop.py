@@ -1551,10 +1551,13 @@ def create_window(app, loop, bridge=None):
             stt_present = bool(self.cfg["stt"]) and Path(self.cfg["stt"]).is_file()
             voices_present = tuple(lang for lang, path in self.cfg["voices"].items()
                                    if path and Path(path).is_file())
-            missing_tools = tuple(name for name in readiness.AUDIO_TOOLS
+            muted = self.mute.get_active()
+            required_tools = ("arecord", "whisper-cli") if muted else readiness.AUDIO_TOOLS
+            missing_tools = tuple(name for name in required_tools
                                   if not audio.tools_ready(name))
             audio_blocked = self.audio_choice_blocked()
-            voice_ready = allowed and stt_present and bool(voices_present) and not missing_tools and not audio_blocked
+            voice_ready = (allowed and stt_present and (muted or bool(voices_present))
+                           and not missing_tools and not audio_blocked)
             if audio_blocked:
                 voice_note = tr("Audio model choice recovery required. Voice operations blocked.",
                                 "Ses modeli seçimi kurtarması gerekli. Ses işlemleri engellendi.",
@@ -1568,6 +1571,10 @@ def create_window(app, loop, bridge=None):
             elif not stt_present:
                 voice_note = tr("Choose an existing Whisper model.", "Mevcut bir Whisper modeli seç.",
                                 "Vorhandenes Whisper-Modell wählen.")
+            elif muted:
+                voice_note = tr("Muted voice input: capture and transcribe; reply as text without Piper.",
+                                "Sessiz ses girişi: kaydet ve yazıya çevir; Piper olmadan metin yanıtı.",
+                                "Stumme Spracheingabe: aufnehmen und transkribieren; Textantwort ohne Piper.")
             elif not voices_present:
                 voice_note = tr("Choose an existing Piper voice.", "Mevcut bir Piper sesi seç.",
                                 "Vorhandene Piper-Stimme wählen.")
@@ -5386,7 +5393,10 @@ def create_window(app, loop, bridge=None):
                     except Hold:
                         return False
 
-                voices = audio.SelectedVoices(self.cfg["voices"])
+                # Mute is an explicit text-output mode. Do not require a
+                # TTS voice or apply spoken-prose constraints to its reply.
+                muted_at_start = self.mute.get_active()
+                voices = None if muted_at_start else audio.SelectedVoices(self.cfg["voices"])
                 self.finish=asyncio.Event()
                 # The microphone is exclusive: a turn that cannot get the lease
                 # is refused before capture starts, never after it fails.
@@ -5420,7 +5430,7 @@ def create_window(app, loop, bridge=None):
                 check_voice_grant()
                 try:
                     result,speech=await self.session.reply(text,backend,epoch,voices,route=route,
-                        authorize=lambda: voice_authorized(route))
+                        model=self.cfg["llm"], authorize=lambda: voice_authorized(route))
                 except Hold as exc:
                     if (str(exc) == "jan_unavailable" and epoch == self.session.epoch
                             and not self.closing):
@@ -5431,7 +5441,7 @@ def create_window(app, loop, bridge=None):
                     raise Hold("attachment_context_changed")
                 self.bubble("JARVIS",result)
                 self.spoken_line(speech, epoch)
-                if self.mute.get_active():
+                if muted_at_start or self.mute.get_active():
                     # Muted: the reply is shown, and nothing is spoken.
                     self.turn_outcome = tr("Reply muted; shown as text.",
                                            "Yanıt sessiz; metin olarak gösterildi.",
