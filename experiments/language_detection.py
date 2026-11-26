@@ -57,6 +57,8 @@ class DetectionFixture:
         self._lock=Lock()
         self._state="ready"
         self._result=None
+        self._hold=None
+        self._call=call
 
     def checkpoint(self):
         with self._lock:
@@ -82,6 +84,37 @@ class DetectionFixture:
                 self._result=None
                 self._state="held"
                 raise
+
+    def hold_observation(self,raw):
+        """Record a genuine rejected observation, not a fabricated confidence."""
+        with self._lock:
+            if self._state!="ready":
+                raise Refused("language_detection_terminal")
+            self._hold=self._g.record_detection_hold(self._grant,self._req,self._call,raw)
+            self._state="held"
+            return self._hold
+
+    def _override_call(self,language,output):
+        if self._state!="held" or self._hold is None:
+            raise Refused("language_override_requires_hold")
+        if output in (self._args["artifact"],self._args["output"]):
+            raise Refused("language_detection_output_alias")
+        return CapabilityCall("whisper_cpp",self._version,"transcribe_wav",
+                 (("artifact",self._args["artifact"]),("digest",self._args["digest"]),
+                  ("model_digest",self._args["model_digest"]),("language",language),("output",output))).checked()
+
+    def prepare_override(self,language,output):
+        with self._lock:
+            call=self._override_call(language,output)
+            review=self._g.prepare_language_override(self._grant,self._req,call,self._hold)
+            return call,review
+
+    def start_override(self,language,output,grant,review_grant):
+        from transcription_result import TranscriptFixture
+        with self._lock:
+            call=self._override_call(language,output)
+            return TranscriptFixture(self._g,self._req.context,call,grant,
+                    dependencies=((self._grant,self._req),),language_review=(self._hold,review_grant))
 
     def _completed(self):
         if self._state!="completed" or self._result is None:
@@ -119,5 +152,6 @@ class DetectionFixture:
     def cancel(self):
         with self._lock:
             self._result=None
+            self._hold=None
             self._state="cancelled"
             self._g.revoke(self._grant.identity)

@@ -138,6 +138,7 @@ class FixtureGateway:
         self._claimed = set()
         self._dependencies = {}
         self._transcript_receipts = {}
+        self._detection_holds = {}
         self._closed = False
         self._lock = Lock()
 
@@ -305,6 +306,68 @@ class FixtureGateway:
             if grant.identity in self._transcript_receipts:
                 raise Refused("transcript_receipt_already_recorded")
             self._transcript_receipts[grant.identity]=receipt
+
+    def record_detection_hold(self,grant,req,call,raw):
+        from capabilities import CapabilityCall
+        from language_detection import detection_observation,parse_detection
+        if (type(call) is not CapabilityCall or (call.adapter,call.operation)!=("whisper_cpp","detect_language")
+                or call.request(self.context)!=req):
+            raise Refused("invalid_detection_hold")
+        observed,score=detection_observation(raw)
+        try:
+            parse_detection(raw)
+        except Refused:
+            pass
+        else:
+            raise Refused("accepted_detection_cannot_be_hold")
+        receipt=(call,observed,score,sha256(raw).hexdigest())
+        with self._lock:
+            self._check_claimed_group_locked(((grant,req),),self._clock.now())
+            if grant.identity in self._detection_holds:
+                raise Refused("detection_hold_already_recorded")
+            self._detection_holds[grant.identity]=receipt
+        return receipt[1:]
+
+    def _language_override_review_locked(self,parent,parent_req,call,observation,now):
+        from capabilities import CapabilityCall
+        self._check_claimed_group_locked(((parent,parent_req),),now)
+        hold=self._detection_holds.get(parent.identity)
+        if hold is None or type(observation) is not tuple or hold[1:]!=observation:
+            raise Refused("language_hold_receipt_mismatch")
+        original=hold[0]
+        if (type(call) is not CapabilityCall or (call.adapter,call.operation)!=("whisper_cpp","transcribe_wav")
+                or original.version!=call.version):
+            raise Refused("language_override_call")
+        args=dict(call.checked().args)
+        before=dict(original.args)
+        if (any(args[k]!=before[k] for k in ("artifact","digest","model_digest"))
+                or args["output"] in (before["artifact"],before["output"])):
+            raise Refused("language_override_provenance")
+        target=call.request(self.context).target
+        digest=sha256(repr(("language-override-v1",parent.identity,parent_req.target,observation,target)).encode("ascii")).hexdigest()
+        return Request(self.context,"voice_review",digest,"owner","private").checked()
+
+    def prepare_language_override(self,parent,parent_req,call,observation):
+        with self._lock:
+            return self._language_override_review_locked(parent,parent_req,call,observation,self._clock.now())
+
+    def claim_language_override(self,grant,req,call,dependencies,observation,review_grant):
+        with self._lock:
+            now=self._clock.now()
+            self._validate_locked(grant,req,now)
+            if type(dependencies) is not tuple or len(dependencies)!=1 or call.request(self.context)!=req:
+                raise Refused("invalid_language_override_parent")
+            parent,parent_req=dependencies[0]
+            review_req=self._language_override_review_locked(parent,parent_req,call,observation,now)
+            self._validate_locked(review_grant,review_req,now)
+            if (grant.identity in self._claimed or review_grant.identity in self._claimed
+                    or grant.identity==review_grant.identity):
+                raise Refused("language_override_already_used")
+            self._dependencies[review_grant.identity]=dependencies
+            self._claimed.add(review_grant.identity)
+            self._dependencies[grant.identity]=dependencies+((review_grant,review_req),)
+            self._claimed.add(grant.identity)
+            return "SIMULATED_ALLOW"
 
     def claim_voice_turn(self, grant, req, dependencies, receipt, review_grant=None):
         """Atomically validate exact registered transcript and claim child."""
