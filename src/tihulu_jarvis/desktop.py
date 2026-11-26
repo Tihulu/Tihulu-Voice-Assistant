@@ -3099,19 +3099,15 @@ def create_window(app, loop, bridge=None):
 
         def forget_choices(self):
             """Erase the stored choices, and state what it did not erase."""
-            try:
-                removed = settings.forget(expected=self.saved_cfg)
-            except Hold as exc:
-                self.settings_note.set_text(str(exc))
-                return
-            # The active profile is kept: it is a policy, not a preference.
+            # Keep the active policy, and reset preferences in one locked write.
             profile = self.store_active_profile_id()
-            self.cfg = settings.empty()
-            self.saved_cfg = settings.empty()
-            self.cfg["profile"] = profile
-            if not self.save():
-                self.settings_note.set_text(self.status.get_text())
+            try:
+                removed, proposed = settings.reset_choices(profile, expected=self.saved_cfg)
+            except (Hold, OSError) as exc:
+                self.settings_note.set_text(str(exc) if isinstance(exc, Hold) else "settings_unwritable")
                 return
+            self.cfg = proposed
+            self.saved_cfg = deepcopy(proposed)
             self.settings_scale.set_active(0)
             self.settings_spoken.set_active(False)
             self.apply_text_scale()

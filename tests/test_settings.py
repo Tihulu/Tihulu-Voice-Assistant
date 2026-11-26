@@ -231,6 +231,39 @@ class SettingsSnapshotBoundaryTests(unittest.TestCase):
         settings.save(newer, self.path)
         settings.require_current_audio_selection(before, self.path)
 
+    def test_reset_of_already_absent_file_is_idempotent(self):
+        before = settings.empty()
+        before["stt"] = "/fixture/old.bin"
+        self.assertFalse(settings.forget(self.path, expected=before))
+        existed, proposed = settings.reset_choices("strict", expected=before, path=self.path)
+        self.assertFalse(existed)
+        self.assertEqual(proposed, {**settings.empty(), "profile": "strict"})
+        self.assertEqual(settings.load(self.path), proposed)
+
+    def test_reset_refuses_present_newer_file(self):
+        before = settings.empty()
+        newer = {**before, "text_scale": "large"}
+        settings.save(newer, self.path)
+        with self.assertRaisesRegex(Hold, "settings_changed"):
+            settings.reset_choices("strict", expected=before, path=self.path)
+        self.assertEqual(settings.load(self.path), newer)
+
+    def test_reset_keeps_lock_through_single_publication(self):
+        from unittest.mock import patch
+        before = {**settings.empty(), "stt": "/fixture/old.bin"}
+        settings.save(before, self.path)
+        original = settings._replace_text
+        def write(path, text):
+            self.assertEqual(settings.load(path), before)
+            with self.assertRaisesRegex(Hold, "settings_busy"):
+                settings.save(settings.empty(), path)
+            original(path, text)
+        with patch.object(settings, "_replace_text", side_effect=write) as replace:
+            existed, proposed = settings.reset_choices("strict", expected=before, path=self.path)
+        self.assertTrue(existed)
+        replace.assert_called_once()
+        self.assertEqual(settings.load(self.path), proposed)
+
     def test_current_snapshot_allows_choice(self):
         before = settings.empty()
         settings.save(before, self.path)
