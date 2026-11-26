@@ -5,6 +5,8 @@ import json
 import os
 from pathlib import Path
 import socket
+import signal
+import time
 import struct
 import subprocess
 import tempfile
@@ -13,6 +15,19 @@ from tihulu_jarvis import profiles
 from gateway import Context, FixtureGateway
 from capabilities import CapabilityCall
 from conversion_result import ConversionFixture, ConversionResult, MAX_OUTPUT
+
+# Fixed disposable child wrapper. Limits survive exec and apply to engine
+# outputs and captured regular files. Not a total disk/memory cgroup quota.
+LIMIT_WRAPPER = """
+import os, resource, sys
+for kind, value in ((resource.RLIMIT_CORE,0), (resource.RLIMIT_FSIZE,1048576),
+                    (resource.RLIMIT_CPU,10), (resource.RLIMIT_NOFILE,128)):
+    resource.setrlimit(kind,(value,value))
+os.execv(sys.argv[1],sys.argv[1:])
+"""
+
+class FixtureLimit(RuntimeError):
+    pass
 
 PROBE = """
 import json, os, socket, sys
@@ -30,6 +45,11 @@ status = dict(line.split(':',1) for line in open('/proc/self/status') if ':' in 
 data['caps_dropped'] = all(int(status[key].strip(),16)==0
                            for key in ('CapEff','CapPrm','CapAmb'))
 data['host_env_hidden'] = 'JARVIS_FIXTURE_HOST_MARKER' not in os.environ
+import resource
+data['limits'] = all(resource.getrlimit(kind)==(value,value)
+                     for kind,value in ((resource.RLIMIT_CORE,0),
+                         (resource.RLIMIT_FSIZE,1048576),(resource.RLIMIT_CPU,10),
+                         (resource.RLIMIT_NOFILE,128)))
 try:
     with socket.create_connection(('127.0.0.1',int(sys.argv[2])),timeout=1):
         data['host_loopback_denied'] = False
@@ -81,11 +101,28 @@ def main():
                    # library directories inside the already mounted /usr.
                    "--setenv","LD_LIBRARY_PATH",
                    "/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack"]
-        def run(args):
-            return subprocess.run(prefix+["--"]+args,stdin=subprocess.DEVNULL,
-                                  stdout=subprocess.PIPE,stderr=subprocess.PIPE,
-                                  timeout=20,check=False,
-                                  env={**os.environ,"JARVIS_FIXTURE_HOST_MARKER":"synthetic-only"})
+        def run(args, timeout=20):
+            argv = prefix+["--","/usr/bin/python3","-I","-c",LIMIT_WRAPPER]+args
+            # Regular files avoid unbounded PIPE buffering in the host.
+            with tempfile.TemporaryFile() as stdout, tempfile.TemporaryFile() as stderr:
+                with subprocess.Popen(argv,stdin=subprocess.DEVNULL,stdout=stdout,stderr=stderr,
+                                      start_new_session=True,
+                                      env={**os.environ,"JARVIS_FIXTURE_HOST_MARKER":"synthetic-only"}) as proc:
+                    try:
+                        proc.wait(timeout=timeout)
+                    except subprocess.TimeoutExpired:
+                        try:
+                            os.killpg(proc.pid,signal.SIGKILL)
+                        except ProcessLookupError:
+                            pass
+                        proc.wait(timeout=5)
+                        raise FixtureLimit("fixture_timeout") from None
+                stdout.seek(0)
+                stderr.seek(0)
+                out, err = stdout.read(65537), stderr.read(65537)
+                if len(out)>65536 or len(err)>65536:
+                    raise FixtureLimit("fixture_capture_limit")
+                return subprocess.CompletedProcess(argv,proc.returncode,out,err)
         # Listening only on the disposable host's loopback; no external traffic.
         with socket.socket() as listener:
             listener.bind(("127.0.0.1",0))
@@ -105,6 +142,26 @@ def main():
         record("sandbox-output-scope",(output/"probe.txt").read_text()=="fixture")
         record("sandbox-capabilities-dropped",data["caps_dropped"])
         record("sandbox-host-environment-hidden",data["host_env_hidden"])
+        record("sandbox-process-resource-limits",data["limits"])
+        oversized = run(["/usr/bin/python3","-I","-c",
+                         "open('/work/out/oversized','wb').write(b'x'*1048577)"])
+        large = output/"oversized"
+        record("sandbox-file-size-limit",oversized.returncode!=0 and large.is_file()
+               and large.stat().st_size<=1048576)
+        try:
+            run(["/usr/bin/python3","-I","-c","import os; os.write(1,b'x'*65537)"])
+        except FixtureLimit as exc:
+            record("sandbox-capture-limit",str(exc)=="fixture_capture_limit")
+        else:
+            record("sandbox-capture-limit",False)
+        try:
+            run(["/usr/bin/python3","-I","-c",
+                 "import time; time.sleep(2); open('/work/out/late','x').close()"],timeout=0.3)
+        except FixtureLimit as exc:
+            time.sleep(2.1)
+            record("sandbox-timeout-cleanup",str(exc)=="fixture_timeout" and not (output/"late").exists())
+        else:
+            record("sandbox-timeout-cleanup",False)
         # The version and conversion both execute in the same fixed mount/network
         # boundary. The host owns the synthetic path; no model or owner input.
         version_probe = run(["/usr/bin/ffmpeg","-version"])
@@ -153,7 +210,7 @@ def main():
         else:
             job.cancel()
             record("sandbox-typed-conversion-receipt",False,reason="conversion_failed")
-    return 0 if len(results)==9 and all(r["status"]=="PASS" for r in results) else 1
+    return 0 if len(results)==13 and all(r["status"]=="PASS" for r in results) else 1
 
 if __name__=="__main__":
     raise SystemExit(main())
