@@ -77,6 +77,25 @@ with open('/tmp/chain-neural-wav.wav','xb') as handle:
 print(json.dumps({'engine':'piper','provider':'CPUExecutionProvider'}))
 """
 
+def stop_fixture_server(proc,cleanup):
+    """Always reap the owned child even when fixed-file cleanup raises."""
+    try:
+        cleanup()
+    finally:
+        if proc.poll() is None:
+            try:
+                proc.terminate()
+            except ProcessLookupError:
+                pass
+        try:
+            proc.wait(timeout=3)
+        except subprocess.TimeoutExpired:
+            try:
+                proc.kill()
+            except ProcessLookupError:
+                pass
+            proc.wait(timeout=3)
+
 def child(host_net,host_port,mode="basic"):
     sys.path.insert(0,"/work/code")
     from tihulu_jarvis import profiles
@@ -432,19 +451,13 @@ def child(host_net,host_port,mode="basic"):
         finally:
             # Always terminate the server even if explicit staging cleanup
             # fails; namespace teardown remains the last containment layer.
-            try:
+            def cleanup():
                 for identity in ("turn0","turn1","chain-turn"):
                     discard_voice(identity)
                 Path("/tmp/chain-transcript.txt").unlink(missing_ok=True)
                 for path in ("/tmp/chain-neural-text.txt","/tmp/chain-neural-wav.wav"):
                     Path(path).unlink(missing_ok=True)
-            finally:
-                proc.terminate()
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait(timeout=3)
+            stop_fixture_server(proc,cleanup)
     record("llm-server-stopped",proc.poll() is not None)
     return 0 if len(results)==(34 if mode=="neural-chain" else 30 if mode=="voice-chain" else 17) and all(results) else 1
 
@@ -534,6 +547,17 @@ def main(binary,model,*stt_inputs):
             print(json.dumps({"case":"llm-host-listener-untouched","status":"PASS" if untouched else "FAIL"}),flush=True)
         unchanged=hashlib.sha256(model.read_bytes()).hexdigest()==MODEL_SHA
         print(json.dumps({"case":"llm-model-unchanged","status":"PASS" if unchanged else "FAIL"}),flush=True)
+        if stt_paths:
+            audio=stt_paths[2].read_bytes()
+            stt_unchanged=(file_digest(stt_paths[1])==STT_SHA
+                and hashlib.sha1(("blob "+str(len(audio))+"\0").encode()+audio).hexdigest()==STT_BLOB)
+            print(json.dumps({"case":"llm-stt-inputs-unchanged-after-chain","status":"PASS" if stt_unchanged else "FAIL"}),flush=True)
+            unchanged=unchanged and stt_unchanged
+        if piper_paths:
+            neural_unchanged=(file_digest(piper_paths[1])==PIPER_MODEL_SHA
+                              and file_digest(piper_paths[2])==PIPER_CONFIG_SHA)
+            print(json.dumps({"case":"llm-neural-inputs-unchanged-after-chain","status":"PASS" if neural_unchanged else "FAIL"}),flush=True)
+            unchanged=unchanged and neural_unchanged
         return 0 if code_status==0 and untouched and unchanged else 1
 
 if __name__=="__main__":
