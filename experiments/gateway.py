@@ -184,29 +184,48 @@ class FixtureGateway:
             self._grants[identity] = grant
             return grant
 
-    def _validate_grant(self, grant, req, *, claim=False):
-        """Validate or atomically claim a fixture initiation, not an OS effect."""
+    def _validate_locked(self, grant, req, now):
         if type(grant) is not Grant:
             raise Refused("invalid_grant")
         token(grant.identity)
+        if self._grants.get(grant.identity) is not grant or grant.identity in self._revoked:
+            raise Refused("unknown_or_revoked_grant")
+        if not math.isfinite(now) or now >= grant.deadline:
+            self._revoked.add(grant.identity)
+            raise Refused("expired_or_unavailable" if not math.isfinite(now) else "expired")
+        if grant.request != req:
+            raise Refused("request_mismatch")
+        try:
+            self._check(req, now)
+        except Refused:
+            self._revoked.add(grant.identity)
+            raise
+
+    def _validate_grant(self, grant, req, *, claim=False):
+        """Validate or atomically claim a fixture initiation, not an OS effect."""
         with self._lock:
-            now = self._clock.now()
-            if self._grants.get(grant.identity) is not grant or grant.identity in self._revoked:
-                raise Refused("unknown_or_revoked_grant")
-            if now >= grant.deadline:
-                self._revoked.add(grant.identity)
-                raise Refused("expired")
-            if grant.request != req:
-                raise Refused("request_mismatch")
-            try:
-                self._check(req, now)
-            except Refused:
-                self._revoked.add(grant.identity)
-                raise
+            self._validate_locked(grant, req, self._clock.now())
             if claim:
                 if grant.identity in self._claimed:
                     raise Refused("grant_already_claimed")
                 self._claimed.add(grant.identity)
+            return "SIMULATED_ALLOW"
+
+    def claim_dependent(self, grant, req, dependency, dependency_req):
+        """Linearize a simulated child claim against an already claimed parent.
+
+        Trusted fixture callers supply the exact dependency relationship. No
+        callback, I/O, or production effect is authorized by this method.
+        """
+        with self._lock:
+            now = self._clock.now()
+            self._validate_locked(grant, req, now)
+            self._validate_locked(dependency, dependency_req, now)
+            if grant is dependency or dependency.identity not in self._claimed:
+                raise Refused("dependency_not_claimed")
+            if grant.identity in self._claimed:
+                raise Refused("grant_already_claimed")
+            self._claimed.add(grant.identity)
             return "SIMULATED_ALLOW"
 
     def checkpoint(self, grant, req):
