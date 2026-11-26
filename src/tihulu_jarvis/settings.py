@@ -215,9 +215,22 @@ def choice_pending(path=None):
         raise Hold("llm_choice_recovery_required") from None
 
 
+def audio_choice_pending(path=None):
+    p = config_path() if path is None else Path(path)
+    try:
+        p.with_name(p.name + ".audio-choice-journal").lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise Hold("audio_choice_recovery_required") from None
+
+
 def _require_no_choice(p):
     if choice_pending(p):
         raise Hold("llm_choice_recovery_required")
+    if audio_choice_pending(p):
+        raise Hold("audio_choice_recovery_required")
 
 
 def _digest(text):
