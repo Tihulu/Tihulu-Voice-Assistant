@@ -1868,6 +1868,39 @@ class ResumeQueueTests(DownloadFixture):
         self.drain_tasks()
         release.set()
 
+    def test_cancelled_partial_cleanup_keeps_gtk_responsive_until_drained(self):
+        from threading import Event, get_ident
+        url, release_server, _ = self.range_server()
+        self.begin_resumable(url, hashlib.sha256(self.payload).hexdigest(), len(self.payload))
+        entered, release_cleanup = Event(), Event()
+        owner = get_ident()
+        original = market.Transfer._finish_temp
+        def delayed(transfer, *, keep):
+            if get_ident() == owner:
+                raise AssertionError("cleanup ran on GTK thread")
+            entered.set()
+            if not release_cleanup.wait(5):
+                raise AssertionError("fixture deadline")
+            return original(transfer, keep=keep)
+        with patch.object(market.Transfer, "_finish_temp", delayed):
+            try:
+                self.click(self.ui.market_fetch)
+                self.until(lambda: any(e["received"] > 0 for e in self.ui.downloads))
+                self.click(self.ui.download_cancel)
+                self.until(entered.is_set)
+                self.assertTrue(self.ui.busy)
+                self.assertFalse(self.ui.market_filter.get_sensitive())
+                self.ui.hard_stop()
+                self.assertTrue(self.ui.busy)
+                release_cleanup.set()
+                self.until(lambda: not self.ui.busy)
+            finally:
+                release_cleanup.set()
+                release_server.set()
+        self.assertTrue(self.partial_file().exists())
+        self.assertEqual(self.ui.downloads[-1]["state"], "RESUMABLE")
+        self.assertTrue(self.ui.market_filter.get_sensitive())
+
     def test_resume_completes_the_registration(self):
         url, release, served = self.range_server()
         self.begin_resumable(url, hashlib.sha256(self.payload).hexdigest(), len(self.payload))

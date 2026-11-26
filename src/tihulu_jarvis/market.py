@@ -995,6 +995,20 @@ class Transfer:
                 pass
             self.temp = None
 
+    async def _finish_temp_async(self, *, keep, threaded=False):
+        """Drain cleanup before releasing the owning model lease.
+
+        Cleanup must still run after cancellation. Unlike publication it
+        cannot reuse a live-turn checkpoint that has already been revoked.
+        Only the existing local partial-retention authority is used.
+        """
+        if self.temp is None:
+            return
+        if not threaded:
+            self._finish_temp(keep=keep)
+            return
+        await finish_owned(asyncio.to_thread(self._finish_temp, keep=keep))
+
     def _consume_partial(self, identity, record=None, *, pair=None):
         """Remove only the exact partial consumed by this committed resume."""
         if identity is None:
@@ -1113,7 +1127,9 @@ class Transfer:
             self.state = "FAILED"
             raise
         finally:
-            self._finish_temp(keep=self.state == "CANCELLED" and not allow_installed)
+            await self._finish_temp_async(
+                keep=self.state == "CANCELLED" and not allow_installed,
+                threaded=threaded_publication)
 
     async def update(self, progress=None, *, threaded_publication=False):
         """Replace an installed item with its approved source, keeping history.
@@ -1165,7 +1181,8 @@ class Transfer:
             self._terminal("FAILED")
             raise
         finally:
-            self._finish_temp(keep=self.state == "CANCELLED")
+            await self._finish_temp_async(keep=self.state == "CANCELLED",
+                                          threaded=threaded_publication)
 
     def cancel(self):
         raise Hold("transfer_cancelled_by_owner")
