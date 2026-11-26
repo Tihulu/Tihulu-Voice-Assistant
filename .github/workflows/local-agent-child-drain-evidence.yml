@@ -8,6 +8,9 @@ on:
       - 'experiments/local_agent_resources.py'
       - 'experiments/fixtures/agent_child_drain_fixture.py'
       - 'experiments/fixtures/agent_fixed_family_fixture.py'
+      - 'experiments/local_agent_launch.py'
+      - 'experiments/fixtures/agent_fixed_launch_broker.py'
+      - 'experiments/fixtures/agent_fixed_broker_fixture.py'
       - '.github/workflows/local-agent-child-drain-evidence.yml'
 permissions:
   contents: read
@@ -37,3 +40,8 @@ jobs:
           PYTHONPATH: src:experiments
           PYTHONDONTWRITEBYTECODE: '1'
         run: /usr/bin/python3 experiments/fixtures/agent_fixed_family_fixture.py
+      - name: Run fixed launch broker evidence
+        env:
+          PYTHONPATH: src:experiments
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: /usr/bin/python3 experiments/fixtures/agent_fixed_broker_fixture.py
