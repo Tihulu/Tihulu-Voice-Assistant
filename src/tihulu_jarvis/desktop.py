@@ -196,9 +196,14 @@ def create_window(app, loop, bridge=None):
             self.cfg = settings.empty()
             read_error = ""
             try:
+                if settings.choice_pending():
+                    settings.recover_jan_choice(profiles.Store(profiles.profile_dir()))
+            except (Hold, OSError):
+                read_error = "llm_choice_recovery_required"
+            try:
                 self.cfg = settings.load()
             except Hold as e:
-                read_error = str(e)
+                read_error = (read_error + " " if read_error else "") + str(e)
             self.look = LOOK
             self.scale_provider = None
             self.apply_text_scale()
@@ -833,7 +838,15 @@ def create_window(app, loop, bridge=None):
                     self.invalidate_attachment()
             self.remove_attachment_button.set_sensitive(not self.busy)
 
+        def jan_choice_blocked(self):
+            try:
+                return settings.choice_pending()
+            except Hold:
+                return True
+
         def attachment_route(self):
+            if self.jan_choice_blocked():
+                raise Hold("llm_choice_recovery_required")
             profile, stamp = self.store.snapshot(self.cfg.get("profile"))
             if profile.state != "active":
                 raise Hold("profile_not_active")
@@ -1089,6 +1102,9 @@ def create_window(app, loop, bridge=None):
                 self.route_note.set_text("")
                 return
             model = self.cfg["llm"]
+            if self.jan_choice_blocked():
+                self.route_note.set_text("llm_choice_recovery_required")
+                return
             if model and model in self.inventory:
                 route, reason = routing.select(profile, routing.Preference(
                     "llm", (routing.Route("llm", model, "local", "jan", self.cfg["endpoint"]),)))
@@ -1407,16 +1423,21 @@ def create_window(app, loop, bridge=None):
 
         def refresh_send(self):
             text = self.entry.get_text()
-            connected = self.cfg["llm"] in self.inventory
+            connected = self.cfg["llm"] in self.inventory and not self.jan_choice_blocked()
             direct = analysis_intent.direct(text) is not None or local_actions.direct(text) is not None
             local = getattr(self, "policy", None) is not None and self.policy.mode == "LOCAL_ONLY"
             self.send.set_sensitive(not self.busy and (connected or (local and direct)))
 
         def refresh(self):
-            connected = self.cfg["llm"] in self.inventory
+            blocked = self.jan_choice_blocked()
+            connected = self.cfg["llm"] in self.inventory and not blocked
             self.setup.set_visible(not connected)
             self.return_to_chat.set_sensitive(not self.busy and connected)
-            if connected:
+            if blocked:
+                model_note = tr("Model choice recovery required. Local model connection blocked.",
+                                "Model seçimi kurtarması gerekli. Yerel model bağlantısı engellendi.",
+                                "Modellauswahl muss wiederhergestellt werden. Lokale Verbindung gesperrt.")
+            elif connected:
                 model_note = tr("Model selected. Text chat is available.",
                                 "Model seçildi. Yazılı sohbet kullanılabilir.",
                                 "Modell ausgewählt. Textchat verfügbar.")
@@ -1433,7 +1454,7 @@ def create_window(app, loop, bridge=None):
             self.refresh_research_scope()
             self.refresh_attachment_scope()
             self.refresh_model_probe(connected)
-            self.setup_connect.set_sensitive(not self.busy)
+            self.setup_connect.set_sensitive(not self.busy and not blocked)
             if not self.url.get_text().strip():
                 self.setup_note.set_text(tr(
                     "Start with your local model. Open Jan, enter its local API URL, discover models and choose one. No download is needed.",
@@ -1879,7 +1900,8 @@ def create_window(app, loop, bridge=None):
                 with self.store._mutation_lock():
                     if self.store.snapshot(profile.id) != (profile, stamp):
                         raise Hold("profile_changed")
-                    with settings.choice_transaction(proposed, expected=self.cfg):
+                    with settings.choice_transaction(proposed, expected=self.cfg,
+                            jan_transition=(self.store, profile, updated)):
                         if card != expected:
                             self.market.save_card(card, expected=expected)
                         try:
@@ -4230,6 +4252,8 @@ def create_window(app, loop, bridge=None):
 
         def require_endpoint(self, raw=None):
             """The active mode decides what kind of endpoint may be used."""
+            if self.jan_choice_blocked():
+                raise Hold("llm_choice_recovery_required")
             raw = self.url.get_text().strip() if raw is None else raw
             try:
                 result = profiles.enforce_endpoint(self.store.load(self.cfg["profile"]).checked(), raw)
@@ -4279,7 +4303,8 @@ def create_window(app, loop, bridge=None):
             # Trusted immutable route created from a validated active profile.
             # Compare current UI selection and exact inode metadata instead
             # of parsing the JSON repeatedly for every streamed text delta.
-            return (not self.closing and self.cfg.get("profile") == route[0]
+            return (not self.closing and not self.jan_choice_blocked()
+                    and self.cfg.get("profile") == route[0]
                     and self.url.get_text().strip() == route[3]
                     and self.cfg["llm"] == route[4]
                     and self.store.is_current(route[0], route[5]))

@@ -1068,6 +1068,44 @@ class MarketInventoryTests(MarketFixture):
         self.assertEqual(settings.load(), old)
         self.assertEqual(self.ui.cfg["llm"], old["llm"])
         self.assertEqual(self.ui.store.load(profile[0].id).llm_model_id, card.model_id)
+        self.assertTrue(settings.choice_pending())
+        self.assertFalse(self.ui.send.get_sensitive())
+        with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+            self.ui.attachment_route()
+
+    def test_startup_recovers_interrupted_jan_settings_stage(self):
+        import json
+        from dataclasses import replace
+        self.prepare_jan_choice()
+        old = settings.load()
+        profile = self.ui.store.load(old["profile"])
+        new = {**old, "llm": "fixture-qwen"}
+        after = replace(profile, version=profile.version + 1, llm_model_id="fixture-qwen").checked()
+        record = settings._jan_record(self.ui.store, profile, after, old, new)
+        path = settings.config_path()
+        settings._replace_text(settings._choice_journal(path), json.dumps(record, sort_keys=True))
+        settings._replace_text(path, settings._serialize(new))
+        fresh = desktop.create_window(self.app, self.loop, self.bridge)
+        self.addCleanup(fresh.win.close)
+        self.assertEqual(fresh.cfg["llm"], old["llm"])
+        self.assertEqual(settings.load()["llm"], old["llm"])
+        self.assertEqual(fresh.store.load(profile.id), profile)
+        self.assertFalse(settings.choice_pending())
+        fresh.win.close()
+        self.until(lambda: not fresh.win.get_visible())
+
+    def test_startup_preserves_unreadable_jan_journal_and_blocks_route(self):
+        path = settings._choice_journal(settings.config_path())
+        settings._replace_text(path, "{}")
+        fresh = desktop.create_window(self.app, self.loop, self.bridge)
+        self.addCleanup(fresh.win.close)
+        self.assertIn("llm_choice_recovery_required", fresh.status.get_text())
+        self.assertFalse(fresh.setup_connect.get_sensitive())
+        with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
+            fresh.attachment_route()
+        self.assertEqual(path.read_text(), "{}")
+        fresh.win.close()
+        self.until(lambda: not fresh.win.get_visible())
 
     def test_jan_stale_settings_refuse_choice_before_registration(self):
         card = self.prepare_jan_choice()
