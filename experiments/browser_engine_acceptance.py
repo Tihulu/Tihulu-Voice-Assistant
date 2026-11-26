@@ -47,8 +47,8 @@ def child(browser,driver,host_net,host_port):
         return 1
     Path("/tmp/browser-runtime").mkdir(mode=0o700)
     os.environ["XDG_RUNTIME_DIR"]="/tmp/browser-runtime"
-    def command(method,path,payload=None):
-        conn=http.client.HTTPConnection("127.0.0.1",4444,timeout=8)
+    def command(method,path,payload=None,*,timeout=8):
+        conn=http.client.HTTPConnection("127.0.0.1",4444,timeout=timeout)
         try:
             body=None if payload is None else json.dumps(payload,separators=(",",":")).encode()
             conn.request(method,path,body=body,headers={"Content-Type":"application/json"})
@@ -66,23 +66,25 @@ def child(browser,driver,host_net,host_port):
         proc=subprocess.Popen([driver,"--host","127.0.0.1","--port","4444","--log","warn"],
                               stdin=subprocess.DEVNULL,stdout=log,stderr=log)
         session=None
+        phase="driver_ready"
         try:
             deadline=time.monotonic()+10
             while True:
                 if proc.poll() is not None or time.monotonic()>=deadline:
                     raise RuntimeError("webdriver unavailable")
                 try:
-                    if command("GET","/status").get("ready"):
+                    if command("GET","/status",timeout=1).get("ready"):
                         break
                 except (OSError,RuntimeError,http.client.HTTPException):
                     pass
                 time.sleep(.1)
+            phase="session_start"
             value=command("POST","/session",{"capabilities":{"alwaysMatch":{
                 "browserName":"firefox","moz:firefoxOptions":{"binary":browser,
                     "args":["-headless","-no-remote"],
                     "prefs":{"browser.shell.checkDefaultBrowser":False,
                              "browser.startup.page":0,"datareporting.policy.dataSubmissionEnabled":False,
-                             "toolkit.telemetry.enabled":False}}}}})
+                             "toolkit.telemetry.enabled":False}}}}},timeout=30)
             session=value.get("sessionId")
             if type(session) is not str or not re.fullmatch(r"[a-fA-F0-9-]{1,64}",session):
                 raise RuntimeError("unexpected session id")
@@ -94,7 +96,9 @@ def child(browser,driver,host_net,host_port):
                    version=caps.get("browserVersion","unknown"))
             if not all(results):
                 return 1
-            command("POST",base+"/url",{"url":"file:///work/fixture.html"})
+            phase="local_navigation"
+            command("POST",base+"/timeouts",{"pageLoad":10000,"script":5000,"implicit":0})
+            command("POST",base+"/url",{"url":"file:///work/fixture.html"},timeout=15)
             record("browser-exact-local-navigation",command("GET",base+"/url")=="file:///work/fixture.html"
                    and command("GET",base+"/title")=="TIHULU Fixture")
             def element(identity):
@@ -107,18 +111,21 @@ def child(browser,driver,host_net,host_port):
                    "Public synthetic browser fixture")
             if not all(results):
                 return 1
+            phase="local_click"
             command("POST",element("change")+"/click",{})
             record("browser-fixed-local-click",command("GET",element("message")+"/text")=="Changed locally")
             # Fixed disposable host-loopback listener only, not external URLs.
             # A real browser navigation must not reach it across namespaces.
+            phase="denied_navigation"
             try:
-                command("POST",base+"/url",{"url":"http://127.0.0.1:"+host_port+"/fixture"})
+                command("POST",base+"/url",{"url":"http://127.0.0.1:"+host_port+"/fixture"},timeout=15)
             except RuntimeError as exc:
                 denied=("NS_ERROR_CONNECTION_REFUSED" in str(exc)
                         or "NS_ERROR_NET_TIMEOUT" in str(exc))
             else:
                 denied=False
             record("browser-real-host-navigation-denied",denied)
+            phase="session_close"
             command("DELETE",base)
             session=None
             record("browser-session-closed",True)
@@ -131,7 +138,7 @@ def child(browser,driver,host_net,host_port):
             record("browser-closed-session-unusable",closed)
         except (RuntimeError,OSError,http.client.HTTPException) as exc:
             print(json.dumps({"case":"browser-webdriver-session","status":"HOLD",
-                              "reason":str(exc)[:1000]}),flush=True)
+                              "phase":phase,"reason":str(exc)[:1000]}),flush=True)
             with open("/tmp/geckodriver.log","rb") as detail:
                 print(detail.read(4096).decode("utf-8","replace"),flush=True)
             return 1
@@ -223,7 +230,7 @@ def main():
             listener.listen(4)
             port=str(listener.getsockname()[1])
             result=subprocess.run(prefix+["--","/usr/bin/python3","-I","/work/runner.py","--child",*tools,host_net,port],
-                                  stdin=subprocess.DEVNULL,timeout=90,check=False,
+                                  stdin=subprocess.DEVNULL,timeout=115,check=False,
                                   env={"PATH":"/usr/bin:/bin","LC_ALL":"C.UTF-8"})
             listener.setblocking(False)
             try:

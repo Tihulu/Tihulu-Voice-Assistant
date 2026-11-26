@@ -124,3 +124,5 @@ CAP-04 #336 loader diagnostics identify stock firefox.sh failing because which i
 CAP-04 alternative package-wrapper remediation: verify fixed stock /usr/lib/firefox/firefox ELF, root ownership and exact resolved wrapper/binary identity; execute actual package binary inside existing /usr read-only mount, no which or /etc/alternatives dependency, no sandbox disable. Hosted Ubuntu22.04 only, actual browser acceptance pending.
 
 CAP-04 #339 real Firefox 160.0 private session, local navigation/DOM/click and closure 8/8 PASS. Successor adds actual fixed host-loopback listener denial (socket probe and real WebDriver navigation), no connection accepted by host listener, and invalid-session rejection after close. Four additional actual cases, 12 planned. No public web or owner profile; no security relaxation.
+
+CAP-04 #340 Firefox 160.0.1 version succeeded, 5/12 checks PASS, WebDriver session startup timed out. Successor separates bounded startup (30s) from ordinary commands (8s), fixed page load/script limits, phase-specific HOLD diagnostics, 115s outer timeout. No retries or security relaxation. Prior #339 8/8 preserved; expanded package requires new evidence.
