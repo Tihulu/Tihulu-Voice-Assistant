@@ -4555,6 +4555,28 @@ class StreamingReplyTests(DesktopTests):
         self.text("Merhaba!")
         self.assertEqual(len(self.ui.growing), 2)
 
+    def test_rejected_stream_is_cleared_before_retry_deltas(self):
+        self.connect_model()
+        seen = []
+
+        async def chat(messages, on_delta=None):
+            if not seen:
+                seen.append("first")
+                on_delta("Hello how are you?")
+                self.assertIn("Hello how are you?", self.bubbles()[-1])
+                return "Hello how are you?"
+            seen.append("retry")
+            self.assertEqual(self.bubbles()[-1], "JARVIS\n")
+            on_delta("Merhaba!")
+            self.assertEqual(self.bubbles()[-1], "JARVIS\nMerhaba!")
+            return "Merhaba!"
+
+        with patch.object(self.backend, "chat", side_effect=chat):
+            self.text("naber nasilsin")
+        self.assertEqual(seen, ["first", "retry"])
+        self.assertEqual(self.ui.session.history[-1].content, "Merhaba!")
+        self.assertEqual(self.bubbles()[-1], "JARVIS\nMerhaba!")
+
     def test_a_reply_grows_with_the_pieces_as_they_arrive(self):
         self.connect_model()
         self.pieces[:] = ["Merha", "ba!", " Nasılsın?"]
