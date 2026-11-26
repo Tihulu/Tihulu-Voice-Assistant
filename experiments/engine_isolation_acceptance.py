@@ -3,6 +3,7 @@
 import hashlib
 import json
 import os
+import stat
 from pathlib import Path
 import socket
 import signal
@@ -454,7 +455,42 @@ with open('/work/out/oversized','xb',buffering=0) as handle:
                all(hashlib.sha256(p.read_bytes()).hexdigest()==h for p,h in source_hashes.items()))
         if not all(row["status"]=="PASS" for row in results):
             return 1
-        office_version = run(["/usr/bin/libreoffice","--version"])
+        # Debian/Ubuntu package configuration lives outside /usr. Copy only
+        # registered, regular stock package files into a disposable fixture;
+        # never mount the runner's /etc or any user configuration directory.
+        packages = ("libreoffice-common","libreoffice-core","libreoffice-writer")
+        listing = subprocess.run(["/usr/bin/dpkg-query","-L",*packages],check=True,
+                                 stdout=subprocess.PIPE,stderr=subprocess.PIPE,timeout=10)
+        config = root/"office-package-config"
+        config.mkdir(mode=0o700)
+        config_count=0
+        for entry in sorted(set(listing.stdout.decode("utf-8").splitlines())):
+            if not entry.startswith("/etc/libreoffice/"):
+                continue
+            src=Path(entry)
+            rel=src.relative_to("/etc/libreoffice")
+            if ".." in rel.parts:
+                raise RuntimeError("invalid package configuration path")
+            if src.is_symlink():
+                # No traversal or arbitrary host symlink target.
+                continue
+            if not src.is_file():
+                continue
+            info=src.stat()
+            if not stat.S_ISREG(info.st_mode) or info.st_uid!=0 or info.st_size>MAX_OUTPUT:
+                raise RuntimeError("unexpected package configuration")
+            dst=config/rel
+            dst.parent.mkdir(parents=True,exist_ok=True)
+            dst.write_bytes(src.read_bytes())
+            config_count+=1
+        print(json.dumps({"office_package_config_files":config_count}),flush=True)
+        if not config_count:
+            print(json.dumps({"case":"sandbox-office-config","status":"HOLD"}),flush=True)
+            return 1
+        prefix[-2:-2]=["--dir","/etc","--ro-bind",str(config),"/etc/libreoffice",
+                        "--setenv","SAL_USE_VCLPLUGIN","svp"]
+        office_version = run(["/usr/bin/libreoffice","-env:UserInstallation=file:///tmp/office-profile",
+                              "--headless","--version"])
         if office_version.returncode:
             print(json.dumps({"case":"sandbox-office-version","status":"HOLD",
                               "stderr":office_version.stderr.decode("utf-8","replace")[:1000]}),flush=True)
