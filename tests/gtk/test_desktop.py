@@ -2468,6 +2468,27 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         settings.save(newer)
         self.ui.require_audio_choice()
 
+    def test_unregister_refuses_selected_audio_without_dropping_integrity(self):
+        path = self.weights("runtime-selected.bin")
+        self.ui.select_imported_audio("stt", str(path))
+        self.pick_card(path.name)
+        before = settings.load()
+        card = self.ui.market.card(path.name)
+        self.ui.forget_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "audio_model_selected")
+        self.assertEqual(settings.load(), before)
+        self.assertEqual(self.ui.market.card(path.name), card)
+
+    def test_unregister_refuses_stale_window_before_registry_effect(self):
+        card, _ = self.prepare_stt()
+        newer = settings.load()
+        newer["text_scale"] = "large"
+        settings.save(newer)
+        self.ui.forget_selected_card()
+        self.assertEqual(self.ui.status.get_text(), "settings_changed")
+        self.assertEqual(settings.load(), newer)
+        self.assertEqual(self.ui.market.card(card.model_id), card)
+
     def test_registered_changed_stt_is_refused_before_capture(self):
         path = self.weights("runtime-changed.bin")
         self.ui.select_imported_audio("stt", str(path))

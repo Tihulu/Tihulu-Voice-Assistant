@@ -4096,23 +4096,40 @@ def create_window(app, loop, bridge=None):
                 expected = self.selected_card_snapshot()
                 if expected is None:
                     raise Hold("registry_card_changed")
-                self.market.unregister(model_id, expected=expected)
-                self.cfg["market_refs"] = {k: v for k, v in self.cfg.get("market_refs", {}).items()
-                                           if self.ref_still_registered(k)}
-                self.cfg["audio_digests"] = {k: v for k, v in self.cfg.get("audio_digests", {}).items()
-                                             if k in self.cfg["market_refs"]}
-                if not self.cfg["audio_digests"]:
-                    self.cfg.pop("audio_digests")
-                sidecars = {k: v for k, v in self.cfg.get("voice_digests", {}).items()
-                            if k in self.cfg.get("audio_digests", {})}
-                if sidecars:
-                    self.cfg["voice_digests"] = sidecars
-                else:
-                    self.cfg.pop("voice_digests", None)
-                self.save()
+                p = settings.config_path()
+                with self.market.transfer_lease(model_id), self.market._write_guard(), settings._write_guard(p):
+                    settings._require_no_choice(p)
+                    if self.market.card(model_id) != expected:
+                        raise Hold("registry_card_changed")
+                    current = settings.load(p)
+                    if current != self.saved_cfg or current != settings.checked(self.cfg):
+                        raise Hold("settings_changed")
+                    selected = {current["stt"], *current["voices"].values()} - {""}
+                    ref = expected.storage_ref
+                    if ref and current["market_refs"].get(ref) in selected:
+                        raise Hold("audio_model_selected")
+                    proposed = settings.checked(current)
+                    # Only remove this card's reference, never unrelated orphan
+                    # references (which may still protect a selected model).
+                    other_refs = {c.storage_ref for c in self.market.cards()
+                                  if c.model_id != model_id}
+                    if ref and ref not in other_refs:
+                        proposed["market_refs"].pop(ref, None)
+                        for field in ("audio_digests", "voice_digests"):
+                            proposed.get(field, {}).pop(ref, None)
+                            if not proposed.get(field):
+                                proposed.pop(field, None)
+                    text = settings._serialize(proposed)
+                    self.market.unregister(model_id, expected=expected)
+                    # If publication fails, retaining an old reference is safer
+                    # than silently removing the verification requirement.
+                    if proposed != current:
+                        settings._replace_text(p, text)
+                self.cfg = proposed
+                self.saved_cfg = deepcopy(proposed)
                 self.build_market_page()
-            except Hold as exc:
-                self.set_state("ready", str(exc))
+            except (Hold, OSError) as exc:
+                self.set_state("ready", str(exc) if isinstance(exc, Hold) else "settings_unwritable")
 
         def ref_still_registered(self, ref):
             return any(card.storage_ref == ref for card in self.market.cards())
