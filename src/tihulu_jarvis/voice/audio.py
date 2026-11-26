@@ -455,6 +455,7 @@ async def _capture(wav, finish, publish, *, checkpoint):
 
     async def run():
         nonlocal heard_start
+        interrupted = False
         async with child("arecord", "-q", "-t", "wav", "-f", "S16_LE", "-r",
                          "16000", "-c", "1", "-d", "30", wav, checkpoint=check) as p:
             check()
@@ -469,14 +470,20 @@ async def _capture(wav, finish, publish, *, checkpoint):
                     check()
                     try:
                         p.send_signal(signal.SIGINT)
+                        interrupted = True
                     except ProcessLookupError:
                         pass
                     break
                 await asyncio.sleep(.04)
             check()
             # Keep the existing short finish wait, bounded by the stage.
-            await await_authorized(p.wait, min(2, deadline.remaining()), check)
+            status = await await_authorized(p.wait, min(2, deadline.remaining()), check)
             check()
+            # arecord can report 1 or -SIGINT when the owner finishes early.
+            # A spontaneous nonzero exit must never reach transcription, even
+            # when the failed recorder left a seemingly usable partial WAV.
+            if status != 0 and not (interrupted and status in (1, -signal.SIGINT)):
+                raise Hold("capture_failed")
 
     try:
         await await_with_deadline(run, deadline, interval=AUTH_POLL)
