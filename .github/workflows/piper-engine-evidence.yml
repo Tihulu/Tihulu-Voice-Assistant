@@ -1,4 +1,4 @@
-name: Disposable pinned Piper Turkish neural speech evidence
+name: Disposable pinned Piper multilingual neural speech evidence
 on:
   pull_request:
     branches: ['**']
@@ -15,6 +15,25 @@ jobs:
   piper:
     runs-on: ubuntu-22.04
     timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: tr
+            revision: 7a90ba8ce175d52cf5b0f6e7fb78ca958bbfcd67
+            voice: tr/tr_TR/dfki/medium/tr_TR-dfki-medium
+            model_sha: 2844717f524ab965d3fe86e60562cbb601d3e456836efcc2196cc3a14112a8fb
+            config_sha: '13ebd7810f1b61b5027583cf3131a0a233b6ea81c38f2200ebc4ff41c3cca039'
+          - language: en
+            revision: a08e8fa47faf6681ecc42a79cfa95369430cbcf6
+            voice: en/en_US/lessac/medium/en_US-lessac-medium
+            model_sha: 5efe09e69902187827af646e1a6e9d269dee769f9877d17b16b1b46eeaaf019f
+            config_sha: ''
+          - language: de
+            revision: 5227e415beb85e92d953cfba376bfc72104bc7ff
+            voice: de/de_DE/thorsten/medium/de_DE-thorsten-medium
+            model_sha: 7e64762d8e5118bb578f2eea6207e1a35a8e0c30595010b666f983fc87bb7819
+            config_sha: ''
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
@@ -28,6 +47,11 @@ jobs:
           test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           git diff --exit-code d4b756351b1552aa5806c89e39eda3b5b82aa337 HEAD -- src packaging tools tests pyproject.toml data
       - name: Prepare public pinned wheels and voice
+        env:
+          VOICE_REV: ${{ matrix.revision }}
+          VOICE_PATH: ${{ matrix.voice }}
+          MODEL_SHA: ${{ matrix.model_sha }}
+          CONFIG_SHA: ${{ matrix.config_sha }}
         run: |
           sudo apt-get update -qq
           sudo apt-get install --no-install-recommends -y bubblewrap python3-venv curl libgomp1
@@ -36,13 +60,18 @@ jobs:
           /usr/bin/python3 -m venv "$RUNNER_TEMP/piper-fixture/venv"
           "$RUNNER_TEMP/piper-fixture/venv/bin/python" -m pip --isolated download --index-url https://pypi.org/simple --only-binary=:all: --require-hashes --dest "$RUNNER_TEMP/piper-fixture/wheels" -r experiments/piper-fixture-requirements.txt
           "$RUNNER_TEMP/piper-fixture/venv/bin/python" -m pip --isolated install --no-index --find-links "$RUNNER_TEMP/piper-fixture/wheels" --only-binary=:all: --require-hashes --target "$RUNNER_TEMP/piper-fixture/site" -r experiments/piper-fixture-requirements.txt
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 120 --max-filesize 70000000 -o "$RUNNER_TEMP/piper-fixture/voice.onnx" 'https://huggingface.co/rhasspy/piper-voices/resolve/7a90ba8ce175d52cf5b0f6e7fb78ca958bbfcd67/tr/tr_TR/dfki/medium/tr_TR-dfki-medium.onnx'
-          echo "2844717f524ab965d3fe86e60562cbb601d3e456836efcc2196cc3a14112a8fb  $RUNNER_TEMP/piper-fixture/voice.onnx" | sha256sum -c -
-          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 16384 -o "$RUNNER_TEMP/piper-fixture/voice.json" 'https://huggingface.co/rhasspy/piper-voices/resolve/7a90ba8ce175d52cf5b0f6e7fb78ca958bbfcd67/tr/tr_TR/dfki/medium/tr_TR-dfki-medium.onnx.json'
-          echo "13ebd7810f1b61b5027583cf3131a0a233b6ea81c38f2200ebc4ff41c3cca039  $RUNNER_TEMP/piper-fixture/voice.json" | sha256sum -c -
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 120 --max-filesize 70000000 -o "$RUNNER_TEMP/piper-fixture/voice.onnx" "https://huggingface.co/rhasspy/piper-voices/resolve/$VOICE_REV/$VOICE_PATH.onnx"
+          echo "$MODEL_SHA  $RUNNER_TEMP/piper-fixture/voice.onnx" | sha256sum -c -
+          curl --fail --silent --show-error --location --proto '=https' --proto-redir '=https' --max-time 60 --max-filesize 16384 -o "$RUNNER_TEMP/piper-fixture/voice.json" "https://huggingface.co/rhasspy/piper-voices/resolve/$VOICE_REV/$VOICE_PATH.onnx.json"
+          if test -n "$CONFIG_SHA"; then
+            echo "$CONFIG_SHA  $RUNNER_TEMP/piper-fixture/voice.json" | sha256sum -c -
+          else
+            sha256sum "$RUNNER_TEMP/piper-fixture/voice.json"
+          fi
       - name: Actual neural TTS in private CPU fixture
         env:
           PYTHONPATH: src:experiments
           PYTHONDONTWRITEBYTECODE: '1'
+          VOICE_LANGUAGE: ${{ matrix.language }}
         run: |
-          /usr/bin/python3 experiments/piper_engine_acceptance.py "$RUNNER_TEMP/piper-fixture/site" "$RUNNER_TEMP/piper-fixture/voice.onnx" "$RUNNER_TEMP/piper-fixture/voice.json"
+          /usr/bin/python3 experiments/piper_engine_acceptance.py "$RUNNER_TEMP/piper-fixture/site" "$RUNNER_TEMP/piper-fixture/voice.onnx" "$RUNNER_TEMP/piper-fixture/voice.json" "$VOICE_LANGUAGE"
