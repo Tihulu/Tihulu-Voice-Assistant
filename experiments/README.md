@@ -20,3 +20,7 @@ Typed synthetic OCR and PDF text output: exact call target, source digest, reque
 ## CAP-01/02 real engine smoke evidence (CI only)
 
 Separate disposable runner, fixed self-generated public documents, no user paths, no desktop entrypoint or runtime grant. Actual Tesseract TR/EN/DE PNG OCR; ReportLab text-layer PDF with Poppler per-page extraction; scan-only PDF render and OCR fallback; corrupt/encrypted refusal. Ten fixed cases, exact normalized text criterion, source digests and version evidence. Apt packages installed only in CI. This is not adversarial parser isolation, real user-document acceptance, production adapter integration or authorization for activation. No output document shipped.
+
+## CAP-04 exact browser operation binding (fixture only)
+
+Firefox and Brave navigate/snapshot operations bind task-owned profile, tab, canonical restricted HTTPS URL, and snapshot content digest. Distinct grants; no navigation grant reuse for snapshot or cross-browser/profile/page. Reject ambiguous authority, private literal/alternate address forms, paths with percent escapes/traversal, queries/fragments, noncanonical typed inputs. DNS, actual profile ownership, peer enforcement and transport remain unimplemented. No real browser or UI control. Three new tests. Legacy origin-only receipts are fixture-only and never authorize real I/O.
