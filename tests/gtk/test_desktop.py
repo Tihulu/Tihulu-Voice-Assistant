@@ -1073,6 +1073,50 @@ class MarketInventoryTests(MarketFixture):
         with self.assertRaisesRegex(Hold, "llm_choice_recovery_required"):
             self.ui.attachment_route()
 
+    def prepare_mixed_jan_choice(self):
+        card = self.prepare_jan_choice()
+        original = self.ui.store._save_locked
+        def committed_then_failed(updated):
+            original(updated)
+            raise Hold("profile_history_write_failed")
+        with patch.object(self.ui.store, "_save_locked", side_effect=committed_then_failed):
+            self.ui.use_selected_card()
+        self.assertTrue(settings.choice_pending())
+        return card
+
+    def test_explicit_jan_recovery_requires_review_and_separate_confirmation(self):
+        card = self.prepare_mixed_jan_choice()
+        old = settings.load()
+        profile = self.ui.store.snapshot(old["profile"])
+        self.assertFalse(self.ui.settings_choice_confirm.get_sensitive())
+        self.ui.confirm_choice_recovery()
+        self.assertEqual(settings.load(), old)
+        self.click(self.ui.settings_choice_inspect)
+        self.assertIn(card.model_id, self.ui.settings_choice_note.get_text())
+        self.assertTrue(self.ui.settings_choice_confirm.get_sensitive())
+        self.assertEqual(settings.load(), old)
+        self.click(self.ui.settings_choice_confirm)
+        self.assertFalse(settings.choice_pending())
+        self.assertEqual(settings.load()["llm"], card.model_id)
+        self.assertEqual(self.ui.cfg["llm"], card.model_id)
+        self.assertEqual(self.ui.store.snapshot(old["profile"]), profile)
+        self.assertEqual(self.ui.inventory, ())
+        self.assertFalse(self.ui.send.get_sensitive())
+
+    def test_jan_recovery_confirmation_refuses_changed_card(self):
+        from dataclasses import replace
+        card = self.prepare_mixed_jan_choice()
+        old = settings.load()
+        self.click(self.ui.settings_choice_inspect)
+        self.assertTrue(self.ui.settings_choice_confirm.get_sensitive())
+        current = self.ui.market.card(card.model_id)
+        self.ui.market.save_card(replace(current, display_name="Changed"), expected=current)
+        self.click(self.ui.settings_choice_confirm)
+        self.assertTrue(settings.choice_pending())
+        self.assertEqual(settings.load(), old)
+        self.assertFalse(self.ui.settings_choice_confirm.get_sensitive())
+        self.assertIn("llm_choice_recovery_required", self.ui.settings_choice_note.get_text())
+
     def test_startup_recovers_interrupted_jan_settings_stage(self):
         import json
         from dataclasses import replace
