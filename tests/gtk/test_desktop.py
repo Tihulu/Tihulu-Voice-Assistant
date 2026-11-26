@@ -2479,6 +2479,17 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         desktop.audio.listen.assert_not_called()
         self.assertFalse(self.backend.requests)
 
+    def test_registered_changed_piper_sidecar_is_refused_before_preview(self):
+        path = self.weights("runtime-config.onnx")
+        config = path.with_name(path.name + ".json")
+        config.write_text('{"language":{"code":"tr"}}')
+        self.ui.select_imported_audio("tr", str(path))
+        config.write_text('{"language":{"code":"tr"},"speaker_id":1}')
+        self.ui.preview("tr")
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "voice_digest_mismatch")
+        desktop.audio.speak.assert_not_called()
+
     def test_registered_changed_piper_is_refused_before_preview(self):
         path = self.weights("runtime-changed.onnx")
         path.with_name(path.name + ".json").write_text('{"language":{"code":"tr"}}')

@@ -248,6 +248,20 @@ class SettingsSnapshotBoundaryTests(unittest.TestCase):
                 settings.save({**cfg, "audio_digests": bad}, self.path)
         self.assertEqual(settings.load(self.path), cfg)
 
+    def test_voice_digest_requires_registered_full_weight_digest(self):
+        digest = "a" * 64
+        ref = "sha256-" + digest[:32]
+        cfg = {**settings.empty(), "market_refs": {ref: "/fixture/voice.onnx"},
+               "audio_digests": {ref: digest}, "voice_digests": {ref: "b" * 64}}
+        settings.save(cfg, self.path)
+        self.assertEqual(settings.load(self.path), cfg)
+        for bad in ({**cfg, "audio_digests": {}},
+                    {**cfg, "market_refs": {ref: "/fixture/model.bin"}},
+                    {**cfg, "voice_digests": {ref: "invalid"}}):
+            with self.assertRaisesRegex(Hold, "invalid_local_settings"):
+                settings.save(bad, self.path)
+        self.assertEqual(settings.load(self.path), cfg)
+
     def test_reset_of_already_absent_file_is_idempotent(self):
         before = settings.empty()
         before["stt"] = "/fixture/old.bin"

@@ -63,6 +63,15 @@ def checked(obj):
             raise Hold("invalid_local_settings")
     if digests:
         out["audio_digests"] = dict(digests)
+    sidecars = obj.get("voice_digests", {})
+    if not isinstance(sidecars, dict) or len(sidecars) > 256:
+        raise Hold("invalid_local_settings")
+    for ref, digest in sidecars.items():
+        if (ref not in digests or not clean[ref].lower().endswith(".onnx")
+                or not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+            raise Hold("invalid_local_settings")
+    if sidecars:
+        out["voice_digests"] = dict(sidecars)
     hosts = obj.get("allowed_hosts", [])
     if not isinstance(hosts, list) or len(hosts) > 32:
         raise Hold("invalid_local_settings")
@@ -192,7 +201,8 @@ def require_current_audio_selection(expected, path=None):
     current = load(path)
     fields = ("profile", "stt", "voices", "market_refs", "resources")
     if (any(current[key] != expected[key] for key in fields)
-            or current.get("audio_digests", {}) != expected.get("audio_digests", {})):
+            or current.get("audio_digests", {}) != expected.get("audio_digests", {})
+            or current.get("voice_digests", {}) != expected.get("voice_digests", {})):
         raise Hold("audio_settings_changed_restart_required")
 
 
