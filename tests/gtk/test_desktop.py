@@ -2378,6 +2378,23 @@ class LocalSelectionConsistencyUITests(MarketFixture):
         self.assertEqual(self.ui.status.get_text(), "model_file_changed")
         self.assertIsNone(self.ui.market.lookup_card(path.name))
 
+    def test_audio_import_refuses_weights_changed_during_selection_stage(self):
+        path = self.weights("fixture-worker.bin")
+        original = settings._replace_text
+        def changed(target, text):
+            original(target, text)
+            if target == settings.config_path() and settings.load()["stt"] == str(path):
+                replacement = path.with_suffix(".replacement")
+                replacement.write_bytes(path.read_bytes())
+                replacement.replace(path)
+        with patch.object(settings, "_replace_text", side_effect=changed):
+            self.ui.start_audio_import("stt", str(path))
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.status.get_text(), "model_file_changed")
+        self.assertEqual(self.ui.market.card(path.name).state, "REGISTERED")
+        self.assertNotEqual(settings.load()["stt"], str(path))
+        self.assertFalse(settings.audio_choice_pending())
+
     def test_audio_import_worker_selects_verified_model(self):
         path = self.weights("fixture-worker.bin")
         self.ui.start_audio_import("stt", str(path))

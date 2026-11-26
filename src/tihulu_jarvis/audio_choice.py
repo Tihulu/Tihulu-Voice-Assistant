@@ -126,7 +126,8 @@ def recover(registry, path=None):
         raise Hold(REASON) from None
 
 
-def commit(registry, expected_card, card, current, proposed, slot, path=None):
+def commit(registry, expected_card, card, current, proposed, slot, path=None,
+           *, checkpoint=lambda: None):
     """Publish one reviewed local audio preference and exact card transition."""
     p = settings.config_path() if path is None else Path(path)
     current, proposed = settings.checked(current), settings.checked(proposed)
@@ -149,6 +150,7 @@ def commit(registry, expected_card, card, current, proposed, slot, path=None):
         raise Hold("invalid_audio_choice_transition")
     with registry.transfer_lease(card.model_id), registry._write_guard(), settings._write_guard(p):
         settings._require_no_choice(p)
+        checkpoint()
         if registry.card(card.model_id) != expected_card:
             raise Hold("registry_card_changed")
         if settings.load(p) != current:
@@ -162,6 +164,7 @@ def commit(registry, expected_card, card, current, proposed, slot, path=None):
                "old_settings": settings._digest(settings._serialize(current)),
                "new_settings": settings._digest(settings._serialize(proposed)),
                "old_registry": old_generation, "new_registry": new_generation}
+        checkpoint()
         try:
             settings._replace_text(_journal(p), json.dumps(rec, sort_keys=True))
         except OSError:
@@ -171,6 +174,12 @@ def commit(registry, expected_card, card, current, proposed, slot, path=None):
                 or settings.load(p) != current or settings._choice_identity(p.lstat()) != settings_stamp):
             raise Hold(REASON)
         try:
+            checkpoint()
+        except Hold:
+            # No setting or registry effect has occurred yet.
+            _clear(p, proof)
+            raise
+        try:
             settings._replace_text(p, settings._serialize(proposed))
         except OSError:
             raise Hold("settings_unwritable") from None
@@ -179,6 +188,7 @@ def commit(registry, expected_card, card, current, proposed, slot, path=None):
                 or registry.snapshot()[0] != old_generation):
             raise Hold(REASON)
         try:
+            checkpoint()
             saved = registry.save_card(card, expected=expected_card)
         except (Hold, OSError):
             if (registry.snapshot()[0] != old_generation or _read(p) != proof

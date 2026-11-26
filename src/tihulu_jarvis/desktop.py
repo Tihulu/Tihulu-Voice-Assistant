@@ -1960,8 +1960,10 @@ def create_window(app, loop, bridge=None):
             if inspected is None:
                 inspected = self.inspect_audio_import(key, path, checkpoint=checkpoint)
             card = self.register_choice(key, path, inspected=inspected, checkpoint=checkpoint)
-            self.check_import_inspection(key, path, inspected, checkpoint=checkpoint)
-            self.use_card(card.model_id, expected=card)
+            def checked_import():
+                self.check_import_inspection(key, path, inspected, checkpoint=checkpoint)
+            checked_import()
+            self.use_card(card.model_id, expected=card, checkpoint=checked_import)
             self.build_market_page()
 
         def start_audio_import(self, key, path):
@@ -1986,7 +1988,6 @@ def create_window(app, loop, bridge=None):
                     raise Hold("turn_cancelled")
                 if not self.store.is_current(profile.id, stamp):
                     raise Hold("profile_changed")
-                settings._require_no_choice(settings.config_path())
 
             async def run(epoch):
                 self.session.check(epoch)
@@ -2052,8 +2053,9 @@ def create_window(app, loop, bridge=None):
             self.models.set_active(self.inventory.index(card.model_id))
             self.refresh()
 
-        def use_card(self, model_id, *, expected=None):
+        def use_card(self, model_id, *, expected=None, checkpoint=lambda: None):
             """Validate selection before recording an activation; never start a model."""
+            checkpoint()
             card = self.market.card(model_id)
             if expected is not None and card != expected:
                 raise Hold("registry_card_changed")
@@ -2098,7 +2100,8 @@ def create_window(app, loop, bridge=None):
                 proposed["voices"][lang] = path
             # Bind both durable generations before changing either store.
             audio_choice.commit(self.market, expected, card, self.cfg, proposed,
-                                "stt" if card.category == "stt" else lang)
+                                "stt" if card.category == "stt" else lang,
+                                checkpoint=checkpoint)
             self.cfg = proposed
             self.update_labels()
             self.refresh()
