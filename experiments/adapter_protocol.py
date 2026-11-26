@@ -146,6 +146,7 @@ class LocalAdapter:
             self._g.claim(grant,self._req)
         self._state="ready"
         self._transport_started=False
+        self._stream_owner=None
         self._seq=0
         self._result=bytearray()
         self._lock=Lock()
@@ -179,8 +180,39 @@ class LocalAdapter:
     def state(self):
         with self._lock:
             return self._state
+    def attach_fixture_stream(self,owner):
+        with self._lock:
+            if (type(owner) is not object or self._state!="ready" or self._seq!=0
+                    or self._stream_owner is not None or self._native_voice):
+                raise Refused("stream_owner_unavailable")
+            self._checkpoint()
+            self._stream_owner=owner
+
+    def checkpoint_fixture_stream(self,owner):
+        with self._lock:
+            if self._stream_owner is not owner or owner is None or self._state not in ("ready","running"):
+                raise Refused("stream_not_live")
+            self._checkpoint()
+
+    def stream_event(self,owner,identity,sequence,kind,value):
+        with self._lock:
+            if self._stream_owner is not owner or owner is None:
+                raise Refused("stream_owner_mismatch")
+            return self._event(identity,sequence,kind,value)
+
+    def abort_fixture_stream(self,owner):
+        with self._lock:
+            if self._stream_owner is not owner or owner is None:
+                raise Refused("stream_owner_mismatch")
+            if self._state!="completed":
+                self._result.clear()
+                self._state="cancelled"
+                self._g.revoke(self._grant.identity)
+
     def event(self,identity,sequence,kind,value):
         with self._lock:
+            if self._stream_owner is not None:
+                raise Refused("stream_owner_mismatch")
             return self._event(identity,sequence,kind,value)
     def frame(self, raw):
         """Strict offline normalized frame, not Jan/OpenAI wire compatibility.
@@ -189,6 +221,8 @@ class LocalAdapter:
         with the same model/request identity entering a new call.
         """
         with self._lock:
+            if self._stream_owner is not None:
+                raise Refused("stream_owner_mismatch")
             if self._state not in ("ready","running"):
                 raise Refused("terminal_call")
             try:
