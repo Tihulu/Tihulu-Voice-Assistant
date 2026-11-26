@@ -190,6 +190,29 @@ class LocalAdapter:
             self._state="held"
             raise
         return bytes(self._result)
+    def _speech_call(self,version,language,artifact,output):
+        from capabilities import CapabilityCall
+        if self.call.operation!="llm":
+            raise Refused("local_llm_required")
+        payload=self._completed_result()
+        call=CapabilityCall("espeak_ng",version,"text_to_wav",
+                    (("artifact",artifact),("digest",sha256(payload).hexdigest()),
+                     ("language",language),("output",output))).checked()
+        return call,payload
+
+    def prepare_speech(self,version,language,artifact,output):
+        with self._lock:
+            call,_=self._speech_call(version,language,artifact,output)
+            return call
+
+    def start_speech(self,version,language,artifact,output,grant):
+        from speech_result import SpeechFixture
+        with self._lock:
+            call,payload=self._speech_call(version,language,artifact,output)
+            job=SpeechFixture(self._g,self._req.context,call,grant,
+                              dependencies=((self._grant,self._req),))
+            return job,payload
+
     def cancel(self):
         with self._lock:
             self._result.clear()

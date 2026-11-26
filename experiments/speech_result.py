@@ -38,13 +38,18 @@ class SpeechResult:
     data: bytes
 
 class SpeechFixture:
-    def __init__(self,gateway,context,call,grant):
+    def __init__(self,gateway,context,call,grant,*,dependencies=()):
         if type(gateway) is not FixtureGateway or type(call) is not CapabilityCall or (call.adapter,call.operation)!=("espeak_ng","text_to_wav"):
             raise Refused("speech_fixture")
         self._g,self._grant=gateway,grant
         self._req=call.request(context)
         self._args=dict(call.args)
-        gateway.claim(grant,self._req)
+        if type(dependencies) is not tuple:
+            raise Refused("invalid_speech_dependencies")
+        if dependencies:
+            gateway.claim_with_dependencies(grant,self._req,dependencies)
+        else:
+            gateway.claim(grant,self._req)
         self._lock=Lock()
         self._state="ready"
         self._receipt=None
