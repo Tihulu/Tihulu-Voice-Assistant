@@ -2158,6 +2158,25 @@ class ArchiveDurabilityTests(unittest.TestCase):
         self.assertFalse(archive.exists())
         self.assertEqual(self.target.read_bytes(), OLD)
 
+    def test_rollback_same_digest_refuses_final_checkpoint_mutation(self):
+        from dataclasses import replace
+        newer = self.registry.save_card(replace(self.card, display_name="Newer"))
+        verified = False
+        original = market._verified_artifact
+        def hash_then_flag(*args, **kwargs):
+            nonlocal verified
+            digest = original(*args, **kwargs)
+            verified = True
+            return digest
+        def checkpoint():
+            if verified:
+                self.target.write_bytes(b"x" * len(OLD))
+        with patch.object(market, "_verified_artifact", side_effect=hash_then_flag):
+            with self.assertRaisesRegex(Hold, "rollback_artifact_unverified"):
+                self.registry.rollback(self.card.model_id, self.card.revision,
+                                       expected=newer, checkpoint=checkpoint)
+        self.assertEqual(self.registry.card(self.card.model_id), newer)
+
     def test_rollback_same_digest_refuses_redirected_artifact_directory(self):
         from dataclasses import replace
         newer = self.registry.save_card(replace(self.card, display_name="Newer"))
