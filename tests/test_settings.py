@@ -231,6 +231,23 @@ class SettingsSnapshotBoundaryTests(unittest.TestCase):
         settings.save(newer, self.path)
         settings.require_current_audio_selection(before, self.path)
 
+    def test_optional_audio_digest_preserves_legacy_serialization(self):
+        before = settings.empty()
+        self.assertEqual(settings._serialize(before), settings._serialize({**before, "audio_digests": {}}))
+        self.assertNotIn("audio_digests", settings.checked(before))
+
+    def test_audio_digest_requires_matching_reference(self):
+        digest = "a" * 64
+        ref = "sha256-" + digest[:32]
+        cfg = {**settings.empty(), "market_refs": {ref: "/fixture/model.bin"},
+               "audio_digests": {ref: digest}}
+        settings.save(cfg, self.path)
+        self.assertEqual(settings.load(self.path), cfg)
+        for bad in ({ref: "b" * 64}, {"other": digest}, {ref: digest[:32]}):
+            with self.assertRaisesRegex(Hold, "invalid_local_settings"):
+                settings.save({**cfg, "audio_digests": bad}, self.path)
+        self.assertEqual(settings.load(self.path), cfg)
+
     def test_reset_of_already_absent_file_is_idempotent(self):
         before = settings.empty()
         before["stt"] = "/fixture/old.bin"

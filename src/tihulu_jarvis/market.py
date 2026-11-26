@@ -327,15 +327,15 @@ def require_import_proof(proof, *, checkpoint=lambda: None):
 class RuntimeModelProofs:
     """Per-window bounded cache of verified registered local weight identities.
 
-    The historical storage reference holds 128 bits of SHA-256, not a full
-    digest. Legacy paths with no reference retain their existing behavior;
+    New imports retain a full digest; historical storage references hold only
+    128 bits of SHA-256. Legacy paths with no reference retain existing behavior;
     this class does not claim they are content-verified.
     """
 
     def __init__(self):
         self._proofs = {}
 
-    async def bind(self, path, refs, *, checkpoint):
+    async def bind(self, path, refs, *, checkpoint, digests=None):
         checkpoint()
         matching = tuple(ref for ref, value in refs.items() if value == path)
         if not matching:
@@ -344,7 +344,12 @@ class RuntimeModelProofs:
             raise Hold("model_reference_unverified")
         ref = matching[0]
         identity = import_file_identity(path)
-        key = (path, ref)
+        expected_digest = (digests or {}).get(ref)
+        if expected_digest is not None and (not isinstance(expected_digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", expected_digest)
+                or ref != "sha256-" + expected_digest[:32]):
+            raise Hold("model_reference_unverified")
+        key = (path, ref, expected_digest)
         proof = self._proofs.get(key)
         if proof is None or proof.identity != identity:
             stop = threading.Event()
@@ -356,7 +361,9 @@ class RuntimeModelProofs:
             def work():
                 _, verified = inspect_file(path, "stt", model_id="runtime-verification",
                                            checkpoint=worker_check, expected_identity=identity)
-                if not hmac.compare_digest(ref, "sha256-" + verified.digest[:32]):
+                if (not hmac.compare_digest(ref, "sha256-" + verified.digest[:32])
+                        or (expected_digest is not None and
+                            not hmac.compare_digest(expected_digest, verified.digest))):
                     raise Hold("model_digest_mismatch")
                 return verified
 

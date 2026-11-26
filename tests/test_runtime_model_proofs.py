@@ -36,6 +36,21 @@ class RuntimeModelProofTests(unittest.IsolatedAsyncioTestCase):
                 await self.bind()
             self.assertEqual(inspect.call_count, 2)
 
+    async def test_full_digest_mismatch_not_hidden_by_cached_prefix_proof(self):
+        await self.bind()
+        ref = self.card.storage_ref
+        incorrect = ref.removeprefix("sha256-") + "0" * 32
+        with self.assertRaisesRegex(Hold, "model_digest_mismatch"):
+            await self.cache.bind(str(self.path), self.refs, digests={ref: incorrect},
+                                  checkpoint=lambda: None)
+
+    async def test_full_digest_accepts_matching_content(self):
+        import hashlib
+        digest = hashlib.sha256(self.path.read_bytes()).hexdigest()
+        guard = await self.cache.bind(str(self.path), self.refs,
+                                      digests={self.card.storage_ref: digest}, checkpoint=lambda: None)
+        guard()
+
     async def test_changed_content_before_first_use_refused(self):
         self.path.write_bytes(b"modified")
         with self.assertRaisesRegex(Hold, "model_digest_mismatch"):

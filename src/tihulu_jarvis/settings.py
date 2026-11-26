@@ -52,6 +52,17 @@ def checked(obj):
             raise Hold("invalid_local_settings")
         clean[ref] = path
     out["market_refs"] = clean
+    # Omit empty optional metadata to preserve old recovery-journal digests.
+    digests = obj.get("audio_digests", {})
+    if not isinstance(digests, dict) or len(digests) > 256:
+        raise Hold("invalid_local_settings")
+    for ref, digest in digests.items():
+        if (ref not in clean or not isinstance(digest, str)
+                or not re.fullmatch(r"[0-9a-f]{64}", digest)
+                or ref != "sha256-" + digest[:32]):
+            raise Hold("invalid_local_settings")
+    if digests:
+        out["audio_digests"] = dict(digests)
     hosts = obj.get("allowed_hosts", [])
     if not isinstance(hosts, list) or len(hosts) > 32:
         raise Hold("invalid_local_settings")
@@ -180,7 +191,8 @@ def require_current_audio_selection(expected, path=None):
     """
     current = load(path)
     fields = ("profile", "stt", "voices", "market_refs", "resources")
-    if any(current[key] != expected[key] for key in fields):
+    if (any(current[key] != expected[key] for key in fields)
+            or current.get("audio_digests", {}) != expected.get("audio_digests", {})):
         raise Hold("audio_settings_changed_restart_required")
 
 
