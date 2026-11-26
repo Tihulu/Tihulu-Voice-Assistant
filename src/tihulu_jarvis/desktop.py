@@ -4909,17 +4909,27 @@ def create_window(app, loop, bridge=None):
                 client, checkpoint, route = self.bound_jan(epoch, discovery=True)
                 models=await client.models()
                 checkpoint()
-                self.cfg["endpoint"]=route[3]
-                previous=self.cfg["llm"]
-                # Restoring the saved choice is not a new explicit selection.
-                self.cfg["llm"]=previous if previous in models else ""
+                proposed = settings.checked(self.cfg)
+                if proposed != self.saved_cfg:
+                    raise Hold("settings_changed")
+                proposed["endpoint"] = route[3]
+                previous = proposed["llm"]
+                # Publish the inventory only after the exact local route
+                # preference has committed; never expose an unsaved route.
+                proposed["llm"] = previous if previous in models else ""
+                try:
+                    settings.save(proposed, expected=self.saved_cfg)
+                except OSError:
+                    raise Hold("settings_unwritable") from None
+                checkpoint()
+                self.cfg = proposed
+                self.saved_cfg = deepcopy(proposed)
                 self.inventory=models
                 self.models.remove_all()
                 for m in models:
                     self.models.append_text(m)
                 if previous in models:
                     self.models.set_active(models.index(previous))
-                self.save()
                 if not models:
                     raise Hold("no_installed_chat_models")
             self.submit(run, label=tr("Discover local models", "Yerel modelleri keşfet",
