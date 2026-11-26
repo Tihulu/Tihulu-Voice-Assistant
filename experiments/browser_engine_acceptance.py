@@ -46,6 +46,10 @@ def denied_navigation(error,target):
     return params.get("e") in (["connectionFailure"],["netTimeout"]) and params.get("u")==[target]
 
 def child(browser,driver,host_net,host_port):
+    sys.path.insert(0,"/work/fixture-code")
+    from tihulu_jarvis import profiles
+    from gateway import Context, FixtureGateway, Refused
+    from offline_browser import OfflineBrowser
     results=[]
     def record(case,ok,**details):
         results.append(bool(ok))
@@ -95,6 +99,7 @@ def child(browser,driver,host_net,host_port):
         proc=subprocess.Popen([driver,"--host","127.0.0.1","--port","4444","--log","warn"],
                               stdin=subprocess.DEVNULL,stdout=log,stderr=log)
         session=None
+        owned=None
         phase="driver_ready"
         try:
             deadline=time.monotonic()+10
@@ -127,7 +132,21 @@ def child(browser,driver,host_net,host_port):
                 return 1
             phase="local_navigation"
             command("POST",base+"/timeouts",{"pageLoad":10000,"script":5000,"implicit":0})
+            version=caps.get("browserVersion")
+            source_hash=hashlib.sha256(Path("/work/fixture.html").read_bytes()).hexdigest()
+            ctx=Context("browser-fixture","session","profile",1,"local","LOCAL_ONLY")
+            rules=tuple(profiles.Rule(x,(),"allow") for x in
+                        ("browser_navigate","filesystem_read","host_shell"))
+            gate=FixtureGateway(ctx,rules,clock=profiles.PolicyClock())
+            owned=OfflineBrowser(gate,ctx,version,session,"tab","fixture-html",source_hash)
+            def start(operation,identity,element=None):
+                call=owned.prepare(operation,element)
+                grant=gate.fixture_grant(identity,call.request(ctx),60)
+                owned.begin(call,grant)
+                owned.checkpoint()
+            start("offline_open","open")
             command("POST",base+"/url",{"url":"file:///work/fixture.html"},timeout=15)
+            owned.complete()
             record("browser-exact-local-navigation",command("GET",base+"/url")=="file:///work/fixture.html"
                    and command("GET",base+"/title")=="TIHULU Fixture")
             def element(identity):
@@ -136,13 +155,40 @@ def child(browser,driver,host_net,host_port):
                 if type(element_id) is not str or not re.fullmatch(r"[a-fA-F0-9-]{1,64}",element_id):
                     raise RuntimeError("unexpected element id")
                 return base+"/element/"+element_id
-            record("browser-real-dom-text",command("GET",element("message")+"/text")==
-                   "Public synthetic browser fixture")
+            start("offline_read","read","message")
+            text=command("GET",element("message")+"/text")
+            owned.complete(text)
+            record("browser-real-dom-text",text=="Public synthetic browser fixture")
+            record("browser-exact-read-receipt",owned.result()==hashlib.sha256(text.encode()).hexdigest())
             if not all(results):
                 return 1
             phase="local_click"
+            start("offline_click","click","change")
             command("POST",element("change")+"/click",{})
-            record("browser-fixed-local-click",command("GET",element("message")+"/text")=="Changed locally")
+            owned.complete()
+            start("offline_read","after","message")
+            text=command("GET",element("message")+"/text")
+            owned.complete(text)
+            record("browser-fixed-local-click",text=="Changed locally")
+            record("browser-exact-post-click-receipt",owned.result()==hashlib.sha256(text.encode()).hexdigest())
+            gate.revoke("open")
+            try:
+                start("offline_click","revoked","change")
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("browser-revoked-parent-blocks-operation",denied)
+            owned.close()
+            try:
+                owned.result()
+            except Refused:
+                closed=True
+            else:
+                closed=False
+            record("browser-closed-fixture-receipt-denied",closed)
+            if not all(results):
+                return 1
             # Fixed disposable host-loopback listener only, not external URLs.
             # A real browser navigation must not reach it across namespaces.
             phase="denied_navigation"
@@ -175,6 +221,8 @@ def child(browser,driver,host_net,host_port):
                 print(detail.read(4096).decode("utf-8","replace"),flush=True)
             return 1
         finally:
+            if owned is not None:
+                owned.close()
             if session:
                 try:
                     command("DELETE","/session/"+session)
@@ -186,7 +234,7 @@ def child(browser,driver,host_net,host_port):
             except subprocess.TimeoutExpired:
                 proc.kill()
                 proc.wait(timeout=3)
-    return 0 if len(results)==10 and all(results) else 1
+    return 0 if len(results)==14 and all(results) else 1
 
 def main():
     tools=[]
@@ -254,6 +302,21 @@ def main():
                  "--setenv","MOZ_HEADLESS","1","--setenv","USER","fixture",
                  "--setenv","LD_LIBRARY_PATH","/usr/lib/firefox:/usr/lib/x86_64-linux-gnu/pulseaudio",
                  "--chdir","/work","--remount-ro","/"]
+        # Copy only the exact reviewed pure Python dependency files. Never
+        # bind repository metadata, owner home, full source tree or credentials.
+        repo=Path(__file__).resolve().parents[1]
+        code=root/"fixture-code"
+        names=("gateway.py","capabilities.py","offline_browser.py","adapter_protocol.py","inference.py")
+        for name in names:
+            dst=code/name
+            dst.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(repo/"experiments"/name,dst)
+        for name in ("__init__.py","profiles.py","selected_csv.py","temperature_engine.py",
+                     "voice/__init__.py","voice/m1.py"):
+            dst=code/"tihulu_jarvis"/name
+            dst.parent.mkdir(parents=True,exist_ok=True)
+            shutil.copyfile(repo/"src/tihulu_jarvis"/name,dst)
+        prefix[-2:-2]=["--ro-bind",str(code),"/work/fixture-code"]
         host_net=os.readlink("/proc/self/ns/net")
         with socket.socket(socket.AF_INET,socket.SOCK_STREAM) as listener:
             listener.bind(("127.0.0.1",0))

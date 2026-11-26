@@ -4,6 +4,11 @@ on:
     branches: ['**']
     paths:
       - 'experiments/browser_engine_acceptance.py'
+      - 'experiments/offline_browser.py'
+      - 'experiments/gateway.py'
+      - 'experiments/capabilities.py'
+      - 'experiments/adapter_protocol.py'
+      - 'experiments/inference.py'
       - '.github/workflows/browser-engine-evidence.yml'
 permissions:
   contents: read
