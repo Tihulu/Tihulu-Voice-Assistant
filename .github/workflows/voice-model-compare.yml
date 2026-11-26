@@ -1,0 +1,66 @@
+name: Whisper CPU model comparison
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'src/tihulu_jarvis/voice/audio.py'
+      - 'tools/voice_model_compare.py'
+      - '.github/workflows/voice-model-compare.yml'
+permissions:
+  contents: read
+jobs:
+  compare:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - model: base
+            sha256: 60ed5bc3dd14eea856493d334349b405782ddcaf0028d4b5df4088345fba2efe
+          - model: small
+            sha256: 1be3a9b2063867b937e64e2ec7483364a79917e157fa98c5d94b5c1fffea987b
+          - model: large-v3-turbo-q5_0
+            sha256: 394221709cd5ad1f40c46e6031ca61bce88931e6e088c188294c6d5a55ffa7e2
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha }}
+      - name: Verify exact head
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
+      - name: Build pinned CPU engine and verify model weights
+        env:
+          MODEL: ${{ matrix.model }}
+          SHA256: ${{ matrix.sha256 }}
+        run: |
+          set -eu
+          sudo apt-get update -qq
+          sudo apt-get install --no-install-recommends -y cmake g++ espeak-ng ffmpeg
+          root="$RUNNER_TEMP/jarvis-model-compare"
+          mkdir -p "$root"
+          git init "$root/whisper"
+          git -C "$root/whisper" remote add origin https://github.com/ggml-org/whisper.cpp.git
+          git -C "$root/whisper" fetch --depth 1 origin 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          git -C "$root/whisper" checkout --detach FETCH_HEAD
+          test "$(git -C "$root/whisper" rev-parse HEAD)" = 4979e04f5dcaccb36057e059bbaed8a2f5288315
+          cmake -S "$root/whisper" -B "$root/build" -DWHISPER_BUILD_TESTS=OFF -DGGML_NATIVE=OFF -DBUILD_SHARED_LIBS=OFF -DCMAKE_BUILD_TYPE=Release
+          cmake --build "$root/build" --target whisper-cli -j 2
+          echo "$root/build/bin" >> "$GITHUB_PATH"
+          curl --fail --location --retry 2 --max-time 300 -o "$root/ggml-$MODEL.bin" "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-$MODEL.bin"
+          printf '%s  %s\n' "$SHA256" "$root/ggml-$MODEL.bin" | sha256sum -c -
+      - name: Compare the same six WAV cases on each model
+        env:
+          PYTHONPATH: src
+          PYTHONDONTWRITEBYTECODE: '1'
+          MODEL: ${{ matrix.model }}
+        run: |
+          root="$RUNNER_TEMP/jarvis-model-compare"
+          python3 tools/voice_model_compare.py --model "$root/ggml-$MODEL.bin" --report "$root/report.json"
+      - name: Show synthetic-only evidence
+        if: always()
+        run: |
+          root="$RUNNER_TEMP/jarvis-model-compare"
+          if test -f "$root/report.json"; then cat "$root/report.json"; fi

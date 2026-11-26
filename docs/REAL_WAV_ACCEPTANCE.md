@@ -14,3 +14,7 @@ PYTHONPATH=src python3 tools/voice_wav_acceptance.py --model /absolute/ggml-base
 The user can explicitly choose Auto/TR/EN/DE input recognition in the model page for the current window; it is separate from response language. Auto remains the default. No silent language fallback. Forced-language PASS cannot clear an automatic-language FAIL.
 
 Experimental segmented mode partitions at quiet gaps (>=600ms), keeps every PCM sample, processes each part with automatic detection and one shared 120-second transcription deadline. Maximum 60 seconds and eight segments, explicit refusal above bounds. This is not continuous code-switch recognition; the original mixed-auto test remains required. Added separate segmented mixed case.
+
+## Focused model comparison
+
+The separate CPU comparison matrix uses the same six eSpeak WAV cases on Base, Small and Large v3 Turbo Q5_0, four threads, identical pinned whisper.cpp v1.8.2 source and independently checked SHA-256 weights from the upstream Hugging Face model pointers. Verify identical WAV hashes before comparing WER; runner timings are indicative, not a controlled hardware benchmark. Auto and segmented remain separate, explicit TR is not an automatic rescue. All six use the unchanged 50% smoke threshold. No production model is switched or downloaded automatically. The quantized Turbo test is not the full-precision owner model or GPU acceptance.
