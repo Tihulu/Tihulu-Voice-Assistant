@@ -597,12 +597,26 @@ async def _transcription_stage(model, wav, stem, runner, publish, *, checkpoint,
     return await await_with_deadline(run, deadline, interval=AUTH_POLL)
 
 
+def whisper_resource_args(profile, cores_count=None):
+    """Fixed CLI options only; a GPU backend preference is not proof of use."""
+    if profile is None:
+        return ()
+    profile = profile.checked()
+    count = resources.cores() if cores_count is None else cores_count
+    args = ("-t", str(profile.threads_for(count)))
+    if profile.gpu == "cpu":
+        args += ("-ng",)
+    return args
+
+
 async def _whisper(model, wav, stem, *, checkpoint, model_identity=None):
     checkpoint()
     if not tools_ready("whisper-cli"):
         raise Hold("transcription_backend_missing")
+    options = whisper_resource_args(PROFILE)
+    checkpoint()
     async with child("whisper-cli", "-m", model, "-f", wav, "-l", "auto",
-                     "-otxt", "-of", stem, checkpoint=checkpoint, model_identity=model_identity) as p:
+                     *options, "-otxt", "-of", stem, checkpoint=checkpoint, model_identity=model_identity) as p:
         checkpoint()
         if await p.wait():
             raise Hold("transcription_failed")
