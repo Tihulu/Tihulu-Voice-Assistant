@@ -146,3 +146,5 @@ CAP-04 terminal failure handling: revoked/expired ancestors close offline browse
 CAP-04 non-idempotent fixed local click fixture: repeat click increments a counter and changes DOM text; inspect exact counter and visible text after explicit host deny and ancestor revocation to distinguish an unintended repeat effect. No extra case count (22 planned). Trusted test-only observation, no generic selector or production operation.
 
 Gateway dense-chain performance: #349 199/199 tests but 64-operation limit test consumed ~24–25s whole suite because group checks re-evaluated shared ancestors. Deduplicate exact grant/request evaluation within one lock/time observation; repeated forged grant/request and unclaimed/revoked ancestor still denied. Four regression methods including exact validation count. No production changes or relaxed policy.
+
+CAP-08 local speech: exact single-language eSpeak NG text-to-WAV request and canonical bounded mono PCM receipt (source/language/output/hash/rate/frame count). Six synthetic tests for provenance, malformed/truncated/silent audio, cancellation and policy. No actual audio device, voice playback, Piper or runtime activation.
