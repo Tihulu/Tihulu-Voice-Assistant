@@ -1,7 +1,7 @@
 name: Isolated R2-R5 experimental fixtures
 on:
   pull_request:
-    branches: ['fix/chat-first-result-lifetime', 'experiment/r3-shared-boundary', 'experiment/r3-typed-application-capabilities', 'experiment/r3-document-result-provenance', 'experiment/real-document-engine-fixtures', 'experiment/browser-exact-navigation-contract', 'experiment/search-query-result-provenance', 'experiment/application-engine-readiness', 'experiment/document-real-output-contract-evidence', 'experiment/fix-poppler-namespace-geometry', 'experiment/pdf-page-ocr-provenance', 'experiment/mixed-pdf-real-page-fallback', 'experiment/owned-browser-task-lifecycle', 'experiment/local-document-summary-chain', 'experiment/real-installed-application-engine-fixtures', 'experiment/typed-engine-output-contract', 'experiment/real-engine-conversion-receipts', 'experiment/bounded-engine-isolation-evidence', 'experiment/pdf-split-merge-real-evidence', 'experiment/conversion-publication-separate-grant', 'experiment/publication-write-ceiling', 'experiment/engine-isolation-alternate-runner', 'experiment/atomic-dependent-publication', 'experiment/engine-isolation-loader-roundtrip', 'experiment/real-engine-preflight-binding', 'experiment/isolated-engine-bound-receipt', 'experiment/atomic-publication-no-clobber', 'experiment/atomic-browser-document-chain', 'experiment/publication-bound-directory', 'experiment/bounded-isolated-engine-process', 'experiment/isolated-readonly-root-scope']
+    branches: ['fix/chat-first-result-lifetime', 'experiment/r3-shared-boundary', 'experiment/r3-typed-application-capabilities', 'experiment/r3-document-result-provenance', 'experiment/real-document-engine-fixtures', 'experiment/browser-exact-navigation-contract', 'experiment/search-query-result-provenance', 'experiment/application-engine-readiness', 'experiment/document-real-output-contract-evidence', 'experiment/fix-poppler-namespace-geometry', 'experiment/pdf-page-ocr-provenance', 'experiment/mixed-pdf-real-page-fallback', 'experiment/owned-browser-task-lifecycle', 'experiment/local-document-summary-chain', 'experiment/real-installed-application-engine-fixtures', 'experiment/typed-engine-output-contract', 'experiment/real-engine-conversion-receipts', 'experiment/bounded-engine-isolation-evidence', 'experiment/pdf-split-merge-real-evidence', 'experiment/conversion-publication-separate-grant', 'experiment/publication-write-ceiling', 'experiment/engine-isolation-alternate-runner', 'experiment/atomic-dependent-publication', 'experiment/engine-isolation-loader-roundtrip', 'experiment/real-engine-preflight-binding', 'experiment/isolated-engine-bound-receipt', 'experiment/atomic-publication-no-clobber', 'experiment/atomic-browser-document-chain', 'experiment/publication-bound-directory', 'experiment/bounded-isolated-engine-process', 'experiment/isolated-readonly-root-scope', 'experiment/document-local-adapter-chain']
 permissions:
   contents: read
 jobs:
@@ -16,11 +16,15 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
       - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
         with:
           python-version: ${{ matrix.python }}
-      - name: Refuse shipped-source changes
+      - name: Verify exact head and refuse shipped-source changes
+        env:
+          EXPECTED_HEAD: ${{ github.event.pull_request.head.sha }}
         run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_HEAD"
           git diff --exit-code d4b756351b1552aa5806c89e39eda3b5b82aa337 HEAD -- src packaging tools tests pyproject.toml data
           git diff --name-only d4b756351b1552aa5806c89e39eda3b5b82aa337 HEAD
       - name: Run synthetic experiment tests only
