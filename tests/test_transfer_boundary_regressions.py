@@ -231,6 +231,60 @@ class TransferBoundaryTests(unittest.IsolatedAsyncioTestCase):
         registry.rollback(new.model_id,new.revision)
         self.assertEqual(self.target.read_bytes(),NEW)
 
+    async def test_threaded_initial_publication_stop_does_not_install(self):
+        from threading import Event
+        card = self.card()
+        transfer = self.transfer(card, self.source())
+        release = Event()
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        original = transfer._publish
+        def delayed(*args, **kwargs):
+            loop.call_soon_threadsafe(started.set)
+            if not release.wait(5):
+                raise AssertionError("fixture deadline")
+            return original(*args, **kwargs)
+        with patch.object(transfer, "_publish", side_effect=delayed):
+            task = asyncio.create_task(transfer.run(threaded_publication=True))
+            try:
+                await asyncio.wait_for(started.wait(), 3)
+                task.cancel()
+                await asyncio.sleep(0)
+            finally:
+                release.set()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(self.store.card(card.model_id).state, "CANCELLED")
+        self.assertFalse(self.target.exists())
+        self.assertIsNone(transfer.temp)
+
+    async def test_threaded_initial_publication_late_stop_returns_commit(self):
+        from threading import Event
+        card = self.card()
+        transfer = self.transfer(card, self.source())
+        release = Event()
+        loop = asyncio.get_running_loop()
+        committed = asyncio.Event()
+        original = transfer._publish
+        def delayed(*args, **kwargs):
+            result = original(*args, **kwargs)
+            loop.call_soon_threadsafe(committed.set)
+            if not release.wait(5):
+                raise AssertionError("fixture deadline")
+            return result
+        with patch.object(transfer, "_publish", side_effect=delayed):
+            task = asyncio.create_task(transfer.run(threaded_publication=True))
+            try:
+                await asyncio.wait_for(committed.wait(), 3)
+                task.cancel()
+                await asyncio.sleep(0)
+            finally:
+                release.set()
+            result = await task
+        self.assertEqual(self.store.card(card.model_id), result)
+        self.assertEqual(result.state, "REGISTERED")
+        self.assertEqual(self.target.read_bytes(), NEW)
+
     async def test_threaded_update_stop_drains_before_releasing_lease(self):
         from threading import Event, get_ident
         old = await self.install_verified()

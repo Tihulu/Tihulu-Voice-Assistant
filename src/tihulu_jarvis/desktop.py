@@ -3290,8 +3290,13 @@ def create_window(app, loop, bridge=None):
             expected = self.selected_card_snapshot()
             if expected is None:
                 return
-            self.submit(lambda epoch: self.download(epoch, model_id, expected=expected), kind="download",
-                        label=tr("Model download", "Model indirme", "Modelldownload"))
+            completion, failure = [], []
+            self.submit(lambda epoch: self.download(epoch, model_id, expected=expected,
+                                                    completion=completion, failure=failure),
+                        kind="download",
+                        label=tr("Model download", "Model indirme", "Modelldownload"),
+                        committed=lambda: completion[0] if completion else "",
+                        worker_failure=lambda: failure[0] if failure else "")
 
         def transfer_checkpoint(self, epoch):
             context = self.picker_context()
@@ -3308,7 +3313,9 @@ def create_window(app, loop, bridge=None):
                 self.market, model_id, transport=self.transport,
                 checkpoint=self.transfer_checkpoint(epoch), expected=expected)
 
-        async def download(self, epoch, model_id, *, expected=None):
+        async def download(self, epoch, model_id, *, expected=None, completion=None, failure=None):
+            completion = [] if completion is None else completion
+            failure = [] if failure is None else failure
             transfer = self.bound_transfer(epoch, model_id, expected=expected)
             source = transfer.source
             entry = {"id": model_id, "state": "QUEUED", "received": 0, "total": source.size,
@@ -3319,14 +3326,21 @@ def create_window(app, loop, bridge=None):
                 entry["state"] = "DOWNLOADING"
                 self.build_downloads_page()
 
-            progress = self.download_progress(entry, 0)
+            self.registry_worker_active = True
+            self.market_filter.set_sensitive(False)
+            self.refresh_market_buttons()
             try:
+                progress = self.download_progress(entry, 0)
                 self.session.check(epoch)
                 started()
-                result = await transfer.run(progress)
+                result = await transfer.run(progress, threaded_publication=True)
+                completion.append(tr("Registered.","Kaydedildi.","Registriert."))
                 self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
                 entry["state"] = result.state
-                entry["note"] = tr("Registered.","Kaydedildi.","Registriert.")
+                entry["note"] = completion[0]
+            except (Hold, OSError, asyncio.TimeoutError) as exc:
+                self.record_transfer_failure(failure, exc)
+                raise
             finally:
                 if transfer.state == "CANCELLED":
                     self.refresh_partial_entry(entry)
@@ -3336,13 +3350,28 @@ def create_window(app, loop, bridge=None):
                 elif transfer.state in ("REGISTERED", "TESTABLE", "ACTIVE"):
                     entry["state"], entry["note"] = transfer.state, tr(
                         "Registered.", "Kaydedildi.", "Registriert.")
-                try:
-                    # A cancelled turn has nothing to check; cleanup still runs.
-                    self.session.check(epoch)
-                except Hold:
-                    pass
-                self.build_downloads_page()
+                else:
+                    entry["state"] = "FAILED"
+                self.finish_transfer_views(completion)
+
+        def record_transfer_failure(self, failure, exc):
+            if not isinstance(exc, Hold):
+                failure.append("Operation timed out" if isinstance(exc, asyncio.TimeoutError)
+                               else "Local operation failed")
+            elif str(exc) != "turn_cancelled":
+                failure.append(str(exc))
+
+        def finish_transfer_views(self, completion):
+            self.registry_worker_active = False
+            self.market_filter.set_sensitive(True)
+            self.build_downloads_page()
+            try:
                 self.build_market_page()
+            except (Hold, OSError):
+                if completion:
+                    completion[0] += tr(" Registry refresh unavailable.",
+                                        " Kayıt yenilenemedi.",
+                                        " Registry-Aktualisierung nicht verfügbar.")
 
         def refresh_partial_entry(self, entry):
             entry["resume"], entry["partial_identity"] = 0, None
@@ -3476,6 +3505,7 @@ def create_window(app, loop, bridge=None):
             start = entry["resume"]
 
             expected = entry["partial_identity"]
+            completion, failure = [], []
 
             async def run(epoch):
                 status = self.market.partial_status(entry["id"])
@@ -3488,22 +3518,30 @@ def create_window(app, loop, bridge=None):
                 source = transfer.source
                 entry["state"], entry["note"] = "DOWNLOADING", tr("Resuming…","Sürdürülüyor…",
                                                                  "Fortsetzung…")
+                self.registry_worker_active = True
+                self.market_filter.set_sensitive(False)
+                self.refresh_market_buttons()
                 try:
                     result = await transfer.resume(self.download_progress(entry, start), start,
-                                                   expected_pair=expected)
+                                                   expected_pair=expected, threaded_publication=True)
+                    completion.append(tr("Registered.", "Kaydedildi.", "Registriert."))
                     self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
-                    entry["state"], entry["note"] = result.state, tr(
-                        "Registered.", "Kaydedildi.", "Registriert.")
+                    entry["state"], entry["note"] = result.state, completion[0]
+                    entry["resume"], entry["partial_identity"] = 0, None
+                except (Hold, OSError, asyncio.TimeoutError) as exc:
+                    self.record_transfer_failure(failure, exc)
+                    raise
                 finally:
                     if transfer.state in ("CANCELLED", "FAILED"):
                         self.refresh_partial_entry(entry)
                         if transfer.state == "FAILED":
                             entry["state"], entry["resume"] = "UNVERIFIED", 0
-                    self.build_downloads_page()
-                    self.build_market_page()
+                    self.finish_transfer_views(completion)
             self.submit(run, kind="download",
                         label=tr("Resume model download", "Model indirmeyi sürdür",
-                                 "Modelldownload fortsetzen"))
+                                 "Modelldownload fortsetzen"),
+                        committed=lambda: completion[0] if completion else "",
+                        worker_failure=lambda: failure[0] if failure else "")
 
         def restore_download_queue(self):
             """Rebuild pending rows from one bounded registry snapshot."""
@@ -3663,11 +3701,7 @@ def create_window(app, loop, bridge=None):
                     self.note_transfer_bytes(result.disk_size_bytes, source.size, epoch, self.active_task)
                     entry["state"], entry["note"] = result.state, completion[0]
                 except (Hold, OSError, asyncio.TimeoutError) as exc:
-                    if not isinstance(exc, Hold):
-                        failure.append("Operation timed out" if isinstance(exc, asyncio.TimeoutError)
-                                       else "Local operation failed")
-                    elif str(exc) != "turn_cancelled":
-                        failure.append(str(exc))
+                    self.record_transfer_failure(failure, exc)
                     raise
                 finally:
                     if transfer.state == "CANCELLED":
@@ -3675,16 +3709,7 @@ def create_window(app, loop, bridge=None):
                     elif not completion:
                         entry["state"] = "FAILED"
                         entry["note"] = failure[0] if failure else ""
-                    self.registry_worker_active = False
-                    self.market_filter.set_sensitive(True)
-                    self.build_downloads_page()
-                    try:
-                        self.build_market_page()
-                    except (Hold, OSError):
-                        if completion:
-                            completion[0] = tr("Updated; registry refresh unavailable.",
-                                               "Güncellendi; kayıt yenilenemedi.",
-                                               "Aktualisiert; Registry-Aktualisierung nicht verfügbar.")
+                    self.finish_transfer_views(completion)
             self.submit(run, kind="update",
                         label=tr("Model update", "Model güncelleme", "Modellaktualisierung"),
                         committed=lambda: completion[0] if completion else "",
