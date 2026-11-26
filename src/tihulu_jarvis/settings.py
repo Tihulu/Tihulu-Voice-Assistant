@@ -342,6 +342,66 @@ def recover_jan_choice(store, path=None):
             raise Hold("llm_choice_recovery_required") from None
 
 
+def _review_committed_locked(store, registry, p):
+    record, raw, journal_stamp = _read_choice(p)
+    settings_stamp = _choice_identity(p.lstat())
+    current = load(p)
+    profile, profile_stamp = store.snapshot(record["profile"])
+    proposed = {**current, "llm": record["new_model"]}
+    card = registry.card(record["new_model"])
+    if (current["profile"] != record["profile"]
+            or current["llm"] != record["old_model"]
+            or _digest(_serialize(current)) != record["old_settings"]
+            or _digest(_serialize(proposed)) != record["new_settings"]
+            or _profile_digest(store, profile) != record["new_profile"]
+            or profile.state != "active" or profile.llm_model_id != card.model_id
+            or not registry._jan_inventory_card(card) or not card.registered
+            or card.loaded
+            or _choice_identity(p.lstat()) != settings_stamp
+            or not store.is_current(profile.id, profile_stamp)):
+        raise Hold("llm_choice_recovery_required")
+    # Immutable review proof; no settings contents or profile rules in the UI.
+    return (card, raw, journal_stamp, settings_stamp, profile_stamp)
+
+
+def review_committed_jan_choice(store, registry, path=None):
+    """Review an exact committed profile with compensated old settings."""
+    p = config_path() if path is None else Path(path)
+    record, raw, stamp = _read_choice(p)
+    with registry.transfer_lease(record["new_model"]), registry._write_guard():
+        with store._mutation_lock(), _write_guard(p):
+            if _read_choice(p) != (record, raw, stamp):
+                raise Hold("llm_choice_recovery_required")
+            return _review_committed_locked(store, registry, p)
+
+
+def resolve_committed_jan_choice(store, registry, *, expected, path=None):
+    """Explicit owner-approved adoption of the committed local preference.
+
+    Never restore permissions or activate/load a model. A fresh discovery
+    is still required before connecting. The caller must display the reviewed
+    model and obtain a distinct confirmation before invoking this operation.
+    """
+    p = config_path() if path is None else Path(path)
+    card = expected[0]
+    with registry.transfer_lease(card.model_id), registry._write_guard():
+        with store._mutation_lock(), _write_guard(p):
+            if _review_committed_locked(store, registry, p) != expected:
+                raise Hold("llm_choice_recovery_required")
+            record, raw, stamp = _read_choice(p)
+            profile = store.load(record["profile"])
+            store._ensure_current_archive_locked(profile)
+            if _review_committed_locked(store, registry, p) != expected:
+                raise Hold("llm_choice_recovery_required")
+            proposed = {**load(p), "llm": card.model_id}
+            _replace_text(p, _serialize(proposed))
+            if (load(p) != proposed or registry.card(card.model_id) != card
+                    or not store.is_current(profile.id, expected[4])):
+                raise Hold("llm_choice_recovery_required")
+            _clear_choice(p, raw, stamp)
+            return proposed
+
+
 def forget(path=None):
     """Remove the stored choices, and say what was left alone.
 
