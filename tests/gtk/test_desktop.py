@@ -6232,6 +6232,47 @@ class MuteTests(DesktopTests):
         self.until(lambda: not self.ui.busy)
         self.assertIn("audio output muted", self.ui.state_row.get_text())
 
+    def test_recognized_local_voice_command_requires_explicit_composer_send(self):
+        self.connect_model()
+        self.backend.transcript = "Bir ses kaydını yazıya çevir"
+        before = len(self.backend.requests)
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(len(self.backend.requests), before)
+        self.assertEqual(self.ui.session.history, ())
+        self.assertIsNone(self.ui.owned_picker)
+        self.assertEqual(self.ui.entry.get_text(), self.backend.transcript)
+        self.assertIn("press Send", self.ui.status.get_text())
+        self.click(self.ui.send)
+        self.assertIsNotNone(self.ui.owned_picker)
+        self.assertEqual(len(self.backend.requests), before)
+        self.ui.hard_stop()
+
+    def test_local_voice_command_does_not_overwrite_existing_draft(self):
+        self.connect_model()
+        self.ui.entry.set_text("Existing draft")
+        self.backend.transcript = "Find existing audio models"
+        before = len(self.backend.requests)
+        self.begin_voice()
+        self.click(self.ui.finish_btn)
+        self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.entry.get_text(), "Existing draft")
+        self.assertEqual(len(self.backend.requests), before)
+        self.assertIsNone(self.ui.owned_picker)
+
+    def test_voice_disconnect_preserves_recognized_text_for_explicit_retry(self):
+        self.connect_model()
+        self.ui.mute.set_active(True)
+        self.begin_voice()
+        with patch.object(self.backend, "chat", side_effect=Hold("jan_unavailable")):
+            self.click(self.ui.finish_btn)
+            self.until(lambda: not self.ui.busy)
+        self.assertEqual(self.ui.entry.get_text(), self.backend.transcript)
+        self.assertEqual(self.ui.inventory, ())
+        self.assertEqual(self.ui.session.history, ())
+        self.assertEqual(self.backend.speeches, [])
+
     def test_unexpected_script_voice_result_requires_review_without_jan(self):
         self.connect_model()
         self.backend.transcript = "แม่หามา บูเกินหาซิลซื้น"

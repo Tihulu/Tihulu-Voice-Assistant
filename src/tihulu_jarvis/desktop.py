@@ -5484,7 +5484,6 @@ def create_window(app, loop, bridge=None):
                 # or dispatch the returned transcription after revocation.
                 self.note_leases()
                 check_voice_grant()
-                self.bubble("You",text)
                 try:
                     require_conversation_transcript(text)
                 except Hold as exc:
@@ -5492,12 +5491,31 @@ def create_window(app, loop, bridge=None):
                         raise
                     # Show the recognized text, but do not dispatch it to Jan
                     # or any automatic tool. The owner can review/edit it.
+                    self.bubble("Recording", text)
                     if not self.entry.get_text():
                         self.entry.set_text(text)
                     raise Hold(tr(
                         "Unexpected speech script. Review the text or select the input language and retry.",
                         "Beklenmeyen konuşma alfabesi. Metni incele veya giriş dilini seçip yeniden dene.",
                         "Unerwartete Schriftsprache. Text prüfen oder Eingabesprache wählen und erneut versuchen.")) from None
+                if local_actions.direct(text) is not None:
+                    # Only the explicit composer can open these native pickers.
+                    # Speech recognition can be wrong; never turn it into
+                    # implicit consent or ask Jan to perform the local action.
+                    self.bubble("Recording", text)
+                    if not self.entry.get_text():
+                        self.entry.set_text(text)
+                        self.turn_outcome = tr(
+                            "Review the recognized local command and press Send to choose a file or folder.",
+                            "Algılanan yerel komutu incele; dosya veya klasör seçmek için Gönder'e bas.",
+                            "Erkannten lokalen Befehl prüfen und zum Auswählen Senden drücken.")
+                    else:
+                        self.turn_outcome = tr(
+                            "Recognized a local command. Your existing draft is unchanged.",
+                            "Yerel komut algılandı. Mevcut taslak değiştirilmedi.",
+                            "Lokaler Befehl erkannt. Vorhandener Entwurf unverändert.")
+                    return
+                user_label = self.bubble("You", text)
                 if analysis_intent.direct(text) is not None or analysis_intent.explicit_task(text) is not None:
                     if self.analysis.dialog is not None:
                         raise Hold("analysis_picker_busy")
@@ -5519,6 +5537,11 @@ def create_window(app, loop, bridge=None):
                     if (str(exc) == "jan_unavailable" and epoch == self.session.epoch
                             and not self.closing):
                         self.forget_inventory()
+                        if not self.entry.get_text():
+                            self.entry.set_text(text)
+                            self.growing.pop(user_label, None)
+                            if user_label.get_parent() == self.log:
+                                self.log.remove(user_label)
                     raise
                 check_voice_grant()
                 if not self.conversation_authorized(route):
