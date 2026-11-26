@@ -43,6 +43,8 @@ CAPABILITIES = MappingProxyType({
     ("brave", "snapshot"): ("browser_read", "public", ("profile", "tab", "url", "digest")),
     ("libreoffice", "window_inspect"): ("application_ui", "private", ("window",)),
     ("gimp", "window_inspect"): ("application_ui", "private", ("window",)),
+    ("whisper_cpp", "detect_language"): ("application_engine","private",
+                                          ("artifact","digest","model_digest","output")),
     ("whisper_cpp", "transcribe_wav"): ("application_engine","private",
                                         ("artifact","digest","model_digest","language","output")),
     ("piper", "neural_text_to_wav"): ("application_engine","private",

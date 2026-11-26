@@ -138,6 +138,27 @@ class SpeechFixture:
             return TranscriptFixture(self._g,self._req.context,call,grant,
                                      dependencies=((self._grant,self._req),))
 
+    def _detection_call(self,version,model_digest,output):
+        if self._state!="completed" or self._receipt is None:
+            raise Refused("speech_no_result")
+        self._g.checkpoint(self._grant,self._req)
+        if output in (self._args["artifact"],self._args["output"]):
+            raise Refused("speech_detection_alias")
+        return CapabilityCall("whisper_cpp",version,"detect_language",
+                    (("artifact",self._receipt[3]),("digest",self._receipt[4]),
+                     ("model_digest",model_digest),("output",output))).checked()
+
+    def prepare_detection(self,version,model_digest,output):
+        with self._lock:
+            return self._detection_call(version,model_digest,output)
+
+    def start_detection(self,version,model_digest,output,grant):
+        from language_detection import DetectionFixture
+        with self._lock:
+            call=self._detection_call(version,model_digest,output)
+            return DetectionFixture(self._g,self._req.context,call,grant,
+                                     dependencies=((self._grant,self._req),))
+
     def cancel(self):
         with self._lock:
             self._receipt=None
