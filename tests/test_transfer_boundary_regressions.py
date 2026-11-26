@@ -839,6 +839,27 @@ sys.exit(99)
         self.assertFalse(reopened.removal_journal.exists())
         self.assertEqual(reopened.cards(), ())
 
+    def test_recovery_snapshot_restores_moved_artifact_and_reads_once(self):
+        self.interrupt("moved")
+        reopened = market.Registry(self.root)
+        self.assertTrue(reopened.recovery_pending())
+        with patch.object(reopened, "cards", wraps=reopened.cards) as cards:
+            snapshot, rows, error = reopened.recovery_snapshot()
+            # Recovery itself may read cards to validate the old generation.
+            self.assertGreaterEqual(cards.call_count, 1)
+        self.assertEqual(snapshot, (self.card,))
+        self.assertEqual((rows, error), ((), ""))
+        self.assertFalse(reopened.recovery_pending())
+        self.assertEqual(self.target.read_bytes(), OLD)
+
+    def test_recovery_snapshot_preserves_invalid_journal(self):
+        self.registry.removal_journal.write_text("{}")
+        self.assertTrue(self.registry.recovery_pending())
+        with self.assertRaisesRegex(Hold, "uninstall_recovery_required"):
+            self.registry.recovery_snapshot()
+        self.assertEqual(self.registry.removal_journal.read_text(), "{}")
+        self.assertEqual(self.target.read_bytes(), OLD)
+
     def test_process_death_after_journal_before_move(self):
         self.interrupt("journal")
         self.assert_old_restored()
@@ -2752,6 +2773,27 @@ class PendingPartialInventoryTests(unittest.TestCase):
             rows = self.registry.pending_partials()
         self.assertEqual([row[0] for row in rows], ["known"])
         self.assertEqual(rows[0][2]["state"], "UNVERIFIED")
+
+    def test_recovery_snapshot_uses_single_card_read(self):
+        card = self.card("known")
+        (self.folder / "partial-known").write_bytes(b"x")
+        with patch.object(self.registry, "cards", wraps=self.registry.cards) as cards:
+            snapshot, rows, error = self.registry.recovery_snapshot()
+            cards.assert_called_once()
+        self.assertEqual(snapshot, (card,))
+        self.assertEqual(rows[0][0], card.model_id)
+        self.assertEqual(error, "")
+
+    def test_recovery_snapshot_separates_queue_failure_from_registry(self):
+        card = self.card("known")
+        self.folder.chmod(0o777)
+        try:
+            snapshot, rows, error = self.registry.recovery_snapshot()
+            self.assertEqual(snapshot, (card,))
+            self.assertEqual(rows, ())
+            self.assertEqual(error, "transfer_directory_untrusted")
+        finally:
+            self.folder.chmod(0o700)
 
     def test_uses_single_card_snapshot(self):
         for name in ("first", "second", "third"):
