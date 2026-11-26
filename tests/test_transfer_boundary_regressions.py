@@ -231,6 +231,42 @@ class TransferBoundaryTests(unittest.IsolatedAsyncioTestCase):
         registry.rollback(new.model_id,new.revision)
         self.assertEqual(self.target.read_bytes(),NEW)
 
+    async def test_rollback_checkpoint_cancels_before_any_change(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        def cancelled():
+            raise Hold("turn_cancelled")
+        with self.assertRaisesRegex(Hold, "turn_cancelled"):
+            self.store.rollback(old.model_id, old.revision, expected=new, checkpoint=cancelled)
+        self.assertEqual(self.target.read_bytes(), NEW)
+        self.assertEqual(self.store.card(old.model_id), new)
+
+    async def test_rollback_cancel_during_staging_preserves_current(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        def cancelled():
+            if any(self.target.parent.glob(".rollback-*")):
+                raise Hold("turn_cancelled")
+        with self.assertRaisesRegex(Hold, "turn_cancelled"):
+            self.store.rollback(old.model_id, old.revision, expected=new, checkpoint=cancelled)
+        self.assertEqual(self.target.read_bytes(), NEW)
+        self.assertEqual(self.store.card(old.model_id), new)
+        self.assertFalse(list(self.target.parent.glob(".rollback-*")))
+        self.assertFalse(self.store.publication_journal.exists())
+
+    async def test_rollback_cancel_after_replace_recovers_previous_generation(self):
+        old=await self.install_verified()
+        new=await self.transfer(old,self.source()).update()
+        def cancelled():
+            if self.target.read_bytes() == OLD:
+                raise Hold("turn_cancelled")
+        with self.assertRaisesRegex(Hold, "turn_cancelled"):
+            self.store.rollback(old.model_id, old.revision, expected=new, checkpoint=cancelled)
+        self.assertEqual(self.target.read_bytes(), NEW)
+        self.assertEqual(self.store.card(old.model_id), new)
+        self.assertFalse(self.store.publication_journal.exists())
+        self.assertFalse((self.target.parent / ".publish-backup").exists())
+
     async def test_rollback_recovers_interrupted_historical_archive_link(self):
         old=await self.install_verified()
         new=await self.transfer(old,self.source()).update()
