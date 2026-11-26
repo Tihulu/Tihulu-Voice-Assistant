@@ -68,6 +68,21 @@ class ManagedWave:
         self._thread()
         return tuple(entry[0] for entry in self._owned.values())
 
+    def checkpoint(self,handle,context,candidates):
+        self._thread()
+        if type(handle) is not OwnedWorker or type(handle.worker) is not str:
+            raise Refused("managed_exit_unknown")
+        entry=self._owned.get(handle.worker)
+        if entry is None or entry[0] is not handle:
+            raise Refused("managed_exit_unknown")
+        if self._stopping:
+            raise Refused("managed_wave_draining")
+        try:
+            self._run.checkpoint_worker(handle.worker,context,candidates,completion_grant=entry[1])
+        except Refused:
+            self.stop()
+            raise
+
     def observe_exit(self,handle,exit_code,context,candidates,*,payload=None):
         self._thread()
         if type(handle) is not OwnedWorker or type(handle.worker) is not str:
