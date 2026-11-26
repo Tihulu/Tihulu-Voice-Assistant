@@ -4,13 +4,14 @@ from hashlib import sha256
 from threading import current_thread
 from gateway import Context,FixtureGateway,Request,Refused
 from local_agent_planner import AgentPlan,plan_agents
+from local_agent_resources import ResourceLedger
 
 class WaveRun:
     """Trusted coordinator supplies current snapshots at every checkpoint.
     No caller-supplied callbacks, executor, subprocess or provider transport.
     A wave barrier prevents concurrent reservations from crossing waves.
     """
-    def __init__(self,gateway,plan,workers,candidates,budget,limit=6,preference="balanced"):
+    def __init__(self,gateway,plan,workers,candidates,budget,limit=6,preference="balanced",*,ledger=None,run_id=None):
         if type(gateway) is not FixtureGateway or type(plan) is not AgentPlan:
             raise Refused("agent_run_invalid")
         self._gateway=gateway
@@ -20,6 +21,13 @@ class WaveRun:
         self._limit=limit
         self._preference=preference
         self._owner=current_thread()
+        if ledger is not None and (type(ledger) is not ResourceLedger or type(run_id) is not str):
+            raise Refused("agent_resource_ledger_invalid")
+        if ledger is None and run_id is not None:
+            raise Refused("agent_resource_ledger_invalid")
+        self._ledger=ledger
+        self._run_id=run_id
+        self._reservations={}
         self._claims={}
         self._done=set()
         self._cancelled=False
@@ -72,18 +80,44 @@ class WaveRun:
                 break
             previous.extend(self._claims[a.worker] for a in wave)
         parents=tuple(previous)
-        if parents:
-            self._gateway.claim_with_dependencies(grant,req,parents)
-        else:
-            self._gateway.claim(grant,req)
+        reservation=None
+        if self._ledger is not None:
+            assignment=next(a for a in current_wave if a.worker==worker)
+            reservation=self._ledger.reserve(self._run_id,worker,assignment.memory_mib)
+        try:
+            if parents:
+                self._gateway.claim_with_dependencies(grant,req,parents)
+            else:
+                self._gateway.claim(grant,req)
+        except BaseException:
+            if reservation is not None:
+                self._ledger.release(reservation)
+            raise
         self._claims[worker]=(grant,req)
+        if reservation is not None:
+            self._reservations[worker]=reservation
 
     def complete(self,worker,context,candidates):
         self._check(context,candidates)
         if worker not in self._claims or worker in self._done:
             raise Refused("agent_worker_not_running")
         self._gateway.checkpoint_claimed_group((self._claims[worker],))
+        # In this synthetic API completion means the simulated worker ended.
+        self._release(worker)
         self._done.add(worker)
+
+    def _release(self,worker):
+        reservation=self._reservations.get(worker)
+        if reservation is not None:
+            self._ledger.release(reservation)
+            del self._reservations[worker]
+
+    def fail(self,worker,context,candidates):
+        """Trusted simulated terminal failure; no automatic fallback/retry."""
+        self._check(context,candidates)
+        if worker not in self._claims or worker in self._done:
+            raise Refused("agent_worker_not_running")
+        self.cancel()
 
     def result(self,context,candidates):
         self._check(context,candidates)
@@ -98,3 +132,7 @@ class WaveRun:
             self._cancelled=True
             for grant,req in self._claims.values():
                 self._gateway.revoke(grant.identity)
+            # Only synthetic runs: no actual process is alive. A real broker
+            # must keep reservations until owned process termination is proven.
+            for worker in tuple(self._reservations):
+                self._release(worker)
