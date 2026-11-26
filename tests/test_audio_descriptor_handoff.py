@@ -61,6 +61,37 @@ class AudioDescriptorHandoffTests(unittest.IsolatedAsyncioTestCase):
     async def test_piper_child_reads_original_weights_and_sidecar(self):
         await self.exercise("piper", "--model", b"originalconfig-original")
 
+    async def test_piper_inferred_sidecar_uses_sealed_bytes_and_aliases_are_cleaned(self):
+        # Reproduce Piper 1.8 CLI ignoring --config after parsing it.
+        self.fixture.write_text("#!" + sys.executable + "\n" +
+            "import sys, time\nfrom pathlib import Path\n"
+            "a=sys.argv[1:]\n"
+            "time.sleep(.05)\n"
+            "m=Path(a[a.index('--model')+1])\n"
+            "Path(a[-1]).write_bytes(m.read_bytes()+Path(str(m)+'.json').read_bytes())\n")
+        real_spawn = asyncio.create_subprocess_exec
+        aliases = []
+
+        async def spawn(*args, **kwargs):
+            alias = Path(args[args.index("--model") + 1])
+            sidecar = Path(args[args.index("--config") + 1])
+            aliases.append(alias.parent)
+            self.assertEqual(sidecar, Path(str(alias) + ".json"))
+            self.assertEqual(alias.parent.stat().st_mode & 0o777, 0o700)
+            self.assertTrue(alias.is_symlink())
+            self.assertTrue(sidecar.is_symlink())
+            self.replace(self.model)
+            self.config.write_bytes(b"changed")
+            return await real_spawn(*args, **kwargs)
+
+        with patch.object(audio.shutil, "which", return_value=str(self.fixture)), \
+             patch.object(audio.asyncio, "create_subprocess_exec", side_effect=spawn):
+            async with audio.child("piper", "--model", self.model, self.output) as proc:
+                self.assertEqual(await proc.wait(), 0)
+                self.assertTrue(aliases[0].exists())
+        self.assertEqual(self.output.read_bytes(), b"originalconfig-original")
+        self.assertFalse(aliases[0].exists())
+
     async def test_piper_config_is_immutable_after_same_inode_write(self):
         real_spawn = asyncio.create_subprocess_exec
         async def spawn(*args, **kwargs):
