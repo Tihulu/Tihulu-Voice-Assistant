@@ -139,3 +139,13 @@ class VoiceQualityTests(unittest.TestCase):
         for model,available in (("small",False),("turbo-q5",True)):
             with self.assertRaises(RuntimeError):
                 speech_corpus_profile(name,model,available)
+
+    def test_handoff_profile_has_four_additional_checks(self):
+        from voice_quality import speech_corpus_profile,neural_sample_allowed
+        name="mixed-manual-piper-handoff"
+        self.assertEqual(speech_corpus_profile(name,"small",True),(True,True,31))
+        self.assertTrue(neural_sample_allowed(name,"tr","tr","original","original"))
+        self.assertFalse(neural_sample_allowed(name,"tr-2","tr","Lütfen bu metni Türkçe olarak oku.","original"))
+        for model,available in (("small",False),("turbo-q5",True)):
+            with self.assertRaises(RuntimeError):
+                speech_corpus_profile(name,model,available)
