@@ -114,6 +114,20 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.context.response_language,"tr")
 
 
+class TranscriptReviewTests(unittest.TestCase):
+    def test_wholly_non_latin_voice_text_is_not_automatically_dispatched(self):
+        from tihulu_jarvis.voice.m1 import require_conversation_transcript
+        for value in ("แม่หามา บูเกินหาซิลซื้น", "Привет мир", "你好世界"):
+            with self.subTest(value=value), self.assertRaisesRegex(Hold, "unsupported_transcript_script"):
+                require_conversation_transcript(value)
+
+    def test_latin_mixed_names_and_numbers_are_not_language_guesses(self):
+        from tihulu_jarvis.voice.m1 import require_conversation_transcript
+        for value in ("İstanbul", "Guten Morgen", "Merhaba 你好", "123", "München"):
+            with self.subTest(value=value):
+                self.assertEqual(require_conversation_transcript(value), value)
+
+
 class LocalChoicesTests(unittest.TestCase):
     def test_silence_and_voiced_fixture(self):
         with tempfile.TemporaryDirectory() as tmp:

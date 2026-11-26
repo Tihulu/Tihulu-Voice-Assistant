@@ -208,6 +208,25 @@ def safe_text(value):
     return True
 
 
+def require_conversation_transcript(text):
+    """Narrow guard for automatic voice dispatch in the supported locales.
+
+    All supported languages use Latin letters. A wholly non-Latin alphabetic
+    transcript is not safe evidence of the intended voice request. Mixed text,
+    names, numerals and ambiguous Latin words remain allowed; this is not a
+    language classifier. File transcription and explicitly typed text are
+    unaffected.
+    """
+    if not safe_text(text) or len(text) > 16000:
+        raise Hold("invalid_input")
+    if not any(ch.isalnum() for ch in text):
+        raise Hold("empty_input")
+    letters = [ch for ch in text if ch.isalpha()]
+    if letters and not any("LATIN" in unicodedata.name(ch, "") for ch in letters):
+        raise Hold("unsupported_transcript_script")
+    return text
+
+
 def route_language(
     text: str,
     context: LanguageContext,
