@@ -357,7 +357,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 else:
                     transcript.cancel()
                     qrecord("multilingual-stt-typed-receipt-"+case_id,False,reason="quality_gate_failed")
-            if corpus in ("mixed-preview","mixed-auto","mixed-auto-turbo"):
+            if corpus in ("mixed-preview","mixed-auto","mixed-auto-turbo","mixed-auto-piper"):
                 if transcript is None or not all(quality):
                     job.cancel()
                     return 1
@@ -381,7 +381,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
             record("speech-revoke-invalidates-conversion-"+case_id,denied)
             if not all(results):
                 return 1
-        if corpus in ("mixed-preview","mixed-auto","mixed-auto-turbo"):
+        if corpus in ("mixed-preview","mixed-auto","mixed-auto-turbo","mixed-auto-piper"):
             import io,wave
             from mixed_voice_review import MixedVoiceReview,split_pcm
             # All original short WAVs are real engine outputs, with known
@@ -467,7 +467,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                 else:
                     denied=False
                 record("speech-revoke-invalidates-conversion-"+case_id,denied)
-        if corpus in ("mixed-auto","mixed-auto-turbo"):
+        if corpus in ("mixed-auto","mixed-auto-turbo","mixed-auto-piper"):
             # A fresh public fixture review session for the changed PCM bytes.
             # Do not revive or inherit the revoked original segment receipts.
             from language_detection import Detection,DetectionFixture,parse_detection,detection_observation
@@ -569,7 +569,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
                     detector.cancel()
         record("speech-distinct-multilingual-output",len(digests)==len(samples))
         record("speech-exact-output-set",all(sorted(p.name for p in (root/("voice-"+case_id)).iterdir())==[speech_filename(case_id)] for case_id,_,_ in samples) and not list(output.iterdir()))
-    return 0 if len(results)==5+7*len(samples)+(22 if corpus in ("mixed-auto","mixed-auto-turbo") else 8 if corpus=="mixed-preview" else 0) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
+    return 0 if len(results)==5+7*len(samples)+(22 if corpus in ("mixed-auto","mixed-auto-turbo","mixed-auto-piper") else 8 if corpus=="mixed-preview" else 0) and all(results) and (not stt_paths or (len(quality)==5*len(samples) and all(quality))) else 1
 
 if __name__=="__main__":
     raise SystemExit(main(*sys.argv[1:]))
