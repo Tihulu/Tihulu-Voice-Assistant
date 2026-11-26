@@ -49,3 +49,10 @@ class VoiceQualityTests(unittest.TestCase):
         by_id={s[0]:s for s in expanded_corpus()}
         self.assertEqual(targeted_corpus(),(by_id["tr-3"],by_id["de-2"],
                                       ("en","en","Hello. Today is a beautiful day.")))
+
+    def test_turbo_short_profile_does_not_truncate_long_audio(self):
+        from voice_quality import turbo_short_args
+        self.assertEqual(turbo_short_args(22050,22050*8),["-ac","500","-bs","1","-bo","1"])
+        for rate,frames in ((22050,22050*8+1),(16000,16000),(22050,0),(True,1)):
+            with self.assertRaises(Refused):
+                turbo_short_args(rate,frames)

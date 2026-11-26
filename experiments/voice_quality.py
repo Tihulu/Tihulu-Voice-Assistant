@@ -51,3 +51,12 @@ def targeted_corpus():
     """Preserve the two failed Small utterances and one passing EN control."""
     by_id={sample[0]:sample for sample in expanded_corpus()}
     return (by_id["tr-3"],by_id["de-2"],("en","en","Hello. Today is a beautiful day."))
+
+def turbo_short_args(rate,frames):
+    """Fixed short-audio fixture profile only: 10s context, greedy decode.
+    Reject longer inputs rather than truncating to a smaller context.
+    """
+    if (type(rate) is not int or type(frames) is not int
+            or rate!=22050 or not 0<frames<=rate*8):
+        raise Refused("turbo_short_audio_limit")
+    return ["-ac","500","-bs","1","-bo","1"]
