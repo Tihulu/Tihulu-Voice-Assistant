@@ -1665,15 +1665,12 @@ def create_window(app, loop, bridge=None):
             self.resource_profile.set_active(resources.PROFILE_IDS.index(chosen))
             self.resource_profile.connect("changed", self.choose_resource_profile)
             page.append(Gtk.Label(label=tr(
-                "Performance keeps a model warm for the session and uses all cores; "
-                "Balance releases a warm model after two idle minutes; "
-                "Resource-optimized releases after fifteen seconds.",
-                "Performans modeli oturum boyunca sıcak tutar ve tüm çekirdekleri kullanır; "
-                "Denge iki boşta dakikadan sonra bırakır; "
-                "Kaynak odaklı on beş saniyede bırakır.",
-                "Leistung hält ein Modell die Sitzung über warm und nutzt alle Kerne; "
-                "Ausgewogen gibt nach zwei untätigen Minuten frei; "
-                "Ressourcenoptimiert nach fünfzehn Sekunden."),
+                "Profiles set resource preferences. Whisper receives thread and CPU-only options. "
+                "CUDA/Vulkan selection, model warming and idle release are not enforced here.",
+                "Profiller kaynak tercihlerini belirler. Whisper iş parçacığı ve yalnızca CPU seçeneklerini alır. "
+                "CUDA/Vulkan seçimi, modeli sıcak tutma ve boşta bırakma burada uygulanmaz.",
+                "Profile setzen Ressourcenpräferenzen. Whisper erhält Thread- und CPU-Optionen. "
+                "CUDA/Vulkan-Auswahl, Warmhalten und Freigabe bei Leerlauf werden hier nicht erzwungen."),
                 xalign=0, wrap=True))
             page.append(Gtk.Label(label=tr("Custom profile", "Özel profil",
                                            "Benutzerdefiniertes Profil"), xalign=0))
@@ -1727,7 +1724,7 @@ def create_window(app, loop, bridge=None):
             profile = self.effective_resource()
             count = resources.cores() or 4
             self.resource_note.set_text(tr(
-                "Now: %s — %d threads, %s, %s."
+                "Requested: %s — %d threads, %s, %s."
                 % ({"performance": "Performance", "balance": "Balance",
                     "resource_optimized": "Resource-optimized", "custom": "Custom"}[profile.id],
                    profile.threads_for(count),
@@ -1736,28 +1733,32 @@ def create_window(app, loop, bridge=None):
                    "kept warm" if profile.keep_warm else
                    ("never released" if not profile.releases_after()
                     else "released after %d idle seconds" % profile.idle_release)),
-                "Şimdi: %s — %d iş parçacığı, %s, %s."
+                "Tercih: %s — %d iş parçacığı, %s, %s."
                 % (resources.LABELS[profile.id], profile.threads_for(count),
                    {"auto": "otomatik aygıt", "cuda": "CUDA", "vulkan": "Vulkan",
                     "cpu": "yalnızca işlemci"}[profile.gpu],
                    "sıcak tutuluyor" if profile.keep_warm else
                    ("hiç bırakılmıyor" if not profile.releases_after()
                     else "%d boşta saniyeden sonra bırakılıyor" % profile.idle_release)),
-                "Jetzt: %s — %d Threads, %s, %s."
+                "Gewünscht: %s — %d Threads, %s, %s."
                 % (resources.LABELS[profile.id], profile.threads_for(count),
                    {"auto": "automatisches Gerät", "cuda": "CUDA", "vulkan": "Vulkan",
                     "cpu": "nur Prozessor"}[profile.gpu],
                    "warm gehalten" if profile.keep_warm else
                    ("nie freigegeben" if not profile.releases_after()
                     else "nach %d untätigen Sekunden freigegeben" % profile.idle_release))))
+            self.resource_note.set_text(self.resource_note.get_text() + " " + tr(
+                "GPU backend and warm/idle policy are not verified or enforced; audio uses per-operation processes.",
+                "GPU motoru ve sıcak tutma/boşta bırakma politikası doğrulanmış veya uygulanmış değil; ses işlem başına süreç kullanır.",
+                "GPU-Backend und Warmhalte-/Leerlaufregeln sind nicht verifiziert oder erzwungen; Audio nutzt Prozesse pro Vorgang."))
             idle = self.bridge.idle_for() if self.bridge is not None else 0
             if not self.busy:
                 # The measured time since the last submitted work; 0 is a true
                 # answer immediately after a turn, not a placeholder.
                 self.resource_note.set_text(self.resource_note.get_text() + " " + tr(
-                    "Last work %ds ago: no engine is running." % idle,
-                    "Son iş %d s önce: hiçbir motor çalışmıyor." % idle,
-                    "Letzte Arbeit vor %d s: keine Engine läuft." % idle))
+                    "Last work %ds ago: no owned turn is pending." % idle,
+                    "Son iş %d s önce: etkin Jarvis görevi yok." % idle,
+                    "Letzte Arbeit vor %d s: kein eigener Vorgang ausstehend." % idle))
             # What the process itself uses, measured on demand rather than
             # polled: the row is refreshed when the owner opens the page.
             mib = usage.resident_mib()
@@ -1781,12 +1782,20 @@ def create_window(app, loop, bridge=None):
             """Apply the chosen profile now; a restart is never required."""
             if self.syncing_preferences:
                 return
-            chosen = resources.PROFILE_IDS[self.resource_profile.get_active()]
+            selected = self.resource_profile.get_active()
+            if not 0 <= selected < len(resources.PROFILE_IDS):
+                self.sync_preference_widgets()
+                return
+            chosen = resources.PROFILE_IDS[selected]
             stored = {"profile": chosen}
             if chosen == "custom":
+                gpu = self.resource_gpu.get_active()
+                if not 0 <= gpu < len(resources.GPUS):
+                    self.sync_preference_widgets()
+                    return
                 stored = {"profile": chosen,
                           "threads": int(self.resource_threads.get_value()),
-                          "gpu": resources.GPUS[self.resource_gpu.get_active()],
+                          "gpu": resources.GPUS[gpu],
                           "keep_warm": bool(self.resource_warm.get_active()),
                           "idle_release": int(self.resource_idle.get_value())}
             try:
@@ -1806,8 +1815,8 @@ def create_window(app, loop, bridge=None):
 
         def apply_resource_profile(self):
             """Hand the chosen profile to the voice layer, which starts the
-            local engines. A profile chooses threads and the device only — never
-            the executable, the flags or the model."""
+            local engines. A profile controls fixed resource options, not
+            arbitrary executables, flags or model paths."""
             try:
                 profile = self.effective_resource()
             except Hold:
