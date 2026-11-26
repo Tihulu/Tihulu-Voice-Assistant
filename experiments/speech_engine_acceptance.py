@@ -16,6 +16,7 @@ from gateway import Context,FixtureGateway,Refused
 from capabilities import CapabilityCall
 from speech_result import SpeechFixture,SpeechResult,MAX_WAV
 from conversion_result import ConversionResult
+from fixture_lifetime import FixtureLifetime
 
 TEXT={"tr":"Merhaba. Bugün güzel bir gün.","en":"Hello. Today is a beautiful day.",
       "de":"Guten Tag. Heute ist ein schöner Tag."}
@@ -87,7 +88,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
     def record(case,ok,**extra):
         results.append(bool(ok))
         print(json.dumps(dict(case=case,status="PASS" if ok else "FAIL",**extra)),flush=True)
-    with tempfile.TemporaryDirectory(prefix="jarvis-speech-") as tmp:
+    with tempfile.TemporaryDirectory(prefix="jarvis-speech-") as tmp, FixtureLifetime() as lifetime:
         root=Path(tmp)
         source=root/"text.txt"
         marker=root/"not-approved"
@@ -147,7 +148,7 @@ def main(stt_binary=None,stt_model=None,stt_profile="tiny",corpus="original"):
         print(json.dumps({"espeak_version":version.group(1)}),flush=True)
         ctx=Context("speech-fixture","session","profile",1,"local","LOCAL_ONLY")
         rules=tuple(profiles.Rule(a,(),"allow") for a in ("host_shell","filesystem_read","filesystem_write"))
-        gate=FixtureGateway(ctx,rules,clock=profiles.PolicyClock())
+        gate=lifetime.track(FixtureGateway(ctx,rules,clock=profiles.PolicyClock()))
         ffmpeg_prefix=prefix.copy()
         ffmpeg_prefix[-2:-2]=["--setenv","LD_LIBRARY_PATH",
                               "/usr/lib/x86_64-linux-gnu/blas:/usr/lib/x86_64-linux-gnu/lapack"]
@@ -425,7 +426,7 @@ print(json.dumps({'model':h.hexdigest(),'audio':hashlib.sha256(Path('/work/sampl
             # Do not revive or inherit the revoked original segment receipts.
             from language_detection import Detection,DetectionFixture,parse_detection
             auto_ctx=Context("mixed-auto-fixture","session","profile",1,"local","LOCAL_ONLY")
-            auto_gate=FixtureGateway(auto_ctx,rules,clock=profiles.PolicyClock())
+            auto_gate=lifetime.track(FixtureGateway(auto_ctx,rules,clock=profiles.PolicyClock()))
             detectors=[]
             transcripts=[]
             try:
