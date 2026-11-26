@@ -396,9 +396,9 @@ def create_window(app, loop, bridge=None):
             self.voice_setup_note = Gtk.Label(xalign=0, wrap=True)
             models.append(self.voice_setup_note)
             models.append(Gtk.Label(label=tr(
-                "Speech input language (this window only; Auto is default)",
-                "Ses giriş dili (bu pencere için; varsayılan otomatik)",
-                "Spracheingabe (nur dieses Fenster; Standard automatisch)"), xalign=0))
+                "Speech input language (saved; Auto is default)",
+                "Ses giriş dili (kaydedilir; varsayılan otomatik)",
+                "Spracheingabe (gespeichert; Standard automatisch)"), xalign=0))
             self.stt_language = Gtk.ComboBoxText()
             for key, title in (("auto", tr("Auto detect", "Otomatik algıla", "Automatisch erkennen")),
                                ("tr", "Türkçe"), ("en", "English"), ("de", "Deutsch"),
@@ -406,7 +406,8 @@ def create_window(app, loop, bridge=None):
                                                 "Karışık konuşma (deneysel, duraklamalı, en çok 60 sn)",
                                                 "Gemischt (experimentell, Pausen, max. 60 s)"))):
                 self.stt_language.append(key, title)
-            self.stt_language.set_active_id("auto")
+            self.stt_language.set_active_id(self.cfg.get("stt_language", "auto"))
+            self.stt_language.connect("changed", self.choose_stt_language)
             models.append(self.stt_language)
             self.model_scan_result = self.model_scan_context = None
             self.model_scan = self.button(models, tr(
@@ -1873,6 +1874,40 @@ def create_window(app, loop, bridge=None):
                                          "Bu sürümde bağlı kısayol yok.",
                                          "In diesem Build sind keine Tastenkürzel gebunden.")
 
+        def choose_stt_language(self, *_):
+            if self.syncing_preferences:
+                return
+            previous = self.cfg.get("stt_language", "auto")
+            try:
+                if self.busy or self.closing:
+                    raise Hold("model_selection_busy")
+                language = audio.checked_stt_language(self.stt_language.get_active_id())
+            except Hold as exc:
+                self.sync_preference_widgets()
+                self.status.set_text(str(exc))
+                return
+            if language == previous:
+                return
+            if language == "auto":
+                self.cfg.pop("stt_language", None)
+            else:
+                self.cfg["stt_language"] = language
+            if not self.save():
+                if previous == "auto":
+                    self.cfg.pop("stt_language", None)
+                else:
+                    self.cfg["stt_language"] = previous
+                self.sync_preference_widgets()
+                return
+
+        def selected_stt_language(self):
+            language = audio.checked_stt_language(self.cfg.get("stt_language", "auto"))
+            if (language != self.saved_cfg.get("stt_language", "auto")
+                    or language != self.stt_language.get_active_id()
+                    or language != settings.load().get("stt_language", "auto")):
+                raise Hold("settings_changed")
+            return language
+
         def choose_spoken_text(self, *_):
             """Store the choice immediately; a restart is never required."""
             if self.syncing_preferences:
@@ -3310,6 +3345,7 @@ def create_window(app, loop, bridge=None):
             try:
                 self.settings_scale.set_active(1 if self.cfg["text_scale"] == "large" else 0)
                 self.settings_spoken.set_active(self.cfg["show_spoken_text"])
+                self.stt_language.set_active_id(self.cfg.get("stt_language", "auto"))
                 profile = self.effective_resource()
                 self.resource_profile.set_active(resources.PROFILE_IDS.index(profile.id))
                 self.resource_threads.set_value(profile.threads_for(resources.cores()))
@@ -4686,7 +4722,7 @@ def create_window(app, loop, bridge=None):
                 self.require_audio_choice()
                 self.require_tools(("filesystem_read", ("recording",)), selected=True)
                 model = self.cfg["stt"]
-                language = audio.checked_stt_language(self.stt_language.get_active_id())
+                language = self.selected_stt_language()
                 context = self.picker_context()
                 selection = self.tool_checkpoint("filesystem_read", ("recording",),
                                                  self.session.epoch, selected=True,
@@ -5380,7 +5416,7 @@ def create_window(app, loop, bridge=None):
                     "Textanhang vor dem Sprachchat entfernen."))
                 return
             try:
-                language = audio.checked_stt_language(self.stt_language.get_active_id())
+                language = self.selected_stt_language()
             except Hold as exc:
                 self.set_state("ready", str(exc))
                 return

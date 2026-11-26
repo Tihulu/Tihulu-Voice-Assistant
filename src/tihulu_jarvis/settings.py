@@ -127,6 +127,11 @@ def checked(obj):
     if not isinstance(spoken, bool):
         raise Hold("invalid_local_settings")
     out["show_spoken_text"] = spoken
+    # Omit the default key, preserving historical recovery-journal digests.
+    from .voice.audio import checked_stt_language
+    language = checked_stt_language(obj.get("stt_language", "auto"))
+    if language != "auto":
+        out["stt_language"] = language
     scale = obj.get("text_scale", "normal")
     # An unknown scale is refused here, not quietly swapped for a default:
     # a stored preference the client cannot honour must not be hidden.
@@ -212,7 +217,7 @@ def audio_integrity_level(cfg, slot):
 
 # A partial in-place reload must never implicitly change routing, permissions,
 # profile selection, approved sites, or research roots.
-RELOADABLE = frozenset(("text_scale", "show_spoken_text", "stt", "voices",
+RELOADABLE = frozenset(("text_scale", "show_spoken_text", "stt_language", "stt", "voices",
                         "market_refs", "audio_digests", "voice_digests", "resources"))
 
 
