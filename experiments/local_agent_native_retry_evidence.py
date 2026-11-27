@@ -17,11 +17,13 @@ from llama_engine_acceptance import MODEL,ENGINE_REV
 
 
 def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
-    if scenario not in ("retry-cumulative","retry-dual","retry-prompt-hold"):
+    if scenario not in ("retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold"):
         raise RuntimeError("native_retry_scenario")
     dual=scenario!="retry-cumulative"
     prompt_hold=scenario=="retry-prompt-hold"
-    prompt_total=461 if prompt_hold else (462 if dual else None)
+    wave_policy=scenario in ("retry-wave-prompt","retry-wave-prompt-hold")
+    wave_hold=scenario=="retry-wave-prompt-hold"
+    prompt_total=(251 if wave_hold else 252) if wave_policy else (461 if prompt_hold else (462 if dual else None))
     generated_total=80 if prompt_hold else 64
     ctx=Context("native-retry","session","profile",1,"local","LOCAL_ONLY")
     gate=FixtureGateway(ctx,(profiles.Rule("host_shell",(),"allow"),),clock=profiles.PolicyClock())
@@ -84,7 +86,7 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
             record("retry-dual-wave-prompt-cleared-"+ "-".join(names),session.prompt_snapshot()[2]==0)
         return total
     try:
-        first=session.prepare(ctx,models,"standard")
+        first=session.prepare(ctx,models,"standard",prompt_policy="wave" if wave_policy else "whole-plan")
         first_run=session.confirm(first,ctx,models)
         used=wave(first,first_run,("plan",))
         session.stop()
@@ -120,15 +122,47 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
             denied=False
         record("retry-standard-refused-before-launch",denied and coordinator._issued==issued and not owned
                and namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
-        second=session.prepare(ctx,models,"economy")
+        if wave_policy:
+            try:
+                session.prepare(ctx,models,"economy")
+            except Refused as exc:
+                denied=str(exc)=="retry_budget_prompt_unaffordable"
+            else:
+                denied=False
+            record("retry-wave-default-whole-plan-refused",denied and coordinator._issued==issued)
+        second=session.prepare(ctx,models,"economy",prompt_policy="wave" if wave_policy else "whole-plan")
         second_run=session.confirm(second,ctx,models)
         record("retry-explicit-economy-fresh-identity",first.attempt!=second.attempt
                and first_run.request("plan")!=second_run.request("plan")
                and second.ceilings==(16,8,8,16) and second.remaining==48)
-        if dual:
+        if wave_policy:
+            record("retry-wave-explicit-admission",second.prompt_policy=="wave" and second.prompt_required_at_admission==112
+                   and second.prompt_remaining==prompt_total-14)
+        elif dual:
             record("retry-dual-exact-prompt-admission",second.prompt_remaining==448 and session.prompt_snapshot()==(462,14,0,448))
-        actual=0
-        for names in (("plan",),("a","b"),("review",)):
+        actual=wave(second,second_run,("plan",))
+        if wave_hold:
+            try:
+                wave(second,second_run,("a","b"))
+            except Refused as exc:
+                denied=str(exc)=="team_budget_prompt_exhausted"
+            else:
+                denied=False
+            record("retry-wave-peer-refused-before-claim-and-spawn",denied and second_run.drained()
+                   and set(second_run._run._claims)=={"plan"} and not owned
+                   and session.snapshot()==(64,32,0,32) and session.prompt_snapshot()==(251,28,0,223)
+                   and memory.snapshot()==(32,0,32) and namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
+            try:
+                second_run.output("plan",ctx,models)
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("retry-wave-hold-no-intermediate-output",denied)
+            return 0
+        for names in (("a","b"),("review",)):
+            if wave_policy and names==("a","b"):
+                record("retry-wave-exact-peer-boundary",session.prompt_snapshot()==(252,28,0,224))
             actual+=wave(second,second_run,names)
         receipt,data=second_run.output("review",ctx,models)
         record("retry-final-bound-output",bool(data) and receipt.payload_digest==sha256(data).hexdigest())
@@ -136,7 +170,7 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
                first_generated=used,retry_generated=actual,total_generated=used+actual)
         if dual:
             record("retry-dual-final-actual-prompt",len(measured_prompts)==5 and all(1<=p<=112 for p in measured_prompts)
-                   and session.prompt_snapshot()==(462,sum(measured_prompts),0,462-sum(measured_prompts)),
+                   and session.prompt_snapshot()==(prompt_total,sum(measured_prompts),0,prompt_total-sum(measured_prompts)),
                    per_call_prompt=measured_prompts,total_prompt=sum(measured_prompts))
         session.stop()
         issued=coordinator._issued
