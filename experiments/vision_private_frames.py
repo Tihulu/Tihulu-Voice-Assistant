@@ -35,6 +35,7 @@ class PrivateFrames:
         self._g=gateway
         self._surface=identity(surface)
         self._source=source
+        gateway.register_agent_attempt(target("vision-frame-scope-v1",source,self._surface))
         self._owner=current_thread()
         self._frame=None
         self._raster=None
