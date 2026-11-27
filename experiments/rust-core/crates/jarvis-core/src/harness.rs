@@ -80,8 +80,9 @@ fn compatible(m: &Manifest) -> bool {
             | (TerminalObserver, PtyObserverV1)
     ) && m.pin != [0; 32]
         && !m.supported.is_empty()
+        && (!matches!(m.kind, NativeJanQwen | TerminalObserver) || m.route == Route::Local)
         && m.supported.iter().all(|c| match m.kind {
-            TerminalObserver => matches!(c, Capability::ObserveTerminal | Capability::Cancel),
+            TerminalObserver => *c == Capability::ObserveTerminal,
             DeepSeek => !matches!(
                 c,
                 Capability::HostShell | Capability::IsolatedWork | Capability::ObserveTerminal
