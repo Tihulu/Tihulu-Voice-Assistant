@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! In-memory layout fixture. No file access, persistence or authorization grants.
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 const MAX_OBJECTS: usize = 1024;
+static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct ProjectId(u64);
@@ -41,8 +43,11 @@ impl Workspace {
         if self.next >= MAX_OBJECTS as u64 {
             return Err(Error::Limit);
         }
+        let id = NEXT_ID
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+            .map_err(|_| Error::Limit)?;
         self.next += 1;
-        Ok(self.next)
+        Ok(id)
     }
 
     pub fn project(&mut self) -> Result<ProjectId, Error> {
@@ -71,7 +76,10 @@ impl Workspace {
             return Err(Error::Unknown);
         }
         let id = TabId(self.issue()?);
-        self.windows.get_mut(&window).ok_or(Error::Unknown)?.push(id);
+        self.windows
+            .get_mut(&window)
+            .ok_or(Error::Unknown)?
+            .push(id);
         self.tabs.insert(id, View { session, window });
         Ok(id)
     }
@@ -100,9 +108,15 @@ impl Workspace {
             return Err(Error::Conflict);
         }
         let source = self.windows.get_mut(&view.window).ok_or(Error::Unknown)?;
-        let old = source.iter().position(|id| *id == tab).ok_or(Error::Conflict)?;
+        let old = source
+            .iter()
+            .position(|id| *id == tab)
+            .ok_or(Error::Conflict)?;
         source.remove(old);
-        self.windows.get_mut(&target).ok_or(Error::Unknown)?.insert(index, tab);
+        self.windows
+            .get_mut(&target)
+            .ok_or(Error::Unknown)?
+            .insert(index, tab);
         self.tabs.get_mut(&tab).ok_or(Error::Unknown)?.window = target;
         Ok(())
     }
@@ -119,7 +133,10 @@ impl Workspace {
     pub fn close_tab(&mut self, tab: TabId) -> Result<(), Error> {
         let view = *self.tabs.get(&tab).ok_or(Error::Unknown)?;
         let list = self.windows.get_mut(&view.window).ok_or(Error::Unknown)?;
-        let index = list.iter().position(|id| *id == tab).ok_or(Error::Conflict)?;
+        let index = list
+            .iter()
+            .position(|id| *id == tab)
+            .ok_or(Error::Conflict)?;
         list.remove(index);
         self.tabs.remove(&tab);
         Ok(())
