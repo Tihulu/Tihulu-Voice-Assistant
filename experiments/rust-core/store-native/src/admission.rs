@@ -4,25 +4,34 @@
 use crate::replay::guarded::{GuardedReplayStore, Peer};
 use crate::replay::Digest;
 use crate::{Error, Id};
+use jarvis_core::approval_broker::{self, Broker, Observation, Request};
 use jarvis_core::budget::Snapshot;
 use jarvis_core::harness_wave::{
     self, Current, HarnessWave, PolicyStamp, ResultState, Worker, WorkerKey,
 };
 use jarvis_core::session::Session;
 use jarvis_core::synthetic_transport::Identity;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum AdmissionError {
     Storage(Error),
     Wave(harness_wave::Error),
+    Review(approval_broker::Error),
     Invalid,
     Busy,
+}
+
+struct Review {
+    turn: Digest,
+    broker: Broker,
+    denied: BTreeSet<Digest>,
 }
 
 struct Active {
     attempt: Digest,
     peers: Vec<Peer>,
+    review: Option<Review>,
 }
 
 pub struct GuardedWave {
@@ -144,8 +153,98 @@ impl GuardedWave {
             }
             return Err(AdmissionError::Storage(error));
         }
-        self.active = Some(Active { attempt, peers });
+        self.active = Some(Active {
+            attempt,
+            peers,
+            review: None,
+        });
         Ok(keys)
+    }
+
+    /// The trusted owner explicitly predeclares the turn namespace.
+    /// Existing plain prepare does not enable typed approval review.
+    pub fn prepare_for_turn(
+        &mut self,
+        label: &str,
+        turn: Digest,
+        workers: Vec<Worker<'_>>,
+        planned: BTreeMap<String, Identity>,
+        now: u64,
+    ) -> Result<Vec<WorkerKey>, AdmissionError> {
+        if turn == [0; 32] {
+            return Err(AdmissionError::Invalid);
+        }
+        let stamp = workers
+            .first()
+            .ok_or(AdmissionError::Invalid)?
+            .current
+            .policy;
+        let broker = Broker::new(
+            project_scope(self.project),
+            session_scope(self.session),
+            stamp,
+            now,
+        )
+        .map_err(AdmissionError::Review)?;
+        let keys = self.prepare(label, workers, planned, now)?;
+        self.active.as_mut().ok_or(AdmissionError::Invalid)?.review = Some(Review {
+            turn,
+            broker,
+            denied: BTreeSet::new(),
+        });
+        Ok(keys)
+    }
+
+    /// Only the exact approval-needed event's owner may record a denied
+    /// typed request. Register/revoke via the existing Broker, then persist
+    /// its denial history. Never issue an affirmative receipt or resume.
+    pub fn record_denied_approval(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        source: Identity,
+        id: Digest,
+        request: &Request,
+        now: u64,
+    ) -> Result<(), AdmissionError> {
+        self.wave
+            .check_denied_review(key, current, source)
+            .map_err(AdmissionError::Wave)?;
+        let active = self.active.as_mut().ok_or(AdmissionError::Invalid)?;
+        let review = active.review.as_mut().ok_or(AdmissionError::Invalid)?;
+        let scope = request.scope;
+        if scope.project != source.project
+            || scope.session != source.session
+            || scope.attempt != active.attempt
+            || scope.attempt != source.attempt
+            || scope.worker != source.worker
+            || scope.turn != review.turn
+            || &request.manifest != current.manifest
+            || review.denied.contains(&source.worker)
+        {
+            return Err(AdmissionError::Invalid);
+        }
+        let observed = Observation {
+            request,
+            allowed: current.allowed,
+            policy: current.policy,
+        };
+        let key = review
+            .broker
+            .register(id, request, &observed, now)
+            .map_err(AdmissionError::Review)?;
+        review.broker.revoke(&key).map_err(AdmissionError::Review)?;
+        // Even a storage failure cannot retry or resurrect this review.
+        review.denied.insert(source.worker);
+        self.store
+            .burn_approval(
+                self.session,
+                source.attempt,
+                source.worker,
+                id,
+                request.binding.action,
+            )
+            .map_err(AdmissionError::Storage)
     }
 
     pub fn bind(

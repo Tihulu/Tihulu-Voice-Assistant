@@ -1,4 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+use jarvis_core::approval::Binding;
+use jarvis_core::approval_broker::{Action, Request, Scope};
 use jarvis_core::budget::{Amount, Demand};
 use jarvis_core::harness::{self, Capability, Kind, Manifest, Protocol, Route};
 use jarvis_core::harness_wave::{Current, PolicyStamp, ResultState, Worker};
@@ -225,4 +227,126 @@ fn stopped_prepared_wave_needs_exact_void_before_finish() {
     wave.void_unstarted(&keys[0], id).unwrap();
     wave.finish().unwrap();
     assert!(f.store().unresolved(S).unwrap().is_none());
+}
+
+fn review_manifest() -> Manifest {
+    let mut m = manifest();
+    m.supported.insert(Capability::Propose);
+    m
+}
+
+fn review_request(m: &Manifest, id: Identity) -> Request {
+    Request {
+        scope: Scope {
+            project: id.project,
+            session: id.session,
+            turn: [6; 32],
+            attempt: id.attempt,
+            worker: id.worker,
+        },
+        action: Action::Plan {
+            target: [7; 32],
+            input: [8; 32],
+        },
+        binding: Binding {
+            subject: [9; 32],
+            action: [10; 32],
+            policy: current(m).policy,
+            expires_at: 120,
+        },
+        manifest: m.clone(),
+    }
+}
+
+#[test]
+fn exact_approval_event_records_denial_without_resume() {
+    let f = Fixture::new();
+    let m = review_manifest();
+    let id = identity();
+    let r = review_request(&m, id);
+    let mut wave = GuardedWave::new(f.store(), session(), P, S).unwrap();
+    let keys = wave
+        .prepare_for_turn("one", [6; 32], vec![worker(&m)], planned(id), 100)
+        .unwrap();
+    wave.bind(&keys[0], &current(&m), id, 100).unwrap();
+    wave.dispatch(&keys[0], &current(&m), 100).unwrap();
+    assert!(wave
+        .record_denied_approval(&keys[0], &current(&m), id, [11; 32], &r, 101)
+        .is_err());
+    wave.record_chunk(&keys[0], &current(&m), 101, id, &frame(id, 1, 1))
+        .unwrap();
+    wave.record_chunk(&keys[0], &current(&m), 102, id, &frame(id, 2, 3))
+        .unwrap();
+    let mut wrong = r.clone();
+    wrong.scope.turn = [12; 32];
+    assert!(wave
+        .record_denied_approval(&keys[0], &current(&m), id, [11; 32], &wrong, 103)
+        .is_err());
+    wave.record_denied_approval(&keys[0], &current(&m), id, [11; 32], &r, 103)
+        .unwrap();
+    assert!(wave.stopped());
+    assert!(wave
+        .record_denied_approval(&keys[0], &current(&m), id, [12; 32], &r, 104)
+        .is_err());
+    assert!(wave.dispatch(&keys[0], &current(&m), 104).is_err());
+    assert_eq!(wave.snapshot().reserved, capacity());
+    drop(wave);
+    let db = f.db();
+    let count: i64 = db
+        .query_row("SELECT count(*) FROM harness_approval_replay", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn stopped_without_approval_event_cannot_record_denial() {
+    let f = Fixture::new();
+    let m = review_manifest();
+    let id = identity();
+    let r = review_request(&m, id);
+    let mut wave = GuardedWave::new(f.store(), session(), P, S).unwrap();
+    let keys = wave
+        .prepare_for_turn("one", [6; 32], vec![worker(&m)], planned(id), 100)
+        .unwrap();
+    wave.bind(&keys[0], &current(&m), id, 100).unwrap();
+    wave.dispatch(&keys[0], &current(&m), 100).unwrap();
+    wave.stop();
+    assert!(wave
+        .record_denied_approval(&keys[0], &current(&m), id, [11; 32], &r, 101)
+        .is_err());
+    assert_eq!(wave.snapshot().reserved, capacity());
+}
+
+#[test]
+fn storage_denial_does_not_reopen_review_or_release_reservation() {
+    let f = Fixture::new();
+    let m = review_manifest();
+    let id = identity();
+    let r = review_request(&m, id);
+    let mut wave = GuardedWave::new(f.store(), session(), P, S).unwrap();
+    let keys = wave
+        .prepare_for_turn("one", [6; 32], vec![worker(&m)], planned(id), 100)
+        .unwrap();
+    wave.bind(&keys[0], &current(&m), id, 100).unwrap();
+    wave.dispatch(&keys[0], &current(&m), 100).unwrap();
+    wave.record_chunk(&keys[0], &current(&m), 101, id, &frame(id, 1, 1))
+        .unwrap();
+    wave.record_chunk(&keys[0], &current(&m), 102, id, &frame(id, 2, 3))
+        .unwrap();
+    f.store()
+        .burn_approval(S, id.attempt, id.worker, [11; 32], r.binding.action)
+        .unwrap();
+    assert!(matches!(
+        wave.record_denied_approval(&keys[0], &current(&m), id, [11; 32], &r, 103),
+        Err(AdmissionError::Storage(_))
+    ));
+    let mut changed = r.clone();
+    changed.binding.action = [13; 32];
+    assert!(wave
+        .record_denied_approval(&keys[0], &current(&m), id, [12; 32], &changed, 104)
+        .is_err());
+    assert!(wave.stopped());
+    assert_eq!(wave.snapshot().reserved, capacity());
 }
