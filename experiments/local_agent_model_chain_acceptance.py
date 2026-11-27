@@ -103,7 +103,7 @@ def worker(name,port,mode="normal"):
     return 0
 
 def child(host_net,host_port,scenario,host_pid_namespace):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold","shared-chain","shared-chain-revoke","shared-chain-hold","retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold","retry-deadline","retry-stream-deadline"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold","shared-chain","shared-chain-revoke","shared-chain-hold","retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold","retry-vector-cpu","retry-vector-hold","retry-deadline","retry-stream-deadline"):
         raise RuntimeError("fixture_scenario")
     sys.path.insert(0,"/work/code")
     import resource
@@ -143,7 +143,7 @@ def child(host_net,host_port,scenario,host_pid_namespace):
     if scenario=="retry-deadline":
         from local_agent_native_deadline_evidence import run_deadline
         return run_deadline(record,host_pid_namespace)
-    if scenario in ("retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold"):
+    if scenario in ("retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold","retry-vector-cpu","retry-vector-hold"):
         from local_agent_native_retry_evidence import run_retry
         return run_retry(record,host_pid_namespace,scenario)
     ctx=Context("agent-model-fixture","session","profile",1,"local","LOCAL_ONLY")
@@ -501,7 +501,7 @@ def child(host_net,host_port,scenario,host_pid_namespace):
     return 0
 
 def main(binary,model,scenario="normal"):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold","shared-chain","shared-chain-revoke","shared-chain-hold","retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold","retry-deadline","retry-stream-deadline"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold","shared-chain","shared-chain-revoke","shared-chain-hold","retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold","retry-vector-cpu","retry-vector-hold","retry-deadline","retry-stream-deadline"):
         raise RuntimeError("fixture_scenario")
     from llama_engine_acceptance import MODEL_SHA
     import shutil
@@ -520,6 +520,7 @@ def main(binary,model,scenario="normal"):
                      "heterogeneous_team_token_budget.py","heterogeneous_team_review_token_adapter.py","native_fixture_pid_observation.py",
                      "local_agent_retry_budget_session.py","local_agent_native_retry_evidence.py",
                      "local_agent_retry_deadline.py","local_agent_native_deadline_evidence.py",
+                     "local_agent_vector_resources.py","local_agent_vector_planner.py","local_agent_vector_admission.py",
                      "heterogeneous_agents.py","agent_custom_profiles.py","agent_model_capability.py",
                      "heterogeneous_team.py","heterogeneous_team_admission.py","heterogeneous_data_tools.py",
                      "heterogeneous_data_team.py","vision_image_input.py","document_result.py",
