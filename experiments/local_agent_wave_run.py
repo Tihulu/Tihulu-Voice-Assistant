@@ -18,13 +18,14 @@ class AgentResult:
     request_target: str
     payload_digest: str
     size: int
+    input_digest: str = ""
 
 class WaveRun:
     """Trusted coordinator supplies current snapshots at every checkpoint.
     No caller-supplied callbacks, executor, subprocess or provider transport.
     A wave barrier prevents concurrent reservations from crossing waves.
     """
-    def __init__(self,gateway,plan,workers,candidates,budget,limit=6,preference="balanced",*,ledger=None,run_id=None,attempt=None):
+    def __init__(self,gateway,plan,workers,candidates,budget,limit=6,preference="balanced",*,ledger=None,run_id=None,attempt=None,strict_results=False):
         if type(gateway) is not FixtureGateway or type(plan) is not AgentPlan:
             raise Refused("agent_run_invalid")
         self._gateway=gateway
@@ -42,6 +43,10 @@ class WaveRun:
             if type(attempt) is not str:
                 raise Refused("agent_attempt_invalid")
             token(attempt)
+        if type(strict_results) is not bool or (strict_results and attempt is None):
+            raise Refused("agent_result_policy_invalid")
+        self._strict_results=strict_results
+        self._input_reads={}
         self._attempt=attempt
         self._ledger=ledger
         self._run_id=run_id
@@ -89,6 +94,8 @@ class WaveRun:
                             a.provider,a.memory_mib)
                     if self._attempt is not None:
                         fields=("agent-wave-attempt-v1",self._attempt,self._run_id)+fields[1:]
+                    if self._strict_results:
+                        fields=("agent-strict-results-v1",)+fields
                     target=sha256(repr(fields).encode("ascii")).hexdigest()
                     return Request(self._plan.context,"agent",target,"local","private").checked()
         raise Refused("agent_worker_unknown")
@@ -97,6 +104,8 @@ class WaveRun:
         self._check(context,candidates)
         if type(worker) is not str or worker in self._claims or not any(a.worker==worker for a in self._wave()):
             raise Refused("agent_wave_not_ready")
+        if self._strict_results and any(p not in self._outputs for p in self._parents(worker)):
+            raise Refused("agent_dependency_result_missing")
         req=self.request(worker)
         # Prior waves are complete. Bind the entire earlier wave barrier
         # (including transitive grant dependencies) before claiming a child.
@@ -146,6 +155,17 @@ class WaveRun:
             raise Refused("agent_completion_attempt_mismatch")
         self._gateway.checkpoint_claimed_group(((grant,req),))
 
+    def _parents(self,worker):
+        return tuple(sorted(next(w.depends for w in self._workers if w.identity==worker)))
+
+    def _input_digest(self,worker):
+        grant,req=self._claims[worker]
+        parents=tuple((p,self._outputs[p][0].grant_identity,
+                       self._outputs[p][0].request_target,self._outputs[p][0].payload_digest,
+                       self._outputs[p][0].input_digest) for p in self._parents(worker))
+        return sha256(repr(("agent-input-v1",self._attempt,self._plan.digest,
+                            worker,grant.identity,req.target,parents)).encode("ascii")).hexdigest()
+
     def complete(self,worker,context,candidates,*,payload=None,completion_grant=None):
         # A foreign/late event must not invalidate a newer attempt with a
         # stale context before its exact ownership has been established.
@@ -156,12 +176,19 @@ class WaveRun:
         if payload is not None and (type(payload) is not bytes or not 0<len(payload)<=MAX_RESULT_BYTES):
             raise Refused("agent_result_invalid")
         grant,req=self._claims[worker]
+        input_digest=""
+        if self._strict_results:
+            if payload is None:
+                raise Refused("agent_result_required")
+            input_digest=self._input_digest(worker)
+            if self._parents(worker) and self._input_reads.get(worker)!=input_digest:
+                raise Refused("agent_dependency_read_required")
         self._gateway.checkpoint_claimed_group(((grant,req),))
         # In this synthetic API completion means the simulated worker ended.
         self._release(worker)
         if payload is not None:
             receipt=AgentResult(worker,self._plan.digest,grant.identity,req.target,
-                                sha256(payload).hexdigest(),len(payload))
+                                sha256(payload).hexdigest(),len(payload),input_digest)
             self._outputs[worker]=(receipt,payload)
         self._done.add(worker)
 
@@ -172,12 +199,14 @@ class WaveRun:
         self._check(context,candidates)
         if type(worker) is not str or worker not in self._claims or worker in self._done:
             raise Refused("agent_worker_not_running")
-        parents=next(w.depends for w in self._workers if w.identity==worker)
+        parents=self._parents(worker)
         if any(parent not in self._outputs for parent in parents):
             raise Refused("agent_dependency_result_missing")
         claims=(self._claims[worker],)+tuple(self._claims[p] for p in sorted(parents))
         self._gateway.checkpoint_claimed_group(claims)
-        return tuple(self._outputs[p] for p in sorted(parents))
+        if self._strict_results:
+            self._input_reads[worker]=self._input_digest(worker)
+        return tuple(self._outputs[p] for p in parents)
 
     def output(self,worker,context,candidates):
         """Read one terminal fixture result only after the whole run is valid."""
@@ -212,6 +241,7 @@ class WaveRun:
         if not self._cancelled:
             self._cancelled=True
             self._outputs.clear()
+            self._input_reads.clear()
             for grant,req in self._claims.values():
                 self._gateway.revoke(grant.identity)
             # Only synthetic runs: no actual process is alive. A real broker
