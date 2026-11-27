@@ -208,9 +208,7 @@ impl Workspace {
     }
 
     fn valid_name(name: &str) -> bool {
-        !name.trim().is_empty()
-            && name.len() <= 128
-            && !name.chars().any(char::is_control)
+        !name.trim().is_empty() && name.len() <= 128 && !name.chars().any(char::is_control)
     }
 
     pub fn create_group(
@@ -270,12 +268,7 @@ impl Workspace {
     }
 
     /// Index is relative to the target after removing the moving group.
-    pub fn move_group(
-        &mut self,
-        id: GroupId,
-        target: WindowId,
-        index: usize,
-    ) -> Result<(), Error> {
+    pub fn move_group(&mut self, id: GroupId, target: WindowId, index: usize) -> Result<(), Error> {
         let group = self.group(id)?;
         let source = group.window;
         let members = group.tabs.clone();
