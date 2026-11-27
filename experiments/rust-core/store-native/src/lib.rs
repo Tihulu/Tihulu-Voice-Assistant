@@ -533,4 +533,6 @@ impl Store {
     }
 }
 
+#[cfg(target_os = "linux")]
+pub mod exclusive;
 pub mod owned;

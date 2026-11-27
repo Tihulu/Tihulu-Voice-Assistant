@@ -1,0 +1,114 @@
+// SPDX-License-Identifier: AGPL-3.0-only
+#![cfg(target_os = "linux")]
+use jarvis_store_fixture::exclusive::ExclusiveStore;
+use jarvis_store_fixture::owned::Admission;
+use jarvis_store_fixture::{Error, State};
+use std::fs;
+use std::os::unix::fs::{symlink, DirBuilderExt, PermissionsExt};
+use std::path::PathBuf;
+use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+const S: [u8; 16] = [2; 16];
+const C: [u8; 16] = [4; 16];
+static NEXT: AtomicU64 = AtomicU64::new(1);
+
+struct Fixture(PathBuf);
+
+impl Fixture {
+    fn new() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "jarvis-exclusive-{}-{}",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+        Self(path)
+    }
+}
+
+impl Drop for Fixture {
+    fn drop(&mut self) {
+        let _ = fs::remove_dir_all(&self.0);
+    }
+}
+
+#[test]
+fn competing_owner_cannot_open_and_restart_preserves_hold() {
+    let f = Fixture::new();
+    let mut owner = ExclusiveStore::open(&f.0, true).unwrap();
+    owner.session(S, None).unwrap();
+    let Admission::New(_, old) = owner.submit(S, C, 0, "one", "Hello").unwrap() else {
+        panic!("new turn required");
+    };
+    assert!(matches!(ExclusiveStore::open(&f.0, false), Err(Error::Busy)));
+    assert!(matches!(ExclusiveStore::open(&f.0, true), Err(Error::Busy)));
+    drop(owner);
+    let mut owner = ExclusiveStore::open(&f.0, false).unwrap();
+    assert_eq!(owner.recovery(S).unwrap().unwrap().state, State::Pending);
+    assert_eq!(owner.complete_reaped(&old, "late"), Err(Error::Unknown));
+    let recovery = owner.recover_cancel(S, 1).unwrap();
+    assert_eq!(owner.observe_drained(&recovery), Ok(3));
+}
+
+#[test]
+fn child_lock_probe() {
+    // Normal test matrix has no probe environment and performs no I/O.
+    let Some(path) = std::env::var_os("JARVIS_FIXTURE_LOCK_PROBE") else {
+        return;
+    };
+    assert!(matches!(
+        ExclusiveStore::open(&PathBuf::from(path), false),
+        Err(Error::Busy)
+    ));
+}
+
+#[test]
+fn operating_system_lock_excludes_a_second_process() {
+    let f = Fixture::new();
+    let owner = ExclusiveStore::open(&f.0, true).unwrap();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "child_lock_probe"])
+        .env("JARVIS_FIXTURE_LOCK_PROBE", &f.0)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    drop(owner);
+    assert!(ExclusiveStore::open(&f.0, false).is_ok());
+    assert!(f.0.join("owner.lock").is_file());
+}
+
+#[test]
+fn rejects_nonprivate_directory_and_lock_aliases() {
+    let f = Fixture::new();
+    fs::set_permissions(&f.0, fs::Permissions::from_mode(0o755)).unwrap();
+    assert!(matches!(ExclusiveStore::open(&f.0, true), Err(Error::Invalid)));
+    fs::set_permissions(&f.0, fs::Permissions::from_mode(0o700)).unwrap();
+    let target = f.0.join("target");
+    fs::write(&target, b"unchanged").unwrap();
+    symlink(&target, f.0.join("owner.lock")).unwrap();
+    assert!(matches!(ExclusiveStore::open(&f.0, true), Err(Error::Invalid)));
+    assert_eq!(fs::read(target).unwrap(), b"unchanged");
+}
+
+#[test]
+fn initialization_never_overwrites_existing_database() {
+    let f = Fixture::new();
+    let owner = ExclusiveStore::open(&f.0, true).unwrap();
+    owner.session(S, None).unwrap();
+    drop(owner);
+    assert!(ExclusiveStore::open(&f.0, true).is_err());
+    let owner = ExclusiveStore::open(&f.0, false).unwrap();
+    assert_eq!(owner.history(S).unwrap(), (0, vec![]));
+}
+
+#[test]
+fn refuses_symlink_sidecar_before_sqlite_open() {
+    let f = Fixture::new();
+    drop(ExclusiveStore::open(&f.0, true).unwrap());
+    let target = f.0.join("target");
+    fs::write(&target, b"unchanged").unwrap();
+    symlink(&target, f.0.join("fixture.sqlite-journal")).unwrap();
+    assert!(matches!(ExclusiveStore::open(&f.0, false), Err(Error::Invalid)));
+    assert_eq!(fs::read(target).unwrap(), b"unchanged");
+}
