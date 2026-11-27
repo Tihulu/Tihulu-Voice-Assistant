@@ -202,7 +202,11 @@ class ManagedWave:
         self.checkpoint(handle,context,candidates)
         if handle.worker in self._root_exits:
             raise Refused("managed_root_exited")
-        return self._run.inputs(handle.worker,context,candidates)
+        try:
+            return self._run.inputs(handle.worker,context,candidates)
+        except Refused:
+            self.stop()
+            raise
 
     def output(self,worker,context,candidates):
         self._thread()
