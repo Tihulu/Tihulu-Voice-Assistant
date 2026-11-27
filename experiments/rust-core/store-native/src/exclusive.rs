@@ -36,6 +36,7 @@ impl ExclusiveStore {
     /// No arbitrary remote paths, no lock deletion, no stale-PID takeover.
     pub fn open(directory: &Path, initialize: bool) -> Result<Self, Error> {
         private_dir(directory)?;
+        let directory = fs::canonicalize(directory).map_err(|_| Error::Database)?;
         let lock_path = directory.join("owner.lock");
         let lock = match OpenOptions::new()
             .read(true)
@@ -86,7 +87,7 @@ impl ExclusiveStore {
         };
         Ok(Self {
             owner: OwnedStore::new(store),
-            directory: directory.to_path_buf(),
+            directory,
             _lock: lock,
         })
     }
