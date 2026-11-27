@@ -11,7 +11,7 @@ from threading import current_thread
 
 from gateway import Refused
 from local_agent_replan import AttemptCoordinator
-from local_agent_model_fixture_contract import PARENTS, DEFAULT_CEILINGS, ECONOMY_CEILINGS, wire_for, bound_reply
+from local_agent_model_fixture_contract import PARENTS, DEFAULT_CEILINGS, ECONOMY_CEILINGS, MAX_PROMPT_TOKENS, wire_for, bound_reply
 from heterogeneous_team_token_budget import TeamTokenBudget, Attempt
 
 
@@ -22,20 +22,23 @@ class RetryOffer:
     profile: str
     ceilings: tuple
     remaining: int
+    prompt_remaining: int | None = None
 
 
 class RetryBudgetSession:
-    def __init__(self, coordinator, total):
+    def __init__(self, coordinator, total, *, prompt_total=None):
         if (type(coordinator) is not AttemptCoordinator or not coordinator._owned_drain
                 or not coordinator._strict_results or coordinator._issued
                 or type(total) is not int or not 16 <= total <= 655360):
             raise Refused("retry_budget_session")
+        if prompt_total is not None and (type(prompt_total) is not int or not 1 <= prompt_total <= 655360):
+            raise Refused("retry_budget_prompt_limit")
         coordinator._thread()
         scope = sha256(("retry-budget-v1:"+coordinator._identity).encode("ascii")).hexdigest()
         coordinator._gateway.register_agent_attempt(scope)
         self._coordinator = coordinator
         self._scope = scope
-        self._budget = TeamTokenBudget(scope,total)
+        self._budget = TeamTokenBudget(scope,total,prompt_budget=prompt_total)
         self._owner = current_thread()
         self._pending = None
         self._active = None
@@ -50,6 +53,10 @@ class RetryBudgetSession:
     def snapshot(self):
         self._thread()
         return self._budget.snapshot()
+
+    def prompt_snapshot(self):
+        self._thread()
+        return self._budget.prompt_snapshot()
 
     def _open(self):
         self._thread()
@@ -70,10 +77,13 @@ class RetryBudgetSession:
         _, _, reserved, remaining = self.snapshot()
         if reserved or sum(ceilings) > remaining:
             raise Refused("retry_budget_unaffordable")
+        prompt = self.prompt_snapshot()
+        if prompt is not None and (prompt[2] or prompt[3] < len(PARENTS)*MAX_PROMPT_TOKENS):
+            raise Refused("retry_budget_prompt_unaffordable")
         preview = self._coordinator.prepare(context,candidates)
         if tuple(tuple(a.worker for a in w) for w in preview.plan.waves) != (("plan",),("a","b"),("review",)):
             raise Refused("retry_budget_plan_shape")
-        offer = RetryOffer(preview.attempt,preview.plan.digest,profile,ceilings,remaining)
+        offer = RetryOffer(preview.attempt,preview.plan.digest,profile,ceilings,remaining,None if prompt is None else prompt[3])
         self._pending = (offer,preview)
         return offer
 
@@ -84,6 +94,9 @@ class RetryBudgetSession:
         _, preview = self._pending
         self._pending = None
         if self._active is not None or self.snapshot()[2:] != (0,offer.remaining):
+            raise Refused("retry_budget_changed")
+        prompt = self.prompt_snapshot()
+        if (None if prompt is None else prompt[3]) != offer.prompt_remaining or (prompt is not None and prompt[2]):
             raise Refused("retry_budget_changed")
         run = self._coordinator.confirm(preview,context,candidates)
         self._active = (offer,run)
@@ -106,7 +119,7 @@ class RetryBudgetSession:
         limits = dict(zip(PARENTS,offer.ceilings))
         wires = tuple(wire_for(n,tuple(run._run._outputs[p] for p in PARENTS[n]),ceiling=limits[n]) for n in wave)
         attempts = tuple(Attempt(sha256((offer.attempt+":"+offer.plan_digest+":"+n).encode("ascii")).hexdigest(),
-                                  n,sha256(w).hexdigest(),limits[n]) for n,w in zip(wave,wires))
+                                  n,sha256(w).hexdigest(),limits[n],MAX_PROMPT_TOKENS if offer.prompt_remaining is not None else 0) for n,w in zip(wave,wires))
         leases = self._budget.reserve_wave(self._scope,attempts)
         self._leases = {l.attempt.worker:(l,w,"PREPARED") for l,w in zip(leases,wires)}
         return tuple(zip(leases,wires))
@@ -138,13 +151,13 @@ class RetryBudgetSession:
         if state != "DISPATCHED":
             raise Refused("retry_budget_terminal")
         try:
-            _,tokens,_ = bound_reply(l.attempt.worker,wire,envelope)
+            _,tokens,prompt = bound_reply(l.attempt.worker,wire,envelope)
         except (ValueError,RecursionError):
             self._budget.abandon_reaped(l)
             del self._leases[l.attempt.worker]
             self.stop()
             raise Refused("retry_budget_unknown_usage")
-        self._budget.settle_reaped(l,len(tokens))
+        self._budget.settle_reaped(l,len(tokens),prompt=prompt if l.attempt.prompt_ceiling else None)
         del self._leases[l.attempt.worker]
         return len(tokens)
 
