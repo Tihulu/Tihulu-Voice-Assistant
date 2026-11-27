@@ -52,3 +52,25 @@ class HeterogeneousAgentTests(unittest.TestCase):
     def test_offline_research_not_network(self):
         with self.assertRaises(Refused):
             self.route("research",("public_search",))
+
+    def test_offline_denies_network_connector_and_browser_channels(self):
+        for role,channel in (("connector","connector_read"),("connector","connector_write"),
+                             ("browser","browser_read"),("browser","browser_action")):
+            with self.assertRaises(Refused):
+                self.route(role,(channel,))
+        self.assertEqual(self.route("browser",("offline_browser_read",)).channel,"offline_browser_read")
+        self.assertTrue(self.route("browser",("offline_browser_action",)).effect_review)
+    def test_local_only_online_public_opt_in_is_explicit(self):
+        ctx=replace(self.ctx,offline=False)
+        with self.assertRaises(Refused):
+            self.route("research",("public_search",),ctx=ctx)
+        ctx=replace(ctx,public_opt_in=True)
+        self.assertEqual(self.route("research",("public_search",),ctx=ctx).channel,"public_search")
+        for role,channel in (("connector","connector_read"),("browser","browser_action")):
+            with self.assertRaises(Refused):
+                self.route(role,(channel,),ctx=ctx)
+    def test_hybrid_online_connector_is_proposal_not_grant(self):
+        ctx=replace(self.ctx,offline=False,mode="SECURE_HYBRID")
+        r=self.route("connector",("connector_write",),ctx=ctx)
+        self.assertTrue(r.effect_review)
+        self.assertFalse(r.requires_screen)

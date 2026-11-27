@@ -10,14 +10,14 @@ ROLES=MappingProxyType({
     "reasoning":("reasoning",),
     "planner":("reasoning",),
     "reviewer":("reasoning","file_read"),
-    "research":("public_search","browser_read","connector_read"),
+    "research":("public_search","browser_read","connector_read","offline_browser_read"),
     "coding":("file_read","file_write","code_session","local_cli"),
     "terminal":("local_cli",),
     "application":("typed_engine","local_ipc","local_cli"),
     "file":("file_read","file_write"),
     "data_science":("typed_engine","file_read","local_cli"),
     "database":("connector_read","connector_write","typed_engine"),
-    "browser":("browser_read","browser_action"),
+    "browser":("browser_read","browser_action","offline_browser_read","offline_browser_action"),
     "vision":("image_review","screen_observe"),
     "desktop":("screen_observe","accessibility_read","desktop_input"),
     "accessibility":("accessibility_read","desktop_input"),
@@ -32,10 +32,12 @@ ROLES=MappingProxyType({
 # Planning-only cloud advice is never a host tool channel.
 HOST=frozenset(c for channels in ROLES.values() for c in channels)-{"reasoning","public_search"}
 SCREEN=frozenset(("screen_observe","desktop_input"))
+NETWORK=frozenset(("public_search","browser_read","browser_action","connector_read","connector_write"))
+PUBLIC_NETWORK=frozenset(("public_search","browser_read"))
 EFFECTS=frozenset(("file_write","code_session","local_cli","local_ipc","typed_engine",
-                   "connector_write","browser_action","desktop_input","voice_input","voice_output","schedule"))
+                   "connector_write","browser_action","offline_browser_action","desktop_input","voice_input","voice_output","schedule"))
 ORDER=("reasoning","file_read","typed_engine","local_ipc","local_cli","code_session",
-       "connector_read","connector_write","public_search","browser_read","browser_action",
+       "connector_read","connector_write","offline_browser_read","offline_browser_action","public_search","browser_read","browser_action",
        "image_review","accessibility_read","screen_observe","desktop_input","file_write",
        "voice_input","voice_output","schedule")
 @dataclass(frozen=True)
@@ -79,7 +81,9 @@ def plan_route(context,spec,available):
     elif context.mode=="CLOUD_CHAT":
         candidates&={"reasoning"}
     if context.offline:
-        candidates.discard("public_search")
+        candidates-=NETWORK
+    elif context.mode=="LOCAL_ONLY":
+        candidates-=NETWORK-(PUBLIC_NETWORK if context.public_opt_in else set())
     if not candidates:
         raise Refused("agent_catalog_hold")
     channel=next(c for c in ORDER if c in candidates)
