@@ -16,7 +16,7 @@ MAX_RESULT=16384
 INTEGER=re.compile(r"-?(?:0|[1-9][0-9]{0,6})\Z")
 
 def encode(value):
-    data=json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True).encode("ascii")
+    data=json.dumps(value,sort_keys=True,separators=(",",":"),ensure_ascii=True,allow_nan=False).encode("ascii")
     if len(data)>MAX_RESULT:
         raise Refused("team_tool_result_size")
     return data
@@ -70,10 +70,11 @@ def evaluate(call,parents=()):
             if name in seen or type(payload) is not bytes or not 1<=len(payload)<=MAX_RESULT:
                 raise Refused("team_tool_parent")
             try:
-                value=json.loads(payload)
+                value=json.loads(payload,parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")))
+                canonical=encode(value)
             except (ValueError,UnicodeError,RecursionError) as exc:
                 raise Refused("team_tool_parent") from exc
-            if type(value) is not dict or encode(value)!=payload:
+            if type(value) is not dict or canonical!=payload:
                 raise Refused("team_tool_parent")
             rows.append({"task":name,"digest":sha256(payload).hexdigest(),"result":value})
             seen.add(name)
