@@ -238,3 +238,67 @@ fn history_unknown_session_is_not_empty_authorized_history() {
     assert_eq!(s.recovery(D), Err(Error::Unknown));
     assert_eq!(s.history(T).unwrap(), (0, vec![]));
 }
+
+#[test]
+fn reopen_rejects_orphan_message_even_with_valid_foreign_keys() {
+    let f = Fixture::new();
+    drop(setup(f.db()));
+    let db = f.db();
+    db.execute(
+        "INSERT INTO messages VALUES (?1,1,'user','orphan')",
+        [S.as_slice()],
+    )
+    .unwrap();
+    assert!(matches!(Store::reopen(db), Err(Error::Schema)));
+}
+
+#[test]
+fn reopen_rejects_revision_drift() {
+    let f = Fixture::new();
+    let mut store = setup(f.db());
+    store.submit(S, C, 0, "first", "Hello").unwrap();
+    drop(store);
+    let db = f.db();
+    db.execute("UPDATE sessions SET revision=99 WHERE id=?1", [S.as_slice()])
+        .unwrap();
+    assert!(matches!(Store::reopen(db), Err(Error::Schema)));
+}
+
+#[test]
+fn reopen_rejects_gap_even_if_receipt_and_revision_match() {
+    let f = Fixture::new();
+    drop(setup(f.db()));
+    let db = f.db();
+    db.execute(
+        "INSERT INTO messages VALUES (?1,3,'user','gap')",
+        [S.as_slice()],
+    )
+    .unwrap();
+    db.execute(
+        "INSERT INTO turns(session_id,client_id,request_key,user_seq,state)
+         VALUES (?1,?2,'gap',3,'pending')",
+        rusqlite::params![S.as_slice(), C.as_slice()],
+    )
+    .unwrap();
+    db.execute("UPDATE sessions SET revision=1 WHERE id=?1", [S.as_slice()])
+        .unwrap();
+    assert!(matches!(Store::reopen(db), Err(Error::Schema)));
+}
+
+#[test]
+fn reopen_accepts_valid_cancel_drain_complete_and_archive_history() {
+    let f = Fixture::new();
+    let mut store = setup(f.db());
+    store.submit(S, C, 0, "first", "Hello").unwrap();
+    store.cancel(S, C, "first", 1).unwrap();
+    store.drain(S, C, "first").unwrap();
+    store.submit(S, C, 3, "next", "Again").unwrap();
+    store.complete(S, C, "next", "Done").unwrap();
+    store.archive(S, 5).unwrap();
+    drop(store);
+    let store = Store::reopen(f.db()).unwrap();
+    let (revision, messages) = store.history(S).unwrap();
+    assert_eq!(revision, 6);
+    assert_eq!(messages.len(), 3);
+    assert_eq!(store.recovery(S).unwrap(), None);
+}
