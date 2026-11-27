@@ -131,7 +131,12 @@ fn exact_client_session_and_revision_boundaries() {
 #[test]
 fn invalid_inputs_do_not_mutate() {
     let mut s = setup(Connection::open_in_memory().unwrap());
-    for (key, text) in [("", "valid"), ("a/b", "valid"), ("key", "\t"), ("key", "x\0y")] {
+    for (key, text) in [
+        ("", "valid"),
+        ("a/b", "valid"),
+        ("key", "\t"),
+        ("key", "x\0y"),
+    ] {
         assert_eq!(s.submit(S, C, 0, key, text), Err(Error::Invalid));
     }
     assert_eq!(s.submit(S, C, -1, "key", "ok"), Err(Error::Invalid));
@@ -162,6 +167,74 @@ fn foreign_key_damage_refused_on_reopen() {
     let f = Fixture::new();
     drop(setup(f.db()));
     let db = f.db();
-    db.execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM projects;").unwrap();
+    db.execute_batch("PRAGMA foreign_keys=OFF; DELETE FROM projects;")
+        .unwrap();
     assert!(matches!(Store::reopen(db), Err(Error::Schema)));
+}
+
+#[test]
+fn recovery_and_archive_keep_live_turn_barrier() {
+    let f = Fixture::new();
+    let mut s = setup(f.db());
+    s.submit(S, C, 0, "first", "Hello").unwrap();
+    drop(s);
+    let mut s = Store::reopen(f.db()).unwrap();
+    let recovery = s.recovery(S).unwrap().unwrap();
+    assert_eq!(recovery.client, C);
+    assert_eq!(recovery.key, "first");
+    assert_eq!(recovery.state, State::Pending);
+    assert_eq!(s.archive(S, 1), Err(Error::Busy));
+    assert_eq!(s.cancel(S, C, "first", 1), Ok(2));
+    assert_eq!(s.recovery(S).unwrap().unwrap().state, State::Cancelled);
+    assert_eq!(s.archive(S, 2), Err(Error::Busy));
+    assert_eq!(s.drain(S, C, "first"), Ok(3));
+    assert_eq!(s.recovery(S).unwrap(), None);
+    assert_eq!(s.archive(S, 2), Err(Error::Conflict));
+    assert_eq!(s.archive(S, 3), Ok(4));
+    assert_eq!(s.archive(S, 4), Ok(4));
+    assert_eq!(s.submit(S, C, 4, "next", "New"), Err(Error::Archived));
+    assert!(s.submit(S, C, 0, "first", "Hello").unwrap().replay);
+    assert_eq!(s.history(S).unwrap().1.len(), 1);
+    assert_eq!(s.history(T).unwrap(), (0, vec![]));
+}
+
+#[test]
+fn history_and_revision_are_consistent_during_parallel_writes() {
+    let f = Fixture::new();
+    drop(setup(f.db()));
+    let mut writer = Store::reopen(f.db()).unwrap();
+    let reader = Store::reopen(f.db()).unwrap();
+    let worker = thread::spawn(move || {
+        for i in 0..32 {
+            let key = format!("key-{i}");
+            writer.submit(S, C, 2 * i, &key, "Hello").unwrap();
+            writer.complete(S, C, &key, "Done").unwrap();
+        }
+    });
+    for _ in 0..128 {
+        let (rev, messages) = reader.history(S).unwrap();
+        assert_eq!(rev as usize, messages.len());
+    }
+    worker.join().unwrap();
+    let (rev, messages) = reader.history(S).unwrap();
+    assert_eq!(rev, 64);
+    assert_eq!(messages.len(), 64);
+}
+
+#[test]
+fn schema_prefix_wildcard_does_not_hide_unexpected_tables() {
+    let f = Fixture::new();
+    drop(setup(f.db()));
+    let db = f.db();
+    db.execute_batch("CREATE TABLE sqliteXunexpected(x);")
+        .unwrap();
+    assert!(matches!(Store::reopen(db), Err(Error::Schema)));
+}
+
+#[test]
+fn history_unknown_session_is_not_empty_authorized_history() {
+    let s = setup(Connection::open_in_memory().unwrap());
+    assert_eq!(s.history(D), Err(Error::Unknown));
+    assert_eq!(s.recovery(D), Err(Error::Unknown));
+    assert_eq!(s.history(T).unwrap(), (0, vec![]));
 }
