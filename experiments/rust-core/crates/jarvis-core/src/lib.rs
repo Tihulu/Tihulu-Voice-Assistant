@@ -3,6 +3,7 @@
 //! Non-shipping, deterministic core fixtures. No OS, network or model effects.
 
 pub mod budget;
+pub mod chat;
 
 pub mod deadline;
 pub mod session;
