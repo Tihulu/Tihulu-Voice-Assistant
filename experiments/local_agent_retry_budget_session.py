@@ -44,7 +44,7 @@ class RetryBudgetSession:
             raise Refused("retry_deadline_limit")
         if (vector_owner is None)!=(vector_memory is None) or (vector_owner is not None and
                 (type(vector_owner) is not VectorAdmission or type(vector_memory) is not tuple
-                 or vector_owner._issued or vector_owner._closed)):
+                 or vector_owner._issued or vector_owner._closed or vector_owner._binding is not None)):
             raise Refused("retry_vector_config")
         coordinator._thread()
         if vector_owner is not None:
@@ -62,6 +62,9 @@ class RetryBudgetSession:
         self._coordinator = coordinator
         self._scope = scope
         self._budget = TeamTokenBudget(scope,total,prompt_budget=prompt_total)
+        self._vector_binding=object() if vector_owner is not None else None
+        if vector_owner is not None:
+            vector_owner.bind_session(self._vector_binding)
         self._owner = current_thread()
         self._pending = None
         self._active = None
@@ -143,7 +146,7 @@ class RetryBudgetSession:
         vector_offer=None
         if self._vector is not None:
             try:
-                vector_offer=self._vector.prepare(context,candidates,self._vector_memory)
+                vector_offer=self._vector.prepare(context,candidates,self._vector_memory,owner=self._vector_binding)
                 legacy=tuple(tuple((a.worker,a.model,a.provider,a.memory_mib) for a in w) for w in preview.plan.waves)
                 vector=tuple(tuple((a.worker,a.model,a.provider,a.capacity.ram_mib+a.capacity.vram_mib)
                                    for a in w) for w in vector_offer.plan.waves)
@@ -175,7 +178,7 @@ class RetryBudgetSession:
         self._vector_pending=None
         try:
             if self._vector is not None:
-                self._vector.confirm(vector_offer,context,candidates,self._vector_memory)
+                self._vector.confirm(vector_offer,context,candidates,self._vector_memory,owner=self._vector_binding)
             run = self._coordinator.confirm(preview,context,candidates)
         except Refused:
             self.stop()
@@ -216,7 +219,7 @@ class RetryBudgetSession:
         vector_rows=()
         try:
             if self._vector is not None:
-                vector_rows=self._vector.reserve_next(self._vector_offer,context,candidates,self._vector_memory)
+                vector_rows=self._vector.reserve_next(self._vector_offer,context,candidates,self._vector_memory,owner=self._vector_binding)
                 if tuple(r.demand.worker for r in vector_rows)!=wave:
                     raise Refused("retry_vector_wave_mismatch")
             leases = self._budget.reserve_wave(self._scope,attempts)
@@ -225,7 +228,7 @@ class RetryBudgetSession:
             # exact unstarted vector reservations, never an in-flight worker.
             self.stop()
             for row in vector_rows:
-                self._vector.void_unstarted(row)
+                self._vector.void_unstarted(row,owner=self._vector_binding)
             raise
         self._vector_rows={l.attempt.worker:(l,r) for l,r in zip(leases,vector_rows)}
         self._leases = {l.attempt.worker:(l,w,"PREPARED") for l,w in zip(leases,wires)}
@@ -335,13 +338,13 @@ class RetryBudgetSession:
             raise Refused("retry_vector_undrained")
         if worker in run._run._claims:
             success=not self._stopped and worker in run._run._done
-            self._vector.observe_reaped(row,success=success)
+            self._vector.observe_reaped(row,success=success,owner=self._vector_binding)
             if not success:
                 self.stop()
         else:
             if not self._stopped:
                 raise Refused("retry_vector_unstarted")
-            self._vector.void_unstarted(row)
+            self._vector.void_unstarted(row,owner=self._vector_binding)
         del self._vector_rows[worker]
 
     def stop(self):
@@ -349,7 +352,7 @@ class RetryBudgetSession:
         self._pending = None
         self._vector_pending=None
         if self._vector is not None:
-            self._vector.stop()
+            self._vector.stop(owner=self._vector_binding)
         self._stopped = True
         for lease,_,_ in self._leases.values():
             self._budget.cancel(lease)
@@ -363,4 +366,4 @@ class RetryBudgetSession:
         self._budget.close()
         self._coordinator.close()
         if self._vector is not None:
-            self._vector.close()
+            self._vector.close(owner=self._vector_binding)
