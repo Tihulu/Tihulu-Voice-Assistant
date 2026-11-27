@@ -329,8 +329,7 @@ impl HarnessWave {
             }
             let row = self.rows.get_mut(&key.worker).ok_or(Error::Foreign)?;
             let count = (FRAME_LEN - row.pending_len).min(bytes.len());
-            row.pending[row.pending_len..row.pending_len + count]
-                .copy_from_slice(&bytes[..count]);
+            row.pending[row.pending_len..row.pending_len + count].copy_from_slice(&bytes[..count]);
             row.pending_len += count;
             bytes = &bytes[count..];
             if row.pending_len == FRAME_LEN {
@@ -389,11 +388,7 @@ impl HarnessWave {
     }
 
     /// Exact trusted owner cancellation, not a protocol acknowledgement.
-    pub fn cancel_transport(
-        &mut self,
-        key: &WorkerKey,
-        identity: Identity,
-    ) -> Result<(), Error> {
+    pub fn cancel_transport(&mut self, key: &WorkerKey, identity: Identity) -> Result<(), Error> {
         if self.row(key)?.transport != Some(identity) {
             return Err(Error::Foreign);
         }
