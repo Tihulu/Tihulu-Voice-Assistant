@@ -60,3 +60,62 @@ class TokenLedgerTests(unittest.TestCase):
         for b in (True,0,65,16.0):
             with self.assertRaises(Refused):
                 TokenLedger(b)
+
+    def test_strict_dispatch_exact_wire_and_once_only(self):
+        l=TokenLedger(32,strict_dispatch=True)
+        w=wire_for("plan",())
+        x=l.reserve("plan",w)
+        with self.assertRaises(Refused):
+            l.settle(x,w,(1,))
+        with self.assertRaises(Refused):
+            l.dispatch(x,w,w+b" ")
+        l.dispatch(x,w,w)
+        with self.assertRaises(Refused):
+            l.dispatch(x,w,w)
+        with self.assertRaises(Refused):
+            l.void(x)
+        l.settle(x,w,(1,2))
+        self.assertEqual(l.snapshot(),(32,2,0,30))
+    def test_stream_reservation_binds_derived_transport(self):
+        from local_agent_model_stream_contract import stream_wire
+        l=TokenLedger(32,strict_dispatch=True)
+        w=wire_for("plan",())
+        x=l.reserve("plan",w,streaming=True)
+        with self.assertRaises(Refused):
+            l.dispatch(x,w,w)
+        l.dispatch(x,w,stream_wire("plan",w))
+        with self.assertRaises(Refused):
+            l.settle(x,w,(1,))
+        l.abandon(x)
+        self.assertEqual(l.snapshot(),(32,16,0,16))
+    def test_no_dispatch_void_does_not_charge_or_allow_replay(self):
+        l=TokenLedger(32,strict_dispatch=True)
+        w=wire_for("plan",())
+        x=l.reserve("plan",w)
+        l.void(x)
+        self.assertEqual(l.snapshot(),(32,0,0,32))
+        with self.assertRaises(Refused):
+            l.reserve("plan",w)
+    def test_close_distinguishes_unsent_and_uncertain_usage(self):
+        l=TokenLedger(32,strict_dispatch=True)
+        p=wire_for("plan",())
+        a=wire_for("a",(row("plan"),))
+        x=l.reserve("plan",p)
+        l.reserve("a",a)
+        l.dispatch(x,p,p)
+        l.close()
+        self.assertEqual(l.snapshot(),(32,16,0,16))
+    def test_stream_requires_strict_policy(self):
+        w=wire_for("plan",())
+        with self.assertRaises(Refused):
+            TokenLedger(16).reserve("plan",w,streaming=True)
+        with self.assertRaises(Refused):
+            TokenLedger(16,strict_dispatch=1)
+    def test_foreign_lease_never_marks_dispatched(self):
+        l=TokenLedger(16,strict_dispatch=True)
+        w=wire_for("plan",())
+        x=l.reserve("plan",w)
+        with self.assertRaises(Refused):
+            l.dispatch(replace(x),w,w)
+        l.close()
+        self.assertEqual(l.snapshot(),(16,0,0,16))

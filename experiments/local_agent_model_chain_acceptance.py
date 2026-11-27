@@ -140,7 +140,7 @@ def child(host_net,host_port,scenario):
     workers=(Worker("plan",(),0,"plan"),Worker("a",("plan",),0,"review"),
              Worker("b",("plan",),0,"review"),Worker("review",("a","b"),0,"review"))
     ledger=ResourceLedger(32)
-    token_ledger=TokenLedger(64)
+    token_ledger=TokenLedger(64,strict_dispatch=True)
     leases={}
     elapsed={}
     prompt_counts={}
@@ -172,8 +172,14 @@ def child(host_net,host_port,scenario):
         if tuple(data for _,data in rows)!=tuple(results[parent] for parent in next(w.depends for w in workers if w.identity==name)):
             raise RuntimeError("fixture_dependency_bytes")
         wire=wire_for(name,rows)
-        leases[t]=token_ledger.reserve(name,wire)
+        leases[t]=token_ledger.reserve(name,wire,streaming=(mode=="stream"))
         return t,wire
+    def dispatch(t,wire):
+        from local_agent_model_stream_contract import stream_wire
+        lease=leases[t]
+        transport=stream_wire(t.worker,wire) if lease.streaming else wire
+        token_ledger.dispatch(lease,wire,transport)
+
     def invoke(t,wire):
         begin=time.monotonic_ns()
         out=owned[t].communicate(input=wire,timeout=35)[0]
@@ -185,7 +191,8 @@ def child(host_net,host_port,scenario):
             raise RuntimeError("fixture_worker_failed")
         data,tokens,count=bound_reply(t.worker,wire,out)
         prompt_counts[t.worker]=count
-        token_ledger.settle(leases.pop(t),wire,tokens)
+        token_ledger.settle(leases[t],wire,tokens)
+        del leases[t]
         elapsed[t.worker]=duration_ns
         record("agent-model-"+t.worker+"-real-output",bool(data) and 1<=len(tokens)<=16,
                input_digest=digest(wire),output_digest=digest(data),tokens=len(tokens),prompt_tokens=count,
@@ -201,6 +208,7 @@ def child(host_net,host_port,scenario):
             from local_agent_model_stream_contract import verify_marker,verify_cancel
             t,wire=launch("plan","8080","stream")
             p=owned[t]
+            dispatch(t,wire)
             p.stdin.write(wire+b"\n")
             p.stdin.flush()
             ready,_,_=select.select([p.stdout],[],[],30)
@@ -252,6 +260,7 @@ def child(host_net,host_port,scenario):
             record("agent-model-stream-dependent-not-started",denied and not owned)
             return 0
         t,wire=launch("plan","8080")
+        dispatch(t,wire)
         finish(t,wire,invoke(t,wire))
         a,wa=launch("a","8080")
         b,wb=launch("b","8081")
@@ -262,6 +271,8 @@ def child(host_net,host_port,scenario):
         for ticket,wire in ((a,wa),(b,wb)):
             if wire_for(ticket.worker,boundary.inputs(ticket,ctx,models))!=wire:
                 raise RuntimeError("fixture_pre_dispatch_drift")
+        for ticket,wire in ((a,wa),(b,wb)):
+            dispatch(ticket,wire)
         with ThreadPoolExecutor(max_workers=2) as pool:
             fa=pool.submit(invoke,a,wa)
             fb=pool.submit(invoke,b,wb)
@@ -286,7 +297,8 @@ def child(host_net,host_port,scenario):
                 raise RuntimeError("fixture_peer_exit")
             data,tokens,count=bound_reply(b.worker,wb,out)
             prompt_counts[b.worker]=count
-            token_ledger.settle(leases.pop(b),wb,tokens)
+            token_ledger.settle(leases[b],wb,tokens)
+            del leases[b]
             record("agent-model-revoked-peer-actual-output",bool(data),tokens=len(tokens),prompt_tokens=count)
             outcome=boundary.observe_reaped(b,p.returncode,ctx,models,payload=data)
             del owned[b]
@@ -313,6 +325,7 @@ def child(host_net,host_port,scenario):
         record("agent-model-peer-reservation-retained",ledger.snapshot()==(32,16,16))
         finish(b,wb,ob)
         t,wire=launch("review","8080")
+        dispatch(t,wire)
         finish(t,wire,invoke(t,wire))
         receipt,data=run.output("review",ctx,models)
         budget,spent,reserved,remaining=token_ledger.snapshot()
