@@ -31,59 +31,68 @@ fn private_dir(path: &Path) -> Result<(), Error> {
     Ok(())
 }
 
+/// Shared advisory lock for cooperating v1 and v3 fixture owners.
+pub(crate) fn open_locked(
+    directory: &Path,
+    initialize: bool,
+) -> Result<(Connection, PathBuf, File), Error> {
+    private_dir(directory)?;
+    let directory = fs::canonicalize(directory).map_err(|_| Error::Database)?;
+    let lock_path = directory.join("owner.lock");
+    let lock = match OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&lock_path)
+    {
+        Ok(file) => file,
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+            private_file(&lock_path)?;
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .open(&lock_path)
+                .map_err(|_| Error::Database)?
+        }
+        Err(_) => return Err(Error::Database),
+    };
+    match lock.try_lock() {
+        Ok(()) => {}
+        Err(TryLockError::WouldBlock) => return Err(Error::Busy),
+        Err(TryLockError::Error(_)) => return Err(Error::Database),
+    }
+    let db_path = directory.join("fixture.sqlite");
+    for name in [
+        "fixture.sqlite-wal",
+        "fixture.sqlite-shm",
+        "fixture.sqlite-journal",
+    ] {
+        let sidecar = directory.join(name);
+        match fs::symlink_metadata(&sidecar) {
+            Ok(_) => private_file(&sidecar)?,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+            Err(_) => return Err(Error::Database),
+        }
+    }
+    if initialize {
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&db_path)
+            .map_err(|_| Error::Database)?;
+    }
+    private_file(&db_path)?;
+    let db = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+    Ok((db, directory, lock))
+}
+
 impl ExclusiveStore {
     /// Only the trusted local owner supplies the private, existing directory.
     /// No arbitrary remote paths, no lock deletion, no stale-PID takeover.
     pub fn open(directory: &Path, initialize: bool) -> Result<Self, Error> {
-        private_dir(directory)?;
-        let directory = fs::canonicalize(directory).map_err(|_| Error::Database)?;
-        let lock_path = directory.join("owner.lock");
-        let lock = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .mode(0o600)
-            .open(&lock_path)
-        {
-            Ok(file) => file,
-            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-                private_file(&lock_path)?;
-                OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .open(&lock_path)
-                    .map_err(|_| Error::Database)?
-            }
-            Err(_) => return Err(Error::Database),
-        };
-        match lock.try_lock() {
-            Ok(()) => {}
-            Err(TryLockError::WouldBlock) => return Err(Error::Busy),
-            Err(TryLockError::Error(_)) => return Err(Error::Database),
-        }
-        let db_path = directory.join("fixture.sqlite");
-        for name in [
-            "fixture.sqlite-wal",
-            "fixture.sqlite-shm",
-            "fixture.sqlite-journal",
-        ] {
-            let sidecar = directory.join(name);
-            match fs::symlink_metadata(&sidecar) {
-                Ok(_) => private_file(&sidecar)?,
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
-                Err(_) => return Err(Error::Database),
-            }
-        }
-        if initialize {
-            OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .mode(0o600)
-                .open(&db_path)
-                .map_err(|_| Error::Database)?;
-        }
-        private_file(&db_path)?;
-        let db = Connection::open_with_flags(&db_path, OpenFlags::SQLITE_OPEN_READ_WRITE)?;
+        let (db, directory, lock) = open_locked(directory, initialize)?;
         let store = if initialize {
             Store::initialize(db)?
         } else {
