@@ -20,13 +20,21 @@ def record(case,ok,**extra):
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
-def worker(name,port):
+def worker(name,port,mode="normal"):
+    if mode not in ("normal","stream") or (mode=="stream" and name!="plan"):
+        raise RuntimeError("fixture_worker_mode")
     sys.path.insert(0,"/work/code")
     from llama_engine_acceptance import MODEL,MODEL_SHA,MAX_REPLY,stop_fixture_server
     from local_agent_model_fixture_contract import MAX_WIRE,validate_wire,tokenizer_wire,prompt_count,measured_reply
     if port not in ("8080","8081"):
         raise RuntimeError("fixture_port")
-    wire=sys.stdin.buffer.read(MAX_WIRE+1)
+    if mode=="stream":
+        frame=sys.stdin.buffer.readline(MAX_WIRE+2)
+        if not frame.endswith(b"\n"):
+            raise RuntimeError("fixture_stream_input")
+        wire=frame[:-1]
+    else:
+        wire=sys.stdin.buffer.read(MAX_WIRE+1)
     if not 0<len(wire)<=MAX_WIRE:
         raise RuntimeError("fixture_wire_size")
     wire_digest=validate_wire(name,wire)
@@ -61,19 +69,41 @@ def worker(name,port):
                     pass
                 time.sleep(.1)
             count=prompt_count(request("POST","/tokenize",tokenizer_wire(name,wire)))
-            raw=request("POST","/completion",wire)
-            measured_reply(raw,count)
+            if mode=="stream":
+                from local_agent_model_stream_contract import stream_wire,marker,MAX_EVENT
+                stream=stream_wire(name,wire)
+                conn=http.client.HTTPConnection("127.0.0.1",int(port),timeout=8)
+                try:
+                    conn.request("POST","/completion",body=stream,headers={"Content-Type":"application/json",
+                                 "Connection":"close"})
+                    response=conn.getresponse()
+                    if response.status!=200 or not response.getheader("Content-Type","").startswith("text/event-stream"):
+                        raise RuntimeError("fixture_stream_status")
+                    line=response.readline(MAX_EVENT+1)
+                    # Trusted fixed server event; never print generated text.
+                    print(json.dumps(marker(name,wire,line),separators=(",",":")),flush=True)
+                    if sys.stdin.buffer.readline(8)!=b"CANCEL\n":
+                        raise RuntimeError("fixture_stream_cancel_command")
+                finally:
+                    conn.close()
+            else:
+                raw=request("POST","/completion",wire)
+                measured_reply(raw,count)
         finally:
             stop_fixture_server(proc,lambda:None)
     # Exit 0 only after the exact owned server has been waited for.
     if proc.poll() is None:
         raise RuntimeError("fixture_server_not_reaped")
+    if mode=="stream":
+        print(json.dumps({"state":"CANCELLED","worker":name,"wire_digest":digest(stream),
+                          "server_reaped":True},separators=(",",":")),flush=True)
+        return 0
     sys.stdout.write(json.dumps({"worker":name,"wire_digest":wire_digest,"model_digest":MODEL_SHA,
                                  "reply":raw.decode("utf-8"),"server_reaped":True,"prompt_tokens":count},separators=(",",":")))
     return 0
 
 def child(host_net,host_port,scenario):
-    if scenario not in ("normal","revoke"):
+    if scenario not in ("normal","revoke","stream-cancel"):
         raise RuntimeError("fixture_scenario")
     sys.path.insert(0,"/work/code")
     import resource
@@ -123,7 +153,7 @@ def child(host_net,host_port,scenario):
     grants={w.identity:gate.fixture_grant("native-"+w.identity,run.request(w.identity),60) for w in workers}
     owned={}
     results={}
-    def launch(name,port):
+    def launch(name,port,mode="normal"):
         t=boundary.prepare(name,grants[name],ctx,models)
         try:
             boundary.before_start(t,ctx,models)
@@ -131,7 +161,7 @@ def child(host_net,host_port,scenario):
             boundary.not_started(t,ctx,models)
             raise
         try:
-            p=subprocess.Popen(["/usr/bin/python3","-I","/work/runner.py","--worker",name,port],
+            p=subprocess.Popen(["/usr/bin/python3","-I","/work/runner.py","--worker",name,port,mode],
                                stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,close_fds=True)
         except BaseException:
             boundary.uncertain(t)
@@ -166,6 +196,61 @@ def child(host_net,host_port,scenario):
         record("agent-model-"+t.worker+"-owned-exit",outcome=="COMPLETED")
         results[t.worker]=data
     try:
+        if scenario=="stream-cancel":
+            import select
+            from local_agent_model_stream_contract import verify_marker,verify_cancel
+            t,wire=launch("plan","8080","stream")
+            p=owned[t]
+            p.stdin.write(wire+b"\n")
+            p.stdin.flush()
+            ready,_,_=select.select([p.stdout],[],[],30)
+            if not ready:
+                raise RuntimeError("fixture_stream_marker_timeout")
+            line=p.stdout.readline(2049)
+            if not line.endswith(b"\n") or len(line)>2048:
+                raise RuntimeError("fixture_stream_marker_frame")
+            observed=verify_marker(t.worker,wire,json.loads(line))
+            record("agent-model-stream-first-event",1<=observed<=16 and p.poll() is None,
+                   observed_tokens=observed)
+            gate.revoke("native-plan")
+            boundary.stop()
+            record("agent-model-stream-revoke-retains-ownership",ledger.snapshot()==(32,16,16)
+                   and token_ledger.snapshot()==(64,0,16,48) and not run.drained())
+            try:
+                boundary.inputs(t,ctx,models)
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("agent-model-stream-revoked-input-denied",denied)
+            p.stdin.write(b"CANCEL\n")
+            p.stdin.flush()
+            out,_=p.communicate(timeout=12)
+            if p.returncode!=0 or not 0<len(out)<=2048:
+                raise RuntimeError("fixture_stream_cancel_exit")
+            verify_cancel(t.worker,wire,json.loads(out))
+            record("agent-model-stream-owned-server-and-wrapper-reaped",p.poll() is not None)
+            token_ledger.abandon(leases.pop(t))
+            record("agent-model-stream-unknown-usage-charged",token_ledger.snapshot()==(64,16,0,48))
+            outcome=boundary.observe_reaped(t,p.returncode,ctx,models)
+            del owned[t]
+            record("agent-model-stream-drained",outcome=="DRAINED" and ledger.snapshot()==(32,0,32)
+                   and not boundary.observations() and run.drained())
+            try:
+                run.output("plan",ctx,models)
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("agent-model-stream-no-result-publication",denied and not results)
+            try:
+                boundary.prepare("a",grants["a"],ctx,models)
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("agent-model-stream-dependent-not-started",denied and not owned)
+            return 0
         t,wire=launch("plan","8080")
         finish(t,wire,invoke(t,wire))
         a,wa=launch("a","8080")
@@ -260,7 +345,7 @@ def child(host_net,host_port,scenario):
     return 0
 
 def main(binary,model,scenario="normal"):
-    if scenario not in ("normal","revoke"):
+    if scenario not in ("normal","revoke","stream-cancel"):
         raise RuntimeError("fixture_scenario")
     from llama_engine_acceptance import MODEL_SHA
     import shutil
@@ -274,7 +359,7 @@ def main(binary,model,scenario="normal"):
         code=root/"code"
         for name in ("gateway.py","inference.py","local_agent_planner.py","local_agent_wave_run.py",
                      "local_agent_resources.py","local_agent_owned_drain.py","local_agent_replan.py","local_agent_launch.py",
-                     "local_agent_model_fixture_contract.py","local_agent_model_token_ledger.py","llama_engine_acceptance.py"):
+                     "local_agent_model_fixture_contract.py","local_agent_model_token_ledger.py","local_agent_model_stream_contract.py","llama_engine_acceptance.py"):
             dst=code/name
             dst.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(repo/"experiments"/name,dst)
@@ -324,7 +409,7 @@ def main(binary,model,scenario="normal"):
         return status
 
 if __name__=="__main__":
-    if len(sys.argv)==4 and sys.argv[1]=="--worker":
+    if len(sys.argv)==5 and sys.argv[1]=="--worker":
         raise SystemExit(worker(*sys.argv[2:]))
     if len(sys.argv)==5 and sys.argv[1]=="--child":
         raise SystemExit(child(*sys.argv[2:]))

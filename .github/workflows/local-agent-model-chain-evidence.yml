@@ -6,6 +6,7 @@ on:
       - 'experiments/local_agent_model_chain_acceptance.py'
       - 'experiments/local_agent_model_fixture_contract.py'
       - 'experiments/local_agent_model_token_ledger.py'
+      - 'experiments/local_agent_model_stream_contract.py'
       - 'experiments/local_agent_wave_run.py'
       - 'experiments/local_agent_owned_drain.py'
       - 'experiments/local_agent_launch.py'
@@ -49,3 +50,5 @@ jobs:
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf"
       - name: Actual model post-inference revocation before publication
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" revoke
+      - name: Actual fixed model stream cancellation after first event
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" stream-cancel
