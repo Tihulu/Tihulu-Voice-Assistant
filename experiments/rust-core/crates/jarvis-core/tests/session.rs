@@ -95,7 +95,11 @@ fn shrink_before_dispatch_stops_without_losing_reservation() {
 #[test]
 fn no_partial_wave_on_exhaustion() {
     let mut s = session();
-    assert_eq!(s.reserve_wave("one", &[demand("a"), demand("b"), demand("c")], 100).unwrap_err(), Error::Budget(budget::Error::Exhausted));
+    assert_eq!(
+        s.reserve_wave("one", &[demand("a"), demand("b"), demand("c")], 100)
+            .unwrap_err(),
+        Error::Budget(budget::Error::Exhausted)
+    );
     assert!(s.drained());
     assert_eq!(s.snapshot().reserved, Amount::default());
 }
