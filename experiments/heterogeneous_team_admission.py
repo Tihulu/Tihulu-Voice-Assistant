@@ -2,6 +2,7 @@
 """One-shot confirmation of heterogeneous team plan. No effect authorization."""
 from dataclasses import dataclass
 from threading import current_thread
+from hashlib import sha256
 from gateway import Context,FixtureGateway,Refused
 from agent_custom_profiles import ident
 from heterogeneous_team import TeamPlan,plan_team
@@ -17,9 +18,10 @@ class TeamAdmission:
             raise Refused("team_admission_gateway")
         self._g=gateway
         self._identity=ident(identity)
-        gateway.register_agent_attempt("team-admission:"+self._identity)
+        gateway.register_agent_attempt(sha256(("team-admission:"+self._identity).encode("ascii")).hexdigest())
         self._owner=current_thread()
         self._pending=None
+        self._confirmed=None
         self._issued=0
         self._closed=False
 
@@ -53,12 +55,27 @@ class TeamAdmission:
                         limit=limit,approved_cloud=approved_cloud)
         if fresh!=offer.plan:
             raise Refused("team_plan_changed")
-        self._g.register_agent_attempt("team-confirmed:"+offer.identity)
+        attempt=sha256(("team-confirmed:"+offer.identity+":"+fresh.digest).encode("ascii")).hexdigest()
+        self._g.register_agent_attempt(attempt)
+        self._confirmed=(fresh,attempt,tasks)
         self._closed=True
         return fresh
+
+    def take_confirmed(self,plan):
+        """Transfer exact confirmed plan once to trusted fixture execution code.
+        Does not authorize any task or grant. The consumer must check policy.
+        """
+        if current_thread() is not self._owner:
+            raise Refused("team_admission_thread")
+        if self._confirmed is None or plan is not self._confirmed[0]:
+            raise Refused("team_confirmed_unknown")
+        result=self._confirmed
+        self._confirmed=None
+        return result
 
     def close(self):
         if current_thread() is not self._owner:
             raise Refused("team_admission_thread")
         self._pending=None
+        self._confirmed=None
         self._closed=True
