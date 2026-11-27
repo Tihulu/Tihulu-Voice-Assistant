@@ -7,5 +7,6 @@ pub mod chat;
 
 pub mod deadline;
 pub mod session;
+pub mod terminal_binding;
 pub mod workshop;
 pub mod workspace;
