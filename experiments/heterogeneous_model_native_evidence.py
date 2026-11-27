@@ -10,7 +10,7 @@ import zlib
 import subprocess
 import os
 from pathlib import Path
-from gateway import Context,FixtureGateway,Refused
+from gateway import Context,FixtureGateway,Refused,Request
 from tihulu_jarvis import profiles
 from agent_custom_profiles import AgentProfile
 from agent_model_capability import ModelOffer
@@ -66,18 +66,31 @@ def run_mixed(scenario,record):
     if shared:
         from heterogeneous_team_token_budget import Attempt
         from local_agent_model_fixture_contract import wire_for,bound_reply
-        previous_wire=wire_for("plan",())
+        previous_wire=(b"synthetic prior accounting fixture" if scenario=="mixed-shared-hold"
+                       else wire_for("plan",()))
         # The HOLD variant uses a synthetic prior charge, expressly not a model
         # execution. It must refuse the review before any wrapper/server starts.
         ceiling=49 if scenario=="mixed-shared-hold" else 16
         spec=Attempt("prior-fixed", "planner", sha256(previous_wire).hexdigest(), ceiling)
         (previous,)=cumulative.reserve_wave(plan.digest,(spec,))
-        cumulative.dispatch(previous,previous_wire)
         if scenario=="mixed-shared-hold":
+            cumulative.dispatch(previous,previous_wire)
             cumulative.abandon_reaped(previous)
             prior=49
             record("mixed-shared-synthetic-prior-charge",cumulative.snapshot()==(64,49,0,15),synthetic=True)
         else:
+            # Fixed prior fixture has its own exact synthetic grant and memory
+            # reservation. It is not a new unrestricted team execution path.
+            request=Request(ctx,"document_engine",
+                            sha256(("prior:"+plan.digest+":"+run._attempt+":"+spec.wire_digest).encode("ascii")).hexdigest(),
+                            "local","private").checked()
+            prior_grant=gate.fixture_grant("native-prior",request,60)
+            memory=ledger.reserve(run._attempt,"prior-fixed",16)
+            gate.claim_with_dependencies(prior_grant,request,tuple(run._claims.values()))
+            gate.checkpoint_claimed_group(((prior_grant,request),))
+            cumulative.dispatch(previous,previous_wire)
+            record("mixed-shared-prior-reserved",ledger.snapshot()==(64,16,48)
+                   and cumulative.snapshot()==(64,0,16,48))
             p=subprocess.Popen(["/usr/bin/python3","-I","/work/runner.py","--worker","plan","8080","normal"],
                                stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,close_fds=True)
             try:
@@ -92,7 +105,10 @@ def run_mixed(scenario,record):
             _,previous_tokens,previous_prompt=bound_reply("plan",previous_wire,out)
             prior=len(previous_tokens)
             cumulative.settle_reaped(previous,prior)
-            record("mixed-shared-prior-native-charge",prior==16 and cumulative.snapshot()==(64,prior,0,64-prior),
+            ledger.release(memory)
+            gate.checkpoint_claimed_group(((prior_grant,request),))
+            record("mixed-shared-prior-native-charge",prior==16 and cumulative.snapshot()==(64,prior,0,64-prior)
+                   and ledger.snapshot()==(64,0,64),
                    generated_tokens=prior,prompt_tokens=previous_prompt)
     owned=OwnedMixedReview(review,use_team_budget=shared)
     if scenario=="mixed-shared-hold":
