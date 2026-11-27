@@ -208,10 +208,7 @@ fn database_failure_does_not_leave_a_partial_turn_or_lose_ticket() {
              BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
         )
         .unwrap();
-    assert_eq!(
-        owner.complete_reaped(&first, "Done"),
-        Err(Error::Database)
-    );
+    assert_eq!(owner.complete_reaped(&first, "Done"), Err(Error::Database));
     assert_eq!(owner.history(S).unwrap().0, 1);
     assert_eq!(owner.history(S).unwrap().1.len(), 1);
     assert_eq!(owner.recovery(S).unwrap().unwrap().state, State::Pending);
@@ -232,9 +229,7 @@ fn admission_limit_does_not_commit_untracked_durable_work() {
     let mut owner = OwnedStore::new(store);
     let mut tickets = Vec::new();
     for i in 0..64u8 {
-        tickets.push(ticket(
-            owner.submit([i; 16], C, 0, "one", "Hello").unwrap(),
-        ));
+        tickets.push(ticket(owner.submit([i; 16], C, 0, "one", "Hello").unwrap()));
     }
     assert!(matches!(
         owner.submit([64; 16], C, 0, "one", "Hello"),
