@@ -13,6 +13,9 @@ PREFIX={"plan":"Once upon a time, there was a little bird named",
         "review":"The little bird and its friend went home. "}
 MAX_WIRE=4096
 MAX_PARENT_BYTES=512
+CONTEXT_TOKENS=128
+MAX_GENERATED_TOKENS=16
+MAX_PROMPT_TOKENS=CONTEXT_TOKENS-MAX_GENERATED_TOKENS
 
 
 def _digest(value):
@@ -41,7 +44,7 @@ def wire_for(worker,rows):
     prompt=PREFIX[worker]+(" ".join(texts)+" " if texts else "")
     wire=json.dumps({"prompt":prompt,"n_predict":16,"temperature":0,"seed":42,
                      "stream":False,"return_tokens":True,"cache_prompt":False,
-                     "response_fields":["content","tokens","stop","stop_type","model","truncated"]},
+                     "response_fields":["content","tokens","stop","stop_type","model","truncated","tokens_evaluated"]},
                     separators=(",",":"),ensure_ascii=True).encode("ascii")
     if len(wire)>MAX_WIRE:
         raise Refused("model_fixture_wire_size")
@@ -65,7 +68,7 @@ def validate_wire(worker,wire):
         raise Refused("model_fixture_wire") from exc
     expected={"prompt":prompt,"n_predict":16,"temperature":0,"seed":42,
               "stream":False,"return_tokens":True,"cache_prompt":False,
-              "response_fields":["content","tokens","stop","stop_type","model","truncated"]}
+              "response_fields":["content","tokens","stop","stop_type","model","truncated","tokens_evaluated"]}
     if (not prompt.startswith(PREFIX[worker]) or prompt_size>2048
             or any(ord(x)<32 and x not in "\n\t" or 127<=ord(x)<=159 for x in prompt)
             or (worker=="plan" and prompt!=PREFIX[worker])
@@ -81,6 +84,51 @@ def reply_for(raw):
         raise Refused("model_fixture_result_size")
     return data,tokens
 
+def _unique(pairs):
+    result={}
+    for key,value in pairs:
+        if key in result:
+            raise Refused("model_fixture_duplicate_field")
+        result[key]=value
+    return result
+
+def tokenizer_wire(worker,wire):
+    validate_wire(worker,wire)
+    return json.dumps({"content":json.loads(wire)["prompt"],"add_special":True,
+                       "parse_special":True,"with_pieces":False},
+                      separators=(",",":"),ensure_ascii=True).encode("ascii")
+
+def prompt_count(raw):
+    if type(raw) is not bytes or not 0<len(raw)<=8192:
+        raise Refused("model_fixture_tokenizer_size")
+    try:
+        obj=json.loads(raw,object_pairs_hook=_unique)
+    except (UnicodeError,ValueError) as exc:
+        raise Refused("model_fixture_tokenizer") from exc
+    if (type(obj) is not dict or set(obj)!={"tokens"} or type(obj["tokens"]) is not list
+            or not 1<=len(obj["tokens"])<=MAX_PROMPT_TOKENS
+            or any(type(t) is not int or not 0<=t<512 for t in obj["tokens"])):
+        raise Refused("model_fixture_context_budget")
+    return len(obj["tokens"])
+
+def measured_reply(raw,count):
+    if type(count) is not int or not 1<=count<=MAX_PROMPT_TOKENS:
+        raise Refused("model_fixture_context_budget")
+    if type(raw) is not bytes or not 0<len(raw)<=32768:
+        raise Refused("model_fixture_reply_size")
+    try:
+        obj=json.loads(raw,object_pairs_hook=_unique)
+    except (UnicodeError,ValueError) as exc:
+        raise Refused("model_fixture_reply") from exc
+    if (type(obj) is not dict or type(obj.get("tokens_evaluated")) is not int
+            or obj["tokens_evaluated"]!=count):
+        raise Refused("model_fixture_prompt_count_mismatch")
+    del obj["tokens_evaluated"]
+    data,tokens=reply_for(json.dumps(obj,separators=(",",":")).encode("ascii"))
+    if count+len(tokens)>CONTEXT_TOKENS:
+        raise Refused("model_fixture_context_budget")
+    return data,tokens,count
+
 def bound_reply(worker,wire,envelope):
     wire_digest=validate_wire(worker,wire)
     if type(envelope) is not bytes or not 0<len(envelope)<=65536:
@@ -89,10 +137,10 @@ def bound_reply(worker,wire,envelope):
         obj=json.loads(envelope)
     except (ValueError,UnicodeError) as exc:
         raise Refused("model_fixture_envelope") from exc
-    if (type(obj) is not dict or set(obj)!={"worker","wire_digest","model_digest","reply","server_reaped"}
+    if (type(obj) is not dict or set(obj)!={"worker","wire_digest","model_digest","reply","server_reaped","prompt_tokens"}
             or obj["worker"]!=worker or obj["wire_digest"]!=wire_digest
             or obj["model_digest"]!=MODEL_SHA or obj["server_reaped"] is not True
             or type(obj["reply"]) is not str
             or envelope!=json.dumps(obj,separators=(",",":"),ensure_ascii=True).encode("ascii")):
         raise Refused("model_fixture_envelope")
-    return reply_for(obj["reply"].encode("utf-8"))
+    return measured_reply(obj["reply"].encode("utf-8"),obj["prompt_tokens"])
