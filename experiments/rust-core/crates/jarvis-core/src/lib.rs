@@ -6,3 +6,4 @@ pub mod budget;
 
 pub mod deadline;
 pub mod session;
+pub mod workspace;
