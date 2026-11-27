@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Disposable native v2 denial-history adapter. No active grants, effects,
 //! process evidence, canonical digest generation, or runtime owner authority.
+pub mod guarded;
+
 use super::{configure, schema_rows, validate_records, version, Error, Id, Store};
 use rusqlite::{params, Connection, TransactionBehavior};
 
