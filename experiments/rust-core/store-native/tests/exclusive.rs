@@ -112,3 +112,59 @@ fn refuses_symlink_sidecar_before_sqlite_open() {
     assert!(matches!(ExclusiveStore::open(&f.0, false), Err(Error::Invalid)));
     assert_eq!(fs::read(target).unwrap(), b"unchanged");
 }
+
+#[test]
+fn backup_preserves_history_without_overwriting_or_activating() {
+    let f = Fixture::new();
+    let mut owner = ExclusiveStore::open(&f.0, true).unwrap();
+    owner.session(S, None).unwrap();
+    let Admission::New(_, first) = owner.submit(S, C, 0, "one", "Hello").unwrap() else {
+        panic!("expected new turn");
+    };
+    assert_eq!(owner.backup_idle(), Err(Error::Busy));
+    assert!(!f.0.join("backup.sqlite").exists());
+    assert!(!f.0.join("backup.staging").exists());
+    owner.complete_reaped(&first, "Done").unwrap();
+    owner.backup_idle().unwrap();
+    assert_eq!(owner.backup_history(S).unwrap(), owner.history(S).unwrap());
+    let Admission::New(_, second) = owner.submit(S, C, 2, "two", "Later").unwrap() else {
+        panic!("expected new turn");
+    };
+    owner.complete_reaped(&second, "New").unwrap();
+    assert_eq!(owner.backup_idle(), Err(Error::Conflict));
+    assert_eq!(owner.backup_history(S).unwrap().0, 2);
+    assert_eq!(owner.history(S).unwrap().0, 4);
+}
+
+#[test]
+fn backup_refuses_unreconciled_durable_turn_after_restart() {
+    let f = Fixture::new();
+    let mut owner = ExclusiveStore::open(&f.0, true).unwrap();
+    owner.session(S, None).unwrap();
+    owner.submit(S, C, 0, "one", "Hello").unwrap();
+    drop(owner);
+    let mut owner = ExclusiveStore::open(&f.0, false).unwrap();
+    assert_eq!(owner.backup_idle(), Err(Error::Busy));
+    let recovery = owner.recover_cancel(S, 1).unwrap();
+    assert_eq!(owner.backup_idle(), Err(Error::Busy));
+    owner.observe_drained(&recovery).unwrap();
+    owner.backup_idle().unwrap();
+    assert_eq!(owner.backup_history(S).unwrap().0, 3);
+}
+
+#[test]
+fn backup_never_replaces_stale_stage_or_symlink() {
+    let f = Fixture::new();
+    let owner = ExclusiveStore::open(&f.0, true).unwrap();
+    let stage = f.0.join("backup.staging");
+    fs::write(&stage, b"preserved").unwrap();
+    assert_eq!(owner.backup_idle(), Err(Error::Database));
+    assert_eq!(fs::read(&stage).unwrap(), b"preserved");
+    fs::remove_file(&stage).unwrap();
+    let target = f.0.join("target");
+    fs::write(&target, b"unchanged").unwrap();
+    symlink(&target, f.0.join("backup.sqlite")).unwrap();
+    assert_eq!(owner.backup_idle(), Err(Error::Conflict));
+    assert_eq!(owner.backup_history(S), Err(Error::Invalid));
+    assert_eq!(fs::read(target).unwrap(), b"unchanged");
+}
