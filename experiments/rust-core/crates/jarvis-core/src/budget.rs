@@ -129,7 +129,13 @@ impl Ledger {
         if self.closed { return Err(Error::Closed); }
         let e = self.entry(lease)?;
         if e.cancelled || e.phase != Phase::Prepared { return Err(Error::WrongPhase); }
-        e.phase = Phase::Dispatched;
+        // Capacity can shrink between reservation and dispatch. Do not launch
+        // new work while overcommitted; existing reservations remain owned.
+        let snapshot = self.snapshot();
+        if !snapshot.reserved.add(snapshot.spent).ok_or(Error::Exhausted)?.fits(snapshot.capacity) {
+            return Err(Error::Exhausted);
+        }
+        self.entry(lease)?.phase = Phase::Dispatched;
         Ok(())
     }
     pub fn cancel(&mut self, lease: &Lease) -> Result<(), Error> {
