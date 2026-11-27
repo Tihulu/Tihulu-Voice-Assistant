@@ -6,6 +6,7 @@ on:
       - 'experiments/local_agent_model_chain_acceptance.py'
       - 'experiments/heterogeneous_model_native_evidence.py'
       - 'experiments/heterogeneous_model_review.py'
+      - 'experiments/heterogeneous_model_owned_review.py'
       - 'experiments/local_agent_model_fixture_contract.py'
       - 'experiments/local_agent_model_token_ledger.py'
       - 'experiments/local_agent_model_budget_admission.py'

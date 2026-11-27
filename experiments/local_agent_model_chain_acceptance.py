@@ -438,7 +438,7 @@ def main(binary,model,scenario="normal"):
         for name in ("gateway.py","inference.py","local_agent_planner.py","local_agent_wave_run.py",
                      "local_agent_resources.py","local_agent_owned_drain.py","local_agent_replan.py","local_agent_launch.py",
                      "local_agent_model_fixture_contract.py","local_agent_model_token_ledger.py","local_agent_model_stream_contract.py","local_agent_model_budget_admission.py","llama_engine_acceptance.py",
-                     "heterogeneous_model_native_evidence.py","heterogeneous_model_review.py",
+                     "heterogeneous_model_native_evidence.py","heterogeneous_model_review.py","heterogeneous_model_owned_review.py",
                      "heterogeneous_agents.py","agent_custom_profiles.py","agent_model_capability.py",
                      "heterogeneous_team.py","heterogeneous_team_admission.py","heterogeneous_data_tools.py",
                      "heterogeneous_data_team.py","vision_image_input.py","document_result.py",

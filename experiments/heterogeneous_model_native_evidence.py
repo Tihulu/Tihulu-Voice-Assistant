@@ -17,6 +17,7 @@ from heterogeneous_team_admission import TeamAdmission
 from heterogeneous_data_tools import DataCall
 from heterogeneous_data_team import DataTeamRun
 from heterogeneous_model_review import MixedModelReview
+from heterogeneous_model_owned_review import OwnedMixedReview
 from local_agent_resources import ResourceLedger
 from vision_image_input import SIGNATURE
 
@@ -57,56 +58,73 @@ def run_mixed(scenario,record):
     record("mixed-model-source-data",report["csv"]["sum"]==15 and report["image"]["width"]==2 and report["text"]["words"]==2)
     review=MixedModelReview(run,ctx,available,models)
     grant=gate.fixture_grant("native-review",review.request(),60)
-    wire=review.begin(grant,ctx,available,models)
+    owned=OwnedMixedReview(review)
+    ticket,wire=owned.prepare(grant,ctx,available,models)
+    record("mixed-model-reserved-before-dispatch",owned.usage()==(16,0,16,0)
+           and ledger.snapshot()==(64,16,48) and owned.pending() is ticket)
+    owned.dispatch(ticket,wire,ctx,available,models)
     record("mixed-model-projected-input","3 numbers, total 15, 2 words, and a 2 by 1 picture" in json.loads(wire)["prompt"]
            and "public fixture" not in json.loads(wire)["prompt"])
     # Fixed worker owns and waits for the fixed server, inside existing namespace.
-    p=subprocess.Popen(["/usr/bin/python3","-I","/work/runner.py","--worker","a","8080","normal"],
-                       stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,close_fds=True)
+    try:
+        p=subprocess.Popen(["/usr/bin/python3","-I","/work/runner.py","--worker","a","8080","normal"],
+                           stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,close_fds=True)
+    except BaseException:
+        owned.stop()
+        raise
     try:
         out=p.communicate(input=wire,timeout=35)[0]
     except BaseException:
-        review.stop()
+        owned.stop()
         # Namespace teardown is the ultimate descendant barrier on failure.
         if p.poll() is None:
             p.kill()
         p.wait(timeout=5)
         raise
     if p.returncode!=0 or not 0<len(out)<=65536:
-        review.stop()
+        owned.stop()
         raise RuntimeError("mixed_fixture_worker_exit")
     from local_agent_model_fixture_contract import bound_reply
-    data,tokens,count=bound_reply("a",wire,out)
+    try:
+        data,tokens,count=bound_reply("a",wire,out)
+    except BaseException:
+        owned.stop()
+        raise
     record("mixed-model-actual-native-output",bool(data) and 1<=len(tokens)<=16 and p.poll() is not None,
            generated_tokens=len(tokens),prompt_tokens=count,wire_digest=sha256(wire).hexdigest())
     if scenario=="mixed-revoke":
         gate.revoke("data-csv")
+        record("mixed-model-revoke-retains-reservation",ledger.snapshot()==(64,16,48)
+               and owned.pending() is ticket and owned.usage()==(16,0,16,0))
         try:
-            review.complete(out,ctx,available,models)
+            owned.observe_reaped(ticket,p.returncode,out,ctx,available,models)
         except Refused:
             denied=True
         else:
             denied=False
         record("mixed-model-revoked-before-publication",denied and not run._results)
         try:
-            review.output(ctx,available,models)
+            owned.output(ctx,available,models)
         except Refused:
             denied=True
         else:
             denied=False
         record("mixed-model-revoked-no-output",denied)
     else:
-        review.complete(out,ctx,available,models)
-        result,actual=review.output(ctx,available,models)
+        outcome=owned.observe_reaped(ticket,p.returncode,out,ctx,available,models)
+        record("mixed-model-owned-completion",outcome=="COMPLETED")
+        result,actual=owned.output(ctx,available,models)
         record("mixed-model-bound-final-output",actual==data and result.source_digest==source.payload_digest
                and result.wire_digest==sha256(wire).hexdigest() and result.output_digest==sha256(data).hexdigest())
         gate.revoke("data-text")
         try:
-            review.output(ctx,available,models)
+            owned.output(ctx,available,models)
         except Refused:
             denied=True
         else:
             denied=False
         record("mixed-model-revoked-after-publication",denied)
+    record("mixed-model-actual-token-settlement",owned.usage()==(16,len(tokens),0,16-len(tokens))
+           and owned.pending() is None,generated_tokens=len(tokens))
     record("mixed-model-no-data-reservations",ledger.snapshot()==(64,0,64))
     return 0
