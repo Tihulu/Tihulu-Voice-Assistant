@@ -114,3 +114,31 @@ class ModelFixtureContractTests(unittest.TestCase):
         response["tokens_evaluated"]=True
         with self.assertRaises(Refused):
             measured_reply(json.dumps(response).encode(),1)
+
+    def test_reduced_ceiling_only_for_fixed_parallel_roles(self):
+        from local_agent_model_fixture_contract import wire_ceiling
+        w=wire_for("a",(row("plan"),),ceiling=8)
+        self.assertEqual(wire_ceiling("a",w),8)
+        for worker,rows,n in (("plan",(),8),("a",(row("plan"),),True),("a",(row("plan"),),12)):
+            with self.assertRaises(Refused):
+                wire_for(worker,rows,ceiling=n)
+    def test_native_limit_matches_requested_ceiling(self):
+        from local_agent_model_fixture_contract import measured_reply
+        r={"content":"bird","tokens":[2]*8,"stop":True,"stop_type":"limit","model":MODEL,
+           "truncated":False,"tokens_evaluated":12}
+        raw=json.dumps(r).encode()
+        self.assertEqual(measured_reply(raw,12,ceiling=8),(b"bird",(2,)*8,12))
+        with self.assertRaises(ValueError):
+            measured_reply(raw,12)
+        r["tokens"]=[2]*9
+        with self.assertRaises(ValueError):
+            measured_reply(json.dumps(r).encode(),12,ceiling=8)
+    def test_bound_reply_cannot_exceed_reduced_wire(self):
+        from local_agent_model_fixture_contract import bound_reply,MODEL_SHA
+        w=wire_for("b",(row("plan"),),ceiling=8)
+        response={"content":"bird","tokens":[2]*16,"stop":True,"stop_type":"limit","model":MODEL,
+                  "truncated":False,"tokens_evaluated":12}
+        obj={"worker":"b","wire_digest":sha256(w).hexdigest(),"model_digest":MODEL_SHA,
+             "reply":json.dumps(response),"server_reaped":True,"prompt_tokens":12}
+        with self.assertRaises(ValueError):
+            bound_reply("b",w,json.dumps(obj,separators=(",",":")).encode())
