@@ -624,6 +624,10 @@ fn partial_buffers_remain_isolated_between_concurrent_peers() {
         w.settle(&keys[1], &current(&m), 104, Some((0, 0))),
         Ok(ResultState::MeasuredReport)
     );
+    assert_eq!(w.snapshot().reserved, Amount::default());
+    assert!(!w.stopped());
+    assert!(!w.drained());
+    w.stop();
     assert!(w.drained());
 }
 
