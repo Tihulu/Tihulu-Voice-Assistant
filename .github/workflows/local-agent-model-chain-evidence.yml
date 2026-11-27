@@ -7,6 +7,8 @@ on:
       - 'experiments/heterogeneous_model_native_evidence.py'
       - 'experiments/heterogeneous_model_review.py'
       - 'experiments/heterogeneous_model_owned_review.py'
+      - 'experiments/heterogeneous_team_review_token_adapter.py'
+      - 'experiments/heterogeneous_team_token_budget.py'
       - 'experiments/local_agent_model_fixture_contract.py'
       - 'experiments/local_agent_model_token_ledger.py'
       - 'experiments/local_agent_model_budget_admission.py'
@@ -66,3 +68,9 @@ jobs:
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" mixed-data
       - name: Actual fixed mixed data source revocation before model publication
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" mixed-revoke
+      - name: Actual shared team budget with prior and review native inference
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" mixed-shared
+      - name: Actual shared team budget with revoked review output
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" mixed-shared-revoke
+      - name: Shared budget exhaustion before any model spawn (synthetic prior charge)
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" mixed-shared-hold
