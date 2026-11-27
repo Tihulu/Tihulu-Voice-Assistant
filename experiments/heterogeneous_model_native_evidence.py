@@ -8,6 +8,8 @@ from hashlib import sha256
 import struct
 import zlib
 import subprocess
+import os
+from pathlib import Path
 from gateway import Context,FixtureGateway,Refused
 from tihulu_jarvis import profiles
 from agent_custom_profiles import AgentProfile
@@ -27,7 +29,7 @@ def png():
     return SIGNATURE+chunk(b"IHDR",struct.pack(">IIBBBBB",2,1,8,2,0,0,0))+chunk(b"IDAT",zlib.compress(b"\0\1\2\3\4\5\6"))+chunk(b"IEND",b"")
 
 def run_mixed(scenario,record):
-    if scenario not in ("mixed-data","mixed-revoke"):
+    if scenario not in ("mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold"):
         raise RuntimeError("mixed_fixture_scenario")
     ctx=Context("mixed-model","session","profile",1,"local","LOCAL_ONLY")
     gate=FixtureGateway(ctx,tuple(profiles.Rule(a,(),"allow") for a in
@@ -58,8 +60,56 @@ def run_mixed(scenario,record):
     record("mixed-model-source-data",report["csv"]["sum"]==15 and report["image"]["width"]==2 and report["text"]["words"]==2)
     review=MixedModelReview(run,ctx,available,models)
     grant=gate.fixture_grant("native-review",review.request(),60)
-    owned=OwnedMixedReview(review)
+    shared=scenario.startswith("mixed-shared")
+    cumulative=run.generated_budget() if shared else None
+    prior=0
+    if shared:
+        from heterogeneous_team_token_budget import Attempt
+        from local_agent_model_fixture_contract import wire_for,bound_reply
+        previous_wire=wire_for("plan",())
+        # The HOLD variant uses a synthetic prior charge, expressly not a model
+        # execution. It must refuse the review before any wrapper/server starts.
+        ceiling=49 if scenario=="mixed-shared-hold" else 16
+        spec=Attempt("prior-fixed", "planner", sha256(previous_wire).hexdigest(), ceiling)
+        (previous,)=cumulative.reserve_wave(plan.digest,(spec,))
+        cumulative.dispatch(previous,previous_wire)
+        if scenario=="mixed-shared-hold":
+            cumulative.abandon_reaped(previous)
+            prior=49
+            record("mixed-shared-synthetic-prior-charge",cumulative.snapshot()==(64,49,0,15),synthetic=True)
+        else:
+            p=subprocess.Popen(["/usr/bin/python3","-I","/work/runner.py","--worker","plan","8080","normal"],
+                               stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,close_fds=True)
+            try:
+                out=p.communicate(input=previous_wire,timeout=35)[0]
+            except BaseException:
+                if p.poll() is None:
+                    p.kill()
+                p.wait(timeout=5)
+                raise
+            if p.returncode!=0:
+                raise RuntimeError("mixed_shared_prior_exit")
+            _,previous_tokens,previous_prompt=bound_reply("plan",previous_wire,out)
+            prior=len(previous_tokens)
+            cumulative.settle_reaped(previous,prior)
+            record("mixed-shared-prior-native-charge",prior==16 and cumulative.snapshot()==(64,prior,0,64-prior),
+                   generated_tokens=prior,prompt_tokens=previous_prompt)
+    owned=OwnedMixedReview(review,use_team_budget=shared)
+    if scenario=="mixed-shared-hold":
+        try:
+            owned.prepare(grant,ctx,available,models)
+        except Refused as exc:
+            denied=str(exc)=="team_budget_exhausted"
+        else:
+            denied=False
+        record("mixed-shared-hold-before-claim",denied and review._grant is None and owned.pending() is None)
+        children=Path("/proc/self/task/"+str(os.getpid())+"/children").read_text().strip()
+        record("mixed-shared-hold-no-spawn",not children and not tuple(Path("/tmp").glob("server-*.log"))
+               and ledger.snapshot()==(64,0,64) and cumulative.snapshot()==(64,49,0,15))
+        return 0
     ticket,wire=owned.prepare(grant,ctx,available,models)
+    if shared:
+        record("mixed-shared-reservation",cumulative.snapshot()==(64,prior,16,48-prior))
     record("mixed-model-reserved-before-dispatch",owned.usage()==(16,0,16,0)
            and ledger.snapshot()==(64,16,48) and owned.pending() is ticket)
     owned.dispatch(ticket,wire,ctx,available,models)
@@ -92,7 +142,7 @@ def run_mixed(scenario,record):
         raise
     record("mixed-model-actual-native-output",bool(data) and 1<=len(tokens)<=16 and p.poll() is not None,
            generated_tokens=len(tokens),prompt_tokens=count,wire_digest=sha256(wire).hexdigest())
-    if scenario=="mixed-revoke":
+    if scenario in ("mixed-revoke","mixed-shared-revoke"):
         gate.revoke("data-csv")
         record("mixed-model-revoke-retains-reservation",ledger.snapshot()==(64,16,48)
                and owned.pending() is ticket and owned.usage()==(16,0,16,0))
@@ -126,5 +176,8 @@ def run_mixed(scenario,record):
         record("mixed-model-revoked-after-publication",denied)
     record("mixed-model-actual-token-settlement",owned.usage()==(16,len(tokens),0,16-len(tokens))
            and owned.pending() is None,generated_tokens=len(tokens))
+    if shared:
+        record("mixed-shared-final-accounting",cumulative.snapshot()==(64,prior+len(tokens),0,64-prior-len(tokens)),
+               prior_generated=prior,review_generated=len(tokens),total_generated=prior+len(tokens))
     record("mixed-model-no-data-reservations",ledger.snapshot()==(64,0,64))
     return 0
