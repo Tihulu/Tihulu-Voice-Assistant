@@ -61,3 +61,18 @@ class HeterogeneousTeamTests(unittest.TestCase):
         self.assertEqual(len(self.plan(tasks,limit=1).waves),2)
         with self.assertRaises(Refused):
             self.plan(tasks,memory_budget=1024)
+
+    def test_desktop_input_and_observation_never_share_wave(self):
+        self.available+=("screen_observe","accessibility_read")
+        for channel in ("screen_observe","accessibility_read"):
+            for input_name,read_name in (("a","b"),("b","a")):
+                tasks=(self.task(input_name,"desktop","desktop_input"),self.task(read_name,"desktop",channel))
+                p=self.plan(tasks)
+                self.assertEqual(tuple(len(w) for w in p.waves),(1,1))
+    def test_independent_observers_can_share_wave(self):
+        self.available+=("screen_observe",)
+        p=self.plan(tuple(self.task(n,"vision","screen_observe") for n in ("a","b")))
+        self.assertEqual(tuple(len(w) for w in p.waves),(2,))
+    def test_input_and_non_screen_reasoning_can_share_wave(self):
+        p=self.plan((self.task("a","desktop","desktop_input"),self.task("b","planner","reasoning")))
+        self.assertEqual(tuple(len(w) for w in p.waves),(2,))
