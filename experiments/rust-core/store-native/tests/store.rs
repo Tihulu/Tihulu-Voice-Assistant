@@ -259,8 +259,11 @@ fn reopen_rejects_revision_drift() {
     store.submit(S, C, 0, "first", "Hello").unwrap();
     drop(store);
     let db = f.db();
-    db.execute("UPDATE sessions SET revision=99 WHERE id=?1", [S.as_slice()])
-        .unwrap();
+    db.execute(
+        "UPDATE sessions SET revision=99 WHERE id=?1",
+        [S.as_slice()],
+    )
+    .unwrap();
     assert!(matches!(Store::reopen(db), Err(Error::Schema)));
 }
 
