@@ -7,15 +7,23 @@ use crate::session::{self, Handle, Session, Terminal};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
-pub struct Worker {
+/// Trusted owner policy snapshot identity, not a grant or authentication.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PolicyStamp {
+    pub generation: u64,
+    pub local_only: bool,
+}
+
+pub struct Worker<'a> {
     pub demand: Demand,
     pub plan: Negotiated,
+    pub current: Current<'a>,
 }
 
 pub struct Current<'a> {
     pub manifest: &'a Manifest,
     pub allowed: &'a BTreeSet<Capability>,
-    pub local_only: bool,
+    pub policy: PolicyStamp,
 }
 
 #[derive(Debug)]
@@ -39,6 +47,7 @@ pub enum Error {
     Session(session::Error),
     Foreign,
     Phase,
+    PolicyDrift,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -50,6 +59,7 @@ pub enum ResultState {
 pub struct HarnessWave {
     session: Session,
     rows: BTreeMap<String, Row>,
+    policy: Option<PolicyStamp>,
 }
 
 impl HarnessWave {
@@ -60,6 +70,7 @@ impl HarnessWave {
         Ok(Self {
             session,
             rows: BTreeMap::new(),
+            policy: None,
         })
     }
 
@@ -78,11 +89,31 @@ impl HarnessWave {
     pub fn reserve(
         &mut self,
         attempt: &str,
-        workers: Vec<Worker>,
+        workers: Vec<Worker<'_>>,
         now: u64,
     ) -> Result<Vec<WorkerKey>, Error> {
         if !self.rows.is_empty() {
             return Err(Error::Phase);
+        }
+        // All peers must pass the same trusted policy generation and their
+        // individual manifest/capability preflight before any lease is issued.
+        if let Some(first) = workers.first() {
+            let stamp = first.current.policy;
+            self.observe_policy(stamp)?;
+            for worker in &workers {
+                if worker.current.policy != stamp {
+                    self.stop();
+                    return Err(Error::PolicyDrift);
+                }
+                if let Err(error) = worker.plan.recheck(
+                    worker.current.manifest,
+                    worker.current.allowed,
+                    stamp.local_only,
+                ) {
+                    self.stop();
+                    return Err(Error::Harness(error));
+                }
+            }
         }
         let demands: Vec<_> = workers.iter().map(|w| w.demand.clone()).collect();
         let handles = self
@@ -145,7 +176,11 @@ impl HarnessWave {
 
     /// Trusted owner heartbeat, including when no adapter events arrive.
     /// Cooperative only: stopping never establishes process exit.
-    pub fn tick(&mut self, now: u64) -> Result<(), Error> {
+    pub fn tick(&mut self, now: u64, policy: PolicyStamp) -> Result<(), Error> {
+        if self.stopped() {
+            return Err(Error::Session(session::Error::Closed));
+        }
+        self.observe_policy(policy)?;
         if let Err(error) = self.session.checkpoint(now) {
             self.stop();
             return Err(Error::Session(error));
@@ -153,11 +188,29 @@ impl HarnessWave {
         Ok(())
     }
 
+    fn observe_policy(&mut self, current: PolicyStamp) -> Result<(), Error> {
+        let invalid = current.generation == 0
+            || self.policy.is_some_and(|old| {
+                current.generation < old.generation
+                    || (current.generation == old.generation && current != old)
+                    || (!self.rows.is_empty() && current != old)
+            });
+        if invalid {
+            self.stop();
+            return Err(Error::PolicyDrift);
+        }
+        self.policy = Some(current);
+        Ok(())
+    }
+
     fn check(&mut self, key: &WorkerKey, current: &Current<'_>) -> Result<(), Error> {
-        let result =
-            self.row(key)?
-                .plan
-                .recheck(current.manifest, current.allowed, current.local_only);
+        self.row(key)?;
+        self.observe_policy(current.policy)?;
+        let result = self.row(key)?.plan.recheck(
+            current.manifest,
+            current.allowed,
+            current.policy.local_only,
+        );
         if let Err(error) = result {
             self.stop();
             return Err(Error::Harness(error));
