@@ -5,6 +5,8 @@ on:
     paths:
       - 'experiments/local_agent_model_chain_acceptance.py'
       - 'experiments/local_agent_retry_budget_session.py'
+      - 'experiments/local_agent_retry_deadline.py'
+      - 'experiments/local_agent_native_deadline_evidence.py'
       - 'experiments/local_agent_native_retry_evidence.py'
       - 'experiments/heterogeneous_model_native_evidence.py'
       - 'experiments/heterogeneous_model_review.py'
@@ -92,3 +94,5 @@ jobs:
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" retry-wave-prompt
       - name: Actual later wave prompt refusal before peer launch
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" retry-wave-prompt-hold
+      - name: Actual native late result with monotonic worker deadline
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" retry-deadline
