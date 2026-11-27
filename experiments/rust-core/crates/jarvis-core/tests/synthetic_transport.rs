@@ -419,11 +419,11 @@ fn split_frames_at_every_byte_boundary() {
         w.bind_transport(key, &current(&m), id, 100).unwrap();
         w.dispatch(key, &current(&m), 100).unwrap();
         let start = frame(id, 1, 1);
-        w.record_chunk(key, &current(&m), 101, &start[..split])
+        w.record_chunk(key, &current(&m), 101, id, &start[..split])
             .unwrap();
-        w.record_chunk(key, &current(&m), 102, &start[split..])
+        w.record_chunk(key, &current(&m), 102, id, &start[split..])
             .unwrap();
-        w.record_chunk(key, &current(&m), 103, &frame(id, 2, 4))
+        w.record_chunk(key, &current(&m), 103, id, &frame(id, 2, 4))
             .unwrap();
         assert_eq!(
             w.settle(key, &current(&m), 104, Some((0, 0))),
@@ -442,7 +442,7 @@ fn coalesced_frames_share_existing_sequence_and_reservation() {
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
     let bytes = [frame(id, 1, 1), frame(id, 2, 2), frame(id, 3, 4)].concat();
-    w.record_chunk(key, &current(&m), 101, &bytes).unwrap();
+    w.record_chunk(key, &current(&m), 101, id, &bytes).unwrap();
     assert_eq!(w.snapshot().reserved, amount());
     assert_eq!(
         w.settle(key, &current(&m), 102, Some((0, 0))),
@@ -459,7 +459,7 @@ fn raw_full_frame_cannot_skip_a_buffered_prefix() {
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
-    w.record_chunk(key, &current(&m), 101, &frame(id, 1, 1)[..5])
+    w.record_chunk(key, &current(&m), 101, id, &frame(id, 1, 1)[..5])
         .unwrap();
     assert_eq!(
         w.record_frame(key, &current(&m), 102, &frame(id, 1, 1)),
@@ -480,7 +480,7 @@ fn oversized_chunk_fails_closed_before_processing_any_frame() {
     w.dispatch(key, &current(&m), 100).unwrap();
     let bytes = vec![0; synthetic_transport::MAX_CHUNK + 1];
     assert_eq!(
-        w.record_chunk(key, &current(&m), 101, &bytes),
+        w.record_chunk(key, &current(&m), 101, id, &bytes),
         Err(Error::Transport(synthetic_transport::Error::ChunkLimit))
     );
     assert!(w.stopped());
@@ -496,7 +496,7 @@ fn partial_eof_requires_exact_trusted_cleanup() {
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
-    w.record_chunk(key, &current(&m), 101, &frame(id, 1, 1)[..5])
+    w.record_chunk(key, &current(&m), 101, id, &frame(id, 1, 1)[..5])
         .unwrap();
     assert_eq!(
         w.disconnect_transport(key, id),
@@ -522,7 +522,7 @@ fn trailing_bytes_after_done_in_same_chunk_invalidate_report() {
     let mut bytes = [frame(id, 1, 1), frame(id, 2, 4)].concat();
     bytes.push(0);
     assert_eq!(
-        w.record_chunk(key, &current(&m), 101, &bytes),
+        w.record_chunk(key, &current(&m), 101, id, &bytes),
         Err(Error::Phase)
     );
     assert_eq!(
@@ -553,4 +553,122 @@ fn exact_owner_cancel_retains_lease_and_rejects_foreign_identity() {
         Ok(ResultState::NoPublication)
     );
     assert!(w.drained());
+}
+
+#[test]
+fn foreign_chunk_cannot_mutate_partial_buffer_or_clock() {
+    let m = manifest();
+    let id = identity();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let key = &keys[0];
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    let start = frame(id, 1, 1);
+    w.record_chunk(key, &current(&m), 101, id, &start[..5])
+        .unwrap();
+    let foreign = Identity {
+        connection: [9; 32],
+        ..id
+    };
+    assert_eq!(
+        w.record_chunk(key, &current(&m), 999, foreign, &[0; 12]),
+        Err(Error::Foreign)
+    );
+    w.record_chunk(key, &current(&m), 102, id, &start[5..])
+        .unwrap();
+    w.record_chunk(key, &current(&m), 103, id, &frame(id, 2, 4))
+        .unwrap();
+    assert_eq!(
+        w.settle(key, &current(&m), 104, Some((0, 0))),
+        Ok(ResultState::MeasuredReport)
+    );
+}
+
+#[test]
+fn partial_buffers_remain_isolated_between_concurrent_peers() {
+    let m = manifest();
+    let mut w = pair_wave();
+    let keys = w
+        .reserve("one", vec![worker("a", &m), worker("b", &m)], 100)
+        .unwrap();
+    let a = identity();
+    let b = Identity {
+        worker: [6; 32],
+        connection: [7; 32],
+        ..a
+    };
+    w.bind_transport(&keys[0], &current(&m), a, 100).unwrap();
+    w.bind_transport(&keys[1], &current(&m), b, 100).unwrap();
+    w.dispatch(&keys[0], &current(&m), 100).unwrap();
+    w.dispatch(&keys[1], &current(&m), 100).unwrap();
+    let first = frame(a, 1, 1);
+    let second = frame(b, 1, 1);
+    w.record_chunk(&keys[0], &current(&m), 101, a, &first[..3])
+        .unwrap();
+    w.record_chunk(&keys[1], &current(&m), 101, b, &second[..99])
+        .unwrap();
+    w.record_chunk(&keys[0], &current(&m), 102, a, &first[3..])
+        .unwrap();
+    w.record_chunk(&keys[1], &current(&m), 102, b, &second[99..])
+        .unwrap();
+    w.record_chunk(&keys[0], &current(&m), 103, a, &frame(a, 2, 4))
+        .unwrap();
+    w.record_chunk(&keys[1], &current(&m), 103, b, &frame(b, 2, 4))
+        .unwrap();
+    assert_eq!(
+        w.settle(&keys[0], &current(&m), 104, Some((0, 0))),
+        Ok(ResultState::MeasuredReport)
+    );
+    assert_eq!(
+        w.settle(&keys[1], &current(&m), 104, Some((0, 0))),
+        Ok(ResultState::MeasuredReport)
+    );
+    assert!(w.drained());
+}
+
+#[test]
+fn partial_frame_does_not_extend_worker_deadline() {
+    let m = manifest();
+    let id = identity();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let key = &keys[0];
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    let start = frame(id, 1, 1);
+    w.record_chunk(key, &current(&m), 119, id, &start[..5])
+        .unwrap();
+    assert!(w
+        .record_chunk(key, &current(&m), 120, id, &start[5..])
+        .is_err());
+    assert!(w.stopped());
+    assert_eq!(w.snapshot().reserved, amount());
+    assert_eq!(
+        w.settle(key, &current(&m), 121, None),
+        Ok(ResultState::NoPublication)
+    );
+}
+
+#[test]
+fn malformed_second_frame_invalidates_coalesced_report() {
+    let m = manifest();
+    let id = identity();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let key = &keys[0];
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    let mut bad = frame(id, 2, 4);
+    bad[0] = 0;
+    let bytes = [frame(id, 1, 1), bad].concat();
+    assert_eq!(
+        w.record_chunk(key, &current(&m), 101, id, &bytes),
+        Err(Error::Transport(synthetic_transport::Error::Version))
+    );
+    assert!(w.stopped());
+    assert_eq!(
+        w.settle(key, &current(&m), 102, Some((0, 0))),
+        Ok(ResultState::NoPublication)
+    );
 }

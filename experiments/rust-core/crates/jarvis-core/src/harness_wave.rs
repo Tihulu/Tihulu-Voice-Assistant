@@ -305,11 +305,17 @@ impl HarnessWave {
         key: &WorkerKey,
         current: &Current<'_>,
         now: u64,
+        source: Identity,
         mut bytes: &[u8],
     ) -> Result<(), Error> {
         let row = self.row(key)?;
         if !row.dispatched || row.transport.is_none() {
             return Err(Error::Phase);
+        }
+        // The trusted reader must identify its actual connection before
+        // touching the buffer, owner clock or shared policy.
+        if row.transport != Some(source) {
+            return Err(Error::Foreign);
         }
         self.check(key, current)?;
         self.tick(now, current.policy)?;
