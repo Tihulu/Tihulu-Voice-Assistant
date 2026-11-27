@@ -5,11 +5,11 @@ from hashlib import sha256
 from gateway import Refused
 from heterogeneous_model_review import MixedModelReview,review_wire
 from llama_engine_acceptance import MODEL,MODEL_SHA
-from test_heterogeneous_data_team import DataTeamRunTests
+import test_heterogeneous_data_team as data_tests
 
 class MixedModelReviewTests(unittest.TestCase):
     def setUp(self):
-        self.f=DataTeamRunTests()
+        self.f=data_tests.DataTeamRunTests()
         self.f.setUp()
         self.f.start()
         for t in ("csv","image","text","review"):
