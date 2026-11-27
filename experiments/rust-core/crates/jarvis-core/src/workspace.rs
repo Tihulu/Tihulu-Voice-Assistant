@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! In-memory layout fixture. No file access, persistence or authorization grants.
+use crate::chat::Chat;
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -48,11 +49,16 @@ struct View {
     window: WindowId,
 }
 
+struct SessionRow {
+    project: Option<ProjectId>,
+    chat: Chat,
+}
+
 #[derive(Default)]
 pub struct Workspace {
     next: u64,
     projects: BTreeMap<ProjectId, ()>,
-    sessions: BTreeMap<SessionId, Option<ProjectId>>,
+    sessions: BTreeMap<SessionId, SessionRow>,
     windows: BTreeMap<WindowId, Vec<TabId>>,
     tabs: BTreeMap<TabId, View>,
     groups: BTreeMap<GroupId, Group>,
@@ -82,7 +88,13 @@ impl Workspace {
             return Err(Error::Unknown);
         }
         let id = SessionId(self.issue()?);
-        self.sessions.insert(id, project);
+        self.sessions.insert(
+            id,
+            SessionRow {
+                project,
+                chat: Chat::new(id),
+            },
+        );
         Ok(id)
     }
 
@@ -110,7 +122,26 @@ impl Workspace {
     }
 
     pub fn session_project(&self, session: SessionId) -> Result<Option<ProjectId>, Error> {
-        self.sessions.get(&session).copied().ok_or(Error::Unknown)
+        self.sessions
+            .get(&session)
+            .map(|row| row.project)
+            .ok_or(Error::Unknown)
+    }
+
+    /// Trusted server-side owner accessor; not an authorization boundary.
+    pub fn chat(&self, session: SessionId) -> Result<&Chat, Error> {
+        self.sessions
+            .get(&session)
+            .map(|row| &row.chat)
+            .ok_or(Error::Unknown)
+    }
+
+    /// The workspace owns the only registered chat for this session.
+    pub fn chat_mut(&mut self, session: SessionId) -> Result<&mut Chat, Error> {
+        self.sessions
+            .get_mut(&session)
+            .map(|row| &mut row.chat)
+            .ok_or(Error::Unknown)
     }
 
     pub fn tabs(&self, window: WindowId) -> Result<&[TabId], Error> {
