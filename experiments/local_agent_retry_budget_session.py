@@ -10,6 +10,7 @@ from hashlib import sha256
 from threading import current_thread
 from time import monotonic_ns
 from local_agent_retry_deadline import RetryDeadlines
+from local_agent_model_stream_contract import stream_wire,verify_cancel
 
 from gateway import Refused
 from local_agent_replan import AttemptCoordinator
@@ -42,6 +43,7 @@ class RetryBudgetSession:
         coordinator._thread()
         self._deadlines=None if total_ns is None else RetryDeadlines(total_ns,worker_ns,clock=clock)
         self._timed={}
+        self._streaming=set()
         scope = sha256(("retry-budget-v1:"+coordinator._identity).encode("ascii")).hexdigest()
         coordinator._gateway.register_agent_attempt(scope)
         self._coordinator = coordinator
@@ -144,7 +146,7 @@ class RetryBudgetSession:
         self._stopped = False
         return run
 
-    def reserve_wave(self, offer, names, context, candidates):
+    def reserve_wave(self, offer, names, context, candidates, *, streaming=False):
         self._open()
         if self._active is None or offer is not self._active[0] or self._stopped or self._leases:
             raise Refused("retry_budget_wave")
@@ -160,6 +162,8 @@ class RetryBudgetSession:
         wave = tuple(a.worker for a in run._run._wave())
         if type(names) is not tuple or not wave or names != wave:
             raise Refused("retry_budget_wave")
+        if type(streaming) is not bool or (streaming and (names != ("plan",) or self._deadlines is None)):
+            raise Refused("retry_budget_stream_mode")
         if run._run._claims:
             try:
                 run._run._gateway.checkpoint_claimed_group(tuple(run._run._claims.values()))
@@ -169,7 +173,7 @@ class RetryBudgetSession:
         limits = dict(zip(PARENTS,offer.ceilings))
         wires = tuple(wire_for(n,tuple(run._run._outputs[p] for p in PARENTS[n]),ceiling=limits[n]) for n in wave)
         attempts = tuple(Attempt(sha256((offer.attempt+":"+offer.plan_digest+":"+n).encode("ascii")).hexdigest(),
-                                  n,sha256(w).hexdigest(),limits[n],MAX_PROMPT_TOKENS if offer.prompt_remaining is not None else 0) for n,w in zip(wave,wires))
+                                  n,sha256(stream_wire(n,w) if streaming else w).hexdigest(),limits[n],MAX_PROMPT_TOKENS if offer.prompt_remaining is not None else 0) for n,w in zip(wave,wires))
         try:
             leases = self._budget.reserve_wave(self._scope,attempts)
         except Refused:
@@ -178,6 +182,8 @@ class RetryBudgetSession:
             self.stop()
             raise
         self._leases = {l.attempt.worker:(l,w,"PREPARED") for l,w in zip(leases,wires)}
+        if streaming:
+            self._streaming.update(l.attempt.identity for l in leases)
         return tuple(zip(leases,wires))
 
     def _entry(self, lease):
@@ -206,7 +212,7 @@ class RetryBudgetSession:
                 self.stop()
                 raise
         try:
-            self._budget.dispatch(l,wire)
+            self._budget.dispatch(l,stream_wire(l.attempt.worker,wire) if l.attempt.identity in self._streaming else wire)
         except Refused:
             self._finish_deadline(l)
             self.stop()
@@ -218,6 +224,8 @@ class RetryBudgetSession:
         l,wire,state = self._entry(lease)
         if state != "DISPATCHED":
             raise Refused("retry_budget_terminal")
+        if l.attempt.identity in self._streaming:
+            raise Refused("retry_budget_stream_terminal")
         # Late but measured work is still charged. Revoke before publication.
         try:
             self.poll_deadline()
@@ -236,12 +244,23 @@ class RetryBudgetSession:
         del self._leases[l.attempt.worker]
         return len(tokens)
 
+    def settle_cancelled_stream_reaped(self,lease,marker):
+        """Trusted terminal observation for the exact fixed stream only.
+        A malformed marker retains all reservations; no refund or fake reap.
+        """
+        l,wire,state=self._entry(lease)
+        if not self._stopped or state!="DISPATCHED" or l.attempt.identity not in self._streaming:
+            raise Refused("retry_budget_stream_terminal")
+        verify_cancel(l.attempt.worker,wire,marker)
+        self.abandon_reaped(l)
+
     def abandon_reaped(self, lease):
         l,_,state = self._entry(lease)
         if state != "DISPATCHED":
             raise Refused("retry_budget_terminal")
         self._budget.abandon_reaped(l)
         self._finish_deadline(l)
+        self._streaming.discard(l.attempt.identity)
         del self._leases[l.attempt.worker]
         self.stop()
 
@@ -250,6 +269,7 @@ class RetryBudgetSession:
         if not self._stopped or state != "PREPARED":
             raise Refused("retry_budget_terminal")
         self._budget.void_not_dispatched(l)
+        self._streaming.discard(l.attempt.identity)
         del self._leases[l.attempt.worker]
 
     def stop(self):
