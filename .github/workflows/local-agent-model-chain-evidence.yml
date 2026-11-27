@@ -84,3 +84,7 @@ jobs:
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" shared-chain-hold
       - name: Actual cumulative fixed-model retry with explicit economy confirmation
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" retry-cumulative
+      - name: Actual retry with separate cumulative prompt and generated budgets
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" retry-dual
+      - name: Actual prompt-only retry refusal before new process launch
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" retry-prompt-hold

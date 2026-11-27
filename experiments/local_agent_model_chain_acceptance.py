@@ -103,7 +103,7 @@ def worker(name,port,mode="normal"):
     return 0
 
 def child(host_net,host_port,scenario,host_pid_namespace):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold","shared-chain","shared-chain-revoke","shared-chain-hold","retry-cumulative"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold","shared-chain","shared-chain-revoke","shared-chain-hold","retry-cumulative","retry-dual","retry-prompt-hold"):
         raise RuntimeError("fixture_scenario")
     sys.path.insert(0,"/work/code")
     import resource
@@ -137,9 +137,9 @@ def child(host_net,host_port,scenario,host_pid_namespace):
     if scenario in ("mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold"):
         from heterogeneous_model_native_evidence import run_mixed
         return run_mixed(scenario,record,host_pid_namespace)
-    if scenario=="retry-cumulative":
+    if scenario in ("retry-cumulative","retry-dual","retry-prompt-hold"):
         from local_agent_native_retry_evidence import run_retry
-        return run_retry(record,host_pid_namespace)
+        return run_retry(record,host_pid_namespace,scenario)
     ctx=Context("agent-model-fixture","session","profile",1,"local","LOCAL_ONLY")
     # Synthetic grant mapping only. No shell effects, all roles are text inference.
     gate=FixtureGateway(ctx,(profiles.Rule("host_shell",(),"allow"),),clock=profiles.PolicyClock())
@@ -495,7 +495,7 @@ def child(host_net,host_port,scenario,host_pid_namespace):
     return 0
 
 def main(binary,model,scenario="normal"):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold","shared-chain","shared-chain-revoke","shared-chain-hold","retry-cumulative"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold","shared-chain","shared-chain-revoke","shared-chain-hold","retry-cumulative","retry-dual","retry-prompt-hold"):
         raise RuntimeError("fixture_scenario")
     from llama_engine_acceptance import MODEL_SHA
     import shutil
