@@ -25,7 +25,7 @@ fn manifest(kind: Kind, protocol: Protocol, route: Route) -> Manifest {
 }
 
 fn local() -> Manifest {
-    manifest(Kind::OpenCode, Protocol::AcpV1, Route::Local)
+    manifest(Kind::OpenCode, Protocol::OpenCodeV1, Route::Local)
 }
 
 fn cloud() -> Manifest {

@@ -138,6 +138,10 @@ pub fn negotiate(
 }
 
 impl Negotiated {
+    pub(crate) fn protocol(&self) -> Protocol {
+        self.manifest.protocol
+    }
+
     /// Recheck current trusted observations and policy before dispatch.
     /// No external call is made here.
     pub fn recheck(

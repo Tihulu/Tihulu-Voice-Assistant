@@ -257,3 +257,153 @@ fn connection_id_cannot_be_reused_after_successful_settle() {
     w.void_unstarted(&keys[0]).unwrap();
     assert!(w.drained());
 }
+
+fn pair_wave() -> HarnessWave {
+    let capacity = Amount {
+        ram: 32,
+        vram: 16,
+        generated: 32,
+        prompt: 224,
+    };
+    HarnessWave::new(Session::new(capacity, 100, 100, 20).unwrap()).unwrap()
+}
+
+#[test]
+fn acp_worker_cannot_dispatch_without_bound_envelope() {
+    let m = manifest();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    assert_eq!(w.dispatch(&keys[0], &current(&m), 100), Err(Error::Phase));
+    assert_eq!(w.snapshot().reserved, amount());
+    w.void_unstarted(&keys[0]).unwrap();
+    assert!(w.drained());
+}
+
+#[test]
+fn all_acp_peers_must_bind_before_any_dispatch() {
+    let m = manifest();
+    let mut w = pair_wave();
+    let keys = w
+        .reserve("one", vec![worker("a", &m), worker("b", &m)], 100)
+        .unwrap();
+    w.bind_transport(&keys[0], &current(&m), identity(), 100)
+        .unwrap();
+    assert_eq!(w.dispatch(&keys[0], &current(&m), 100), Err(Error::Phase));
+    assert!(w.stopped());
+    w.void_unstarted(&keys[0]).unwrap();
+    w.void_unstarted(&keys[1]).unwrap();
+    assert!(w.drained());
+}
+
+#[test]
+fn distinct_peers_share_exact_project_session_and_attempt() {
+    let m = manifest();
+    let mut w = pair_wave();
+    let keys = w
+        .reserve("one", vec![worker("a", &m), worker("b", &m)], 100)
+        .unwrap();
+    let a = identity();
+    let b = Identity {
+        worker: [6; 32],
+        connection: [7; 32],
+        ..a
+    };
+    w.bind_transport(&keys[0], &current(&m), a, 100).unwrap();
+    w.bind_transport(&keys[1], &current(&m), b, 100).unwrap();
+    w.dispatch(&keys[0], &current(&m), 100).unwrap();
+    w.dispatch(&keys[1], &current(&m), 100).unwrap();
+    w.record_frame(&keys[0], &current(&m), 101, &frame(a, 1, 1))
+        .unwrap();
+    w.record_frame(&keys[1], &current(&m), 101, &frame(b, 1, 1))
+        .unwrap();
+    assert!(!w.stopped());
+}
+
+#[test]
+fn peer_scope_drift_or_duplicate_worker_rejects_entire_wave() {
+    let m = manifest();
+    let a = identity();
+    let b = Identity {
+        worker: [6; 32],
+        connection: [7; 32],
+        ..a
+    };
+    for invalid in [
+        Identity {
+            project: [9; 32],
+            ..b
+        },
+        Identity {
+            session: [9; 32],
+            ..b
+        },
+        Identity {
+            attempt: [9; 32],
+            ..b
+        },
+        Identity {
+            worker: a.worker,
+            ..b
+        },
+    ] {
+        let mut w = pair_wave();
+        let keys = w
+            .reserve("one", vec![worker("a", &m), worker("b", &m)], 100)
+            .unwrap();
+        w.bind_transport(&keys[0], &current(&m), a, 100).unwrap();
+        assert_eq!(
+            w.bind_transport(&keys[1], &current(&m), invalid, 100),
+            Err(Error::Transport(synthetic_transport::Error::Identity))
+        );
+        assert!(w.stopped());
+        w.void_unstarted(&keys[0]).unwrap();
+        w.void_unstarted(&keys[1]).unwrap();
+        assert!(w.drained());
+    }
+}
+
+#[test]
+fn version_mismatch_is_not_a_compatible_fallback() {
+    let m = manifest();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let key = &keys[0];
+    let id = identity();
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    let mut bytes = frame(id, 1, 1);
+    bytes[4] = 2;
+    assert_eq!(
+        w.record_frame(key, &current(&m), 101, &bytes),
+        Err(Error::Transport(synthetic_transport::Error::Identity))
+    );
+    assert_eq!(w.snapshot().reserved, amount());
+    assert!(w.stopped());
+}
+
+#[test]
+fn old_attempt_cannot_be_rebound_with_fresh_connection() {
+    let m = manifest();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let key = &keys[0];
+    let id = identity();
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    w.record_frame(key, &current(&m), 101, &frame(id, 1, 1))
+        .unwrap();
+    w.record_frame(key, &current(&m), 102, &frame(id, 2, 4))
+        .unwrap();
+    w.settle(key, &current(&m), 103, Some((0, 0))).unwrap();
+    let keys = w.reserve("two", vec![worker("a", &m)], 104).unwrap();
+    let fresh = Identity {
+        connection: [8; 32],
+        ..id
+    };
+    assert_eq!(
+        w.bind_transport(&keys[0], &current(&m), fresh, 104),
+        Err(Error::Transport(synthetic_transport::Error::Identity))
+    );
+    w.void_unstarted(&keys[0]).unwrap();
+    assert!(w.drained());
+}
