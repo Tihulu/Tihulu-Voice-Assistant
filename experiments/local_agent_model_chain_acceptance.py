@@ -103,7 +103,7 @@ def worker(name,port,mode="normal"):
     return 0
 
 def child(host_net,host_port,scenario,host_pid_namespace):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold","shared-chain","shared-chain-revoke","shared-chain-hold"):
         raise RuntimeError("fixture_scenario")
     sys.path.insert(0,"/work/code")
     import resource
@@ -146,7 +146,7 @@ def child(host_net,host_port,scenario,host_pid_namespace):
     ledger=ResourceLedger(32)
     ceilings=ECONOMY_CEILINGS if scenario=="economy" else DEFAULT_CEILINGS
     limits=dict(zip(PARENTS,ceilings))
-    total_budget=32 if scenario in ("budget-hold","plan-hold") else sum(ceilings)
+    total_budget=32 if scenario in ("budget-hold","plan-hold","shared-chain-hold") else sum(ceilings)
     leases={}
     elapsed={}
     prompt_counts={}
@@ -193,7 +193,45 @@ def child(host_net,host_port,scenario,host_pid_namespace):
     owned={}
     results={}
     launched=[]
+    shared=scenario.startswith("shared-chain")
+    shared_leases={}
+    expected_wires={}
+    if shared:
+        from heterogeneous_team_token_budget import Attempt,TeamTokenBudget
+        from native_fixture_pid_observation import private_process_snapshot,namespace_drained
+        cumulative=TeamTokenBudget(preview.plan.digest,total_budget)
+        baseline=private_process_snapshot(host_pid_namespace)
+    def shared_wave(names):
+        if not shared:
+            return
+        # Trusted coordinator projects exact completed parent receipts before
+        # any wrapper is started, then checks the same wire after grant claim.
+        run._run.validate_plan(ctx,models)
+        if run._run._claims:
+            gate.checkpoint_claimed_group(tuple(run._run._claims.values()))
+        specs=[]
+        wires={}
+        for name in names:
+            rows=tuple(run._run._outputs[parent] for parent in PARENTS[name])
+            wire=wire_for(name,rows,ceiling=limits[name])
+            wires[name]=wire
+            specs.append(Attempt(preview.attempt+":"+name,name,digest(wire),limits[name]))
+        for lease in cumulative.reserve_wave(preview.plan.digest,tuple(specs)):
+            shared_leases[lease.attempt.worker]=lease
+        expected_wires.update(wires)
+        record("shared-chain-atomic-"+ "-".join(names),cumulative.snapshot()[2]==sum(limits[n] for n in names))
+    def shared_drained(label):
+        if shared:
+            record("shared-chain-pid-drained-"+label,namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
+    def shared_settle(name,tokens):
+        if shared:
+            cumulative.settle_reaped(shared_leases.pop(name),len(tokens))
+    def shared_equal(label):
+        if shared:
+            record("shared-chain-accounting-"+label,cumulative.snapshot()==token_ledger.snapshot())
     def launch(name,port,mode="normal"):
+        if shared and name not in shared_leases:
+            raise RuntimeError("shared_chain_unreserved")
         token_ledger.preflight((name,))
         t=boundary.prepare(name,grants[name],ctx,models)
         try:
@@ -214,12 +252,16 @@ def child(host_net,host_port,scenario,host_pid_namespace):
         if tuple(data for _,data in rows)!=tuple(results[parent] for parent in next(w.depends for w in workers if w.identity==name)):
             raise RuntimeError("fixture_dependency_bytes")
         wire=wire_for(name,rows,ceiling=limits[name])
+        if shared and wire!=expected_wires[name]:
+            raise RuntimeError("shared_chain_wire_drift")
         leases[t]=token_ledger.reserve(name,wire,streaming=(mode=="stream"))
         return t,wire
     def dispatch(t,wire):
         from local_agent_model_stream_contract import stream_wire
         lease=leases[t]
         transport=stream_wire(t.worker,wire) if lease.streaming else wire
+        if shared:
+            cumulative.dispatch(shared_leases[t.worker],transport)
         token_ledger.dispatch(lease,wire,transport)
 
     def invoke(t,wire):
@@ -234,6 +276,7 @@ def child(host_net,host_port,scenario,host_pid_namespace):
         data,tokens,count=bound_reply(t.worker,wire,out)
         prompt_counts[t.worker]=count
         token_ledger.settle(leases[t],wire,tokens)
+        shared_settle(t.worker,tokens)
         del leases[t]
         elapsed[t.worker]=duration_ns
         record("agent-model-"+t.worker+"-real-output",bool(data) and 1<=len(tokens)<=wire_ceiling(t.worker,wire),
@@ -301,12 +344,19 @@ def child(host_net,host_port,scenario,host_pid_namespace):
                 denied=False
             record("agent-model-stream-dependent-not-started",denied and not owned)
             return 0
+        shared_wave(("plan",))
         t,wire=launch("plan","8080")
         dispatch(t,wire)
-        finish(t,wire,invoke(t,wire))
-        if scenario=="budget-hold":
+        response=invoke(t,wire)
+        shared_drained("plan")
+        finish(t,wire,response)
+        shared_equal("plan")
+        if scenario in ("budget-hold","shared-chain-hold"):
             try:
-                token_ledger.preflight(("a","b"))
+                if shared:
+                    shared_wave(("a","b"))
+                else:
+                    token_ledger.preflight(("a","b"))
             except Refused:
                 denied=True
             else:
@@ -314,6 +364,9 @@ def child(host_net,host_port,scenario,host_pid_namespace):
             record("agent-model-wave-budget-refused-before-launch",denied and launched==["plan"]
                    and not owned and not boundary.observations() and ledger.snapshot()==(32,0,32))
             record("agent-model-wave-budget-no-phantom-charge",token_ledger.snapshot()==(32,16,0,16))
+            if shared:
+                record("shared-chain-hold-no-new-reservations",cumulative.snapshot()==(32,16,0,16) and not shared_leases)
+                shared_drained("hold")
             boundary.stop()
             try:
                 run.output("plan",ctx,models)
@@ -323,11 +376,13 @@ def child(host_net,host_port,scenario,host_pid_namespace):
                 denied=False
             record("agent-model-wave-budget-no-partial-publication",denied and run.drained())
             return 0
+        shared_wave(("a","b"))
         token_ledger.preflight(("a","b"))
         a,wa=launch("a","8080")
         b,wb=launch("b","8081")
         record("agent-model-parallel-reservations",ledger.snapshot()==(32,32,0) and all(p.poll() is None for p in owned.values()))
         record("agent-model-parallel-token-ceiling",token_ledger.snapshot()==(total_budget,16,limits["a"]+limits["b"],16))
+        shared_equal("parallel-reserved")
         # Recheck both exact scoped inputs immediately before dispatch;
         # worker threads never access the gateway or choose requests.
         for ticket,wire in ((a,wa),(b,wb)):
@@ -339,10 +394,15 @@ def child(host_net,host_port,scenario,host_pid_namespace):
             fa=pool.submit(invoke,a,wa)
             fb=pool.submit(invoke,b,wb)
             oa,ob=fa.result(),fb.result()
-        if scenario=="revoke":
+        shared_drained("parallel")
+        if scenario in ("revoke","shared-chain-revoke"):
             # Both fixed wrappers have actually returned from inference.
             # Revoke the parent before publishing either validated result.
             gate.revoke("native-plan")
+            if shared:
+                for lease in shared_leases.values():
+                    cumulative.cancel(lease)
+                shared_equal("revoked-reservations")
             try:
                 finish(a,wa,oa)
             except Refused:
@@ -360,6 +420,7 @@ def child(host_net,host_port,scenario,host_pid_namespace):
             data,tokens,count=bound_reply(b.worker,wb,out)
             prompt_counts[b.worker]=count
             token_ledger.settle(leases[b],wb,tokens)
+            shared_settle(b.worker,tokens)
             del leases[b]
             record("agent-model-revoked-peer-actual-output",bool(data),tokens=len(tokens),prompt_tokens=count)
             outcome=boundary.observe_reaped(b,p.returncode,ctx,models,payload=data)
@@ -368,6 +429,7 @@ def child(host_net,host_port,scenario,host_pid_namespace):
             record("agent-model-revoked-all-ownership-cleared",ledger.snapshot()==(32,0,32)
                    and not boundary.observations() and not owned and run.drained())
             record("agent-model-revoked-usage-not-refunded",token_ledger.snapshot()==(64,48,0,16))
+            shared_equal("revoked-final")
             try:
                 run.output("plan",ctx,models)
             except Refused:
@@ -386,9 +448,14 @@ def child(host_net,host_port,scenario,host_pid_namespace):
         finish(a,wa,oa)
         record("agent-model-peer-reservation-retained",ledger.snapshot()==(32,16,16))
         finish(b,wb,ob)
+        shared_equal("parallel-completed")
+        shared_wave(("review",))
         t,wire=launch("review","8080")
         dispatch(t,wire)
-        finish(t,wire,invoke(t,wire))
+        response=invoke(t,wire)
+        shared_drained("review")
+        finish(t,wire,response)
+        shared_equal("final")
         receipt,data=run.output("review",ctx,models)
         budget,spent,reserved,remaining=token_ledger.snapshot()
         record("agent-model-prompt-context-accounting",len(prompt_counts)==4 and all(1<=n<=112 for n in prompt_counts.values()),
@@ -412,6 +479,8 @@ def child(host_net,host_port,scenario,host_pid_namespace):
             rejected=False
         record("agent-model-transitive-revoke",rejected)
     finally:
+        if shared:
+            cumulative.close()
         token_ledger.close()
         boundary.stop()
         # On failure, never assert descendants are reaped or release uncertain
@@ -423,7 +492,7 @@ def child(host_net,host_port,scenario,host_pid_namespace):
     return 0
 
 def main(binary,model,scenario="normal"):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold","shared-chain","shared-chain-revoke","shared-chain-hold"):
         raise RuntimeError("fixture_scenario")
     from llama_engine_acceptance import MODEL_SHA
     import shutil
