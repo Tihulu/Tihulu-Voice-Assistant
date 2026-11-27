@@ -4,6 +4,11 @@ on:
     branches: ['**']
     paths:
       - 'experiments/document_engine_acceptance.py'
+      - 'experiments/heterogeneous_document_evidence.py'
+      - 'experiments/heterogeneous_data_team.py'
+      - 'experiments/heterogeneous_data_tools.py'
+      - 'experiments/heterogeneous_team_admission.py'
+      - 'experiments/heterogeneous_team.py'
       - 'experiments/document_geometry.py'
       - 'experiments/document_result.py'
       - 'experiments/capabilities.py'
@@ -37,3 +42,9 @@ jobs:
           PYTHONPATH: src:experiments
           OMP_THREAD_LIMIT: '2'
         run: /usr/bin/python3 experiments/document_engine_acceptance.py
+      - name: Actual public TR EN DE OCR to mixed data team
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+          PYTHONPATH: src:experiments
+          OMP_THREAD_LIMIT: '2'
+        run: /usr/bin/python3 experiments/heterogeneous_document_evidence.py
