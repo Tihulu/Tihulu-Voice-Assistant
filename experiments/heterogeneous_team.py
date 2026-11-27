@@ -8,6 +8,10 @@ from agent_custom_profiles import AgentProfile,ident
 from agent_model_capability import ModelOffer,select
 from heterogeneous_agents import ORDER
 
+# Until verified isolated workspace scopes exist, assume a shared desktop.
+DESKTOP_READ=frozenset(("screen_observe","accessibility_read"))
+DESKTOP_ALL=DESKTOP_READ|{"desktop_input"}
+
 @dataclass(frozen=True)
 class TeamTask:
     identity: str
@@ -90,22 +94,24 @@ def plan_team(context,tasks,available,models,memory_budget,token_budget,*,limit=
     while len(done)<len(graph):
         wave=[]
         remaining=memory_budget
-        input_taken=False
+        channels=set()
         for t in sorted(tasks,key=lambda x:x.identity):
             if t.identity in done or not set(t.depends)<=done or len(wave)>=limit:
                 continue
             # Do not change the chosen model/interface because a peer uses RAM.
             r=initial[t.identity]
-            if r.memory_mib>remaining or (r.route.channel=="desktop_input" and input_taken):
+            channel=r.route.channel
+            conflict=(channel=="desktop_input" and bool(channels&DESKTOP_ALL)) or (channel in DESKTOP_READ and "desktop_input" in channels)
+            if r.memory_mib>remaining or conflict:
                 continue
             wave.append(r)
             remaining-=r.memory_mib
-            input_taken|=r.route.channel=="desktop_input"
+            channels.add(channel)
         if not wave:
             raise Refused("team_resource_unavailable")
         waves.append(tuple(wave))
         done.update(r.route.agent for r in wave)
-    canonical=("heterogeneous-team-v1",asdict(context),memory_budget,token_budget,limit,
+    canonical=("heterogeneous-team-v2",asdict(context),memory_budget,token_budget,limit,
                sorted(available),sorted(approved_cloud),
                [(t.identity,t.profile.digest(),sorted(t.alternatives),sorted(t.depends))
                 for t in sorted(tasks,key=lambda x:x.identity)],

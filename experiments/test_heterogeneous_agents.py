@@ -74,3 +74,9 @@ class HeterogeneousAgentTests(unittest.TestCase):
         r=self.route("connector",("connector_write",),ctx=ctx)
         self.assertTrue(r.effect_review)
         self.assertFalse(r.requires_screen)
+
+    def test_cloud_chat_reasoning_selects_cloud_only(self):
+        ctx=replace(self.ctx,mode="CLOUD_CHAT",offline=False)
+        with self.assertRaises(Refused):
+            self.route("planner",("reasoning",),ctx=ctx)
+        self.assertEqual(self.route("planner",("reasoning",),locality="cloud",ctx=ctx).channel,"reasoning")

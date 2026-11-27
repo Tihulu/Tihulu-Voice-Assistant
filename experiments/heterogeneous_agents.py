@@ -79,7 +79,7 @@ def plan_route(context,spec,available):
         if context.offline or context.mode=="LOCAL_ONLY":
             candidates.clear()
     elif context.mode=="CLOUD_CHAT":
-        candidates&={"reasoning"}
+        candidates.clear()
     if context.offline:
         candidates-=NETWORK
     elif context.mode=="LOCAL_ONLY":
