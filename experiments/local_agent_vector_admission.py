@@ -92,6 +92,18 @@ class VectorAdmission:
         self._leases={r.demand.worker:r for r in rows}
         return rows
 
+    def void_unstarted(self,reservation):
+        """Trusted owner confirms no worker was ever claimed or dispatched.
+
+        Only the combined coordinator can establish that fact. Cancellation
+        alone is insufficient. This is not a process exit observation.
+        """
+        self._thread()
+        if not self._stopped or not any(r is reservation for r in self._leases.values()):
+            raise Refused("vector_admission_void")
+        self._ledger.release_reaped(reservation)
+        del self._leases[reservation.demand.worker]
+
     def observe_reaped(self,reservation,*,success):
         self._thread()
         if type(success) is not bool or not any(r is reservation for r in self._leases.values()):
