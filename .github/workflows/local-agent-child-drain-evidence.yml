@@ -11,6 +11,8 @@ on:
       - 'experiments/local_agent_launch.py'
       - 'experiments/fixtures/agent_fixed_launch_broker.py'
       - 'experiments/fixtures/agent_fixed_broker_fixture.py'
+      - 'experiments/fixtures/agent_strict_real_chain_fixture.py'
+      - 'experiments/local_agent_replan.py'
       - '.github/workflows/local-agent-child-drain-evidence.yml'
 permissions:
   contents: read
@@ -45,3 +47,8 @@ jobs:
           PYTHONPATH: src:experiments
           PYTHONDONTWRITEBYTECODE: '1'
         run: /usr/bin/python3 experiments/fixtures/agent_fixed_broker_fixture.py
+      - name: Run fixed strict four-worker input-output evidence
+        env:
+          PYTHONPATH: src:experiments
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: /usr/bin/python3 experiments/fixtures/agent_strict_real_chain_fixture.py
