@@ -63,7 +63,11 @@ fn shared_transaction_trace() {
         assert_eq!(actual, fields[6], "row {count}");
         let (revision, messages) = store.history(session).unwrap();
         assert_eq!(revision, fields[7].parse::<i64>().unwrap(), "row {count}");
-        assert_eq!(messages.len(), fields[8].parse::<usize>().unwrap(), "row {count}");
+        assert_eq!(
+            messages.len(),
+            fields[8].parse::<usize>().unwrap(),
+            "row {count}"
+        );
     }
     assert_eq!(count, 25);
 }
