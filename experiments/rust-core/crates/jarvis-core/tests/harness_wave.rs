@@ -254,10 +254,7 @@ fn local_only_change_blocks_cloud_and_duplicate_event_stops_wave() {
             local_only: true,
         },
     };
-    assert_eq!(
-        w.dispatch(&keys[0], &strict, 100),
-        Err(Error::PolicyDrift)
-    );
+    assert_eq!(w.dispatch(&keys[0], &strict, 100), Err(Error::PolicyDrift));
     w.void_unstarted(&keys[0]).unwrap();
     let a = local();
     let mut w = wave();
@@ -497,6 +494,54 @@ fn idle_policy_observation_cannot_be_rolled_back_at_admission() {
         w.reserve("one", vec![worker("a", &a)], 101),
         Err(Error::PolicyDrift)
     ));
+    assert_eq!(w.snapshot().reserved, Amount::default());
+    assert!(w.drained());
+}
+
+#[test]
+fn zero_generation_is_rejected_before_reservation() {
+    let a = local();
+    let mut w = wave();
+    let mut first = worker("a", &a);
+    first.current.policy.generation = 0;
+    assert!(matches!(
+        w.reserve("one", vec![first], 100),
+        Err(Error::PolicyDrift)
+    ));
+    assert_eq!(w.snapshot().reserved, Amount::default());
+    assert!(w.drained());
+}
+
+#[test]
+fn same_generation_cannot_change_mode() {
+    let mut w = wave();
+    w.tick(100, policy()).unwrap();
+    let changed = PolicyStamp {
+        generation: 1,
+        local_only: true,
+    };
+    assert_eq!(w.tick(101, changed), Err(Error::PolicyDrift));
+    assert!(w.drained());
+}
+
+#[test]
+fn generation_change_after_report_retains_lease_and_denies_result() {
+    let a = local();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &a)], 100).unwrap();
+    let key = &keys[0];
+    w.dispatch(key, &current(&a), 100).unwrap();
+    w.record(key, &current(&a), 101, 1, Event::Started).unwrap();
+    w.record(key, &current(&a), 102, 2, Event::ReportedDone)
+        .unwrap();
+    let mut changed = current(&a);
+    changed.policy.generation = 2;
+    assert_eq!(w.tick(103, changed.policy), Err(Error::PolicyDrift));
+    assert_eq!(w.snapshot().reserved, amount(16, 8, 16, 112));
+    assert_eq!(
+        w.settle(key, &changed, 104, Some((2, 3))),
+        Ok(ResultState::NoPublication)
+    );
     assert_eq!(w.snapshot().reserved, Amount::default());
     assert!(w.drained());
 }
