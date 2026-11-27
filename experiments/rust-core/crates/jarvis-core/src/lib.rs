@@ -3,6 +3,7 @@
 //! Non-shipping, deterministic core fixtures. No OS, network or model effects.
 
 pub mod approval;
+pub mod approval_broker;
 pub mod budget;
 pub mod chat;
 

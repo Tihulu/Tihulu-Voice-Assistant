@@ -249,6 +249,17 @@ impl Registry {
         self.rows.get(&key.request).ok_or(RegistryError::Foreign)
     }
 
+    pub(crate) fn matches_receipt(
+        &self,
+        key: &RequestKey,
+        receipt: &Receipt,
+    ) -> Result<(), RegistryError> {
+        if !Arc::ptr_eq(&self.exact(key)?.identity, &receipt.0) {
+            return Err(RegistryError::Foreign);
+        }
+        Ok(())
+    }
+
     pub fn phase(&self, key: &RequestKey) -> Result<Phase, RegistryError> {
         Ok(self.exact(key)?.phase())
     }
