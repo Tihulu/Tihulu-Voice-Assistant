@@ -53,10 +53,11 @@ class ModelFixtureContractTests(unittest.TestCase):
         from local_agent_model_fixture_contract import bound_reply,MODEL_SHA
         w=wire_for("a",(row("plan"),))
         response={"content":"bird","tokens":[2],"stop":True,"stop_type":"eos","model":MODEL,"truncated":False}
+        response["tokens_evaluated"]=12
         obj={"worker":"a","wire_digest":sha256(w).hexdigest(),"model_digest":MODEL_SHA,
-             "reply":json.dumps(response),"server_reaped":True}
+             "reply":json.dumps(response),"server_reaped":True,"prompt_tokens":12}
         pack=lambda value:json.dumps(value,separators=(",",":")).encode("ascii")
-        self.assertEqual(bound_reply("a",w,pack(obj)),(b"bird",(2,)))
+        self.assertEqual(bound_reply("a",w,pack(obj)),(b"bird",(2,),12))
         for key,value in (("worker","b"),("wire_digest","0"*64),("model_digest","0"*64),("server_reaped",False)):
             with self.assertRaises(Refused):
                 bound_reply("a",w,pack(dict(obj,**{key:value})))
@@ -82,3 +83,34 @@ class ModelFixtureContractTests(unittest.TestCase):
         for bad in (replace(receipt,input_digest="z"*64),replace(receipt,size=True)):
             with self.assertRaises(Refused):
                 wire_for("a",((bad,data),))
+
+    def test_tokenizer_wire_uses_exact_prompt_and_special_options(self):
+        from local_agent_model_fixture_contract import tokenizer_wire
+        w=wire_for("a",(row("plan"),))
+        self.assertEqual(json.loads(tokenizer_wire("a",w)),{"content":json.loads(w)["prompt"],
+            "add_special":True,"parse_special":True,"with_pieces":False})
+        with self.assertRaises(Refused):
+            tokenizer_wire("b",w)
+    def test_context_reserves_full_generation_ceiling(self):
+        from local_agent_model_fixture_contract import prompt_count
+        self.assertEqual(prompt_count(json.dumps({"tokens":[1]*112}).encode()),112)
+        for n in (0,113,128):
+            with self.assertRaises(Refused):
+                prompt_count(json.dumps({"tokens":[1]*n}).encode())
+    def test_tokenizer_malformed_and_duplicate_fields_refused(self):
+        from local_agent_model_fixture_contract import prompt_count
+        for raw in (b'{"tokens":[true]}',b'{"tokens":[512]}',b'{"tokens":[1],"tokens":[2]}',b'{"tokens":[1],"extra":0}'):
+            with self.assertRaises(Refused):
+                prompt_count(raw)
+    def test_native_evaluated_count_must_match_preflight(self):
+        from local_agent_model_fixture_contract import measured_reply
+        response={"content":"bird","tokens":[2],"stop":True,"stop_type":"eos","model":MODEL,
+                  "truncated":False,"tokens_evaluated":112}
+        raw=json.dumps(response).encode()
+        self.assertEqual(measured_reply(raw,112),(b"bird",(2,),112))
+        for n in (111,113,True):
+            with self.assertRaises(Refused):
+                measured_reply(raw,n)
+        response["tokens_evaluated"]=True
+        with self.assertRaises(Refused):
+            measured_reply(json.dumps(response).encode(),1)

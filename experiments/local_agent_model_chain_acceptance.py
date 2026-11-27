@@ -23,7 +23,7 @@ def digest(data):
 def worker(name,port):
     sys.path.insert(0,"/work/code")
     from llama_engine_acceptance import MODEL,MODEL_SHA,MAX_REPLY,stop_fixture_server
-    from local_agent_model_fixture_contract import MAX_WIRE,validate_wire,reply_for
+    from local_agent_model_fixture_contract import MAX_WIRE,validate_wire,tokenizer_wire,prompt_count,measured_reply
     if port not in ("8080","8081"):
         raise RuntimeError("fixture_port")
     wire=sys.stdin.buffer.read(MAX_WIRE+1)
@@ -60,15 +60,16 @@ def worker(name,port):
                 except (OSError,RuntimeError,http.client.HTTPException):
                     pass
                 time.sleep(.1)
+            count=prompt_count(request("POST","/tokenize",tokenizer_wire(name,wire)))
             raw=request("POST","/completion",wire)
-            reply_for(raw)
+            measured_reply(raw,count)
         finally:
             stop_fixture_server(proc,lambda:None)
     # Exit 0 only after the exact owned server has been waited for.
     if proc.poll() is None:
         raise RuntimeError("fixture_server_not_reaped")
     sys.stdout.write(json.dumps({"worker":name,"wire_digest":wire_digest,"model_digest":MODEL_SHA,
-                                 "reply":raw.decode("utf-8"),"server_reaped":True},separators=(",",":")))
+                                 "reply":raw.decode("utf-8"),"server_reaped":True,"prompt_tokens":count},separators=(",",":")))
     return 0
 
 def child(host_net,host_port,scenario):
@@ -112,6 +113,7 @@ def child(host_net,host_port,scenario):
     token_ledger=TokenLedger(64)
     leases={}
     elapsed={}
+    prompt_counts={}
     started_ns=time.monotonic_ns()
     coordinator=AttemptCoordinator(gate,ledger,"native-chain",workers,32,2,owned_drain=True,strict_results=True)
     preview=coordinator.prepare(ctx,models)
@@ -151,11 +153,12 @@ def child(host_net,host_port,scenario):
         p=owned[t]
         if p.returncode!=0 or not 0<len(out)<=65536:
             raise RuntimeError("fixture_worker_failed")
-        data,tokens=bound_reply(t.worker,wire,out)
+        data,tokens,count=bound_reply(t.worker,wire,out)
+        prompt_counts[t.worker]=count
         token_ledger.settle(leases.pop(t),wire,tokens)
         elapsed[t.worker]=duration_ns
         record("agent-model-"+t.worker+"-real-output",bool(data) and 1<=len(tokens)<=16,
-               input_digest=digest(wire),output_digest=digest(data),tokens=len(tokens),
+               input_digest=digest(wire),output_digest=digest(data),tokens=len(tokens),prompt_tokens=count,
                elapsed_ms=round(duration_ns/1000000,3))
         # Exact wrapper exited 0 after its owned server was reaped.
         outcome=boundary.observe_reaped(t,p.returncode,ctx,models,payload=data)
@@ -196,9 +199,10 @@ def child(host_net,host_port,scenario):
             p=owned[b]
             if p.returncode!=0:
                 raise RuntimeError("fixture_peer_exit")
-            data,tokens=bound_reply(b.worker,wb,out)
+            data,tokens,count=bound_reply(b.worker,wb,out)
+            prompt_counts[b.worker]=count
             token_ledger.settle(leases.pop(b),wb,tokens)
-            record("agent-model-revoked-peer-actual-output",bool(data),tokens=len(tokens))
+            record("agent-model-revoked-peer-actual-output",bool(data),tokens=len(tokens),prompt_tokens=count)
             outcome=boundary.observe_reaped(b,p.returncode,ctx,models,payload=data)
             del owned[b]
             record("agent-model-revoked-peer-drained",outcome=="DRAINED")
@@ -227,6 +231,8 @@ def child(host_net,host_port,scenario):
         finish(t,wire,invoke(t,wire))
         receipt,data=run.output("review",ctx,models)
         budget,spent,reserved,remaining=token_ledger.snapshot()
+        record("agent-model-prompt-context-accounting",len(prompt_counts)==4 and all(1<=n<=112 for n in prompt_counts.values()),
+               prompt_tokens=sum(prompt_counts.values()),per_worker=prompt_counts)
         record("agent-model-token-accounting",budget==64 and spent==64 and reserved==0 and remaining==0 and not leases,
                generated_tokens=spent,reserved_tokens=reserved,remaining_tokens=remaining,
                wall_ms=round((time.monotonic_ns()-started_ns)/1000000,3),
