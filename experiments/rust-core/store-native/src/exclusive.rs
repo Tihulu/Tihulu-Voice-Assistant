@@ -62,7 +62,11 @@ impl ExclusiveStore {
             Err(TryLockError::Error(_)) => return Err(Error::Database),
         }
         let db_path = directory.join("fixture.sqlite");
-        for name in ["fixture.sqlite-wal", "fixture.sqlite-shm", "fixture.sqlite-journal"] {
+        for name in [
+            "fixture.sqlite-wal",
+            "fixture.sqlite-shm",
+            "fixture.sqlite-journal",
+        ] {
             let sidecar = directory.join(name);
             match fs::symlink_metadata(&sidecar) {
                 Ok(_) => private_file(&sidecar)?,
@@ -108,7 +112,7 @@ impl ExclusiveStore {
             .open(&staged)
             .map_err(|_| Error::Database)?;
         drop(staging);
-        let result = (|| {
+        let result: Result<(), Error> = (|| {
             self.owner.backup_idle(&staged)?;
             private_file(&staged)?;
             let db = Connection::open_with_flags(&staged, OpenFlags::SQLITE_OPEN_READ_ONLY)?;

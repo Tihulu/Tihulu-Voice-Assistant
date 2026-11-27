@@ -41,7 +41,10 @@ fn competing_owner_cannot_open_and_restart_preserves_hold() {
     let Admission::New(_, old) = owner.submit(S, C, 0, "one", "Hello").unwrap() else {
         panic!("new turn required");
     };
-    assert!(matches!(ExclusiveStore::open(&f.0, false), Err(Error::Busy)));
+    assert!(matches!(
+        ExclusiveStore::open(&f.0, false),
+        Err(Error::Busy)
+    ));
     assert!(matches!(ExclusiveStore::open(&f.0, true), Err(Error::Busy)));
     drop(owner);
     let mut owner = ExclusiveStore::open(&f.0, false).unwrap();
@@ -82,12 +85,18 @@ fn operating_system_lock_excludes_a_second_process() {
 fn rejects_nonprivate_directory_and_lock_aliases() {
     let f = Fixture::new();
     fs::set_permissions(&f.0, fs::Permissions::from_mode(0o755)).unwrap();
-    assert!(matches!(ExclusiveStore::open(&f.0, true), Err(Error::Invalid)));
+    assert!(matches!(
+        ExclusiveStore::open(&f.0, true),
+        Err(Error::Invalid)
+    ));
     fs::set_permissions(&f.0, fs::Permissions::from_mode(0o700)).unwrap();
     let target = f.0.join("target");
     fs::write(&target, b"unchanged").unwrap();
     symlink(&target, f.0.join("owner.lock")).unwrap();
-    assert!(matches!(ExclusiveStore::open(&f.0, true), Err(Error::Invalid)));
+    assert!(matches!(
+        ExclusiveStore::open(&f.0, true),
+        Err(Error::Invalid)
+    ));
     assert_eq!(fs::read(target).unwrap(), b"unchanged");
 }
 
@@ -109,7 +118,10 @@ fn refuses_symlink_sidecar_before_sqlite_open() {
     let target = f.0.join("target");
     fs::write(&target, b"unchanged").unwrap();
     symlink(&target, f.0.join("fixture.sqlite-journal")).unwrap();
-    assert!(matches!(ExclusiveStore::open(&f.0, false), Err(Error::Invalid)));
+    assert!(matches!(
+        ExclusiveStore::open(&f.0, false),
+        Err(Error::Invalid)
+    ));
     assert_eq!(fs::read(target).unwrap(), b"unchanged");
 }
 
