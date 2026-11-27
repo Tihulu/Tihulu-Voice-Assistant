@@ -20,22 +20,17 @@ def record(case,ok,**extra):
 def digest(data):
     return hashlib.sha256(data).hexdigest()
 
-def worker(port):
+def worker(name,port):
     sys.path.insert(0,"/work/code")
     from llama_engine_acceptance import MODEL,MODEL_SHA,MAX_REPLY,stop_fixture_server
-    from local_agent_model_fixture_contract import MAX_WIRE,PREFIX,reply_for
+    from local_agent_model_fixture_contract import MAX_WIRE,validate_wire,reply_for
     if port not in ("8080","8081"):
         raise RuntimeError("fixture_port")
     wire=sys.stdin.buffer.read(MAX_WIRE+1)
     if not 0<len(wire)<=MAX_WIRE:
         raise RuntimeError("fixture_wire_size")
-    obj=json.loads(wire)
-    expected={"prompt":obj.get("prompt"),"n_predict":16,"temperature":0,"seed":42,
-              "stream":False,"return_tokens":True,"cache_prompt":False,
-              "response_fields":["content","tokens","stop","stop_type","model","truncated"]}
-    if (type(obj.get("prompt")) is not str or not any(obj["prompt"].startswith(p) for p in PREFIX.values())
-            or wire!=json.dumps(expected,separators=(",",":"),ensure_ascii=True).encode("ascii")
-            or digest(Path("/work/model.gguf").read_bytes())!=MODEL_SHA):
+    wire_digest=validate_wire(name,wire)
+    if digest(Path("/work/model.gguf").read_bytes())!=MODEL_SHA:
         raise RuntimeError("fixture_wire_contract")
     def request(method,path,payload=None):
         conn=http.client.HTTPConnection("127.0.0.1",int(port),timeout=8)
@@ -72,8 +67,8 @@ def worker(port):
     # Exit 0 only after the exact owned server has been waited for.
     if proc.poll() is None:
         raise RuntimeError("fixture_server_not_reaped")
-    sys.stdout.write(json.dumps({"wire_digest":digest(wire),"reply":raw.decode("utf-8"),
-                                 "server_reaped":True},separators=(",",":")))
+    sys.stdout.write(json.dumps({"worker":name,"wire_digest":wire_digest,"model_digest":MODEL_SHA,
+                                 "reply":raw.decode("utf-8"),"server_reaped":True},separators=(",",":")))
     return 0
 
 def child(host_net,host_port):
@@ -85,7 +80,7 @@ def child(host_net,host_port):
     from local_agent_replan import AttemptCoordinator
     from local_agent_resources import ResourceLedger
     from local_agent_launch import LaunchBoundary
-    from local_agent_model_fixture_contract import wire_for,reply_for
+    from local_agent_model_fixture_contract import wire_for,bound_reply
     from llama_engine_acceptance import MODEL,MODEL_SHA,ENGINE_REV
     from tihulu_jarvis import profiles
     from concurrent.futures import ThreadPoolExecutor
@@ -127,7 +122,7 @@ def child(host_net,host_port):
             boundary.not_started(t,ctx,models)
             raise
         try:
-            p=subprocess.Popen(["/usr/bin/python3","-I","/work/runner.py","--worker",port],
+            p=subprocess.Popen(["/usr/bin/python3","-I","/work/runner.py","--worker",name,port],
                                stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,close_fds=True)
         except BaseException:
             boundary.uncertain(t)
@@ -144,11 +139,7 @@ def child(host_net,host_port):
         p=owned[t]
         if p.returncode!=0 or not 0<len(out)<=65536:
             raise RuntimeError("fixture_worker_failed")
-        envelope=json.loads(out)
-        if (type(envelope) is not dict or set(envelope)!={"wire_digest","reply","server_reaped"}
-                or envelope["wire_digest"]!=digest(wire) or envelope["server_reaped"] is not True):
-            raise RuntimeError("fixture_worker_envelope")
-        data,tokens=reply_for(envelope["reply"].encode("utf-8"))
+        data,tokens=bound_reply(t.worker,wire,out)
         record("agent-model-"+t.worker+"-real-output",bool(data) and 1<=len(tokens)<=16,
                input_digest=digest(wire),output_digest=digest(data),tokens=len(tokens))
         # Exact wrapper exited 0 after its owned server was reaped.
@@ -162,6 +153,11 @@ def child(host_net,host_port):
         a,wa=launch("a","8080")
         b,wb=launch("b","8081")
         record("agent-model-parallel-reservations",ledger.snapshot()==(32,32,0) and all(p.poll() is None for p in owned.values()))
+        # Recheck both exact scoped inputs immediately before dispatch;
+        # worker threads never access the gateway or choose requests.
+        for ticket,wire in ((a,wa),(b,wb)):
+            if wire_for(ticket.worker,boundary.inputs(ticket,ctx,models))!=wire:
+                raise RuntimeError("fixture_pre_dispatch_drift")
         with ThreadPoolExecutor(max_workers=2) as pool:
             fa=pool.submit(invoke,a,wa)
             fb=pool.submit(invoke,b,wb)
@@ -256,8 +252,8 @@ def main(binary,model):
         return status
 
 if __name__=="__main__":
-    if len(sys.argv)==3 and sys.argv[1]=="--worker":
-        raise SystemExit(worker(sys.argv[2]))
+    if len(sys.argv)==4 and sys.argv[1]=="--worker":
+        raise SystemExit(worker(*sys.argv[2:]))
     if len(sys.argv)==4 and sys.argv[1]=="--child":
         raise SystemExit(child(*sys.argv[2:]))
     raise SystemExit(main(*sys.argv[1:]))
