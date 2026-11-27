@@ -17,9 +17,11 @@ from llama_engine_acceptance import MODEL,ENGINE_REV
 
 
 def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
-    if scenario not in ("retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold"):
+    if scenario not in ("retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold","retry-vector-cpu","retry-vector-hold"):
         raise RuntimeError("native_retry_scenario")
     dual=scenario!="retry-cumulative"
+    vector=scenario in ("retry-vector-cpu","retry-vector-hold")
+    vector_hold=scenario=="retry-vector-hold"
     prompt_hold=scenario=="retry-prompt-hold"
     wave_policy=scenario in ("retry-wave-prompt","retry-wave-prompt-hold")
     wave_hold=scenario=="retry-wave-prompt-hold"
@@ -36,7 +38,41 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
     measured_prompts=[]
     baseline=private_process_snapshot(host_pid_namespace)
     owned=[]
+    if vector:
+        from local_agent_vector_resources import Capacity,VectorResources,Demand
+        from local_agent_vector_planner import ModelMemory
+        from local_agent_vector_admission import VectorAdmission
+        vector_ledger=VectorResources(Capacity(32,0))
+        inventory=(ModelMemory(MODEL,"cpu",Capacity(16,0)),)
+        vector_owner=VectorAdmission("native-vector",vector_ledger,workers,limit=2,backend="cpu")
+        accelerator=VectorAdmission("native-accelerator",vector_ledger,workers,limit=2)
+        try:
+            accelerator.prepare(ctx,models,inventory)
+        except Refused:
+            denied=True
+        else:
+            denied=False
+        record("vector-native-no-implicit-cpu-fallback",denied and not owned
+               and vector_ledger.snapshot()[1]==Capacity(0,0)
+               and namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
+        vector_offer=None
+        def new_vector_offer():
+            offer=vector_owner.prepare(ctx,models,inventory)
+            vector_owner.confirm(offer,ctx,models,inventory)
+            record("vector-native-confirmed-cpu-plan",all(a.backend=="cpu" and a.capacity==Capacity(16,0)
+                   for w in offer.plan.waves for a in w))
+            return offer
     def wave(offer,run,names):
+        vector_rows={}
+        if vector:
+            # Reserve the vector wave first, so a refused resource wave cannot
+            # claim a model worker or launch any process.
+            reserved=vector_owner.reserve_next(vector_offer,ctx,models,inventory)
+            record("vector-native-atomic-before-claim-"+ "-".join(names),
+                   tuple(r.demand.worker for r in reserved)==names
+                   and vector_ledger.snapshot()[1]==Capacity(16*len(names),0)
+                   and not run.pending())
+            vector_rows={r.demand.worker:r for r in reserved}
         rows=session.reserve_wave(offer,names,ctx,models)
         record("retry-wave-reserved-"+ "-".join(names),
                session.snapshot()[2]==sum(l.attempt.ceiling for l,_ in rows))
@@ -65,6 +101,9 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
             envelopes=tuple(pool.map(invoke,active))
         record("retry-wave-private-pid-drained-"+ "-".join(names),
                namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
+        if vector:
+            record("vector-native-retained-until-private-drain-"+ "-".join(names),
+                   vector_ledger.snapshot()[1]==Capacity(16*len(names),0))
         total=0
         for (lease,wire,handle,proc),envelope in zip(active,envelopes):
             if proc.returncode!=0:
@@ -79,6 +118,10 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
                    generated_tokens=generated,prompt_tokens=prompt,attempt=offer.attempt)
             outcome=run.observe_exit(handle,proc.returncode,ctx,models,payload=data)
             record("retry-owned-exit-"+lease.attempt.worker,outcome=="COMPLETED")
+            if vector:
+                vector_owner.observe_reaped(vector_rows[lease.attempt.worker],success=True)
+                record("vector-native-post-reap-matches-managed-"+lease.attempt.worker,
+                       vector_ledger.snapshot()[1]==Capacity(memory.snapshot()[1],0))
             total+=generated
             owned.remove(proc)
         record("retry-wave-cleared-"+ "-".join(names),memory.snapshot()==(32,0,32) and session.snapshot()[2]==0)
@@ -88,8 +131,12 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
     try:
         first=session.prepare(ctx,models,"standard",prompt_policy="wave" if wave_policy else "whole-plan")
         first_run=session.confirm(first,ctx,models)
+        if vector:
+            vector_offer=new_vector_offer()
         used=wave(first,first_run,("plan",))
         session.stop()
+        if vector:
+            vector_owner.stop()
         record("retry-first-drained",used==16 and first_run.drained() and session.snapshot()==(generated_total,16,0,generated_total-16))
         try:
             first_run.output("plan",ctx,models)
@@ -132,6 +179,10 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
             record("retry-wave-default-whole-plan-refused",denied and coordinator._issued==issued)
         second=session.prepare(ctx,models,"economy",prompt_policy="wave" if wave_policy else "whole-plan")
         second_run=session.confirm(second,ctx,models)
+        if vector:
+            previous_vector=vector_offer
+            vector_offer=new_vector_offer()
+            record("vector-native-fresh-confirmed-attempt",vector_offer.identity!=previous_vector.identity)
         record("retry-explicit-economy-fresh-identity",first.attempt!=second.attempt
                and first_run.request("plan")!=second_run.request("plan")
                and second.ceilings==(16,8,8,16) and second.remaining==48)
@@ -141,6 +192,23 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
         elif dual:
             record("retry-dual-exact-prompt-admission",second.prompt_remaining==448 and session.prompt_snapshot()==(462,14,0,448))
         actual=wave(second,second_run,("plan",))
+        if vector_hold:
+            external,=vector_ledger.reserve_wave("competing",(Demand("other",Capacity(1,0)),))
+            try:
+                wave(second,second_run,("a","b"))
+            except Refused as exc:
+                denied=str(exc)=="vector_resource_exhausted"
+            else:
+                denied=False
+            session.stop()
+            record("vector-native-peer-hold-before-claim-and-spawn",denied and second_run.drained()
+                   and set(second_run._run._claims)=={"plan"} and not owned
+                   and vector_ledger.snapshot()[1]==Capacity(1,0)
+                   and session.snapshot()==(64,32,0,32) and memory.snapshot()==(32,0,32)
+                   and namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
+            vector_ledger.release_reaped(external)
+            record("vector-native-hold-cleared",vector_ledger.snapshot()[1]==Capacity(0,0))
+            return 0
         if wave_hold:
             try:
                 wave(second,second_run,("a","b"))
@@ -164,6 +232,8 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
             if wave_policy and names==("a","b"):
                 record("retry-wave-exact-peer-boundary",session.prompt_snapshot()==(252,28,0,224))
             actual+=wave(second,second_run,names)
+        if vector:
+            record("vector-native-completed",vector_owner.completed(vector_offer) and vector_ledger.snapshot()[1]==Capacity(0,0))
         receipt,data=second_run.output("review",ctx,models)
         record("retry-final-bound-output",bool(data) and receipt.payload_digest==sha256(data).hexdigest())
         record("retry-cumulative-total",actual==48 and session.snapshot()==(64,64,0,0),
@@ -185,6 +255,9 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
                and namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
     finally:
         session.close()
+        if vector:
+            vector_owner.close()
+            vector_ledger.close()
         for proc in owned:
             if proc.poll() is None:
                 proc.kill()
