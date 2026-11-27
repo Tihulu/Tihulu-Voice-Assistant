@@ -36,6 +36,7 @@ struct Pending {
     identity: Arc<()>,
     sequence: u64,
     owner: u64,
+    cancelled: bool,
 }
 
 #[derive(Debug)]
@@ -134,9 +135,11 @@ impl Chat {
     pub fn revoke(&mut self, handle: &Access) -> Result<(), Error> {
         self.check(handle, false)?;
         self.access.remove(&handle.id);
-        if self.pending.as_ref().is_some_and(|p| p.owner == handle.id) {
-            self.pending = None;
-            self.revision += 1;
+        if let Some(pending) = self.pending.as_mut() {
+            if pending.owner == handle.id && !pending.cancelled {
+                pending.cancelled = true;
+                self.revision += 1;
+            }
         }
         Ok(())
     }
@@ -197,6 +200,7 @@ impl Chat {
             identity: identity.clone(),
             sequence,
             owner: handle.id,
+            cancelled: false,
         });
         self.revision += 1;
         Ok(Submission::New(Turn { identity, sequence }))
@@ -207,6 +211,9 @@ impl Chat {
         let pending = self.pending.as_ref().ok_or(Error::Foreign)?;
         if turn.sequence != pending.sequence || !Arc::ptr_eq(&turn.identity, &pending.identity) {
             return Err(Error::Foreign);
+        }
+        if pending.cancelled {
+            return Err(Error::Conflict);
         }
         if !Self::valid_text(text) {
             return Err(Error::Invalid);
@@ -223,7 +230,26 @@ impl Chat {
 
     pub fn cancel(&mut self, handle: &Access, expected: u64) -> Result<(), Error> {
         self.check(handle, true)?;
-        if expected != self.revision || self.pending.is_none() {
+        if expected != self.revision {
+            return Err(Error::Conflict);
+        }
+        let pending = self.pending.as_mut().ok_or(Error::Conflict)?;
+        if pending.cancelled {
+            return Err(Error::Conflict);
+        }
+        pending.cancelled = true;
+        self.revision += 1;
+        Ok(())
+    }
+
+    /// Trusted terminal evidence for a cancelled turn, not a cancellation request.
+    /// The future process broker must establish that all owned work has exited.
+    pub fn observe_drained(&mut self, turn: &Turn) -> Result<(), Error> {
+        let pending = self.pending.as_ref().ok_or(Error::Foreign)?;
+        if turn.sequence != pending.sequence || !Arc::ptr_eq(&turn.identity, &pending.identity) {
+            return Err(Error::Foreign);
+        }
+        if !pending.cancelled {
             return Err(Error::Conflict);
         }
         self.pending = None;
