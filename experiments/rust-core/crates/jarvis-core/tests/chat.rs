@@ -235,3 +235,64 @@ fn cancelled_turn_requires_exact_drain_evidence() {
     assert_eq!(chat.read(&user).unwrap().0, 3);
     chat.archive().unwrap();
 }
+
+#[test]
+fn reconnect_preserves_replay_namespace_and_pending_owner() {
+    let mut chat = fixture();
+    let old = chat.grant(AccessMode::Write).unwrap();
+    let turn = ticket(chat.submit(&old, 0, "first", "Hello").unwrap());
+    let new = chat.reconnect(&old).unwrap();
+    assert_eq!(chat.read(&old), Err(Error::Denied));
+    assert_eq!(chat.reconnect(&old).unwrap_err(), Error::Denied);
+    assert!(matches!(
+        chat.submit(&new, 0, "first", "Hello"),
+        Ok(Submission::Replay(1))
+    ));
+    assert_eq!(
+        chat.submit(&new, 1, "first", "changed").unwrap_err(),
+        Error::Conflict
+    );
+    chat.complete(&turn, "Done").unwrap();
+    let again = chat.reconnect(&new).unwrap();
+    assert!(matches!(
+        chat.submit(&again, 0, "first", "Hello"),
+        Ok(Submission::Replay(1))
+    ));
+    assert_eq!(chat.read(&again).unwrap().1.len(), 2);
+}
+
+#[test]
+fn reconnect_does_not_upgrade_read_only_or_revoked_access() {
+    let mut chat = fixture();
+    let reader = chat.grant(AccessMode::Read).unwrap();
+    let new = chat.reconnect(&reader).unwrap();
+    assert_eq!(
+        chat.submit(&new, 0, "first", "Hello").unwrap_err(),
+        Error::Denied
+    );
+    chat.revoke(&new).unwrap();
+    assert_eq!(chat.reconnect(&new).unwrap_err(), Error::Denied);
+    let mut other = fixture();
+    let foreign = other.grant(AccessMode::Write).unwrap();
+    assert_eq!(chat.reconnect(&foreign).unwrap_err(), Error::Denied);
+}
+
+#[test]
+fn reconnect_cannot_bypass_cancelled_turn_drain() {
+    let mut chat = fixture();
+    let old = chat.grant(AccessMode::Write).unwrap();
+    let turn = ticket(chat.submit(&old, 0, "first", "Hello").unwrap());
+    let new = chat.reconnect(&old).unwrap();
+    chat.revoke(&new).unwrap();
+    assert_eq!(chat.complete(&turn, "late"), Err(Error::Conflict));
+    let replacement = chat.grant(AccessMode::Write).unwrap();
+    assert_eq!(
+        chat.submit(&replacement, 2, "next", "new").unwrap_err(),
+        Error::Busy
+    );
+    chat.observe_drained(&turn).unwrap();
+    assert!(matches!(
+        chat.submit(&replacement, 3, "next", "new"),
+        Ok(Submission::New(_))
+    ));
+}
