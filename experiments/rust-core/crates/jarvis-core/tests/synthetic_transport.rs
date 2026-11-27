@@ -318,7 +318,8 @@ fn acp_worker_cannot_dispatch_without_bound_envelope() {
         .unwrap();
     assert_eq!(w.dispatch(&keys[0], &current(&m), 100), Err(Error::Phase));
     assert_eq!(w.snapshot().reserved, amount());
-    w.void_unstarted(&keys[0]).unwrap();
+    w.void_transport_unstarted(&keys[0], identity())
+        .unwrap();
     assert!(w.drained());
 }
 
@@ -338,8 +339,10 @@ fn all_acp_peers_must_bind_before_any_dispatch() {
         .unwrap();
     assert_eq!(w.dispatch(&keys[0], &current(&m), 100), Err(Error::Phase));
     assert!(w.stopped());
-    w.void_unstarted(&keys[0]).unwrap();
-    w.void_unstarted(&keys[1]).unwrap();
+    w.void_transport_unstarted(&keys[0], identity())
+        .unwrap();
+    w.void_transport_unstarted(&keys[1], plan_pair()["b"])
+        .unwrap();
     assert!(w.drained());
 }
 
@@ -414,8 +417,10 @@ fn peer_scope_drift_or_duplicate_worker_rejects_entire_wave() {
             Err(Error::Transport(synthetic_transport::Error::Identity))
         );
         assert!(w.stopped());
-        w.void_unstarted(&keys[0]).unwrap();
-        w.void_unstarted(&keys[1]).unwrap();
+        w.void_transport_unstarted(&keys[0], identity())
+            .unwrap();
+        w.void_transport_unstarted(&keys[1], plan_pair()["b"])
+            .unwrap();
         assert!(w.drained());
     }
 }
@@ -944,7 +949,125 @@ fn first_observed_connection_cannot_choose_another_workers_identity() {
     );
     assert!(w.stopped());
     assert_eq!(w.snapshot().reserved.ram, 32);
-    w.void_unstarted(&keys[0]).unwrap();
-    w.void_unstarted(&keys[1]).unwrap();
+    w.void_transport_unstarted(&keys[0], identity())
+        .unwrap();
+    w.void_transport_unstarted(&keys[1], plan_pair()["b"])
+        .unwrap();
+    assert!(w.drained());
+}
+
+#[test]
+fn old_wave_label_cannot_be_reissued_under_new_worker_and_digest() {
+    let m = manifest();
+    let id = identity();
+    let mut w = wave();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(id), 100)
+        .unwrap();
+    let key = &keys[0];
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    w.record_frame(key, &current(&m), 101, id, &frame(id, 1, 1))
+        .unwrap();
+    w.record_frame(key, &current(&m), 102, id, &frame(id, 2, 4))
+        .unwrap();
+    w.settle_transport(key, &current(&m), 103, id, Some((0, 0)))
+        .unwrap();
+    let fresh = Identity {
+        attempt: [8; 32],
+        worker: [9; 32],
+        connection: [10; 32],
+        ..id
+    };
+    let plan = BTreeMap::from([("b".into(), fresh)]);
+    assert_eq!(
+        w.reserve_with_transport("one", vec![worker("b", &m)], plan, 104)
+            .unwrap_err(),
+        Error::DuplicateAttempt
+    );
+    assert_eq!(w.snapshot().reserved, Amount::default());
+    assert!(w.drained());
+}
+
+#[test]
+fn fresh_wave_label_and_connection_can_be_admitted_after_success() {
+    let m = manifest();
+    let id = identity();
+    let mut w = wave();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(id), 100)
+        .unwrap();
+    let key = &keys[0];
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    w.record_frame(key, &current(&m), 101, id, &frame(id, 1, 1))
+        .unwrap();
+    w.record_frame(key, &current(&m), 102, id, &frame(id, 2, 4))
+        .unwrap();
+    w.settle_transport(key, &current(&m), 103, id, Some((0, 0)))
+        .unwrap();
+    let fresh = Identity {
+        attempt: [8; 32],
+        connection: [9; 32],
+        ..id
+    };
+    let keys = w
+        .reserve_with_transport("two", vec![worker("a", &m)], plan_one(fresh), 104)
+        .unwrap();
+    w.bind_transport(&keys[0], &current(&m), fresh, 104)
+        .unwrap();
+    assert!(!w.stopped());
+    w.stop();
+    w.void_transport_unstarted(&keys[0], fresh).unwrap();
+    assert!(w.drained());
+}
+
+#[test]
+fn generic_or_foreign_never_started_observation_retains_planned_lease() {
+    let m = manifest();
+    let id = identity();
+    for bound in [false, true] {
+        let mut w = wave();
+        let keys = w
+            .reserve_with_transport("one", vec![worker("a", &m)], plan_one(id), 100)
+            .unwrap();
+        let key = &keys[0];
+        if bound {
+            w.bind_transport(key, &current(&m), id, 100).unwrap();
+        }
+        w.stop();
+        assert_eq!(w.void_unstarted(key), Err(Error::Phase));
+        let foreign = Identity {
+            connection: [8; 32],
+            ..id
+        };
+        assert_eq!(
+            w.void_transport_unstarted(key, foreign),
+            Err(Error::Foreign)
+        );
+        assert_eq!(w.snapshot().reserved, amount());
+        w.void_transport_unstarted(key, id).unwrap();
+        assert!(w.drained());
+    }
+}
+
+#[test]
+fn exact_never_started_observation_cannot_release_dispatched_worker() {
+    let m = manifest();
+    let id = identity();
+    let mut w = wave();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(id), 100)
+        .unwrap();
+    let key = &keys[0];
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    w.stop();
+    assert_eq!(w.void_transport_unstarted(key, id), Err(Error::Phase));
+    assert_eq!(w.snapshot().reserved, amount());
+    assert_eq!(
+        w.settle_transport(key, &current(&m), 101, id, None),
+        Ok(ResultState::NoPublication)
+    );
     assert!(w.drained());
 }

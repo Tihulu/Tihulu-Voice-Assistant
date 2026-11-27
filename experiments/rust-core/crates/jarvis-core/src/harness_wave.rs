@@ -58,6 +58,7 @@ pub enum Error {
     Foreign,
     Phase,
     PolicyDrift,
+    DuplicateAttempt,
     Transport(synthetic_transport::Error),
 }
 
@@ -74,6 +75,7 @@ pub struct HarnessWave {
     connections: BTreeSet<[u8; 32]>,
     owner_scope: Option<([u8; 32], [u8; 32])>,
     seen_attempts: BTreeSet<[u8; 32]>,
+    seen_attempt_labels: BTreeSet<String>,
     dispatch_started: bool,
 }
 
@@ -89,6 +91,7 @@ impl HarnessWave {
             connections: BTreeSet::new(),
             owner_scope: None,
             seen_attempts: BTreeSet::new(),
+            seen_attempt_labels: BTreeSet::new(),
             dispatch_started: false,
         })
     }
@@ -140,6 +143,12 @@ impl HarnessWave {
         if !self.rows.is_empty() {
             return Err(Error::Phase);
         }
+        // A wave label identifies one admission, even if a later request
+        // changes every worker or transport digest.
+        if self.seen_attempt_labels.contains(attempt) {
+            self.stop();
+            return Err(Error::DuplicateAttempt);
+        }
         let (transport_attempt, connections) = match self.preflight_transport(&workers, &planned) {
             Ok(value) => value,
             Err(error) => {
@@ -174,6 +183,7 @@ impl HarnessWave {
             .map_err(Error::Session)?;
         // The existing ledger bounds issued leases. Record transport history
         // only after atomic admission, never evict on settle or void.
+        self.seen_attempt_labels.insert(attempt.to_owned());
         if let Some(id) = transport_attempt {
             self.seen_attempts.insert(id);
         }
@@ -599,8 +609,28 @@ impl HarnessWave {
         Ok(ResultState::MeasuredReport)
     }
 
-    /// Trusted evidence that the prepared worker never started.
+    /// Trusted never-started evidence for a nontransport worker.
     pub fn void_unstarted(&mut self, key: &WorkerKey) -> Result<(), Error> {
+        if self.row(key)?.planned.is_some() {
+            return Err(Error::Phase);
+        }
+        self.void_exact(key)
+    }
+
+    /// Trusted never-started evidence must match the predeclared identity,
+    /// including before connection binding. This is not actual OS evidence.
+    pub fn void_transport_unstarted(
+        &mut self,
+        key: &WorkerKey,
+        source: Identity,
+    ) -> Result<(), Error> {
+        if self.row(key)?.planned != Some(source) {
+            return Err(Error::Foreign);
+        }
+        self.void_exact(key)
+    }
+
+    fn void_exact(&mut self, key: &WorkerKey) -> Result<(), Error> {
         if self.row(key)?.dispatched {
             return Err(Error::Phase);
         }
