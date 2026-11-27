@@ -17,14 +17,15 @@ from llama_engine_acceptance import MODEL,ENGINE_REV
 
 
 def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
-    if scenario not in ("retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold","retry-vector-cpu","retry-vector-hold"):
+    if scenario not in ("retry-cumulative","retry-dual","retry-prompt-hold","retry-wave-prompt","retry-wave-prompt-hold","retry-vector-cpu","retry-vector-hold","retry-unified","retry-unified-resource-hold","retry-unified-prompt-hold"):
         raise RuntimeError("native_retry_scenario")
     dual=scenario!="retry-cumulative"
-    vector=scenario in ("retry-vector-cpu","retry-vector-hold")
-    vector_hold=scenario=="retry-vector-hold"
+    unified=scenario in ("retry-unified","retry-unified-resource-hold","retry-unified-prompt-hold")
+    vector=unified or scenario in ("retry-vector-cpu","retry-vector-hold")
+    vector_hold=scenario in ("retry-vector-hold","retry-unified-resource-hold")
     prompt_hold=scenario=="retry-prompt-hold"
-    wave_policy=scenario in ("retry-wave-prompt","retry-wave-prompt-hold")
-    wave_hold=scenario=="retry-wave-prompt-hold"
+    wave_policy=scenario in ("retry-wave-prompt","retry-wave-prompt-hold","retry-unified-prompt-hold")
+    wave_hold=scenario in ("retry-wave-prompt-hold","retry-unified-prompt-hold")
     prompt_total=(251 if wave_hold else 252) if wave_policy else (461 if prompt_hold else (462 if dual else None))
     generated_total=80 if prompt_hold else 64
     ctx=Context("native-retry","session","profile",1,"local","LOCAL_ONLY")
@@ -34,7 +35,6 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
              Worker("b",("plan",),0,"review"),Worker("review",("a","b"),0,"review"))
     memory=ResourceLedger(32)
     coordinator=AttemptCoordinator(gate,memory,"native-retry",workers,32,2,owned_drain=True,strict_results=True)
-    session=RetryBudgetSession(coordinator,generated_total,prompt_total=prompt_total)
     measured_prompts=[]
     baseline=private_process_snapshot(host_pid_namespace)
     owned=[]
@@ -57,14 +57,20 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
                and namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
         vector_offer=None
         def new_vector_offer():
-            offer=vector_owner.prepare(ctx,models,inventory)
-            vector_owner.confirm(offer,ctx,models,inventory)
+            if unified:
+                offer=session._vector_offer
+            else:
+                offer=vector_owner.prepare(ctx,models,inventory)
+                vector_owner.confirm(offer,ctx,models,inventory)
             record("vector-native-confirmed-cpu-plan",all(a.backend=="cpu" and a.capacity==Capacity(16,0)
                    for w in offer.plan.waves for a in w))
             return offer
+    session=RetryBudgetSession(coordinator,generated_total,prompt_total=prompt_total,
+                               **({"vector_owner":vector_owner,"vector_memory":inventory,
+                                   "total_ns":120_000_000_000,"worker_ns":35_000_000_000} if unified else {}))
     def wave(offer,run,names):
         vector_rows={}
-        if vector:
+        if vector and not unified:
             # Reserve the vector wave first, so a refused resource wave cannot
             # claim a model worker or launch any process.
             reserved=vector_owner.reserve_next(vector_offer,ctx,models,inventory)
@@ -74,6 +80,12 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
                    and not run.pending())
             vector_rows={r.demand.worker:r for r in reserved}
         rows=session.reserve_wave(offer,names,ctx,models)
+        if unified:
+            vector_rows={n:r for n,(l,r) in session._vector_rows.items()}
+            record("unified-native-bound-wave-"+ "-".join(names),
+                   tuple(vector_rows)==names and offer.vector_digest==vector_offer.plan.digest
+                   and vector_ledger.snapshot()[1]==Capacity(16*len(names),0)
+                   and not run.pending())
         record("retry-wave-reserved-"+ "-".join(names),
                session.snapshot()[2]==sum(l.attempt.ceiling for l,_ in rows))
         if dual:
@@ -84,6 +96,8 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
             grant=gate.fixture_grant(offer.attempt+"-"+worker,run.request(worker),60)
             handle=run.start(worker,grant,ctx,models)
             session.dispatch(lease,wire,ctx,models)
+            if unified:
+                record("unified-native-active-deadline-"+worker,0<session.remaining_ns(lease)<=35_000_000_000)
             prepared.append((lease,wire,handle))
         record("retry-wave-memory-"+ "-".join(names),memory.snapshot()[1]==16*len(rows))
         active=[]
@@ -119,7 +133,10 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
             outcome=run.observe_exit(handle,proc.returncode,ctx,models,payload=data)
             record("retry-owned-exit-"+lease.attempt.worker,outcome=="COMPLETED")
             if vector:
-                vector_owner.observe_reaped(vector_rows[lease.attempt.worker],success=True)
+                if unified:
+                    session.release_vector_after_exit(lease)
+                else:
+                    vector_owner.observe_reaped(vector_rows[lease.attempt.worker],success=True)
                 record("vector-native-post-reap-matches-managed-"+lease.attempt.worker,
                        vector_ledger.snapshot()[1]==Capacity(memory.snapshot()[1],0))
             total+=generated
@@ -227,6 +244,9 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
             else:
                 denied=False
             record("retry-wave-hold-no-intermediate-output",denied)
+            if unified:
+                record("unified-native-prompt-refusal-compensated-vector",vector_ledger.snapshot()[1]==Capacity(0,0)
+                       and not session._vector_rows and not vector_owner._leases)
             return 0
         for names in (("a","b"),("review",)):
             if wave_policy and names==("a","b"):
@@ -234,6 +254,9 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
             actual+=wave(second,second_run,names)
         if vector:
             record("vector-native-completed",vector_owner.completed(vector_offer) and vector_ledger.snapshot()[1]==Capacity(0,0))
+        if unified:
+            record("unified-native-no-residual-reservations",not session._vector_rows and not session._timed
+                   and session.snapshot()[2]==0 and session.prompt_snapshot()[2]==0)
         receipt,data=second_run.output("review",ctx,models)
         record("retry-final-bound-output",bool(data) and receipt.payload_digest==sha256(data).hexdigest())
         record("retry-cumulative-total",actual==48 and session.snapshot()==(64,64,0,0),
