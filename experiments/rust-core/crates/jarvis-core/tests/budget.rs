@@ -194,3 +194,15 @@ fn bounded_wave_and_lifetime() {
         Error::Limit
     );
 }
+
+#[test]
+fn shrink_before_dispatch_refuses_prepared_work() {
+    let mut l = ledger();
+    let rows = l.reserve_wave("a", &[d("x", a(32, 8, 16, 112))]).unwrap();
+    l.resize_memory(16, 4).unwrap();
+    assert_eq!(l.dispatch(&rows[0]), Err(Error::Exhausted));
+    assert_eq!(l.snapshot().reserved, a(32, 8, 16, 112));
+    l.cancel(&rows[0]).unwrap();
+    l.void_unstarted(&rows[0]).unwrap();
+    assert_eq!(l.snapshot().reserved, Amount::default());
+}
