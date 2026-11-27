@@ -39,6 +39,14 @@ impl OwnedStore {
         }
     }
 
+    pub(crate) fn project(&self, id: Id, name: &str) -> Result<(), Error> {
+        self.store.project(id, name)
+    }
+
+    pub(crate) fn session(&self, id: Id, project: Option<Id>) -> Result<(), Error> {
+        self.store.session(id, project)
+    }
+
     pub fn history(&self, session: Id) -> Result<(i64, Vec<Message>), Error> {
         self.store.history(session)
     }
