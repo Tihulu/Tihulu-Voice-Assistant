@@ -1,0 +1,13 @@
+[package]
+name = "jarvis-store-fixture"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.90"
+license = "AGPL-3.0-only"
+publish = false
+
+[workspace]
+
+[dependencies]
+rusqlite = { version = "=0.41.0", default-features = false, features = ["bundled"] }
+libsqlite3-sys = { version = "=0.39.1", default-features = false }
