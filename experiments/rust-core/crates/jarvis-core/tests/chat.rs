@@ -1,10 +1,31 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use jarvis_core::chat::{AccessMode, Chat, Error, Role, Submission, Turn};
-use jarvis_core::workspace::Workspace;
+use jarvis_core::workspace::{SessionId, Workspace};
+use std::ops::{Deref, DerefMut};
 
-fn fixture() -> Chat {
+struct Fixture {
+    workspace: Workspace,
+    session: SessionId,
+}
+
+impl Deref for Fixture {
+    type Target = Chat;
+
+    fn deref(&self) -> &Self::Target {
+        self.workspace.chat(self.session).unwrap()
+    }
+}
+
+impl DerefMut for Fixture {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.workspace.chat_mut(self.session).unwrap()
+    }
+}
+
+fn fixture() -> Fixture {
     let mut workspace = Workspace::default();
-    Chat::new(workspace.session(None).unwrap())
+    let session = workspace.session(None).unwrap();
+    Fixture { workspace, session }
 }
 
 fn ticket(submission: Submission) -> Turn {
