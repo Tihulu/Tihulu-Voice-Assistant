@@ -103,7 +103,7 @@ def worker(name,port,mode="normal"):
     return 0
 
 def child(host_net,host_port,scenario):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold"):
         raise RuntimeError("fixture_scenario")
     sys.path.insert(0,"/work/code")
     import resource
@@ -115,6 +115,7 @@ def child(host_net,host_port,scenario):
     from local_agent_launch import LaunchBoundary
     from local_agent_model_fixture_contract import wire_for,bound_reply,DEFAULT_CEILINGS,ECONOMY_CEILINGS,PARENTS,wire_ceiling
     from local_agent_model_token_ledger import TokenLedger
+    from local_agent_model_budget_admission import BudgetAdmission
     from llama_engine_acceptance import MODEL,MODEL_SHA,ENGINE_REV
     from tihulu_jarvis import profiles
     from concurrent.futures import ThreadPoolExecutor
@@ -142,17 +143,49 @@ def child(host_net,host_port,scenario):
     ledger=ResourceLedger(32)
     ceilings=ECONOMY_CEILINGS if scenario=="economy" else DEFAULT_CEILINGS
     limits=dict(zip(PARENTS,ceilings))
-    total_budget=32 if scenario=="budget-hold" else sum(ceilings)
-    token_ledger=TokenLedger(total_budget,strict_dispatch=True,ceilings=ceilings)
+    total_budget=32 if scenario in ("budget-hold","plan-hold") else sum(ceilings)
     leases={}
     elapsed={}
     prompt_counts={}
     started_ns=time.monotonic_ns()
     coordinator=AttemptCoordinator(gate,ledger,"native-chain",workers,32,2,owned_drain=True,strict_results=True)
-    preview=coordinator.prepare(ctx,models)
-    run=coordinator.confirm(preview,ctx,models)
+    if scenario=="plan-hold":
+        admission=BudgetAdmission(coordinator,total_budget)
+        for profile in ("standard","economy"):
+            try:
+                admission.prepare(ctx,models,profile)
+            except Refused as exc:
+                denied=str(exc)=="fixture_budget_plan_unaffordable"
+            else:
+                denied=False
+            record("agent-model-plan-hold-"+profile,denied)
+        children=Path("/proc/self/task/"+str(os.getpid())+"/children").read_text().strip()
+        record("agent-model-plan-hold-no-spawn",not children and not tuple(Path("/tmp").glob("server-*.log"))
+               and coordinator._issued==0 and ledger.snapshot()==(32,0,32))
+        return 0
+    if scenario in ("normal","economy"):
+        admission=BudgetAdmission(coordinator,total_budget)
+        if scenario=="economy":
+            try:
+                admission.prepare(ctx,models,"standard")
+            except Refused as exc:
+                denied=str(exc)=="fixture_budget_plan_unaffordable"
+            else:
+                denied=False
+            record("agent-model-no-silent-economy-downgrade",denied and coordinator._issued==0)
+        offer=admission.prepare(ctx,models,"economy" if scenario=="economy" else "standard")
+        run,token_ledger=admission.confirm(offer,ctx,models)
+        record("agent-model-explicit-profile-confirmed",offer.ceilings==ceilings and offer.required==total_budget
+               and token_ledger.snapshot()==(total_budget,0,0,total_budget),profile=offer.profile)
+        # Admission enforces the exact three waves before confirmation.
+        record("agent-model-planned-waves",len(offer.plan_digest)==64)
+    else:
+        # Preserve earlier partial-run negative cases as comparators.
+        token_ledger=TokenLedger(total_budget,strict_dispatch=True,ceilings=ceilings)
+        preview=coordinator.prepare(ctx,models)
+        run=coordinator.confirm(preview,ctx,models)
+        record("agent-model-planned-waves",tuple(tuple(a.worker for a in w) for w in preview.plan.waves)==(("plan",),("a","b"),("review",)))
     boundary=LaunchBoundary(run)
-    record("agent-model-planned-waves",tuple(tuple(a.worker for a in w) for w in preview.plan.waves)==(("plan",),("a","b"),("review",)))
     grants={w.identity:gate.fixture_grant("native-"+w.identity,run.request(w.identity),60) for w in workers}
     owned={}
     results={}
@@ -387,7 +420,7 @@ def child(host_net,host_port,scenario):
     return 0
 
 def main(binary,model,scenario="normal"):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold"):
         raise RuntimeError("fixture_scenario")
     from llama_engine_acceptance import MODEL_SHA
     import shutil
@@ -401,7 +434,7 @@ def main(binary,model,scenario="normal"):
         code=root/"code"
         for name in ("gateway.py","inference.py","local_agent_planner.py","local_agent_wave_run.py",
                      "local_agent_resources.py","local_agent_owned_drain.py","local_agent_replan.py","local_agent_launch.py",
-                     "local_agent_model_fixture_contract.py","local_agent_model_token_ledger.py","local_agent_model_stream_contract.py","llama_engine_acceptance.py"):
+                     "local_agent_model_fixture_contract.py","local_agent_model_token_ledger.py","local_agent_model_stream_contract.py","local_agent_model_budget_admission.py","llama_engine_acceptance.py"):
             dst=code/name
             dst.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(repo/"experiments"/name,dst)
