@@ -14,6 +14,26 @@ pub struct SessionId(u64);
 pub struct WindowId(u64);
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub struct TabId(u64);
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub struct GroupId(u64);
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Color {
+    Blue,
+    Green,
+    Purple,
+    Orange,
+    Gray,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct Group {
+    pub name: String,
+    pub color: Color,
+    pub collapsed: bool,
+    pub window: WindowId,
+    pub tabs: Vec<TabId>,
+}
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
@@ -35,6 +55,7 @@ pub struct Workspace {
     sessions: BTreeMap<SessionId, Option<ProjectId>>,
     windows: BTreeMap<WindowId, Vec<TabId>>,
     tabs: BTreeMap<TabId, View>,
+    groups: BTreeMap<GroupId, Group>,
 }
 
 impl Workspace {
@@ -102,16 +123,28 @@ impl Workspace {
     /// Move a view without touching its session. Index is in the resulting list.
     pub fn move_tab(&mut self, tab: TabId, target: WindowId, index: usize) -> Result<(), Error> {
         let view = *self.tabs.get(&tab).ok_or(Error::Unknown)?;
+        if self.group_of(tab).is_some() {
+            return Err(Error::Conflict);
+        }
         let count = self.tabs(target)?.len();
         let maximum = count - usize::from(view.window == target);
         if index > maximum {
             return Err(Error::Conflict);
         }
-        let source = self.windows.get_mut(&view.window).ok_or(Error::Unknown)?;
+        let source = self.windows.get(&view.window).ok_or(Error::Unknown)?;
         let old = source
             .iter()
             .position(|id| *id == tab)
             .ok_or(Error::Conflict)?;
+        // Validate the resulting target before mutating either window.
+        let mut destination = self.tabs(target)?.to_vec();
+        if view.window == target {
+            destination.remove(old);
+        }
+        if self.splits_group(&destination, index) {
+            return Err(Error::Conflict);
+        }
+        let source = self.windows.get_mut(&view.window).ok_or(Error::Unknown)?;
         source.remove(old);
         self.windows
             .get_mut(&target)
@@ -124,6 +157,9 @@ impl Workspace {
     pub fn detach(&mut self, tab: TabId) -> Result<WindowId, Error> {
         if !self.tabs.contains_key(&tab) {
             return Err(Error::Unknown);
+        }
+        if self.group_of(tab).is_some() {
+            return Err(Error::Conflict);
         }
         let target = self.window()?;
         self.move_tab(tab, target, 0)?;
@@ -139,6 +175,13 @@ impl Workspace {
             .ok_or(Error::Conflict)?;
         list.remove(index);
         self.tabs.remove(&tab);
+        if let Some(group) = self.group_of(tab) {
+            let row = self.groups.get_mut(&group).ok_or(Error::Unknown)?;
+            row.tabs.retain(|id| *id != tab);
+            if row.tabs.is_empty() {
+                self.groups.remove(&group);
+            }
+        }
         Ok(())
     }
 
@@ -148,5 +191,125 @@ impl Workspace {
         }
         self.windows.remove(&window);
         Ok(())
+    }
+
+    fn group_of(&self, tab: TabId) -> Option<GroupId> {
+        self.groups
+            .iter()
+            .find_map(|(id, group)| group.tabs.contains(&tab).then_some(*id))
+    }
+
+    fn splits_group(&self, list: &[TabId], index: usize) -> bool {
+        if index == 0 || index >= list.len() {
+            return false;
+        }
+        self.group_of(list[index - 1])
+            .is_some_and(|id| self.group_of(list[index]) == Some(id))
+    }
+
+    fn valid_name(name: &str) -> bool {
+        !name.trim().is_empty()
+            && name.len() <= 128
+            && !name.chars().any(char::is_control)
+    }
+
+    pub fn create_group(
+        &mut self,
+        window: WindowId,
+        tabs: &[TabId],
+        name: &str,
+        color: Color,
+    ) -> Result<GroupId, Error> {
+        if !Self::valid_name(name) || tabs.is_empty() {
+            return Err(Error::Conflict);
+        }
+        let list = self.tabs(window)?;
+        if tabs.len() > list.len()
+            || !list.windows(tabs.len()).any(|slice| slice == tabs)
+            || tabs.iter().any(|tab| self.group_of(*tab).is_some())
+        {
+            return Err(Error::Conflict);
+        }
+        let id = GroupId(self.issue()?);
+        self.groups.insert(
+            id,
+            Group {
+                name: name.to_owned(),
+                color,
+                collapsed: false,
+                window,
+                tabs: tabs.to_vec(),
+            },
+        );
+        Ok(id)
+    }
+
+    pub fn group(&self, id: GroupId) -> Result<&Group, Error> {
+        self.groups.get(&id).ok_or(Error::Unknown)
+    }
+
+    pub fn edit_group(
+        &mut self,
+        id: GroupId,
+        name: &str,
+        color: Color,
+        collapsed: bool,
+    ) -> Result<(), Error> {
+        if !Self::valid_name(name) {
+            return Err(Error::Conflict);
+        }
+        let group = self.groups.get_mut(&id).ok_or(Error::Unknown)?;
+        group.name = name.to_owned();
+        group.color = color;
+        group.collapsed = collapsed;
+        Ok(())
+    }
+
+    pub fn ungroup(&mut self, id: GroupId) -> Result<(), Error> {
+        self.groups.remove(&id).map(|_| ()).ok_or(Error::Unknown)
+    }
+
+    /// Index is relative to the target after removing the moving group.
+    pub fn move_group(
+        &mut self,
+        id: GroupId,
+        target: WindowId,
+        index: usize,
+    ) -> Result<(), Error> {
+        let group = self.group(id)?;
+        let source = group.window;
+        let members = group.tabs.clone();
+        let source_list = self.tabs(source)?;
+        let start = source_list
+            .windows(members.len())
+            .position(|slice| slice == members.as_slice())
+            .ok_or(Error::Conflict)?;
+        let mut remaining = source_list.to_vec();
+        remaining.drain(start..start + members.len());
+        let mut destination = if source == target {
+            remaining.clone()
+        } else {
+            self.tabs(target)?.to_vec()
+        };
+        if index > destination.len() || self.splits_group(&destination, index) {
+            return Err(Error::Conflict);
+        }
+        destination.splice(index..index, members.iter().copied());
+        if source != target {
+            self.windows.insert(source, remaining);
+        }
+        self.windows.insert(target, destination);
+        for tab in members {
+            self.tabs.get_mut(&tab).ok_or(Error::Unknown)?.window = target;
+        }
+        self.groups.get_mut(&id).ok_or(Error::Unknown)?.window = target;
+        Ok(())
+    }
+
+    pub fn detach_group(&mut self, id: GroupId) -> Result<WindowId, Error> {
+        self.group(id)?;
+        let target = self.window()?;
+        self.move_group(id, target, 0)?;
+        Ok(target)
     }
 }
