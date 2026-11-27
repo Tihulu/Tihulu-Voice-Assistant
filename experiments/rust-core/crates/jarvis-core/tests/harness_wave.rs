@@ -193,7 +193,12 @@ fn timeout_and_exit_without_report_never_count_as_success() {
                 .unwrap();
         }
         assert_eq!(
-            w.settle(key, &current(&a), if report { 120 } else { 103 }, Some((2, 3))),
+            w.settle(
+                key,
+                &current(&a),
+                if report { 120 } else { 103 },
+                Some((2, 3))
+            ),
             Ok(ResultState::NoPublication)
         );
         assert!(w.drained());
@@ -215,7 +220,11 @@ fn capacity_shrink_and_oversized_wave_cannot_dispatch() {
     assert!(w.drained());
     let mut w = wave();
     assert!(matches!(
-        w.reserve("one", vec![worker("a", &a), worker("b", &a), worker("c", &a)], 100),
+        w.reserve(
+            "one",
+            vec![worker("a", &a), worker("b", &a), worker("c", &a)],
+            100
+        ),
         Err(Error::Session(_))
     ));
     assert_eq!(w.snapshot().reserved, Amount::default());

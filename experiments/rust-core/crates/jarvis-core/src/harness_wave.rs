@@ -129,15 +129,16 @@ impl HarnessWave {
     }
 
     pub fn resize_memory(&mut self, ram: u64, vram: u64) -> Result<(), Error> {
-        self.session.resize_memory(ram, vram).map_err(Error::Session)
+        self.session
+            .resize_memory(ram, vram)
+            .map_err(Error::Session)
     }
 
     fn check(&mut self, key: &WorkerKey, current: &Current<'_>) -> Result<(), Error> {
-        let result = self.row(key)?.plan.recheck(
-            current.manifest,
-            current.allowed,
-            current.local_only,
-        );
+        let result =
+            self.row(key)?
+                .plan
+                .recheck(current.manifest, current.allowed, current.local_only);
         if let Err(error) = result {
             self.stop();
             return Err(Error::Harness(error));
@@ -219,7 +220,8 @@ impl HarnessWave {
             .observe_drained(&row.event_key)
             .map_err(Error::Harness)?;
         self.rows.remove(&key.worker);
-        if terminal != Terminal::Measured || outcome != harness::Outcome::ReportedSuccessAndDrained {
+        if terminal != Terminal::Measured || outcome != harness::Outcome::ReportedSuccessAndDrained
+        {
             self.stop();
             return Ok(ResultState::NoPublication);
         }
