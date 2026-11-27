@@ -10,6 +10,9 @@ use crate::synthetic_transport::{self, Identity, FRAME_LEN, MAX_CHUNK};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
+type TransportId = [u8; 32];
+type TransportHistory = (Option<TransportId>, BTreeSet<TransportId>);
+
 /// Trusted owner policy snapshot identity, not a grant or authentication.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct PolicyStamp {
@@ -42,6 +45,7 @@ struct Row {
     track: EventTrack,
     event_key: EventKey,
     dispatched: bool,
+    planned: Option<Identity>,
     transport: Option<Identity>,
     pending: [u8; FRAME_LEN],
     pending_len: usize,
@@ -69,7 +73,6 @@ pub struct HarnessWave {
     policy: Option<PolicyStamp>,
     connections: BTreeSet<[u8; 32]>,
     owner_scope: Option<([u8; 32], [u8; 32])>,
-    transport_attempt: Option<[u8; 32]>,
     seen_attempts: BTreeSet<[u8; 32]>,
     dispatch_started: bool,
 }
@@ -85,10 +88,23 @@ impl HarnessWave {
             policy: None,
             connections: BTreeSet::new(),
             owner_scope: None,
-            transport_attempt: None,
             seen_attempts: BTreeSet::new(),
             dispatch_started: false,
         })
+    }
+
+    /// Owner preconfigures the project and session independently of adapters.
+    pub fn new_scoped(
+        session: Session,
+        project: [u8; 32],
+        session_id: [u8; 32],
+    ) -> Result<Self, Error> {
+        if project == [0; 32] || session_id == [0; 32] {
+            return Err(Error::Transport(synthetic_transport::Error::Identity));
+        }
+        let mut wave = Self::new(session)?;
+        wave.owner_scope = Some((project, session_id));
+        Ok(wave)
     }
 
     pub fn snapshot(&self) -> Snapshot {
@@ -109,9 +125,28 @@ impl HarnessWave {
         workers: Vec<Worker<'_>>,
         now: u64,
     ) -> Result<Vec<WorkerKey>, Error> {
+        self.reserve_with_transport(attempt, workers, BTreeMap::new(), now)
+    }
+
+    /// The trusted owner predeclares exact transport IDs for every ACP-labelled
+    /// worker before acquiring any lease. Non-ACP workers must not have IDs.
+    pub fn reserve_with_transport(
+        &mut self,
+        attempt: &str,
+        workers: Vec<Worker<'_>>,
+        planned: BTreeMap<String, Identity>,
+        now: u64,
+    ) -> Result<Vec<WorkerKey>, Error> {
         if !self.rows.is_empty() {
             return Err(Error::Phase);
         }
+        let (transport_attempt, connections) = match self.preflight_transport(&workers, &planned) {
+            Ok(value) => value,
+            Err(error) => {
+                self.stop();
+                return Err(error);
+            }
+        };
         // All peers must pass the same trusted policy generation and their
         // individual manifest/capability preflight before any lease is issued.
         if let Some(first) = workers.first() {
@@ -137,7 +172,12 @@ impl HarnessWave {
             .session
             .reserve_wave(attempt, &demands, now)
             .map_err(Error::Session)?;
-        self.transport_attempt = None;
+        // The existing ledger bounds issued leases. Record transport history
+        // only after atomic admission, never evict on settle or void.
+        if let Some(id) = transport_attempt {
+            self.seen_attempts.insert(id);
+        }
+        self.connections.extend(connections);
         self.dispatch_started = false;
         let mut keys = Vec::with_capacity(handles.len());
         for (worker, handle) in workers.into_iter().zip(handles) {
@@ -153,6 +193,7 @@ impl HarnessWave {
                     track,
                     event_key,
                     dispatched: false,
+                    planned: planned.get(&name).copied(),
                     transport: None,
                     pending: [0; FRAME_LEN],
                     pending_len: 0,
@@ -164,6 +205,41 @@ impl HarnessWave {
             });
         }
         Ok(keys)
+    }
+
+    fn preflight_transport(
+        &self,
+        workers: &[Worker<'_>],
+        planned: &BTreeMap<String, Identity>,
+    ) -> Result<TransportHistory, Error> {
+        let invalid = Error::Transport(synthetic_transport::Error::Identity);
+        let mut attempt = None;
+        let mut connections = BTreeSet::new();
+        let mut worker_ids = BTreeSet::new();
+        for worker in workers {
+            let id = planned.get(&worker.demand.worker);
+            let requires = matches!(worker.plan.protocol(), Protocol::AcpV1 | Protocol::AcpV2);
+            if requires != id.is_some() {
+                return Err(invalid);
+            }
+            if let Some(id) = id {
+                if !id.valid()
+                    || self.owner_scope != Some((id.project, id.session))
+                    || attempt.is_some_and(|old| old != id.attempt)
+                    || self.seen_attempts.contains(&id.attempt)
+                    || self.connections.contains(&id.connection)
+                    || !connections.insert(id.connection)
+                    || !worker_ids.insert(id.worker)
+                {
+                    return Err(invalid);
+                }
+                attempt = Some(id.attempt);
+            }
+        }
+        if connections.len() != planned.len() {
+            return Err(invalid);
+        }
+        Ok((attempt, connections))
     }
 
     fn row(&self, key: &WorkerKey) -> Result<&Row, Error> {
@@ -255,27 +331,10 @@ impl HarnessWave {
         }
         self.check(key, current)?;
         self.tick(now, current.policy)?;
-        let scope = (identity.project, identity.session);
-        if !identity.valid()
-            || !matches!(current.manifest.protocol, Protocol::AcpV1 | Protocol::AcpV2)
-            || self.connections.contains(&identity.connection)
-            || self.owner_scope.is_some_and(|old| old != scope)
-            || self
-                .transport_attempt
-                .is_some_and(|old| old != identity.attempt)
-            || (self.transport_attempt.is_none() && self.seen_attempts.contains(&identity.attempt))
-            || self.rows.values().any(|row| {
-                row.transport
-                    .is_some_and(|old| old.worker == identity.worker)
-            })
-        {
+        if self.row(key)?.planned != Some(identity) {
             self.stop();
             return Err(Error::Transport(synthetic_transport::Error::Identity));
         }
-        self.owner_scope = Some(scope);
-        self.transport_attempt = Some(identity.attempt);
-        self.seen_attempts.insert(identity.attempt);
-        self.connections.insert(identity.connection);
         self.rows
             .get_mut(&key.worker)
             .ok_or(Error::Foreign)?

@@ -4,7 +4,7 @@ use jarvis_core::harness::{self, Capability, Event, Kind, Manifest, Protocol, Ro
 use jarvis_core::harness_wave::{Current, Error, HarnessWave, PolicyStamp, ResultState, Worker};
 use jarvis_core::session::Session;
 use jarvis_core::synthetic_transport::{self, Identity, FRAME_LEN};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 fn manifest() -> Manifest {
     Manifest {
@@ -48,7 +48,12 @@ fn worker<'a>(name: &str, m: &'a Manifest) -> Worker<'a> {
 }
 
 fn wave() -> HarnessWave {
-    HarnessWave::new(Session::new(amount(), 100, 100, 20).unwrap()).unwrap()
+    HarnessWave::new_scoped(
+        Session::new(amount(), 100, 100, 20).unwrap(),
+        [1; 32],
+        [2; 32],
+    )
+    .unwrap()
 }
 
 fn identity() -> Identity {
@@ -59,6 +64,20 @@ fn identity() -> Identity {
         worker: [4; 32],
         connection: [5; 32],
     }
+}
+
+fn plan_one(id: Identity) -> BTreeMap<String, Identity> {
+    BTreeMap::from([("a".into(), id)])
+}
+
+fn plan_pair() -> BTreeMap<String, Identity> {
+    let a = identity();
+    let b = Identity {
+        worker: [6; 32],
+        connection: [7; 32],
+        ..a
+    };
+    BTreeMap::from([("a".into(), a), ("b".into(), b)])
 }
 
 fn frame(id: Identity, seq: u64, event: u8) -> [u8; FRAME_LEN] {
@@ -79,7 +98,9 @@ fn frame(id: Identity, seq: u64, event: u8) -> [u8; FRAME_LEN] {
 fn exact_envelope_uses_existing_wave_and_requires_trusted_settle() {
     let m = manifest();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
@@ -144,7 +165,9 @@ fn strict_decoder_rejects_length_version_event_and_zero_identity() {
 fn foreign_envelope_stops_without_releasing_reservation() {
     let m = manifest();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
@@ -171,7 +194,9 @@ fn gap_or_replay_stops_existing_event_tracker() {
     let m = manifest();
     for seq in [1, 3] {
         let mut w = wave();
-        let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+        let keys = w
+            .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+            .unwrap();
         let key = &keys[0];
         let id = identity();
         w.bind_transport(key, &current(&m), id, 100).unwrap();
@@ -191,7 +216,9 @@ fn gap_or_replay_stops_existing_event_tracker() {
 fn disconnect_after_report_cannot_count_as_success() {
     let m = manifest();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
@@ -219,7 +246,9 @@ fn disconnect_after_report_cannot_count_as_success() {
 fn approval_frame_stops_wave_without_implicit_resume() {
     let m = manifest();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
@@ -239,7 +268,9 @@ fn approval_frame_stops_wave_without_implicit_resume() {
 fn connection_id_cannot_be_reused_after_successful_settle() {
     let m = manifest();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
@@ -250,12 +281,16 @@ fn connection_id_cannot_be_reused_after_successful_settle() {
         .unwrap();
     w.settle_transport(key, &current(&m), 103, id, Some((0, 0)))
         .unwrap();
-    let keys = w.reserve("two", vec![worker("a", &m)], 104).unwrap();
+    let fresh_attempt = Identity {
+        attempt: [8; 32],
+        ..id
+    };
     assert_eq!(
-        w.bind_transport(&keys[0], &current(&m), id, 104),
-        Err(Error::Transport(synthetic_transport::Error::Identity))
+        w.reserve_with_transport("two", vec![worker("a", &m)], plan_one(fresh_attempt), 104)
+            .unwrap_err(),
+        Error::Transport(synthetic_transport::Error::Identity)
     );
-    w.void_unstarted(&keys[0]).unwrap();
+    assert_eq!(w.snapshot().reserved, Amount::default());
     assert!(w.drained());
 }
 
@@ -266,14 +301,21 @@ fn pair_wave() -> HarnessWave {
         generated: 32,
         prompt: 224,
     };
-    HarnessWave::new(Session::new(capacity, 100, 100, 20).unwrap()).unwrap()
+    HarnessWave::new_scoped(
+        Session::new(capacity, 100, 100, 20).unwrap(),
+        [1; 32],
+        [2; 32],
+    )
+    .unwrap()
 }
 
 #[test]
 fn acp_worker_cannot_dispatch_without_bound_envelope() {
     let m = manifest();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     assert_eq!(w.dispatch(&keys[0], &current(&m), 100), Err(Error::Phase));
     assert_eq!(w.snapshot().reserved, amount());
     w.void_unstarted(&keys[0]).unwrap();
@@ -285,7 +327,12 @@ fn all_acp_peers_must_bind_before_any_dispatch() {
     let m = manifest();
     let mut w = pair_wave();
     let keys = w
-        .reserve("one", vec![worker("a", &m), worker("b", &m)], 100)
+        .reserve_with_transport(
+            "one",
+            vec![worker("a", &m), worker("b", &m)],
+            plan_pair(),
+            100,
+        )
         .unwrap();
     w.bind_transport(&keys[0], &current(&m), identity(), 100)
         .unwrap();
@@ -301,7 +348,12 @@ fn distinct_peers_share_exact_project_session_and_attempt() {
     let m = manifest();
     let mut w = pair_wave();
     let keys = w
-        .reserve("one", vec![worker("a", &m), worker("b", &m)], 100)
+        .reserve_with_transport(
+            "one",
+            vec![worker("a", &m), worker("b", &m)],
+            plan_pair(),
+            100,
+        )
         .unwrap();
     let a = identity();
     let b = Identity {
@@ -349,7 +401,12 @@ fn peer_scope_drift_or_duplicate_worker_rejects_entire_wave() {
     ] {
         let mut w = pair_wave();
         let keys = w
-            .reserve("one", vec![worker("a", &m), worker("b", &m)], 100)
+            .reserve_with_transport(
+                "one",
+                vec![worker("a", &m), worker("b", &m)],
+                plan_pair(),
+                100,
+            )
             .unwrap();
         w.bind_transport(&keys[0], &current(&m), a, 100).unwrap();
         assert_eq!(
@@ -367,7 +424,9 @@ fn peer_scope_drift_or_duplicate_worker_rejects_entire_wave() {
 fn version_mismatch_is_not_a_compatible_fallback() {
     let m = manifest();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
@@ -386,7 +445,9 @@ fn version_mismatch_is_not_a_compatible_fallback() {
 fn old_attempt_cannot_be_rebound_with_fresh_connection() {
     let m = manifest();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
@@ -397,16 +458,16 @@ fn old_attempt_cannot_be_rebound_with_fresh_connection() {
         .unwrap();
     w.settle_transport(key, &current(&m), 103, id, Some((0, 0)))
         .unwrap();
-    let keys = w.reserve("two", vec![worker("a", &m)], 104).unwrap();
     let fresh = Identity {
         connection: [8; 32],
         ..id
     };
     assert_eq!(
-        w.bind_transport(&keys[0], &current(&m), fresh, 104),
-        Err(Error::Transport(synthetic_transport::Error::Identity))
+        w.reserve_with_transport("two", vec![worker("a", &m)], plan_one(fresh), 104)
+            .unwrap_err(),
+        Error::Transport(synthetic_transport::Error::Identity)
     );
-    w.void_unstarted(&keys[0]).unwrap();
+    assert_eq!(w.snapshot().reserved, Amount::default());
     assert!(w.drained());
 }
 
@@ -416,7 +477,9 @@ fn split_frames_at_every_byte_boundary() {
     let id = identity();
     for split in 1..FRAME_LEN {
         let mut w = wave();
-        let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+        let keys = w
+            .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+            .unwrap();
         let key = &keys[0];
         w.bind_transport(key, &current(&m), id, 100).unwrap();
         w.dispatch(key, &current(&m), 100).unwrap();
@@ -439,7 +502,9 @@ fn coalesced_frames_share_existing_sequence_and_reservation() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -457,7 +522,9 @@ fn raw_full_frame_cannot_skip_a_buffered_prefix() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -476,7 +543,9 @@ fn oversized_chunk_fails_closed_before_processing_any_frame() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -494,7 +563,9 @@ fn partial_eof_requires_exact_trusted_cleanup() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -517,7 +588,9 @@ fn trailing_bytes_after_done_in_same_chunk_invalidate_report() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -538,7 +611,9 @@ fn exact_owner_cancel_retains_lease_and_rejects_foreign_identity() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -562,7 +637,9 @@ fn foreign_chunk_cannot_mutate_partial_buffer_or_clock() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -592,7 +669,12 @@ fn partial_buffers_remain_isolated_between_concurrent_peers() {
     let m = manifest();
     let mut w = pair_wave();
     let keys = w
-        .reserve("one", vec![worker("a", &m), worker("b", &m)], 100)
+        .reserve_with_transport(
+            "one",
+            vec![worker("a", &m), worker("b", &m)],
+            plan_pair(),
+            100,
+        )
         .unwrap();
     let a = identity();
     let b = Identity {
@@ -638,7 +720,9 @@ fn partial_frame_does_not_extend_worker_deadline() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -661,7 +745,9 @@ fn malformed_second_frame_invalidates_coalesced_report() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -684,7 +770,9 @@ fn foreign_full_frame_source_cannot_mutate_buffer_clock_or_policy() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -715,7 +803,9 @@ fn foreign_terminal_observation_cannot_release_exact_reservation() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -744,7 +834,9 @@ fn generic_settle_cannot_bypass_bound_terminal_identity() {
     let m = manifest();
     let id = identity();
     let mut w = wave();
-    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let keys = w
+        .reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+        .unwrap();
     let key = &keys[0];
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
@@ -755,5 +847,104 @@ fn generic_settle_cannot_bypass_bound_terminal_identity() {
         w.settle_transport(key, &current(&m), 101, id, None),
         Ok(ResultState::NoPublication)
     );
+    assert!(w.drained());
+}
+
+#[test]
+fn missing_or_foreign_owner_scope_is_denied_before_reservation() {
+    let m = manifest();
+    let mut w = HarnessWave::new(Session::new(amount(), 100, 100, 20).unwrap()).unwrap();
+    assert_eq!(
+        w.reserve_with_transport("one", vec![worker("a", &m)], plan_one(identity()), 100)
+            .unwrap_err(),
+        Error::Transport(synthetic_transport::Error::Identity)
+    );
+    assert_eq!(w.snapshot().reserved, Amount::default());
+    let mut w = wave();
+    let wrong = Identity {
+        project: [9; 32],
+        ..identity()
+    };
+    assert_eq!(
+        w.reserve_with_transport("one", vec![worker("a", &m)], plan_one(wrong), 100)
+            .unwrap_err(),
+        Error::Transport(synthetic_transport::Error::Identity)
+    );
+    assert!(w.drained());
+}
+
+#[test]
+fn missing_or_extra_transport_plan_is_denied_atomically() {
+    let m = manifest();
+    let mut w = wave();
+    assert_eq!(
+        w.reserve("one", vec![worker("a", &m)], 100).unwrap_err(),
+        Error::Transport(synthetic_transport::Error::Identity)
+    );
+    assert!(w.drained());
+    let mut w = wave();
+    assert_eq!(
+        w.reserve_with_transport("one", vec![worker("a", &m)], plan_pair(), 100)
+            .unwrap_err(),
+        Error::Transport(synthetic_transport::Error::Identity)
+    );
+    assert_eq!(w.snapshot().reserved, Amount::default());
+    assert!(w.drained());
+}
+
+#[test]
+fn duplicate_or_mismatched_peer_plan_fails_before_any_lease() {
+    let m = manifest();
+    for b in [
+        Identity {
+            worker: [4; 32],
+            connection: [7; 32],
+            ..identity()
+        },
+        Identity {
+            worker: [6; 32],
+            connection: [5; 32],
+            ..identity()
+        },
+        Identity {
+            attempt: [9; 32],
+            worker: [6; 32],
+            connection: [7; 32],
+            ..identity()
+        },
+    ] {
+        let mut w = pair_wave();
+        let plan = BTreeMap::from([("a".into(), identity()), ("b".into(), b)]);
+        assert_eq!(
+            w.reserve_with_transport("one", vec![worker("a", &m), worker("b", &m)], plan, 100)
+                .unwrap_err(),
+            Error::Transport(synthetic_transport::Error::Identity)
+        );
+        assert_eq!(w.snapshot().reserved, Amount::default());
+        assert!(w.drained());
+    }
+}
+
+#[test]
+fn first_observed_connection_cannot_choose_another_workers_identity() {
+    let m = manifest();
+    let mut w = pair_wave();
+    let keys = w
+        .reserve_with_transport(
+            "one",
+            vec![worker("a", &m), worker("b", &m)],
+            plan_pair(),
+            100,
+        )
+        .unwrap();
+    let b = plan_pair()["b"];
+    assert_eq!(
+        w.bind_transport(&keys[0], &current(&m), b, 100),
+        Err(Error::Transport(synthetic_transport::Error::Identity))
+    );
+    assert!(w.stopped());
+    assert_eq!(w.snapshot().reserved.ram, 32);
+    w.void_unstarted(&keys[0]).unwrap();
+    w.void_unstarted(&keys[1]).unwrap();
     assert!(w.drained());
 }
