@@ -11,7 +11,7 @@ from threading import current_thread
 
 from gateway import Refused
 from local_agent_replan import AttemptCoordinator
-from local_agent_model_fixture_contract import PARENTS, DEFAULT_CEILINGS, ECONOMY_CEILINGS, wire_for, bound_reply
+from local_agent_model_fixture_contract import PARENTS, DEFAULT_CEILINGS, ECONOMY_CEILINGS, MAX_PROMPT_TOKENS, wire_for, bound_reply
 from heterogeneous_team_token_budget import TeamTokenBudget, Attempt
 
 
@@ -78,7 +78,7 @@ class RetryBudgetSession:
         if reserved or sum(ceilings) > remaining:
             raise Refused("retry_budget_unaffordable")
         prompt = self.prompt_snapshot()
-        if prompt is not None and (prompt[2] or prompt[3] < len(PARENTS)*112):
+        if prompt is not None and (prompt[2] or prompt[3] < len(PARENTS)*MAX_PROMPT_TOKENS):
             raise Refused("retry_budget_prompt_unaffordable")
         preview = self._coordinator.prepare(context,candidates)
         if tuple(tuple(a.worker for a in w) for w in preview.plan.waves) != (("plan",),("a","b"),("review",)):
@@ -119,7 +119,7 @@ class RetryBudgetSession:
         limits = dict(zip(PARENTS,offer.ceilings))
         wires = tuple(wire_for(n,tuple(run._run._outputs[p] for p in PARENTS[n]),ceiling=limits[n]) for n in wave)
         attempts = tuple(Attempt(sha256((offer.attempt+":"+offer.plan_digest+":"+n).encode("ascii")).hexdigest(),
-                                  n,sha256(w).hexdigest(),limits[n],112 if offer.prompt_remaining is not None else 0) for n,w in zip(wave,wires))
+                                  n,sha256(w).hexdigest(),limits[n],MAX_PROMPT_TOKENS if offer.prompt_remaining is not None else 0) for n,w in zip(wave,wires))
         leases = self._budget.reserve_wave(self._scope,attempts)
         self._leases = {l.attempt.worker:(l,w,"PREPARED") for l,w in zip(leases,wires)}
         return tuple(zip(leases,wires))
