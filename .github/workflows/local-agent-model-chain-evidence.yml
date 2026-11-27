@@ -5,6 +5,7 @@ on:
     paths:
       - 'experiments/local_agent_model_chain_acceptance.py'
       - 'experiments/local_agent_model_fixture_contract.py'
+      - 'experiments/local_agent_model_token_ledger.py'
       - 'experiments/local_agent_wave_run.py'
       - 'experiments/local_agent_owned_drain.py'
       - 'experiments/local_agent_launch.py'
