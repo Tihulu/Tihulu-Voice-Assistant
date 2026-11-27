@@ -46,8 +46,8 @@ def claim_wave(db, project, session, label, attempt, peers):
         digest(pair[1])
     with transaction(db):
         checked_version(db)
-        db.execute("INSERT INTO harness_wave_replay VALUES (?,?,?,?)",
-                   (session, project, label, attempt))
+        db.execute("INSERT INTO harness_wave_replay VALUES (?,?,?,?,?)",
+                   (session, project, label, attempt, len(peers)))
         db.executemany("INSERT INTO harness_connection_replay VALUES (?,?,?,?)",
                        [(session, attempt, worker, connection) for worker, connection in peers])
 
