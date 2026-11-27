@@ -71,7 +71,9 @@ def worker(name,port):
                                  "reply":raw.decode("utf-8"),"server_reaped":True},separators=(",",":")))
     return 0
 
-def child(host_net,host_port):
+def child(host_net,host_port,scenario):
+    if scenario not in ("normal","revoke"):
+        raise RuntimeError("fixture_scenario")
     sys.path.insert(0,"/work/code")
     import resource
     from gateway import Context,FixtureGateway,Refused
@@ -176,6 +178,48 @@ def child(host_net,host_port):
             fa=pool.submit(invoke,a,wa)
             fb=pool.submit(invoke,b,wb)
             oa,ob=fa.result(),fb.result()
+        if scenario=="revoke":
+            # Both fixed wrappers have actually returned from inference.
+            # Revoke the parent before publishing either validated result.
+            gate.revoke("native-plan")
+            try:
+                finish(a,wa,oa)
+            except Refused:
+                rejected=True
+            else:
+                rejected=False
+            record("agent-model-revoke-before-publication",rejected and
+                   all(o.worker!="a" for o in boundary.observations()))
+            del owned[a]
+            record("agent-model-revoke-keeps-peer-reservation",ledger.snapshot()==(32,16,16))
+            out,_=ob
+            p=owned[b]
+            if p.returncode!=0:
+                raise RuntimeError("fixture_peer_exit")
+            data,tokens=bound_reply(b.worker,wb,out)
+            token_ledger.settle(leases.pop(b),wb,tokens)
+            record("agent-model-revoked-peer-actual-output",bool(data),tokens=len(tokens))
+            outcome=boundary.observe_reaped(b,p.returncode,ctx,models,payload=data)
+            del owned[b]
+            record("agent-model-revoked-peer-drained",outcome=="DRAINED")
+            record("agent-model-revoked-all-ownership-cleared",ledger.snapshot()==(32,0,32)
+                   and not boundary.observations() and not owned and run.drained())
+            record("agent-model-revoked-usage-not-refunded",token_ledger.snapshot()==(64,48,0,16))
+            try:
+                run.output("plan",ctx,models)
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("agent-model-revoked-result-unavailable",denied)
+            try:
+                boundary.prepare("review",grants["review"],ctx,models)
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("agent-model-revoked-review-not-started",denied and not boundary.observations())
+            return 0
         finish(a,wa,oa)
         record("agent-model-peer-reservation-retained",ledger.snapshot()==(32,16,16))
         finish(b,wb,ob)
@@ -209,7 +253,9 @@ def child(host_net,host_port):
             p.communicate(timeout=3)
     return 0
 
-def main(binary,model):
+def main(binary,model,scenario="normal"):
+    if scenario not in ("normal","revoke"):
+        raise RuntimeError("fixture_scenario")
     from llama_engine_acceptance import MODEL_SHA
     import shutil
     binary,model=Path(binary).resolve(),Path(model).resolve()
@@ -251,7 +297,7 @@ def main(binary,model):
             port=str(listener.getsockname()[1])
             if port in ("8080","8081"):
                 raise RuntimeError("fixture_port_collision")
-            p=subprocess.Popen(prefix+["--","/usr/bin/python3","-I","/work/runner.py","--child",os.readlink("/proc/self/ns/net"),port],
+            p=subprocess.Popen(prefix+["--","/usr/bin/python3","-I","/work/runner.py","--child",os.readlink("/proc/self/ns/net"),port,scenario],
                                stdin=subprocess.DEVNULL,start_new_session=True,env={"PATH":"/usr/bin:/bin","LC_ALL":"C.UTF-8"})
             try:
                 status=p.wait(timeout=140)
@@ -274,6 +320,6 @@ def main(binary,model):
 if __name__=="__main__":
     if len(sys.argv)==4 and sys.argv[1]=="--worker":
         raise SystemExit(worker(*sys.argv[2:]))
-    if len(sys.argv)==4 and sys.argv[1]=="--child":
+    if len(sys.argv)==5 and sys.argv[1]=="--child":
         raise SystemExit(child(*sys.argv[2:]))
     raise SystemExit(main(*sys.argv[1:]))
