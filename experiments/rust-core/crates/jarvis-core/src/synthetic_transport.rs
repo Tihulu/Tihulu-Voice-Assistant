@@ -95,3 +95,36 @@ pub fn decode(bytes: &[u8]) -> Result<Frame, Error> {
         event,
     })
 }
+
+impl Frame {
+    /// Encode only the internal JHF1 envelope, not ACP wire bytes.
+    pub fn encode(self) -> Result<[u8; FRAME_LEN], Error> {
+        if !self.identity.valid() {
+            return Err(Error::Identity);
+        }
+        if self.sequence == 0 {
+            return Err(Error::Sequence);
+        }
+        let mut bytes = [0; FRAME_LEN];
+        bytes[..4].copy_from_slice(b"JHF1");
+        bytes[4] = match self.protocol {
+            Protocol::AcpV1 => 1,
+            Protocol::AcpV2 => 2,
+            _ => return Err(Error::Version),
+        };
+        bytes[5] = match self.event {
+            Event::Started => 1,
+            Event::Progress => 2,
+            Event::ApprovalNeeded => 3,
+            Event::ReportedDone => 4,
+            Event::ReportedFailure => 5,
+        };
+        bytes[6..14].copy_from_slice(&self.sequence.to_be_bytes());
+        bytes[14..46].copy_from_slice(&self.identity.project);
+        bytes[46..78].copy_from_slice(&self.identity.session);
+        bytes[78..110].copy_from_slice(&self.identity.attempt);
+        bytes[110..142].copy_from_slice(&self.identity.worker);
+        bytes[142..174].copy_from_slice(&self.identity.connection);
+        Ok(bytes)
+    }
+}
