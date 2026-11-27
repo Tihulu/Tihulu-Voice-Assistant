@@ -45,6 +45,7 @@ struct Row {
     track: EventTrack,
     event_key: EventKey,
     dispatched: bool,
+    approval_requested: bool,
     planned: Option<Identity>,
     transport: Option<Identity>,
     pending: [u8; FRAME_LEN],
@@ -208,6 +209,7 @@ impl HarnessWave {
                     track,
                     event_key,
                     dispatched: false,
+                    approval_requested: false,
                     planned: planned.get(&name).copied(),
                     transport: None,
                     pending: [0; FRAME_LEN],
@@ -543,12 +545,33 @@ impl HarnessWave {
             self.stop();
             return Err(Error::Harness(error));
         }
+        if event == Event::ApprovalNeeded {
+            row.approval_requested = true;
+        }
         // No approval/resume authority yet. Approval requests and failures
         // stop the wave rather than silently allowing the requested effect.
         if matches!(event, Event::ApprovalNeeded | Event::ReportedFailure) {
             self.stop();
         }
         Ok(())
+    }
+
+    /// A stopped wave may record a denied approval for its exact live row.
+    /// This is not authorization and does not resume a stopped wave.
+    pub fn check_denied_review(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        source: Identity,
+    ) -> Result<(), Error> {
+        let row = self.row(key)?;
+        if row.transport != Some(source) {
+            return Err(Error::Foreign);
+        }
+        if !row.dispatched || !row.approval_requested || !self.stopped() {
+            return Err(Error::Phase);
+        }
+        self.check(key, current)
     }
 
     /// Trusted terminal observation for a nontransport worker.
