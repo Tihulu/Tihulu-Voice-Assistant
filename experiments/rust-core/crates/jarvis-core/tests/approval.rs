@@ -98,10 +98,7 @@ fn exact_expiry_and_clock_regression_are_terminal() {
     assert_eq!(gate.approve(&b, 120).unwrap_err(), Error::Expired);
     let mut gate = Gate::new(b, 100).unwrap();
     let receipt = gate.approve(&b, 110).unwrap();
-    assert_eq!(
-        gate.consume(&receipt, &b, 109),
-        Err(Error::ClockRegression)
-    );
+    assert_eq!(gate.consume(&receipt, &b, 109), Err(Error::ClockRegression));
     assert_eq!(gate.phase(), Phase::Closed);
     let mut gate = Gate::new(b, 100).unwrap();
     let receipt = gate.approve(&b, 119).unwrap();
