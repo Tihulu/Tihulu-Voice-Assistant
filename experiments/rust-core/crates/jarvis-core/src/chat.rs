@@ -82,7 +82,7 @@ pub struct Chat {
 
 impl Chat {
     /// The trusted owner must bind this to its registered session exactly once.
-    pub fn new(session: SessionId) -> Self {
+    pub(crate) fn new(session: SessionId) -> Self {
         Self {
             session,
             revision: 0,
