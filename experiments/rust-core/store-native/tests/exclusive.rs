@@ -8,22 +8,28 @@ use std::os::unix::fs::{symlink, DirBuilderExt, PermissionsExt};
 use std::path::PathBuf;
 use std::process::Command;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Mutex, MutexGuard};
 
 const S: [u8; 16] = [2; 16];
 const C: [u8; 16] = [4; 16];
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
-struct Fixture(PathBuf);
+// Keep unrelated fork/exec fixtures from overlapping the lock-lifetime
+// assertions. Individual tests still exercise actual competing owners and
+// child processes. Child-only probes do not construct Fixture.
+static FIXTURE_SERIAL: Mutex<()> = Mutex::new(());
+struct Fixture(PathBuf, #[allow(dead_code)] MutexGuard<'static, ()>);
 
 impl Fixture {
     fn new() -> Self {
+        let guard = FIXTURE_SERIAL.lock().unwrap();
         let path = std::env::temp_dir().join(format!(
             "jarvis-exclusive-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
         fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
-        Self(path)
+        Self(path, guard)
     }
 }
 
@@ -116,10 +122,11 @@ fn refuses_symlink_sidecar_before_sqlite_open() {
     let target = f.0.join("target");
     fs::write(&target, b"unchanged").unwrap();
     symlink(&target, f.0.join("fixture.sqlite-journal")).unwrap();
-    assert!(matches!(
-        ExclusiveStore::open(&f.0, false),
-        Err(Error::Invalid)
-    ));
+    match ExclusiveStore::open(&f.0, false) {
+        Err(Error::Invalid) => {}
+        Err(other) => panic!("expected sidecar refusal, got {other:?}"),
+        Ok(_) => panic!("unexpected open with symlink sidecar"),
+    }
     assert_eq!(fs::read(target).unwrap(), b"unchanged");
 }
 
