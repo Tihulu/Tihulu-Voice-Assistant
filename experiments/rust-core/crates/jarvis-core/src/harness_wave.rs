@@ -228,10 +228,10 @@ impl HarnessWave {
 
     /// Trusted evidence that the prepared worker never started.
     pub fn void_unstarted(&mut self, key: &WorkerKey) -> Result<(), Error> {
-        let row = self.row(key)?;
-        if row.dispatched {
+        if self.row(key)?.dispatched {
             return Err(Error::Phase);
         }
+        let row = self.rows.get(&key.worker).ok_or(Error::Foreign)?;
         self.session
             .void_unstarted(&row.handle)
             .map_err(Error::Session)?;
