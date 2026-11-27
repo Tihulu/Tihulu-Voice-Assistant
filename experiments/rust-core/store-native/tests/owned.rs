@@ -158,7 +158,10 @@ fn cancelled_recovery_can_be_reopened_without_second_revision() {
     let recovery = owner.recover_cancel(S, 2).unwrap();
     assert_eq!(owner.history(S).unwrap().0, 2);
     assert_eq!(owner.recover_cancel(S, 2).unwrap_err(), Error::Busy);
-    assert_eq!(owner.complete_reaped(&recovery, "late"), Err(Error::Conflict));
+    assert_eq!(
+        owner.complete_reaped(&recovery, "late"),
+        Err(Error::Conflict)
+    );
     assert_eq!(owner.observe_drained(&recovery), Ok(3));
     assert_eq!(owner.recover_cancel(S, 3).unwrap_err(), Error::Unknown);
 }
@@ -178,4 +181,73 @@ fn recovery_does_not_cancel_newer_turn_at_stale_revision() {
     assert_eq!(pending.state, State::Pending);
     let recovery = owner.recover_cancel(S, 3).unwrap();
     assert_eq!(owner.observe_drained(&recovery), Ok(5));
+}
+
+#[test]
+fn database_failure_does_not_leave_a_partial_turn_or_lose_ticket() {
+    let f = Fixture::new();
+    let mut owner = setup(f.db());
+    let fault = f.db();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER fixture_abort BEFORE UPDATE OF revision ON sessions
+             BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+        )
+        .unwrap();
+    assert!(matches!(
+        owner.submit(S, C, 0, "one", "Hello"),
+        Err(Error::Database)
+    ));
+    assert_eq!(owner.history(S).unwrap(), (0, vec![]));
+    assert_eq!(owner.recovery(S).unwrap(), None);
+    fault.execute_batch("DROP TRIGGER fixture_abort;").unwrap();
+    let first = ticket(owner.submit(S, C, 0, "one", "Hello").unwrap());
+    fault
+        .execute_batch(
+            "CREATE TRIGGER fixture_abort BEFORE UPDATE OF revision ON sessions
+             BEGIN SELECT RAISE(ABORT, 'fixture'); END;",
+        )
+        .unwrap();
+    assert_eq!(
+        owner.complete_reaped(&first, "Done"),
+        Err(Error::Database)
+    );
+    assert_eq!(owner.history(S).unwrap().0, 1);
+    assert_eq!(owner.history(S).unwrap().1.len(), 1);
+    assert_eq!(owner.recovery(S).unwrap().unwrap().state, State::Pending);
+    fault.execute_batch("DROP TRIGGER fixture_abort;").unwrap();
+    assert_eq!(owner.complete_reaped(&first, "Done"), Ok(2));
+    assert_eq!(owner.history(S).unwrap().1.len(), 2);
+    drop(owner);
+    assert!(Store::reopen(f.db()).is_ok());
+}
+
+#[test]
+fn admission_limit_does_not_commit_untracked_durable_work() {
+    let db = Connection::open_in_memory().unwrap();
+    let store = Store::initialize(db).unwrap();
+    for i in 0..65u8 {
+        store.session([i; 16], None).unwrap();
+    }
+    let mut owner = OwnedStore::new(store);
+    let mut tickets = Vec::new();
+    for i in 0..64u8 {
+        tickets.push(ticket(
+            owner.submit([i; 16], C, 0, "one", "Hello").unwrap(),
+        ));
+    }
+    assert!(matches!(
+        owner.submit([64; 16], C, 0, "one", "Hello"),
+        Err(Error::Limit)
+    ));
+    assert_eq!(owner.history([64; 16]).unwrap(), (0, vec![]));
+    assert!(matches!(
+        owner.submit([0; 16], C, 0, "one", "Hello"),
+        Ok(Admission::Replay(_))
+    ));
+    owner.complete_reaped(&tickets[0], "Done").unwrap();
+    assert!(matches!(
+        owner.submit([64; 16], C, 0, "one", "Hello"),
+        Ok(Admission::New(_, _))
+    ));
 }
