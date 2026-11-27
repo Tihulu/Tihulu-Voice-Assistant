@@ -3,7 +3,7 @@
 import json
 from hashlib import sha256
 from gateway import Refused
-from local_agent_model_fixture_contract import validate_wire,_unique
+from local_agent_model_fixture_contract import validate_wire,_unique,wire_ceiling
 
 MAX_EVENT=8192
 
@@ -37,6 +37,8 @@ def first_event(line):
 
 def marker(worker,wire,line):
     count,event_digest=first_event(line)
+    if count>wire_ceiling(worker,wire):
+        raise Refused("fixture_stream_event_ceiling")
     return {"state":"FIRST_EVENT","worker":worker,
             "wire_digest":sha256(stream_wire(worker,wire)).hexdigest(),
             "event_digest":event_digest,"observed_tokens":count}
@@ -45,7 +47,7 @@ def verify_marker(worker,wire,obj):
     if (type(obj) is not dict or set(obj)!={"state","worker","wire_digest","event_digest","observed_tokens"}
             or obj["state"]!="FIRST_EVENT" or obj["worker"]!=worker
             or obj["wire_digest"]!=sha256(stream_wire(worker,wire)).hexdigest()
-            or type(obj["observed_tokens"]) is not int or not 1<=obj["observed_tokens"]<=16
+            or type(obj["observed_tokens"]) is not int or not 1<=obj["observed_tokens"]<=wire_ceiling(worker,wire)
             or type(obj["event_digest"]) is not str or len(obj["event_digest"])!=64
             or any(x not in "0123456789abcdef" for x in obj["event_digest"])):
         raise Refused("fixture_stream_marker")

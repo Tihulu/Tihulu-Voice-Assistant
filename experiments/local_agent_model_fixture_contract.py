@@ -16,12 +16,20 @@ MAX_PARENT_BYTES=512
 CONTEXT_TOKENS=128
 MAX_GENERATED_TOKENS=16
 MAX_PROMPT_TOKENS=CONTEXT_TOKENS-MAX_GENERATED_TOKENS
+DEFAULT_CEILINGS=(16,16,16,16)
+ECONOMY_CEILINGS=(16,8,8,16)
+
+def allowed_ceiling(worker,ceiling):
+    if type(worker) is not str or worker not in PARENTS or type(ceiling) is not int or ceiling not in ((8,16) if worker in ("a","b") else (16,)):
+        raise Refused("model_fixture_ceiling")
+    return ceiling
 
 
 def _digest(value):
     return type(value) is str and len(value)==64 and all(x in "0123456789abcdef" for x in value)
 
-def wire_for(worker,rows):
+def wire_for(worker,rows,*,ceiling=16):
+    allowed_ceiling(worker,ceiling)
     if type(worker) is not str or worker not in PARENTS or type(rows) is not tuple or len(rows)!=len(PARENTS[worker]):
         raise Refused("model_fixture_inputs")
     texts=[]
@@ -42,7 +50,7 @@ def wire_for(worker,rows):
             raise Refused("model_fixture_text")
         texts.append(value)
     prompt=PREFIX[worker]+(" ".join(texts)+" " if texts else "")
-    wire=json.dumps({"prompt":prompt,"n_predict":16,"temperature":0,"seed":42,
+    wire=json.dumps({"prompt":prompt,"n_predict":ceiling,"temperature":0,"seed":42,
                      "stream":False,"return_tokens":True,"cache_prompt":False,
                      "response_fields":["content","tokens","stop","stop_type","model","truncated","tokens_evaluated"]},
                     separators=(",",":"),ensure_ascii=True).encode("ascii")
@@ -66,7 +74,8 @@ def validate_wire(worker,wire):
         prompt_size=len(prompt.encode("utf-8"))
     except UnicodeError as exc:
         raise Refused("model_fixture_wire") from exc
-    expected={"prompt":prompt,"n_predict":16,"temperature":0,"seed":42,
+    ceiling=allowed_ceiling(worker,obj.get("n_predict"))
+    expected={"prompt":prompt,"n_predict":ceiling,"temperature":0,"seed":42,
               "stream":False,"return_tokens":True,"cache_prompt":False,
               "response_fields":["content","tokens","stop","stop_type","model","truncated","tokens_evaluated"]}
     if (not prompt.startswith(PREFIX[worker]) or prompt_size>2048
@@ -77,8 +86,12 @@ def validate_wire(worker,wire):
         raise Refused("model_fixture_wire")
     return sha256(wire).hexdigest()
 
-def reply_for(raw):
-    content,tokens=parse_reply(raw)
+def wire_ceiling(worker,wire):
+    validate_wire(worker,wire)
+    return json.loads(wire)["n_predict"]
+
+def reply_for(raw,*,ceiling=16):
+    content,tokens=parse_reply(raw,token_limit=ceiling)
     data=content.encode("utf-8")
     if not 0<len(data)<=MAX_PARENT_BYTES:
         raise Refused("model_fixture_result_size")
@@ -111,7 +124,7 @@ def prompt_count(raw):
         raise Refused("model_fixture_context_budget")
     return len(obj["tokens"])
 
-def measured_reply(raw,count):
+def measured_reply(raw,count,*,ceiling=16):
     if type(count) is not int or not 1<=count<=MAX_PROMPT_TOKENS:
         raise Refused("model_fixture_context_budget")
     if type(raw) is not bytes or not 0<len(raw)<=32768:
@@ -124,7 +137,7 @@ def measured_reply(raw,count):
             or obj["tokens_evaluated"]!=count):
         raise Refused("model_fixture_prompt_count_mismatch")
     del obj["tokens_evaluated"]
-    data,tokens=reply_for(json.dumps(obj,separators=(",",":")).encode("ascii"))
+    data,tokens=reply_for(json.dumps(obj,separators=(",",":")).encode("ascii"),ceiling=ceiling)
     if count+len(tokens)>CONTEXT_TOKENS:
         raise Refused("model_fixture_context_budget")
     return data,tokens,count
@@ -143,4 +156,4 @@ def bound_reply(worker,wire,envelope):
             or type(obj["reply"]) is not str
             or envelope!=json.dumps(obj,separators=(",",":"),ensure_ascii=True).encode("ascii")):
         raise Refused("model_fixture_envelope")
-    return measured_reply(obj["reply"].encode("utf-8"),obj["prompt_tokens"])
+    return measured_reply(obj["reply"].encode("utf-8"),obj["prompt_tokens"],ceiling=wire_ceiling(worker,wire))

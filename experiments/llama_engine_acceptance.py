@@ -24,7 +24,9 @@ NATIVE_TOKENS=16
 NATIVE_VOCAB=512
 PROMPTS=("Once upon a time, there was a little bird named","A little girl found a small dog and")
 
-def parse_reply(raw):
+def parse_reply(raw,*,token_limit=NATIVE_TOKENS):
+    if type(token_limit) is not int or not 1<=token_limit<=NATIVE_TOKENS:
+        raise ValueError("llm_token_limit")
     if type(raw) is not bytes or not 0<len(raw)<=MAX_REPLY:
         raise ValueError("llm_response_size")
     def unique(pairs):
@@ -40,9 +42,9 @@ def parse_reply(raw):
             or obj["stop_type"] not in ("eos","limit") or type(obj["content"]) is not str
             or not obj["content"].strip() or len(obj["content"].encode("utf-8"))>4096
             or any((ord(c)<32 and c not in "\n\t") or 127<=ord(c)<=159 for c in obj["content"])
-            or type(obj["tokens"]) is not list or not 1<=len(obj["tokens"])<=NATIVE_TOKENS
+            or type(obj["tokens"]) is not list or not 1<=len(obj["tokens"])<=token_limit
             or any(type(t) is not int or not 0<=t<NATIVE_VOCAB for t in obj["tokens"])
-            or (obj["stop_type"]=="limit" and len(obj["tokens"])!=NATIVE_TOKENS)):
+            or (obj["stop_type"]=="limit" and len(obj["tokens"])!=token_limit)):
         raise ValueError("llm_response_contract")
     return obj["content"],tuple(obj["tokens"])
 

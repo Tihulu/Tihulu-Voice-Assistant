@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from threading import current_thread
 from gateway import Refused
 from hashlib import sha256
-from local_agent_model_fixture_contract import validate_wire,PARENTS
+from local_agent_model_fixture_contract import validate_wire,PARENTS,wire_ceiling,allowed_ceiling,DEFAULT_CEILINGS
 from local_agent_model_stream_contract import stream_wire
 
 @dataclass(frozen=True,eq=False)
@@ -18,9 +18,14 @@ class TokenLease:
     streaming: bool = False
 
 class TokenLedger:
-    def __init__(self,budget,*,strict_dispatch=False):
+    def __init__(self,budget,*,strict_dispatch=False,ceilings=DEFAULT_CEILINGS):
         if type(budget) is not int or not 16<=budget<=64 or type(strict_dispatch) is not bool:
             raise Refused("fixture_token_budget")
+        if type(ceilings) is not tuple or len(ceilings)!=len(PARENTS):
+            raise Refused("fixture_token_profile")
+        self._ceilings={w:allowed_ceiling(w,n) for w,n in zip(PARENTS,ceilings)}
+        if not strict_dispatch and ceilings!=DEFAULT_CEILINGS:
+            raise Refused("fixture_token_profile")
         self._budget=budget
         self._strict_dispatch=strict_dispatch
         self._dispatched=set()
@@ -48,7 +53,7 @@ class TokenLedger:
                 or any(type(w) is not str or w not in PARENTS or w in self._seen for w in workers)
                 or len(set(workers))!=len(workers)):
             raise Refused("fixture_token_wave")
-        if len(workers)*16>self.snapshot()[3]:
+        if sum(self._ceilings[w] for w in workers)>self.snapshot()[3]:
             raise Refused("fixture_token_wave_budget")
 
     def reserve(self,worker,wire,*,streaming=False):
@@ -56,10 +61,13 @@ class TokenLedger:
         target=validate_wire(worker,wire)
         if type(streaming) is not bool or (streaming and not self._strict_dispatch):
             raise Refused("fixture_token_transport")
+        ceiling=self._ceilings[worker]
+        if wire_ceiling(worker,wire)!=ceiling:
+            raise Refused("fixture_token_ceiling")
         actual=stream_wire(worker,wire) if streaming else wire
-        if self._closed or worker in self._seen or self.snapshot()[3]<16:
+        if self._closed or worker in self._seen or self.snapshot()[3]<ceiling:
             raise Refused("fixture_token_unavailable")
-        lease=TokenLease(worker,target,16,sha256(actual).hexdigest(),streaming)
+        lease=TokenLease(worker,target,ceiling,sha256(actual).hexdigest(),streaming)
         self._seen.add(worker)
         self._active[worker]=lease
         return lease
