@@ -121,9 +121,9 @@ impl GuardedWave {
             .wave
             .reserve_with_transport(label, workers, planned, now)
             .map_err(AdmissionError::Wave)?;
-        if let Err(error) = self
-            .store
-            .claim_wave(self.project, self.session, label, attempt, &peers)
+        if let Err(error) =
+            self.store
+                .claim_wave(self.project, self.session, label, attempt, &peers)
         {
             self.wave.stop();
             for (key, identity) in keys.iter().zip(identities) {
