@@ -103,9 +103,7 @@ fn schema_rows(db: &Connection) -> Result<Vec<SchemaRow>, Error> {
         "SELECT type,name,tbl_name,sql FROM sqlite_schema
          WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name LIMIT 100",
     )?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
-    })?;
+    let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
