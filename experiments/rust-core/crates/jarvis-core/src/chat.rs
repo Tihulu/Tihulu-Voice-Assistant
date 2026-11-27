@@ -119,8 +119,7 @@ impl Chat {
 
     fn check(&self, handle: &Access, write: bool) -> Result<(), Error> {
         let row = self.access.get(&handle.id).ok_or(Error::Denied)?;
-        if !Arc::ptr_eq(&row.identity, &handle.identity)
-            || (write && row.mode != AccessMode::Write)
+        if !Arc::ptr_eq(&row.identity, &handle.identity) || (write && row.mode != AccessMode::Write)
         {
             return Err(Error::Denied);
         }
@@ -206,9 +205,7 @@ impl Chat {
     /// Only the trusted runtime owns the turn ticket. No model effects here.
     pub fn complete(&mut self, turn: &Turn, text: &str) -> Result<(), Error> {
         let pending = self.pending.as_ref().ok_or(Error::Foreign)?;
-        if turn.sequence != pending.sequence
-            || !Arc::ptr_eq(&turn.identity, &pending.identity)
-        {
+        if turn.sequence != pending.sequence || !Arc::ptr_eq(&turn.identity, &pending.identity) {
             return Err(Error::Foreign);
         }
         if !Self::valid_text(text) {
