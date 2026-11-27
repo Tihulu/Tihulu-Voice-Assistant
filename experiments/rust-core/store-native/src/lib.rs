@@ -488,3 +488,5 @@ impl Store {
         self.transition(session, client, key, Transition::Complete(text))
     }
 }
+
+pub mod owned;
