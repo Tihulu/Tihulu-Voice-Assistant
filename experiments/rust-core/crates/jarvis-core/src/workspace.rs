@@ -262,7 +262,10 @@ impl Workspace {
             return Err(Error::Conflict);
         }
         let mut list = self.tabs(view.window)?.to_vec();
-        let index = list.iter().position(|id| *id == tab).ok_or(Error::Conflict)?;
+        let index = list
+            .iter()
+            .position(|id| *id == tab)
+            .ok_or(Error::Conflict)?;
         list.remove(index);
         let boundary = self.pinned_prefix(&list);
         list.insert(boundary, tab);
@@ -284,7 +287,10 @@ impl Workspace {
         if index >= members.len() {
             return Err(Error::Conflict);
         }
-        let old = members.iter().position(|id| *id == tab).ok_or(Error::Conflict)?;
+        let old = members
+            .iter()
+            .position(|id| *id == tab)
+            .ok_or(Error::Conflict)?;
         let mut list = self.tabs(window)?.to_vec();
         let start = list
             .windows(members.len())
@@ -303,7 +309,10 @@ impl Workspace {
         let row = self.group(group)?;
         let window = row.window;
         let mut members = row.tabs.clone();
-        let old = members.iter().position(|id| *id == tab).ok_or(Error::Conflict)?;
+        let old = members
+            .iter()
+            .position(|id| *id == tab)
+            .ok_or(Error::Conflict)?;
         let mut list = self.tabs(window)?.to_vec();
         let start = list
             .windows(members.len())
