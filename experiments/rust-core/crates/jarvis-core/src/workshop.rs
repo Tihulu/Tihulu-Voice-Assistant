@@ -129,9 +129,7 @@ pub fn evaluate(
     }
     if request.intent == Intent::ObserveStatus {
         return match observation.readiness {
-            Readiness::Ready | Readiness::Busy | Readiness::Draining => {
-                Ok(Route::SanitizedStatus)
-            }
+            Readiness::Ready | Readiness::Busy | Readiness::Draining => Ok(Route::SanitizedStatus),
             _ => Err(Error::NotReady),
         };
     }
