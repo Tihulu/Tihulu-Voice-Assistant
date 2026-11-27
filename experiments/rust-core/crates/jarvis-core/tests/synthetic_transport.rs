@@ -318,8 +318,7 @@ fn acp_worker_cannot_dispatch_without_bound_envelope() {
         .unwrap();
     assert_eq!(w.dispatch(&keys[0], &current(&m), 100), Err(Error::Phase));
     assert_eq!(w.snapshot().reserved, amount());
-    w.void_transport_unstarted(&keys[0], identity())
-        .unwrap();
+    w.void_transport_unstarted(&keys[0], identity()).unwrap();
     assert!(w.drained());
 }
 
@@ -339,8 +338,7 @@ fn all_acp_peers_must_bind_before_any_dispatch() {
         .unwrap();
     assert_eq!(w.dispatch(&keys[0], &current(&m), 100), Err(Error::Phase));
     assert!(w.stopped());
-    w.void_transport_unstarted(&keys[0], identity())
-        .unwrap();
+    w.void_transport_unstarted(&keys[0], identity()).unwrap();
     w.void_transport_unstarted(&keys[1], plan_pair()["b"])
         .unwrap();
     assert!(w.drained());
@@ -417,8 +415,7 @@ fn peer_scope_drift_or_duplicate_worker_rejects_entire_wave() {
             Err(Error::Transport(synthetic_transport::Error::Identity))
         );
         assert!(w.stopped());
-        w.void_transport_unstarted(&keys[0], identity())
-            .unwrap();
+        w.void_transport_unstarted(&keys[0], identity()).unwrap();
         w.void_transport_unstarted(&keys[1], plan_pair()["b"])
             .unwrap();
         assert!(w.drained());
@@ -949,8 +946,7 @@ fn first_observed_connection_cannot_choose_another_workers_identity() {
     );
     assert!(w.stopped());
     assert_eq!(w.snapshot().reserved.ram, 32);
-    w.void_transport_unstarted(&keys[0], identity())
-        .unwrap();
+    w.void_transport_unstarted(&keys[0], identity()).unwrap();
     w.void_transport_unstarted(&keys[1], plan_pair()["b"])
         .unwrap();
     assert!(w.drained());
