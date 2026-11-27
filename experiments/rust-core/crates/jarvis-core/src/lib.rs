@@ -6,5 +6,6 @@ pub mod budget;
 pub mod chat;
 
 pub mod deadline;
+pub mod harness;
 pub mod session;
 pub mod workspace;
