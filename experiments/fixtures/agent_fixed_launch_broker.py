@@ -61,6 +61,10 @@ class FixedChildBroker:
         self._thread()
         return tuple(self._children)
 
+    def observations(self):
+        self._thread()
+        return self._boundary.observations()
+
     def inputs(self,ticket,context,candidates):
         self._thread()
         if not any(t is ticket for t in self._children):
