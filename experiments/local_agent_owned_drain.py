@@ -24,7 +24,7 @@ class ManagedWave:
     the exact owned process (including descendants where applicable).
     """
     def __init__(self,gateway,plan,workers,candidates,budget,ledger,attempt,
-                 limit=6,preference="balanced"):
+                 limit=6,preference="balanced",*,strict_results=False):
         if type(ledger) is not ResourceLedger or type(attempt) is not str:
             raise Refused("managed_wave_invalid")
         token(attempt)
@@ -32,7 +32,7 @@ class ManagedWave:
         self._ledger=ledger
         self._attempt=attempt
         self._run=WaveRun(gateway,plan,workers,candidates,budget,limit,preference,
-                          attempt=attempt)
+                          attempt=attempt,strict_results=strict_results)
         self._assignments={a.worker:a for wave in plan.waves for a in wave}
         self._owned={}
         self._families={}
