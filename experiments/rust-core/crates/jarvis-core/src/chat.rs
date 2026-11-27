@@ -127,6 +127,20 @@ impl Chat {
         Ok(())
     }
 
+    /// Trusted transport handoff: replace the exact active handle without
+    /// changing its scope, request namespace or pending turn ownership.
+    /// A revoked handle cannot reconnect. This is not device authentication.
+    pub fn reconnect(&mut self, handle: &Access) -> Result<Access, Error> {
+        self.check(handle, false)?;
+        let row = self.access.get_mut(&handle.id).ok_or(Error::Denied)?;
+        let identity = Arc::new(());
+        row.identity = identity.clone();
+        Ok(Access {
+            id: handle.id,
+            identity,
+        })
+    }
+
     pub fn read(&self, handle: &Access) -> Result<(u64, &[Message]), Error> {
         self.check(handle, false)?;
         Ok((self.revision, &self.messages))
