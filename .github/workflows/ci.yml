@@ -34,8 +34,16 @@ jobs:
           persist-credentials: false
       - name: Install native display test dependencies
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+          # These tests need Ubuntu runtime packages only. Do not refresh unrelated
+          # runner vendor repositories or weaken APT signature verification.
+          test -r /etc/apt/sources.list.d/ubuntu.sources
+          apt_scope=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources
+                     -o Dir::Etc::sourceparts=-
+                     -o APT::Get::AllowUnauthenticated=false
+                     -o Acquire::AllowInsecureRepositories=false
+                     -o Acquire::AllowDowngradeToInsecureRepositories=false)
+          sudo apt-get "${apt_scope[@]}" update -qq
+          sudo apt-get "${apt_scope[@]}" install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
       - name: Exercise real GTK widgets with synthetic backends
         env:
           PYTHONPATH: src
@@ -66,8 +74,16 @@ jobs:
           python-version: '3.12'
       - name: Install target-system native runtime for Debian launch check
         run: |
-          sudo apt-get update -qq
-          sudo apt-get install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
+          # These tests need Ubuntu runtime packages only. Do not refresh unrelated
+          # runner vendor repositories or weaken APT signature verification.
+          test -r /etc/apt/sources.list.d/ubuntu.sources
+          apt_scope=(-o Dir::Etc::sourcelist=/etc/apt/sources.list.d/ubuntu.sources
+                     -o Dir::Etc::sourceparts=-
+                     -o APT::Get::AllowUnauthenticated=false
+                     -o Acquire::AllowInsecureRepositories=false
+                     -o Acquire::AllowDowngradeToInsecureRepositories=false)
+          sudo apt-get "${apt_scope[@]}" update -qq
+          sudo apt-get "${apt_scope[@]}" install --no-install-recommends -y python3-gi gir1.2-gtk-4.0 gir1.2-gdkpixbuf-2.0 librsvg2-common xvfb xauth dbus-x11
       - name: Build sdist and wheel, then verify the installed package
         env:
           PYTHONDONTWRITEBYTECODE: '1'
