@@ -64,3 +64,15 @@ class PrivateFrameTests(unittest.TestCase):
         self.f.close()
         with self.assertRaises(Refused):
             self.f.replace(png())
+
+    def test_duplicate_frame_scope_cannot_reuse_unclaimed_grant(self):
+        g=self.grant("a")
+        with self.assertRaises(Refused):
+            PrivateFrames(self.g,"surface","window")
+        self.f.close()
+        with self.assertRaises(Refused):
+            PrivateFrames(self.g,"surface","window")
+        other=PrivateFrames(self.g,"other","window")
+        frame=other.replace(png())
+        with self.assertRaises(Refused):
+            other.review(frame,"a","vision",g)
