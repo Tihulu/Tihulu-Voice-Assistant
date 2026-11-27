@@ -6,7 +6,7 @@ use crate::harness::{
     self, Capability, Event, EventKey, EventTrack, Manifest, Negotiated, Phase, Protocol,
 };
 use crate::session::{self, Handle, Session, Terminal};
-use crate::synthetic_transport::{self, Identity};
+use crate::synthetic_transport::{self, Identity, FRAME_LEN, MAX_CHUNK};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -43,6 +43,8 @@ struct Row {
     event_key: EventKey,
     dispatched: bool,
     transport: Option<Identity>,
+    pending: [u8; FRAME_LEN],
+    pending_len: usize,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -152,6 +154,8 @@ impl HarnessWave {
                     event_key,
                     dispatched: false,
                     transport: None,
+                    pending: [0; FRAME_LEN],
+                    pending_len: 0,
                 },
             );
             keys.push(WorkerKey {
@@ -287,6 +291,64 @@ impl HarnessWave {
         now: u64,
         bytes: &[u8],
     ) -> Result<(), Error> {
+        if self.row(key)?.pending_len != 0 {
+            self.stop();
+            return Err(Error::Transport(synthetic_transport::Error::Partial));
+        }
+        self.accept_frame(key, current, now, bytes)
+    }
+
+    /// Bounded internal stream adapter. One partial frame per existing row;
+    /// no new event tracker or ledger. The caller owns the actual byte stream.
+    pub fn record_chunk(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        now: u64,
+        mut bytes: &[u8],
+    ) -> Result<(), Error> {
+        let row = self.row(key)?;
+        if !row.dispatched || row.transport.is_none() {
+            return Err(Error::Phase);
+        }
+        self.check(key, current)?;
+        self.tick(now, current.policy)?;
+        if bytes.len() > MAX_CHUNK {
+            self.stop();
+            return Err(Error::Transport(synthetic_transport::Error::ChunkLimit));
+        }
+        while !bytes.is_empty() {
+            if self.stopped()
+                || !matches!(
+                    self.row(key)?.track.phase(),
+                    Phase::AwaitingStart | Phase::Running
+                )
+            {
+                self.stop();
+                return Err(Error::Phase);
+            }
+            let row = self.rows.get_mut(&key.worker).ok_or(Error::Foreign)?;
+            let count = (FRAME_LEN - row.pending_len).min(bytes.len());
+            row.pending[row.pending_len..row.pending_len + count]
+                .copy_from_slice(&bytes[..count]);
+            row.pending_len += count;
+            bytes = &bytes[count..];
+            if row.pending_len == FRAME_LEN {
+                let frame = row.pending;
+                row.pending_len = 0;
+                self.accept_frame(key, current, now, &frame)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn accept_frame(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        now: u64,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
         let row = self.row(key)?;
         if !row.dispatched {
             return Err(Error::Phase);
@@ -310,6 +372,24 @@ impl HarnessWave {
 
     /// Connection loss is an uncertain outcome, not trusted process exit.
     pub fn disconnect_transport(
+        &mut self,
+        key: &WorkerKey,
+        identity: Identity,
+    ) -> Result<(), Error> {
+        let row = self.row(key)?;
+        if row.transport != Some(identity) {
+            return Err(Error::Foreign);
+        }
+        let partial = row.pending_len != 0;
+        self.stop();
+        if partial {
+            return Err(Error::Transport(synthetic_transport::Error::Partial));
+        }
+        Ok(())
+    }
+
+    /// Exact trusted owner cancellation, not a protocol acknowledgement.
+    pub fn cancel_transport(
         &mut self,
         key: &WorkerKey,
         identity: Identity,
@@ -404,7 +484,7 @@ impl HarnessWave {
             return Err(Error::Phase);
         }
         let _ = self.check(key, current);
-        if self.row(key)?.track.phase() != Phase::Draining {
+        if self.row(key)?.track.phase() != Phase::Draining || self.row(key)?.pending_len != 0 {
             self.stop();
         }
         let row = self.rows.get_mut(&key.worker).ok_or(Error::Foreign)?;

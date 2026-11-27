@@ -4,6 +4,7 @@
 use crate::harness::{Event, Protocol};
 
 pub const FRAME_LEN: usize = 174;
+pub const MAX_CHUNK: usize = FRAME_LEN * 16;
 type Id = [u8; 32];
 
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -36,6 +37,8 @@ pub enum Error {
     Identity,
     Event,
     Sequence,
+    ChunkLimit,
+    Partial,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
