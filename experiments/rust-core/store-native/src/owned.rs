@@ -39,10 +39,20 @@ impl OwnedStore {
         }
     }
 
+    #[cfg(target_os = "linux")]
+    pub(crate) fn backup_idle(&self, destination: &std::path::Path) -> Result<(), Error> {
+        if !self.active.is_empty() {
+            return Err(Error::Busy);
+        }
+        self.store.backup_idle(destination)
+    }
+
+    #[cfg(target_os = "linux")]
     pub(crate) fn project(&self, id: Id, name: &str) -> Result<(), Error> {
         self.store.project(id, name)
     }
 
+    #[cfg(target_os = "linux")]
     pub(crate) fn session(&self, id: Id, project: Option<Id>) -> Result<(), Error> {
         self.store.session(id, project)
     }
