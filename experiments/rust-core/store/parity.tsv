@@ -1,0 +1,26 @@
+# op	session	client	expected	key	text	result	revision	messages
+submit	S	C	0	one	Merhaba	new:1:pending	1	1
+submit	S	C	0	one	Merhaba	replay:1:pending	1	1
+submit	S	C	0	one	Changed	reject	1	1
+submit	S	D	1	two	Hallo	reject	1	1
+complete	T	C	0	one	wrong	reject	0	0
+cancel	S	C	0	one	-	reject	1	1
+drain	S	C	0	one	-	reject	1	1
+complete	S	C	0	one	Guten Tag	rev:2	2	2
+complete	S	C	0	one	again	reject	2	2
+submit	S	C	0	one	Merhaba	replay:1:completed	2	2
+submit	T	C	0	one	Hello	new:1:pending	1	1
+submit	S	D	2	two	Second	new:3:pending	3	3
+cancel	S	D	3	two	-	rev:4	4	3
+complete	S	D	0	two	late	reject	4	3
+submit	S	C	4	three	Third	reject	4	3
+submit	S	D	0	two	Second	replay:3:cancelled	4	3
+drain	S	C	0	two	-	reject	4	3
+drain	S	D	0	two	-	rev:5	5	3
+submit	S	D	0	two	Second	replay:3:drained	5	3
+submit	S	C	5	bad/key	x	reject	5	3
+submit	S	C	5	three	   	reject	5	3
+submit	S	C	5	three	Üçüncü	new:4:pending	6	4
+complete	S	C	0	three	Fertig	rev:7	7	5
+cancel	T	C	1	one	-	rev:2	2	1
+drain	T	C	0	one	-	rev:3	3	1
