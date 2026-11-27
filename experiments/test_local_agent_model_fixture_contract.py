@@ -41,3 +41,24 @@ class ModelFixtureContractTests(unittest.TestCase):
         r["model"]="wrong"
         with self.assertRaises(ValueError):
             reply_for(json.dumps(r).encode())
+
+    def test_worker_role_and_canonical_wire_are_exact(self):
+        from local_agent_model_fixture_contract import validate_wire
+        wire=wire_for("a",(row("plan"),))
+        self.assertEqual(validate_wire("a",wire),sha256(wire).hexdigest())
+        for name,data in (("b",wire),("a",wire+b" "),("plan",wire),("a",wire.replace(b'"n_predict":16',b'"n_predict":17'))):
+            with self.assertRaises(Refused):
+                validate_wire(name,data)
+    def test_bound_reply_exact_worker_wire_model_and_reap(self):
+        from local_agent_model_fixture_contract import bound_reply,MODEL_SHA
+        w=wire_for("a",(row("plan"),))
+        response={"content":"bird","tokens":[2],"stop":True,"stop_type":"eos","model":MODEL,"truncated":False}
+        obj={"worker":"a","wire_digest":sha256(w).hexdigest(),"model_digest":MODEL_SHA,
+             "reply":json.dumps(response),"server_reaped":True}
+        pack=lambda value:json.dumps(value,separators=(",",":")).encode("ascii")
+        self.assertEqual(bound_reply("a",w,pack(obj)),(b"bird",(2,)))
+        for key,value in (("worker","b"),("wire_digest","0"*64),("model_digest","0"*64),("server_reaped",False)):
+            with self.assertRaises(Refused):
+                bound_reply("a",w,pack(dict(obj,**{key:value})))
+        with self.assertRaises(Refused):
+            bound_reply("a",w,pack(obj)+b" ")
