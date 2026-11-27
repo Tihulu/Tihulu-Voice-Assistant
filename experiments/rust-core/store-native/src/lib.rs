@@ -319,6 +319,50 @@ impl Store {
         .transpose()
     }
 
+    // Recovery selection, revision check and cancellation are one transaction.
+    // The caller still needs exclusive recovery authority and actual exit proof.
+    fn recover_cancel(&mut self, session: Id, expected: i64) -> Result<Recovery, Error> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (revision, archived) = session_row(&tx, session)?;
+        if archived || expected != revision {
+            return Err(Error::Conflict);
+        }
+        let row: Option<(Vec<u8>, String, String)> = tx
+            .query_row(
+                "SELECT client_id,request_key,state FROM turns WHERE session_id=?1
+                 AND state IN ('pending','cancelled')",
+                [session.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let (client, key, state) = row.ok_or(Error::Unknown)?;
+        let client: Id = client.try_into().map_err(|_| Error::Schema)?;
+        match State::parse(&state)? {
+            State::Pending => {
+                let count = tx.execute(
+                    "UPDATE turns SET state='cancelled'
+                     WHERE session_id=?1 AND client_id=?2 AND request_key=?3
+                     AND state='pending'",
+                    params![session.as_slice(), client.as_slice(), key],
+                )?;
+                if count != 1 {
+                    return Err(Error::Conflict);
+                }
+                advance(&tx, session, revision)?;
+            }
+            State::Cancelled => {}
+            _ => return Err(Error::Schema),
+        }
+        tx.commit()?;
+        Ok(Recovery {
+            client,
+            key,
+            state: State::Cancelled,
+        })
+    }
+
     pub fn archive(&mut self, session: Id, expected: i64) -> Result<i64, Error> {
         let tx = self
             .db
