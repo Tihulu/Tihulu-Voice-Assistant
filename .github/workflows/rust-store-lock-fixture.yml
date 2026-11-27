@@ -1,25 +1,32 @@
-name: Rust store dependency resolution evidence
+name: Native Rust SQLite fixtures
 on:
   pull_request:
     branches: ['**']
     paths:
-      - 'experiments/rust-core/store-native/Cargo.toml'
+      - 'experiments/rust-core/store-native/**'
+      - 'experiments/rust-core/store/**'
       - '.github/workflows/rust-store-lock-fixture.yml'
 permissions:
   contents: read
 jobs:
-  resolve:
+  native-store:
     runs-on: ubuntu-24.04
-    timeout-minutes: 4
+    timeout-minutes: 8
     steps:
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
         with:
           persist-credentials: false
-      - name: Resolve candidate lock without compiling dependencies
+      - name: Fetch exact locked dependencies
         working-directory: experiments/rust-core/store-native
         run: |
-          rustup toolchain install 1.90.0 --profile minimal
-          cargo +1.90.0 generate-lockfile
-          echo JARVIS_LOCK_BEGIN
-          cat Cargo.lock
-          echo JARVIS_LOCK_END
+          rustup toolchain install 1.90.0 --profile minimal --component clippy --component rustfmt
+          cargo +1.90.0 fetch --locked
+          cargo +1.90.0 tree --locked --offline
+      - name: Native SQLite tests and strict lints
+        working-directory: experiments/rust-core/store-native
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          cargo +1.90.0 test --locked --offline
+          cargo +1.90.0 clippy --locked --offline --all-targets -- -D warnings
+          cargo +1.90.0 fmt --all -- --check
