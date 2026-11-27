@@ -69,14 +69,27 @@ class DataTeamRun:
         self._claims={}
         self._results={}
         self._stopped=False
+        self._generated_budget=None
 
     def _thread(self):
         if current_thread() is not self._owner:
             raise Refused("data_team_thread")
 
+    def generated_budget(self):
+        """One synthetic generation ledger per confirmed team run."""
+        self._thread()
+        if self._stopped:
+            raise Refused("data_team_stopped")
+        if self._generated_budget is None:
+            from heterogeneous_team_token_budget import TeamTokenBudget
+            self._generated_budget=TeamTokenBudget(self._plan.digest,min(self._tokens,self._plan.output_ceiling))
+        return self._generated_budget
+
     def stop(self):
         self._thread()
         self._stopped=True
+        if self._generated_budget is not None:
+            self._generated_budget.close()
         for grant,req in self._claims.values():
             self._g.revoke(grant.identity)
         self._results.clear()
