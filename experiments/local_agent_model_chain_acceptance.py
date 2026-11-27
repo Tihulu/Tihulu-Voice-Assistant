@@ -103,7 +103,7 @@ def worker(name,port,mode="normal"):
     return 0
 
 def child(host_net,host_port,scenario):
-    if scenario not in ("normal","revoke","stream-cancel"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold"):
         raise RuntimeError("fixture_scenario")
     sys.path.insert(0,"/work/code")
     import resource
@@ -140,7 +140,7 @@ def child(host_net,host_port,scenario):
     workers=(Worker("plan",(),0,"plan"),Worker("a",("plan",),0,"review"),
              Worker("b",("plan",),0,"review"),Worker("review",("a","b"),0,"review"))
     ledger=ResourceLedger(32)
-    token_ledger=TokenLedger(64,strict_dispatch=True)
+    token_ledger=TokenLedger(32 if scenario=="budget-hold" else 64,strict_dispatch=True)
     leases={}
     elapsed={}
     prompt_counts={}
@@ -153,7 +153,9 @@ def child(host_net,host_port,scenario):
     grants={w.identity:gate.fixture_grant("native-"+w.identity,run.request(w.identity),60) for w in workers}
     owned={}
     results={}
+    launched=[]
     def launch(name,port,mode="normal"):
+        token_ledger.preflight((name,))
         t=boundary.prepare(name,grants[name],ctx,models)
         try:
             boundary.before_start(t,ctx,models)
@@ -167,6 +169,7 @@ def child(host_net,host_port,scenario):
             boundary.uncertain(t)
             raise
         owned[t]=p
+        launched.append(name)
         boundary.started(t,ctx,models)
         rows=boundary.inputs(t,ctx,models)
         if tuple(data for _,data in rows)!=tuple(results[parent] for parent in next(w.depends for w in workers if w.identity==name)):
@@ -262,6 +265,26 @@ def child(host_net,host_port,scenario):
         t,wire=launch("plan","8080")
         dispatch(t,wire)
         finish(t,wire,invoke(t,wire))
+        if scenario=="budget-hold":
+            try:
+                token_ledger.preflight(("a","b"))
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("agent-model-wave-budget-refused-before-launch",denied and launched==["plan"]
+                   and not owned and not boundary.observations() and ledger.snapshot()==(32,0,32))
+            record("agent-model-wave-budget-no-phantom-charge",token_ledger.snapshot()==(32,16,0,16))
+            boundary.stop()
+            try:
+                run.output("plan",ctx,models)
+            except Refused:
+                denied=True
+            else:
+                denied=False
+            record("agent-model-wave-budget-no-partial-publication",denied and run.drained())
+            return 0
+        token_ledger.preflight(("a","b"))
         a,wa=launch("a","8080")
         b,wb=launch("b","8081")
         record("agent-model-parallel-reservations",ledger.snapshot()==(32,32,0) and all(p.poll() is None for p in owned.values()))
@@ -358,7 +381,7 @@ def child(host_net,host_port,scenario):
     return 0
 
 def main(binary,model,scenario="normal"):
-    if scenario not in ("normal","revoke","stream-cancel"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold"):
         raise RuntimeError("fixture_scenario")
     from llama_engine_acceptance import MODEL_SHA
     import shutil

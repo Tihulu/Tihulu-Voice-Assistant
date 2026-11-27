@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from threading import current_thread
 from gateway import Refused
 from hashlib import sha256
-from local_agent_model_fixture_contract import validate_wire
+from local_agent_model_fixture_contract import validate_wire,PARENTS
 from local_agent_model_stream_contract import stream_wire
 
 @dataclass(frozen=True,eq=False)
@@ -38,6 +38,18 @@ class TokenLedger:
         self._thread()
         reserved=sum(x.ceiling for x in self._active.values())
         return self._budget,self._spent,reserved,self._budget-self._spent-reserved
+
+    def preflight(self,workers):
+        """Non-mutating whole-wave admission on this single owner thread.
+        Each actual reservation still checks capacity and exact request.
+        """
+        self._thread()
+        if (self._closed or type(workers) is not tuple or not 1<=len(workers)<=len(PARENTS)
+                or any(type(w) is not str or w not in PARENTS or w in self._seen for w in workers)
+                or len(set(workers))!=len(workers)):
+            raise Refused("fixture_token_wave")
+        if len(workers)*16>self.snapshot()[3]:
+            raise Refused("fixture_token_wave_budget")
 
     def reserve(self,worker,wire,*,streaming=False):
         self._thread()
