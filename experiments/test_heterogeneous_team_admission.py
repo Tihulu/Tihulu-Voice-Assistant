@@ -57,3 +57,27 @@ class TeamAdmissionTests(unittest.TestCase):
         p=self.a.prepare(**self.args())
         self.a.confirm(p,**self.args())
         self.assertEqual(self.g._grants,{})
+
+    def test_confirmed_exact_object_transfers_once(self):
+        p=self.a.prepare(**self.args())
+        plan=self.a.confirm(p,**self.args())
+        with self.assertRaises(Refused):
+            self.a.take_confirmed(replace(plan))
+        self.assertEqual(self.a.take_confirmed(plan)[2],self.tasks)
+        with self.assertRaises(Refused):
+            self.a.take_confirmed(plan)
+    def test_close_discards_unconsumed_confirmation(self):
+        p=self.a.prepare(**self.args())
+        plan=self.a.confirm(p,**self.args())
+        self.a.close()
+        with self.assertRaises(Refused):
+            self.a.take_confirmed(plan)
+    def test_long_valid_identity_is_bounded_in_registry(self):
+        a=TeamAdmission(self.g,"a"*128)
+        p=a.prepare(**self.args())
+        plan=a.confirm(p,**self.args())
+        self.assertEqual(len(a.take_confirmed(plan)[1]),64)
+    def test_unconfirmed_preview_cannot_transfer(self):
+        p=self.a.prepare(**self.args())
+        with self.assertRaises(Refused):
+            self.a.take_confirmed(p.plan)
