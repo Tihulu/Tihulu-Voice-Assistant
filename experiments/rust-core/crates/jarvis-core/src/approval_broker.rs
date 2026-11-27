@@ -76,12 +76,7 @@ pub struct Broker {
 }
 
 impl Broker {
-    pub fn new(
-        project: Id,
-        session: Id,
-        policy: PolicyStamp,
-        now: u64,
-    ) -> Result<Self, Error> {
+    pub fn new(project: Id, session: Id, policy: PolicyStamp, now: u64) -> Result<Self, Error> {
         if project == [0; 32] || session == [0; 32] {
             return Err(Error::Scope);
         }
@@ -132,9 +127,11 @@ impl Broker {
         self.validate(request, observed)?;
         // The registry remains the only receipt authority. Typed metadata
         // also detects a duplicate even if caller-provided digests change.
-        if self.requests.values().any(|old| {
-            old.scope == request.scope && old.action == request.action
-        }) {
+        if self
+            .requests
+            .values()
+            .any(|old| old.scope == request.scope && old.action == request.action)
+        {
             return Err(Error::Duplicate);
         }
         let receipt_key = self
@@ -146,7 +143,9 @@ impl Broker {
     }
 
     pub fn phase(&self, key: &Key) -> Result<Phase, Error> {
-        self.registry.phase(&key.receipt_key).map_err(Error::Registry)
+        self.registry
+            .phase(&key.receipt_key)
+            .map_err(Error::Registry)
     }
 
     pub fn revoke(&mut self, key: &Key) -> Result<(), Error> {
@@ -155,18 +154,10 @@ impl Broker {
             .map_err(Error::Registry)
     }
 
-    fn recheck(
-        &mut self,
-        key: &Key,
-        observed: &Observation<'_>,
-        now: u64,
-    ) -> Result<(), Error> {
+    fn recheck(&mut self, key: &Key, observed: &Observation<'_>, now: u64) -> Result<(), Error> {
         self.phase(key)?;
         self.observe(observed.policy, now)?;
-        let result = self.validate(
-            self.requests.get(&key.id).ok_or(Error::Scope)?,
-            observed,
-        );
+        let result = self.validate(self.requests.get(&key.id).ok_or(Error::Scope)?, observed);
         if let Err(error) = result {
             self.revoke(key)?;
             return Err(error);
