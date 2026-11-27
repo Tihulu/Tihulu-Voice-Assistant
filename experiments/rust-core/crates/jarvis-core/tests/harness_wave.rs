@@ -286,3 +286,117 @@ fn clock_regression_keeps_peer_reservations_until_cleanup() {
     );
     assert!(w.drained());
 }
+
+#[test]
+fn active_capacity_shrink_stops_peers_and_retains_exact_reservations() {
+    let a = local();
+    for (ram, vram) in [(31, 16), (32, 15)] {
+        let mut w = wave();
+        let keys = w
+            .reserve("one", vec![worker("a", &a), worker("b", &a)], 100)
+            .unwrap();
+        w.dispatch(&keys[0], &current(&a), 100).unwrap();
+        w.record(&keys[0], &current(&a), 101, 1, Event::Started)
+            .unwrap();
+        w.resize_memory(ram, vram).unwrap();
+        assert!(w.stopped());
+        assert_eq!(w.snapshot().reserved, amount(32, 16, 32, 224));
+        assert_eq!(
+            w.dispatch(&keys[1], &current(&a), 102),
+            Err(Error::Session(session::Error::Closed))
+        );
+        assert_eq!(
+            w.record(&keys[0], &current(&a), 102, 2, Event::ReportedDone),
+            Err(Error::Session(session::Error::Closed))
+        );
+        assert_eq!(w.void_unstarted(&keys[0]), Err(Error::Phase));
+        w.void_unstarted(&keys[1]).unwrap();
+        assert_eq!(
+            w.settle(&keys[0], &current(&a), 103, Some((2, 3))),
+            Ok(ResultState::NoPublication)
+        );
+        assert_eq!(w.snapshot().reserved, Amount::default());
+        assert!(w.drained());
+    }
+}
+
+#[test]
+fn capacity_shrink_after_report_cannot_keep_success() {
+    let a = local();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &a)], 100).unwrap();
+    let key = &keys[0];
+    w.dispatch(key, &current(&a), 100).unwrap();
+    w.record(key, &current(&a), 101, 1, Event::Started).unwrap();
+    w.record(key, &current(&a), 102, 2, Event::ReportedDone)
+        .unwrap();
+    w.resize_memory(15, 8).unwrap();
+    assert_eq!(w.snapshot().reserved, amount(16, 8, 16, 112));
+    assert_eq!(
+        w.settle(key, &current(&a), 103, Some((2, 3))),
+        Ok(ResultState::NoPublication)
+    );
+    assert!(w.drained());
+}
+
+#[test]
+fn capacity_equal_to_reservation_does_not_stop() {
+    let a = local();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &a)], 100).unwrap();
+    let key = &keys[0];
+    w.dispatch(key, &current(&a), 100).unwrap();
+    w.resize_memory(16, 8).unwrap();
+    assert!(!w.stopped());
+    w.record(key, &current(&a), 101, 1, Event::Started).unwrap();
+    w.record(key, &current(&a), 102, 2, Event::ReportedDone)
+        .unwrap();
+    assert_eq!(
+        w.settle(key, &current(&a), 103, Some((2, 3))),
+        Ok(ResultState::MeasuredReport)
+    );
+}
+
+#[test]
+fn heartbeat_expires_silent_worker_and_preserves_pending_peer() {
+    let a = local();
+    let mut w = wave();
+    let keys = w
+        .reserve("one", vec![worker("a", &a), worker("b", &a)], 100)
+        .unwrap();
+    w.dispatch(&keys[0], &current(&a), 100).unwrap();
+    w.tick(119).unwrap();
+    assert_eq!(
+        w.tick(120),
+        Err(Error::Session(session::Error::Deadline(
+            jarvis_core::deadline::Error::Expired
+        )))
+    );
+    assert_eq!(w.snapshot().reserved, amount(32, 16, 32, 224));
+    assert!(!w.drained());
+    w.void_unstarted(&keys[1]).unwrap();
+    assert_eq!(
+        w.settle(&keys[0], &current(&a), 121, None),
+        Ok(ResultState::NoPublication)
+    );
+    assert_eq!(w.snapshot().spent, amount(0, 0, 16, 112));
+    assert!(w.drained());
+}
+
+#[test]
+fn heartbeat_expires_undispatched_wave_at_total_deadline() {
+    let a = local();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &a)], 100).unwrap();
+    w.tick(199).unwrap();
+    assert_eq!(
+        w.tick(200),
+        Err(Error::Session(session::Error::Deadline(
+            jarvis_core::deadline::Error::Expired
+        )))
+    );
+    assert_eq!(w.snapshot().reserved, amount(16, 8, 16, 112));
+    w.void_unstarted(&keys[0]).unwrap();
+    assert_eq!(w.snapshot().spent, Amount::default());
+    assert!(w.drained());
+}
