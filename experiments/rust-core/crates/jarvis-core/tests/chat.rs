@@ -89,8 +89,11 @@ fn revoked_writer_cannot_publish_late_or_read_history() {
     let turn = ticket(chat.submit(&writer, 0, "one", "text").unwrap());
     chat.revoke(&writer).unwrap();
     assert_eq!(chat.read(&writer), Err(Error::Denied));
-    assert_eq!(chat.complete(&turn, "late"), Err(Error::Foreign));
+    assert_eq!(chat.complete(&turn, "late"), Err(Error::Conflict));
     assert_eq!(chat.read(&reader).unwrap().0, 2);
+    assert_eq!(chat.archive(), Err(Error::Busy));
+    chat.observe_drained(&turn).unwrap();
+    assert_eq!(chat.read(&reader).unwrap().0, 3);
     assert_eq!(chat.read(&reader).unwrap().1.len(), 1);
 }
 
@@ -101,12 +104,17 @@ fn cancellation_preserves_user_message_and_blocks_late_result() {
     let old = ticket(chat.submit(&user, 0, "one", "text").unwrap());
     assert_eq!(chat.cancel(&user, 0), Err(Error::Conflict));
     chat.cancel(&user, 1).unwrap();
-    assert_eq!(chat.complete(&old, "late"), Err(Error::Foreign));
+    assert_eq!(chat.complete(&old, "late"), Err(Error::Conflict));
     assert!(matches!(
         chat.submit(&user, 0, "one", "text"),
         Ok(Submission::Replay(1))
     ));
-    let next = ticket(chat.submit(&user, 2, "two", "again").unwrap());
+    assert_eq!(
+        chat.submit(&user, 2, "two", "again").unwrap_err(),
+        Error::Busy
+    );
+    chat.observe_drained(&old).unwrap();
+    let next = ticket(chat.submit(&user, 3, "two", "again").unwrap());
     assert_eq!(chat.complete(&old, "late"), Err(Error::Foreign));
     chat.complete(&next, "ok").unwrap();
     assert_eq!(chat.read(&user).unwrap().1.len(), 3);
@@ -183,4 +191,26 @@ fn storage_and_grant_lifetime_are_bounded() {
         chat.revoke(&handle).unwrap();
     }
     assert_eq!(chat.grant(AccessMode::Read).unwrap_err(), Error::Limit);
+}
+
+#[test]
+fn cancelled_turn_requires_exact_drain_evidence() {
+    let mut chat = fixture();
+    let user = chat.grant(AccessMode::Write).unwrap();
+    let turn = ticket(chat.submit(&user, 0, "one", "text").unwrap());
+    assert_eq!(chat.observe_drained(&turn), Err(Error::Conflict));
+    chat.cancel(&user, 1).unwrap();
+    assert_eq!(chat.cancel(&user, 2), Err(Error::Conflict));
+    let mut other = fixture();
+    let foreign = other.grant(AccessMode::Write).unwrap();
+    let wrong = ticket(other.submit(&foreign, 0, "one", "text").unwrap());
+    assert_eq!(chat.observe_drained(&wrong), Err(Error::Foreign));
+    assert_eq!(
+        chat.submit(&user, 2, "two", "next").unwrap_err(),
+        Error::Busy
+    );
+    chat.observe_drained(&turn).unwrap();
+    assert_eq!(chat.observe_drained(&turn), Err(Error::Foreign));
+    assert_eq!(chat.read(&user).unwrap().0, 3);
+    chat.archive().unwrap();
 }
