@@ -16,7 +16,7 @@ pub struct Unresolved {
 }
 
 pub struct GuardedReplayStore {
-    store: ReplayStore,
+    pub(super) store: ReplayStore,
 }
 
 fn check_guard(db: &Connection) -> Result<(), Error> {

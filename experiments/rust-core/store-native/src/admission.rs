@@ -31,6 +31,9 @@ pub struct GuardedWave {
     project: Id,
     session: Id,
     active: Option<Active>,
+    // Drop the store and wave before releasing the cooperating owner lock.
+    #[cfg(target_os = "linux")]
+    _owner_lock: Option<std::fs::File>,
 }
 
 /// Explicit injective mapping from existing 16-byte DB namespaces to
@@ -76,7 +79,15 @@ impl GuardedWave {
             project,
             session: session_id,
             active: None,
+            #[cfg(target_os = "linux")]
+            _owner_lock: None,
         })
+    }
+
+    #[cfg(target_os = "linux")]
+    pub(crate) fn retain_lock(mut self, lock: std::fs::File) -> Self {
+        self._owner_lock = Some(lock);
+        self
     }
 
     pub fn snapshot(&self) -> Snapshot {
