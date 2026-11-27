@@ -396,13 +396,7 @@ fn typed_ingress_foreign_source_cannot_poison_wave_or_adapter() {
 fn typed_ingress_mismatched_requested_plan_cannot_start() {
     let m = manifest();
     let (mut w, key, amount) = prepared_wave(&m);
-    let mut a = Adapter::new(
-        id(),
-        &m,
-        &current(&m),
-        &BTreeSet::from([Capability::Chat]),
-    )
-    .unwrap();
+    let mut a = Adapter::new(id(), &m, &current(&m), &BTreeSet::from([Capability::Chat])).unwrap();
     a.initialized(id(), &current(&m), 0, 1, false).unwrap();
     a.begin_session(id(), &current(&m)).unwrap();
     a.session_created(id(), &current(&m), 1, "sess_1").unwrap();
