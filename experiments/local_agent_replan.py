@@ -12,6 +12,7 @@ from local_agent_owned_drain import ManagedWave
 class ReplanPreview:
     attempt: str
     plan: AgentPlan
+    strict_results: bool = False
 
 class AttemptCoordinator:
     """One active run at a time; no automatic retry or previous output reuse.
@@ -19,11 +20,12 @@ class AttemptCoordinator:
     Context changes require a new owner-created gateway/coordinator.
     """
     def __init__(self,gateway,ledger,identity,workers,budget,limit=6,
-                 preference="balanced",*,max_attempts=3,owned_drain=False):
+                 preference="balanced",*,max_attempts=3,owned_drain=False,strict_results=False):
         if (type(gateway) is not FixtureGateway or type(ledger) is not ResourceLedger
                 or type(identity) is not str or len(identity)>96
                 or type(max_attempts) is not int or not 1<=max_attempts<=3
-                or type(owned_drain) is not bool):
+                or type(owned_drain) is not bool or type(strict_results) is not bool
+                or (strict_results and not owned_drain)):
             raise Refused("agent_coordinator_invalid")
         token(identity)
         self._gateway=gateway
@@ -35,6 +37,7 @@ class AttemptCoordinator:
         self._preference=preference
         self._max_attempts=max_attempts
         self._owned_drain=owned_drain
+        self._strict_results=strict_results
         self._owner=current_thread()
         self._issued=0
         self._accepted=0
@@ -66,7 +69,7 @@ class AttemptCoordinator:
             raise Refused("agent_attempt_limit")
         plan=plan_agents(context,self._workers,candidates,self._budget,self._limit,self._preference)
         self._issued+=1
-        self._pending=ReplanPreview(self._identity+"-"+str(self._issued),plan)
+        self._pending=ReplanPreview(self._identity+"-"+str(self._issued),plan,self._strict_results)
         return self._pending
 
     def confirm(self,preview,context,candidates):
@@ -78,12 +81,12 @@ class AttemptCoordinator:
         if self._active is not None or self._accepted>=self._max_attempts:
             raise Refused("agent_attempt_unavailable")
         fresh=plan_agents(context,self._workers,candidates,self._budget,self._limit,self._preference)
-        if fresh!=preview.plan:
+        if fresh!=preview.plan or preview.strict_results is not self._strict_results:
             raise Refused("agent_replan_changed")
         if self._owned_drain:
             self._active=ManagedWave(self._gateway,fresh,self._workers,candidates,
                                      self._budget,self._ledger,preview.attempt,
-                                     self._limit,self._preference)
+                                     self._limit,self._preference,strict_results=self._strict_results)
         else:
             self._active=WaveRun(self._gateway,fresh,self._workers,candidates,
                                  self._budget,self._limit,self._preference,
