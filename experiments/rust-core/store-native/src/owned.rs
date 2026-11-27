@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! Trusted-owner bridge. A persistent receipt is not an execution capability.
 //! Terminal observations still require a real, separately verified runtime.
-use crate::{Error, Id, Message, Receipt, Recovery, State, Store};
+use crate::{Error, Id, Message, Receipt, Recovery, Store};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
@@ -103,17 +103,7 @@ impl OwnedStore {
         if self.active.len() >= MAX_ACTIVE {
             return Err(Error::Limit);
         }
-        let recovery = self.store.recovery(session)?.ok_or(Error::Unknown)?;
-        if self.store.history(session)?.0 != expected {
-            return Err(Error::Conflict);
-        }
-        match recovery.state {
-            State::Pending => {
-                self.store.cancel(session, recovery.client, &recovery.key, expected)?;
-            }
-            State::Cancelled => {}
-            _ => return Err(Error::Conflict),
-        }
+        let recovery = self.store.recover_cancel(session, expected)?;
         Ok(self.issue(session, recovery.client, &recovery.key, true))
     }
 
