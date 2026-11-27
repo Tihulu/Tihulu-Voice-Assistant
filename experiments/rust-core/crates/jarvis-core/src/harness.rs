@@ -105,7 +105,7 @@ fn compatible(m: &Manifest) -> bool {
 }
 
 /// A negotiated descriptor is not a permission grant or dispatch ticket.
-#[derive(Debug)]
+#[derive(Debug, Eq, PartialEq)]
 pub struct Negotiated {
     manifest: Manifest,
     requested: BTreeSet<Capability>,
@@ -138,6 +138,10 @@ pub fn negotiate(
 }
 
 impl Negotiated {
+    pub(crate) fn requests(&self, capability: Capability) -> bool {
+        self.requested.contains(&capability)
+    }
+
     pub(crate) fn protocol(&self) -> Protocol {
         self.manifest.protocol
     }

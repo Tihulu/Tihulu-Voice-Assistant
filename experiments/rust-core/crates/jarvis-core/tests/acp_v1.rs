@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use jarvis_core::acp_v1::{Adapter, Error, Phase, StopReason, Update};
+use jarvis_core::acp_v1::{Adapter, Error, Ingress, Observation, Phase, StopReason, Update};
 use jarvis_core::budget::{Amount, Demand};
 use jarvis_core::harness::{self, Capability, Event, Kind, Manifest, Protocol, Route};
-use jarvis_core::harness_wave::{Current, HarnessWave, PolicyStamp, ResultState, Worker};
+use jarvis_core::harness_wave::{
+    self, Current, HarnessWave, PolicyStamp, ResultState, Worker, WorkerKey,
+};
 use jarvis_core::session::Session;
 use jarvis_core::synthetic_transport::{decode, Identity};
 use std::collections::{BTreeMap, BTreeSet};
@@ -252,4 +254,220 @@ fn typed_events_flow_through_existing_wave_and_trusted_settle() {
         Ok(ResultState::MeasuredReport)
     );
     assert!(w.idle());
+}
+
+fn prepared_wave(m: &Manifest) -> (HarnessWave, WorkerKey, Amount) {
+    let amount = Amount {
+        ram: 16,
+        vram: 8,
+        generated: 16,
+        prompt: 112,
+    };
+    let worker = Worker {
+        demand: Demand {
+            worker: "a".into(),
+            amount,
+        },
+        plan: harness::negotiate(m, m, &m.supported, &m.supported, true).unwrap(),
+        current: current(m),
+    };
+    let mut w = HarnessWave::new_scoped(
+        Session::new(amount, 100, 100, 20).unwrap(),
+        id().project,
+        id().session,
+    )
+    .unwrap();
+    let mut keys = w
+        .reserve_with_transport(
+            "one",
+            vec![worker],
+            BTreeMap::from([("a".into(), id())]),
+            100,
+        )
+        .unwrap();
+    let key = keys.pop().unwrap();
+    w.bind_transport(&key, &current(m), id(), 100).unwrap();
+    w.dispatch(&key, &current(m), 100).unwrap();
+    (w, key, amount)
+}
+
+fn ingress(observation: Observation<'_>) -> Ingress<'_> {
+    Ingress {
+        source: id(),
+        observation,
+    }
+}
+
+#[test]
+fn typed_ingress_success_requires_existing_trusted_settle() {
+    let m = manifest();
+    let (mut w, key, amount) = prepared_wave(&m);
+    let mut a = ready(&m);
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        101,
+        &mut a,
+        ingress(Observation::PromptSent),
+    )
+    .unwrap();
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        102,
+        &mut a,
+        ingress(Observation::Result {
+            rpc_id: 2,
+            reason: StopReason::EndTurn,
+        }),
+    )
+    .unwrap();
+    assert_eq!(w.snapshot().reserved, amount);
+    assert_eq!(
+        w.settle_transport(&key, &current(&m), 103, id(), Some((0, 0))),
+        Ok(ResultState::MeasuredReport)
+    );
+}
+
+#[test]
+fn typed_ingress_fault_stops_wave_and_retains_reservation() {
+    let m = manifest();
+    let (mut w, key, amount) = prepared_wave(&m);
+    let mut a = ready(&m);
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        101,
+        &mut a,
+        ingress(Observation::PromptSent),
+    )
+    .unwrap();
+    assert_eq!(
+        w.record_acp_v1(
+            &key,
+            &current(&m),
+            102,
+            &mut a,
+            ingress(Observation::Update {
+                session_id: "sess_1",
+                update: Update::ToolCall,
+            }),
+        ),
+        Err(harness_wave::Error::Acp(Error::Unsupported))
+    );
+    assert!(w.stopped());
+    assert_eq!(a.phase(), Phase::Closed);
+    assert_eq!(w.snapshot().reserved, amount);
+    assert_eq!(
+        w.settle_transport(&key, &current(&m), 103, id(), None),
+        Ok(ResultState::NoPublication)
+    );
+}
+
+#[test]
+fn typed_ingress_foreign_source_cannot_poison_wave_or_adapter() {
+    let m = manifest();
+    let (mut w, key, _) = prepared_wave(&m);
+    let mut a = ready(&m);
+    let foreign = Ingress {
+        source: Identity {
+            connection: [9; 32],
+            ..id()
+        },
+        observation: Observation::PromptSent,
+    };
+    assert_eq!(
+        w.record_acp_v1(&key, &current(&m), 999, &mut a, foreign),
+        Err(harness_wave::Error::Foreign)
+    );
+    assert!(!w.stopped());
+    assert_eq!(a.phase(), Phase::Ready);
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        101,
+        &mut a,
+        ingress(Observation::PromptSent),
+    )
+    .unwrap();
+}
+
+#[test]
+fn typed_ingress_mismatched_requested_plan_cannot_start() {
+    let m = manifest();
+    let (mut w, key, amount) = prepared_wave(&m);
+    let mut a = Adapter::new(
+        id(),
+        &m,
+        &current(&m),
+        &BTreeSet::from([Capability::Chat]),
+    )
+    .unwrap();
+    a.initialized(id(), &current(&m), 0, 1, false).unwrap();
+    a.begin_session(id(), &current(&m)).unwrap();
+    a.session_created(id(), &current(&m), 1, "sess_1").unwrap();
+    assert_eq!(
+        w.record_acp_v1(
+            &key,
+            &current(&m),
+            101,
+            &mut a,
+            ingress(Observation::PromptSent),
+        ),
+        Err(harness_wave::Error::Phase)
+    );
+    assert!(w.stopped());
+    assert_eq!(w.snapshot().reserved, amount);
+}
+
+#[test]
+fn typed_ingress_permission_stops_and_late_result_cannot_resume() {
+    let m = manifest();
+    let (mut w, key, amount) = prepared_wave(&m);
+    let mut a = ready(&m);
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        101,
+        &mut a,
+        ingress(Observation::PromptSent),
+    )
+    .unwrap();
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        102,
+        &mut a,
+        ingress(Observation::Permission {
+            session_id: "sess_1",
+        }),
+    )
+    .unwrap();
+    assert!(w.stopped());
+    assert_eq!(a.phase(), Phase::Held);
+    assert!(w
+        .record_acp_v1(
+            &key,
+            &current(&m),
+            103,
+            &mut a,
+            ingress(Observation::Result {
+                rpc_id: 2,
+                reason: StopReason::EndTurn,
+            }),
+        )
+        .is_err());
+    assert_eq!(w.snapshot().reserved, amount);
+}
+
+#[test]
+fn unsupported_plan_update_does_not_infer_propose_capability() {
+    let m = manifest();
+    let mut a = ready(&m);
+    a.begin_prompt(id(), &current(&m)).unwrap();
+    assert_eq!(
+        a.update(id(), &current(&m), "sess_1", Update::Plan),
+        Err(Error::Unsupported)
+    );
+    assert_eq!(a.phase(), Phase::Closed);
 }
