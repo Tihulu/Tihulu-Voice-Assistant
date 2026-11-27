@@ -7,4 +7,5 @@ pub mod chat;
 
 pub mod deadline;
 pub mod session;
+pub mod workshop;
 pub mod workspace;
