@@ -25,7 +25,7 @@ def worker(name,port,mode="normal"):
         raise RuntimeError("fixture_worker_mode")
     sys.path.insert(0,"/work/code")
     from llama_engine_acceptance import MODEL,MODEL_SHA,MAX_REPLY,stop_fixture_server
-    from local_agent_model_fixture_contract import MAX_WIRE,validate_wire,tokenizer_wire,prompt_count,measured_reply
+    from local_agent_model_fixture_contract import MAX_WIRE,validate_wire,tokenizer_wire,prompt_count,measured_reply,wire_ceiling
     if port not in ("8080","8081"):
         raise RuntimeError("fixture_port")
     if mode=="stream":
@@ -88,7 +88,7 @@ def worker(name,port,mode="normal"):
                     conn.close()
             else:
                 raw=request("POST","/completion",wire)
-                measured_reply(raw,count)
+                measured_reply(raw,count,ceiling=wire_ceiling(name,wire))
         finally:
             stop_fixture_server(proc,lambda:None)
     # Exit 0 only after the exact owned server has been waited for.
@@ -103,7 +103,7 @@ def worker(name,port,mode="normal"):
     return 0
 
 def child(host_net,host_port,scenario):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy"):
         raise RuntimeError("fixture_scenario")
     sys.path.insert(0,"/work/code")
     import resource
@@ -113,7 +113,7 @@ def child(host_net,host_port,scenario):
     from local_agent_replan import AttemptCoordinator
     from local_agent_resources import ResourceLedger
     from local_agent_launch import LaunchBoundary
-    from local_agent_model_fixture_contract import wire_for,bound_reply
+    from local_agent_model_fixture_contract import wire_for,bound_reply,DEFAULT_CEILINGS,ECONOMY_CEILINGS,PARENTS,wire_ceiling
     from local_agent_model_token_ledger import TokenLedger
     from llama_engine_acceptance import MODEL,MODEL_SHA,ENGINE_REV
     from tihulu_jarvis import profiles
@@ -140,7 +140,10 @@ def child(host_net,host_port,scenario):
     workers=(Worker("plan",(),0,"plan"),Worker("a",("plan",),0,"review"),
              Worker("b",("plan",),0,"review"),Worker("review",("a","b"),0,"review"))
     ledger=ResourceLedger(32)
-    token_ledger=TokenLedger(32 if scenario=="budget-hold" else 64,strict_dispatch=True)
+    ceilings=ECONOMY_CEILINGS if scenario=="economy" else DEFAULT_CEILINGS
+    limits=dict(zip(PARENTS,ceilings))
+    total_budget=32 if scenario=="budget-hold" else sum(ceilings)
+    token_ledger=TokenLedger(total_budget,strict_dispatch=True,ceilings=ceilings)
     leases={}
     elapsed={}
     prompt_counts={}
@@ -174,7 +177,7 @@ def child(host_net,host_port,scenario):
         rows=boundary.inputs(t,ctx,models)
         if tuple(data for _,data in rows)!=tuple(results[parent] for parent in next(w.depends for w in workers if w.identity==name)):
             raise RuntimeError("fixture_dependency_bytes")
-        wire=wire_for(name,rows)
+        wire=wire_for(name,rows,ceiling=limits[name])
         leases[t]=token_ledger.reserve(name,wire,streaming=(mode=="stream"))
         return t,wire
     def dispatch(t,wire):
@@ -197,7 +200,7 @@ def child(host_net,host_port,scenario):
         token_ledger.settle(leases[t],wire,tokens)
         del leases[t]
         elapsed[t.worker]=duration_ns
-        record("agent-model-"+t.worker+"-real-output",bool(data) and 1<=len(tokens)<=16,
+        record("agent-model-"+t.worker+"-real-output",bool(data) and 1<=len(tokens)<=wire_ceiling(t.worker,wire),
                input_digest=digest(wire),output_digest=digest(data),tokens=len(tokens),prompt_tokens=count,
                elapsed_ms=round(duration_ns/1000000,3))
         # Exact wrapper exited 0 after its owned server was reaped.
@@ -288,11 +291,11 @@ def child(host_net,host_port,scenario):
         a,wa=launch("a","8080")
         b,wb=launch("b","8081")
         record("agent-model-parallel-reservations",ledger.snapshot()==(32,32,0) and all(p.poll() is None for p in owned.values()))
-        record("agent-model-parallel-token-ceiling",token_ledger.snapshot()==(64,16,32,16))
+        record("agent-model-parallel-token-ceiling",token_ledger.snapshot()==(total_budget,16,limits["a"]+limits["b"],16))
         # Recheck both exact scoped inputs immediately before dispatch;
         # worker threads never access the gateway or choose requests.
         for ticket,wire in ((a,wa),(b,wb)):
-            if wire_for(ticket.worker,boundary.inputs(ticket,ctx,models))!=wire:
+            if wire_for(ticket.worker,boundary.inputs(ticket,ctx,models),ceiling=limits[ticket.worker])!=wire:
                 raise RuntimeError("fixture_pre_dispatch_drift")
         for ticket,wire in ((a,wa),(b,wb)):
             dispatch(ticket,wire)
@@ -354,10 +357,13 @@ def child(host_net,host_port,scenario):
         budget,spent,reserved,remaining=token_ledger.snapshot()
         record("agent-model-prompt-context-accounting",len(prompt_counts)==4 and all(1<=n<=112 for n in prompt_counts.values()),
                prompt_tokens=sum(prompt_counts.values()),per_worker=prompt_counts)
-        record("agent-model-token-accounting",budget==64 and spent==64 and reserved==0 and remaining==0 and not leases,
+        record("agent-model-token-accounting",budget==total_budget and spent==total_budget and reserved==0 and remaining==0 and not leases,
                generated_tokens=spent,reserved_tokens=reserved,remaining_tokens=remaining,
                wall_ms=round((time.monotonic_ns()-started_ns)/1000000,3),
                sum_worker_ms=round(sum(elapsed.values())/1000000,3))
+        if scenario=="economy":
+            record("agent-model-economy-ceiling-verified",spent==48 and len(results)==4,
+                   baseline_ceiling=64,actual_generated=spent,per_worker_ceiling=limits)
         record("agent-model-final-receipt",data==results["review"] and receipt.payload_digest==digest(data)
                and len(receipt.input_digest)==64)
         record("agent-model-clean-ownership",ledger.snapshot()==(32,0,32) and not boundary.observations() and not owned)
@@ -381,7 +387,7 @@ def child(host_net,host_port,scenario):
     return 0
 
 def main(binary,model,scenario="normal"):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy"):
         raise RuntimeError("fixture_scenario")
     from llama_engine_acceptance import MODEL_SHA
     import shutil
