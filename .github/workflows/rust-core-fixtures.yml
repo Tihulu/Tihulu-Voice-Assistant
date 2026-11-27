@@ -1,0 +1,32 @@
+name: Isolated Rust core fixtures
+on:
+  pull_request:
+    branches: ['**']
+    paths:
+      - 'experiments/rust-core/**'
+      - '.github/workflows/rust-core-fixtures.yml'
+permissions:
+  contents: read
+jobs:
+  rust:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 6
+    strategy:
+      matrix:
+        toolchain: ['1.85.1', '1.90.0']
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          persist-credentials: false
+      - name: Select exact Rust toolchain
+        run: |
+          rustup toolchain install ${{ matrix.toolchain }} --profile minimal --component clippy --component rustfmt
+          rustc +${{ matrix.toolchain }} --version
+      - name: Locked offline tests and lints
+        working-directory: experiments/rust-core
+        env:
+          CARGO_NET_OFFLINE: 'true'
+        run: |
+          cargo +${{ matrix.toolchain }} test --locked --offline --workspace
+          cargo +${{ matrix.toolchain }} clippy --locked --offline --workspace --all-targets -- -D warnings
+          cargo +${{ matrix.toolchain }} fmt --all -- --check
