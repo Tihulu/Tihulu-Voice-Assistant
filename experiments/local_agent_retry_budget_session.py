@@ -8,6 +8,8 @@ or real billing. Terminal observations remain the caller's responsibility.
 from dataclasses import dataclass
 from hashlib import sha256
 from threading import current_thread
+from time import monotonic_ns
+from local_agent_retry_deadline import RetryDeadlines
 
 from gateway import Refused
 from local_agent_replan import AttemptCoordinator
@@ -28,14 +30,18 @@ class RetryOffer:
 
 
 class RetryBudgetSession:
-    def __init__(self, coordinator, total, *, prompt_total=None):
+    def __init__(self, coordinator, total, *, prompt_total=None, total_ns=None, worker_ns=None, clock=monotonic_ns):
         if (type(coordinator) is not AttemptCoordinator or not coordinator._owned_drain
                 or not coordinator._strict_results or coordinator._issued
                 or type(total) is not int or not 16 <= total <= 655360):
             raise Refused("retry_budget_session")
         if prompt_total is not None and (type(prompt_total) is not int or not 1 <= prompt_total <= 655360):
             raise Refused("retry_budget_prompt_limit")
+        if (total_ns is None)!=(worker_ns is None):
+            raise Refused("retry_deadline_limit")
         coordinator._thread()
+        self._deadlines=None if total_ns is None else RetryDeadlines(total_ns,worker_ns,clock=clock)
+        self._timed={}
         scope = sha256(("retry-budget-v1:"+coordinator._identity).encode("ascii")).hexdigest()
         coordinator._gateway.register_agent_attempt(scope)
         self._coordinator = coordinator
@@ -65,9 +71,35 @@ class RetryBudgetSession:
         if self._closed:
             raise Refused("retry_budget_closed")
 
+    def poll_deadline(self):
+        """Owner checkpoint: expiry revokes work, never invents process exit."""
+        self._thread()
+        if self._deadlines is not None:
+            try:
+                self._deadlines.check()
+            except Refused:
+                self.stop()
+                raise
+
+    def remaining_ns(self,lease):
+        self._entry(lease)
+        if self._deadlines is None or lease.attempt.identity not in self._timed:
+            raise Refused("retry_deadline_ticket")
+        try:
+            return self._deadlines.remaining_ns(self._timed[lease.attempt.identity])
+        except Refused:
+            self.stop()
+            raise
+
+    def _finish_deadline(self,lease):
+        ticket=self._timed.pop(lease.attempt.identity,None)
+        if ticket is not None:
+            self._deadlines.finish(ticket)
+
     def prepare(self, context, candidates, profile, *, prompt_policy="whole-plan"):
         self._open()
         self._pending = None
+        self.poll_deadline()
         if self._active is not None:
             _, run = self._active
             if not self._stopped or self._leases or not run.drained():
@@ -101,6 +133,7 @@ class RetryBudgetSession:
             raise Refused("retry_budget_stale")
         _, preview = self._pending
         self._pending = None
+        self.poll_deadline()
         if self._active is not None or self.snapshot()[2:] != (0,offer.remaining):
             raise Refused("retry_budget_changed")
         prompt = self.prompt_snapshot()
@@ -115,6 +148,7 @@ class RetryBudgetSession:
         self._open()
         if self._active is None or offer is not self._active[0] or self._stopped or self._leases:
             raise Refused("retry_budget_wave")
+        self.poll_deadline()
         run = self._active[1]
         try:
             run._run.validate_plan(context,candidates)
@@ -164,7 +198,19 @@ class RetryBudgetSession:
         rows = run.inputs(handles[0],context,candidates)
         if wire_for(l.attempt.worker,rows,ceiling=l.attempt.ceiling) != expected:
             raise Refused("retry_budget_wire_drift")
-        self._budget.dispatch(l,wire)
+        self.poll_deadline()
+        if self._deadlines is not None:
+            try:
+                self._timed[l.attempt.identity]=self._deadlines.start(l.attempt.identity)
+            except Refused:
+                self.stop()
+                raise
+        try:
+            self._budget.dispatch(l,wire)
+        except Refused:
+            self._finish_deadline(l)
+            self.stop()
+            raise
         self._leases[l.attempt.worker] = (l,expected,"DISPATCHED")
 
     def settle_reaped(self, lease, envelope):
@@ -172,14 +218,21 @@ class RetryBudgetSession:
         l,wire,state = self._entry(lease)
         if state != "DISPATCHED":
             raise Refused("retry_budget_terminal")
+        # Late but measured work is still charged. Revoke before publication.
+        try:
+            self.poll_deadline()
+        except Refused:
+            pass
         try:
             _,tokens,prompt = bound_reply(l.attempt.worker,wire,envelope)
         except (ValueError,RecursionError):
             self._budget.abandon_reaped(l)
+            self._finish_deadline(l)
             del self._leases[l.attempt.worker]
             self.stop()
             raise Refused("retry_budget_unknown_usage")
         self._budget.settle_reaped(l,len(tokens),prompt=prompt if l.attempt.prompt_ceiling else None)
+        self._finish_deadline(l)
         del self._leases[l.attempt.worker]
         return len(tokens)
 
@@ -188,6 +241,7 @@ class RetryBudgetSession:
         if state != "DISPATCHED":
             raise Refused("retry_budget_terminal")
         self._budget.abandon_reaped(l)
+        self._finish_deadline(l)
         del self._leases[l.attempt.worker]
         self.stop()
 
