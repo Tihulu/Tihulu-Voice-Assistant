@@ -289,9 +289,14 @@ impl HarnessWave {
         key: &WorkerKey,
         current: &Current<'_>,
         now: u64,
+        source: Identity,
         bytes: &[u8],
     ) -> Result<(), Error> {
-        if self.row(key)?.pending_len != 0 {
+        let row = self.row(key)?;
+        if row.transport != Some(source) {
+            return Err(Error::Foreign);
+        }
+        if row.pending_len != 0 {
             self.stop();
             return Err(Error::Transport(synthetic_transport::Error::Partial));
         }
@@ -472,9 +477,38 @@ impl HarnessWave {
         Ok(())
     }
 
-    /// Trusted terminal observation only. Not proof of process exit, and
-    /// MeasuredReport is diagnostic rather than publication permission.
+    /// Trusted terminal observation for a nontransport worker.
     pub fn settle(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        now: u64,
+        measured: Option<(u64, u64)>,
+    ) -> Result<ResultState, Error> {
+        if self.row(key)?.transport.is_some() {
+            return Err(Error::Phase);
+        }
+        self.settle_exact(key, current, now, measured)
+    }
+
+    /// Trusted terminal observer must identify the bound connection. This
+    /// observation is not a protocol event or actual process-exit proof.
+    pub fn settle_transport(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        now: u64,
+        source: Identity,
+        measured: Option<(u64, u64)>,
+    ) -> Result<ResultState, Error> {
+        if self.row(key)?.transport != Some(source) {
+            return Err(Error::Foreign);
+        }
+        self.settle_exact(key, current, now, measured)
+    }
+
+    /// MeasuredReport is diagnostic, not publication permission.
+    fn settle_exact(
         &mut self,
         key: &WorkerKey,
         current: &Current<'_>,

@@ -88,13 +88,13 @@ fn exact_envelope_uses_existing_wave_and_requires_trusted_settle() {
         w.record(key, &current(&m), 101, 1, Event::Started),
         Err(Error::Phase)
     );
-    w.record_frame(key, &current(&m), 101, &frame(id, 1, 1))
+    w.record_frame(key, &current(&m), 101, id, &frame(id, 1, 1))
         .unwrap();
-    w.record_frame(key, &current(&m), 102, &frame(id, 2, 4))
+    w.record_frame(key, &current(&m), 102, id, &frame(id, 2, 4))
         .unwrap();
     assert_eq!(w.snapshot().reserved, amount());
     assert_eq!(
-        w.settle(key, &current(&m), 103, Some((1, 2))),
+        w.settle_transport(key, &current(&m), 103, id, Some((1, 2))),
         Ok(ResultState::MeasuredReport)
     );
     assert_eq!(w.snapshot().reserved, Amount::default());
@@ -154,13 +154,13 @@ fn foreign_envelope_stops_without_releasing_reservation() {
         ..id
     };
     assert_eq!(
-        w.record_frame(key, &current(&m), 101, &frame(foreign, 1, 1)),
+        w.record_frame(key, &current(&m), 101, id, &frame(foreign, 1, 1)),
         Err(Error::Transport(synthetic_transport::Error::Identity))
     );
     assert!(w.stopped());
     assert_eq!(w.snapshot().reserved, amount());
     assert_eq!(
-        w.settle(key, &current(&m), 102, None),
+        w.settle_transport(key, &current(&m), 102, id, None),
         Ok(ResultState::NoPublication)
     );
     assert!(w.drained());
@@ -176,10 +176,10 @@ fn gap_or_replay_stops_existing_event_tracker() {
         let id = identity();
         w.bind_transport(key, &current(&m), id, 100).unwrap();
         w.dispatch(key, &current(&m), 100).unwrap();
-        w.record_frame(key, &current(&m), 101, &frame(id, 1, 1))
+        w.record_frame(key, &current(&m), 101, id, &frame(id, 1, 1))
             .unwrap();
         assert_eq!(
-            w.record_frame(key, &current(&m), 102, &frame(id, seq, 2)),
+            w.record_frame(key, &current(&m), 102, id, &frame(id, seq, 2)),
             Err(Error::Harness(harness::Error::Sequence))
         );
         assert_eq!(w.snapshot().reserved, amount());
@@ -196,9 +196,9 @@ fn disconnect_after_report_cannot_count_as_success() {
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
-    w.record_frame(key, &current(&m), 101, &frame(id, 1, 1))
+    w.record_frame(key, &current(&m), 101, id, &frame(id, 1, 1))
         .unwrap();
-    w.record_frame(key, &current(&m), 102, &frame(id, 2, 4))
+    w.record_frame(key, &current(&m), 102, id, &frame(id, 2, 4))
         .unwrap();
     let wrong = Identity {
         connection: [9; 32],
@@ -209,7 +209,7 @@ fn disconnect_after_report_cannot_count_as_success() {
     w.disconnect_transport(key, id).unwrap();
     assert_eq!(w.snapshot().reserved, amount());
     assert_eq!(
-        w.settle(key, &current(&m), 103, Some((1, 2))),
+        w.settle_transport(key, &current(&m), 103, id, Some((1, 2))),
         Ok(ResultState::NoPublication)
     );
     assert!(w.drained());
@@ -224,14 +224,14 @@ fn approval_frame_stops_wave_without_implicit_resume() {
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
-    w.record_frame(key, &current(&m), 101, &frame(id, 1, 1))
+    w.record_frame(key, &current(&m), 101, id, &frame(id, 1, 1))
         .unwrap();
-    w.record_frame(key, &current(&m), 102, &frame(id, 2, 3))
+    w.record_frame(key, &current(&m), 102, id, &frame(id, 2, 3))
         .unwrap();
     assert!(w.stopped());
     assert_eq!(w.snapshot().reserved, amount());
     assert!(w
-        .record_frame(key, &current(&m), 103, &frame(id, 3, 4))
+        .record_frame(key, &current(&m), 103, id, &frame(id, 3, 4))
         .is_err());
 }
 
@@ -244,11 +244,12 @@ fn connection_id_cannot_be_reused_after_successful_settle() {
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
-    w.record_frame(key, &current(&m), 101, &frame(id, 1, 1))
+    w.record_frame(key, &current(&m), 101, id, &frame(id, 1, 1))
         .unwrap();
-    w.record_frame(key, &current(&m), 102, &frame(id, 2, 4))
+    w.record_frame(key, &current(&m), 102, id, &frame(id, 2, 4))
         .unwrap();
-    w.settle(key, &current(&m), 103, Some((0, 0))).unwrap();
+    w.settle_transport(key, &current(&m), 103, id, Some((0, 0)))
+        .unwrap();
     let keys = w.reserve("two", vec![worker("a", &m)], 104).unwrap();
     assert_eq!(
         w.bind_transport(&keys[0], &current(&m), id, 104),
@@ -312,9 +313,9 @@ fn distinct_peers_share_exact_project_session_and_attempt() {
     w.bind_transport(&keys[1], &current(&m), b, 100).unwrap();
     w.dispatch(&keys[0], &current(&m), 100).unwrap();
     w.dispatch(&keys[1], &current(&m), 100).unwrap();
-    w.record_frame(&keys[0], &current(&m), 101, &frame(a, 1, 1))
+    w.record_frame(&keys[0], &current(&m), 101, a, &frame(a, 1, 1))
         .unwrap();
-    w.record_frame(&keys[1], &current(&m), 101, &frame(b, 1, 1))
+    w.record_frame(&keys[1], &current(&m), 101, b, &frame(b, 1, 1))
         .unwrap();
     assert!(!w.stopped());
 }
@@ -374,7 +375,7 @@ fn version_mismatch_is_not_a_compatible_fallback() {
     let mut bytes = frame(id, 1, 1);
     bytes[4] = 2;
     assert_eq!(
-        w.record_frame(key, &current(&m), 101, &bytes),
+        w.record_frame(key, &current(&m), 101, id, &bytes),
         Err(Error::Transport(synthetic_transport::Error::Identity))
     );
     assert_eq!(w.snapshot().reserved, amount());
@@ -390,11 +391,12 @@ fn old_attempt_cannot_be_rebound_with_fresh_connection() {
     let id = identity();
     w.bind_transport(key, &current(&m), id, 100).unwrap();
     w.dispatch(key, &current(&m), 100).unwrap();
-    w.record_frame(key, &current(&m), 101, &frame(id, 1, 1))
+    w.record_frame(key, &current(&m), 101, id, &frame(id, 1, 1))
         .unwrap();
-    w.record_frame(key, &current(&m), 102, &frame(id, 2, 4))
+    w.record_frame(key, &current(&m), 102, id, &frame(id, 2, 4))
         .unwrap();
-    w.settle(key, &current(&m), 103, Some((0, 0))).unwrap();
+    w.settle_transport(key, &current(&m), 103, id, Some((0, 0)))
+        .unwrap();
     let keys = w.reserve("two", vec![worker("a", &m)], 104).unwrap();
     let fresh = Identity {
         connection: [8; 32],
@@ -426,7 +428,7 @@ fn split_frames_at_every_byte_boundary() {
         w.record_chunk(key, &current(&m), 103, id, &frame(id, 2, 4))
             .unwrap();
         assert_eq!(
-            w.settle(key, &current(&m), 104, Some((0, 0))),
+            w.settle_transport(key, &current(&m), 104, id, Some((0, 0))),
             Ok(ResultState::MeasuredReport)
         );
     }
@@ -445,7 +447,7 @@ fn coalesced_frames_share_existing_sequence_and_reservation() {
     w.record_chunk(key, &current(&m), 101, id, &bytes).unwrap();
     assert_eq!(w.snapshot().reserved, amount());
     assert_eq!(
-        w.settle(key, &current(&m), 102, Some((0, 0))),
+        w.settle_transport(key, &current(&m), 102, id, Some((0, 0))),
         Ok(ResultState::MeasuredReport)
     );
 }
@@ -462,7 +464,7 @@ fn raw_full_frame_cannot_skip_a_buffered_prefix() {
     w.record_chunk(key, &current(&m), 101, id, &frame(id, 1, 1)[..5])
         .unwrap();
     assert_eq!(
-        w.record_frame(key, &current(&m), 102, &frame(id, 1, 1)),
+        w.record_frame(key, &current(&m), 102, id, &frame(id, 1, 1)),
         Err(Error::Transport(synthetic_transport::Error::Partial))
     );
     assert!(w.stopped());
@@ -504,7 +506,7 @@ fn partial_eof_requires_exact_trusted_cleanup() {
     );
     assert_eq!(w.snapshot().reserved, amount());
     assert_eq!(
-        w.settle(key, &current(&m), 102, None),
+        w.settle_transport(key, &current(&m), 102, id, None),
         Ok(ResultState::NoPublication)
     );
     assert!(w.drained());
@@ -526,7 +528,7 @@ fn trailing_bytes_after_done_in_same_chunk_invalidate_report() {
         Err(Error::Phase)
     );
     assert_eq!(
-        w.settle(key, &current(&m), 102, Some((0, 0))),
+        w.settle_transport(key, &current(&m), 102, id, Some((0, 0))),
         Ok(ResultState::NoPublication)
     );
 }
@@ -549,7 +551,7 @@ fn exact_owner_cancel_retains_lease_and_rejects_foreign_identity() {
     w.cancel_transport(key, id).unwrap();
     assert_eq!(w.snapshot().reserved, amount());
     assert_eq!(
-        w.settle(key, &current(&m), 102, None),
+        w.settle_transport(key, &current(&m), 102, id, None),
         Ok(ResultState::NoPublication)
     );
     assert!(w.drained());
@@ -580,7 +582,7 @@ fn foreign_chunk_cannot_mutate_partial_buffer_or_clock() {
     w.record_chunk(key, &current(&m), 103, id, &frame(id, 2, 4))
         .unwrap();
     assert_eq!(
-        w.settle(key, &current(&m), 104, Some((0, 0))),
+        w.settle_transport(key, &current(&m), 104, id, Some((0, 0))),
         Ok(ResultState::MeasuredReport)
     );
 }
@@ -617,11 +619,11 @@ fn partial_buffers_remain_isolated_between_concurrent_peers() {
     w.record_chunk(&keys[1], &current(&m), 103, b, &frame(b, 2, 4))
         .unwrap();
     assert_eq!(
-        w.settle(&keys[0], &current(&m), 104, Some((0, 0))),
+        w.settle_transport(&keys[0], &current(&m), 104, a, Some((0, 0))),
         Ok(ResultState::MeasuredReport)
     );
     assert_eq!(
-        w.settle(&keys[1], &current(&m), 104, Some((0, 0))),
+        w.settle_transport(&keys[1], &current(&m), 104, b, Some((0, 0))),
         Ok(ResultState::MeasuredReport)
     );
     assert_eq!(w.snapshot().reserved, Amount::default());
@@ -649,7 +651,7 @@ fn partial_frame_does_not_extend_worker_deadline() {
     assert!(w.stopped());
     assert_eq!(w.snapshot().reserved, amount());
     assert_eq!(
-        w.settle(key, &current(&m), 121, None),
+        w.settle_transport(key, &current(&m), 121, id, None),
         Ok(ResultState::NoPublication)
     );
 }
@@ -672,7 +674,86 @@ fn malformed_second_frame_invalidates_coalesced_report() {
     );
     assert!(w.stopped());
     assert_eq!(
-        w.settle(key, &current(&m), 102, Some((0, 0))),
+        w.settle_transport(key, &current(&m), 102, id, Some((0, 0))),
         Ok(ResultState::NoPublication)
     );
+}
+
+#[test]
+fn foreign_full_frame_source_cannot_mutate_buffer_clock_or_policy() {
+    let m = manifest();
+    let id = identity();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let key = &keys[0];
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    let start = frame(id, 1, 1);
+    w.record_chunk(key, &current(&m), 101, id, &start[..5])
+        .unwrap();
+    let wrong = Identity {
+        connection: [9; 32],
+        ..id
+    };
+    assert_eq!(
+        w.record_frame(key, &current(&m), 999, wrong, &start),
+        Err(Error::Foreign)
+    );
+    assert!(!w.stopped());
+    w.record_chunk(key, &current(&m), 102, id, &start[5..])
+        .unwrap();
+    w.record_frame(key, &current(&m), 103, id, &frame(id, 2, 4))
+        .unwrap();
+    assert_eq!(
+        w.settle_transport(key, &current(&m), 104, id, Some((0, 0))),
+        Ok(ResultState::MeasuredReport)
+    );
+}
+
+#[test]
+fn foreign_terminal_observation_cannot_release_exact_reservation() {
+    let m = manifest();
+    let id = identity();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let key = &keys[0];
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    w.record_frame(key, &current(&m), 101, id, &frame(id, 1, 1))
+        .unwrap();
+    w.record_frame(key, &current(&m), 102, id, &frame(id, 2, 4))
+        .unwrap();
+    let wrong = Identity {
+        worker: [9; 32],
+        ..id
+    };
+    assert_eq!(
+        w.settle_transport(key, &current(&m), 999, wrong, Some((0, 0))),
+        Err(Error::Foreign)
+    );
+    assert_eq!(w.snapshot().reserved, amount());
+    assert!(!w.stopped());
+    assert_eq!(
+        w.settle_transport(key, &current(&m), 103, id, Some((0, 0))),
+        Ok(ResultState::MeasuredReport)
+    );
+}
+
+#[test]
+fn generic_settle_cannot_bypass_bound_terminal_identity() {
+    let m = manifest();
+    let id = identity();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &m)], 100).unwrap();
+    let key = &keys[0];
+    w.bind_transport(key, &current(&m), id, 100).unwrap();
+    w.dispatch(key, &current(&m), 100).unwrap();
+    w.cancel_transport(key, id).unwrap();
+    assert_eq!(w.settle(key, &current(&m), 999, None), Err(Error::Phase));
+    assert_eq!(w.snapshot().reserved, amount());
+    assert_eq!(
+        w.settle_transport(key, &current(&m), 101, id, None),
+        Ok(ResultState::NoPublication)
+    );
+    assert!(w.drained());
 }
