@@ -2,7 +2,9 @@
 //! One shared synthetic Session owns the harness wave. No launch, transport,
 //! process observation or permission issuance. All observations are trusted.
 use crate::budget::{Amount, Demand, Snapshot};
-use crate::harness::{self, Capability, Event, EventKey, EventTrack, Manifest, Negotiated, Phase};
+use crate::harness::{
+    self, Capability, Event, EventKey, EventTrack, Manifest, Negotiated, Phase, Protocol,
+};
 use crate::session::{self, Handle, Session, Terminal};
 use crate::synthetic_transport::{self, Identity};
 use std::collections::{BTreeMap, BTreeSet};
@@ -64,6 +66,10 @@ pub struct HarnessWave {
     rows: BTreeMap<String, Row>,
     policy: Option<PolicyStamp>,
     connections: BTreeSet<[u8; 32]>,
+    owner_scope: Option<([u8; 32], [u8; 32])>,
+    transport_attempt: Option<[u8; 32]>,
+    seen_attempts: BTreeSet<[u8; 32]>,
+    dispatch_started: bool,
 }
 
 impl HarnessWave {
@@ -76,6 +82,10 @@ impl HarnessWave {
             rows: BTreeMap::new(),
             policy: None,
             connections: BTreeSet::new(),
+            owner_scope: None,
+            transport_attempt: None,
+            seen_attempts: BTreeSet::new(),
+            dispatch_started: false,
         })
     }
 
@@ -125,6 +135,8 @@ impl HarnessWave {
             .session
             .reserve_wave(attempt, &demands, now)
             .map_err(Error::Session)?;
+        self.transport_attempt = None;
+        self.dispatch_started = false;
         let mut keys = Vec::with_capacity(handles.len());
         for (worker, handle) in workers.into_iter().zip(handles) {
             let identity = Arc::new(());
@@ -234,21 +246,32 @@ impl HarnessWave {
         now: u64,
     ) -> Result<(), Error> {
         let row = self.row(key)?;
-        if row.dispatched || row.transport.is_some() {
+        if self.dispatch_started || row.dispatched || row.transport.is_some() {
             return Err(Error::Phase);
         }
         self.check(key, current)?;
         self.tick(now, current.policy)?;
+        let scope = (identity.project, identity.session);
         if !identity.valid()
-            || !matches!(
-                current.manifest.protocol,
-                harness::Protocol::AcpV1 | harness::Protocol::AcpV2
-            )
+            || !matches!(current.manifest.protocol, Protocol::AcpV1 | Protocol::AcpV2)
             || self.connections.contains(&identity.connection)
+            || self.owner_scope.is_some_and(|old| old != scope)
+            || self
+                .transport_attempt
+                .is_some_and(|old| old != identity.attempt)
+            || (self.transport_attempt.is_none()
+                && self.seen_attempts.contains(&identity.attempt))
+            || self.rows.values().any(|row| {
+                row.transport
+                    .is_some_and(|old| old.worker == identity.worker)
+            })
         {
             self.stop();
             return Err(Error::Transport(synthetic_transport::Error::Identity));
         }
+        self.owner_scope = Some(scope);
+        self.transport_attempt = Some(identity.attempt);
+        self.seen_attempts.insert(identity.attempt);
         self.connections.insert(identity.connection);
         self.rows
             .get_mut(&key.worker)
@@ -309,12 +332,20 @@ impl HarnessWave {
             return Err(Error::Phase);
         }
         self.check(key, current)?;
+        if self.rows.values().any(|row| {
+            matches!(row.plan.protocol(), Protocol::AcpV1 | Protocol::AcpV2)
+                && row.transport.is_none()
+        }) {
+            self.stop();
+            return Err(Error::Phase);
+        }
         let row = self.rows.get_mut(&key.worker).ok_or(Error::Foreign)?;
         if let Err(error) = self.session.dispatch(&row.handle, now) {
             self.stop();
             return Err(Error::Session(error));
         }
         row.dispatched = true;
+        self.dispatch_started = true;
         Ok(())
     }
 
