@@ -119,3 +119,34 @@ class TokenLedgerTests(unittest.TestCase):
             l.dispatch(replace(x),w,w)
         l.close()
         self.assertEqual(l.snapshot(),(16,0,0,16))
+
+    def test_wave_preflight_rejects_whole_group_without_mutation(self):
+        l=TokenLedger(32,strict_dispatch=True)
+        p=wire_for("plan",())
+        x=l.reserve("plan",p)
+        l.dispatch(x,p,p)
+        l.settle(x,p,(1,)*16)
+        before=l.snapshot()
+        with self.assertRaises(Refused):
+            l.preflight(("a","b"))
+        self.assertEqual(l.snapshot(),before)
+        l.preflight(("a",))
+        self.assertEqual(l.snapshot(),before)
+    def test_wave_preflight_exact_roles_and_no_replay(self):
+        l=TokenLedger(64,strict_dispatch=True)
+        for group in ((),("a","a"),("unknown",),["a"],(True,)):
+            with self.assertRaises(Refused):
+                l.preflight(group)
+        l.preflight(("a","b"))
+        l.reserve("a",wire_for("a",(row("plan"),)))
+        with self.assertRaises(Refused):
+            l.preflight(("a","b"))
+        l.close()
+        with self.assertRaises(Refused):
+            l.preflight(("b",))
+    def test_preflight_is_not_a_reservation(self):
+        l=TokenLedger(16,strict_dispatch=True)
+        l.preflight(("plan",))
+        l.reserve("a",wire_for("a",(row("plan"),)))
+        with self.assertRaises(Refused):
+            l.reserve("plan",wire_for("plan",()))
