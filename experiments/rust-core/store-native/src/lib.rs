@@ -246,6 +246,22 @@ impl Store {
         Ok(Self { db })
     }
 
+    #[cfg(target_os = "linux")]
+    fn backup_idle(&self, destination: &std::path::Path) -> Result<(), Error> {
+        let live: bool = self.db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM turns WHERE state IN ('pending','cancelled'))",
+            [],
+            |r| r.get(0),
+        )?;
+        if live {
+            return Err(Error::Busy);
+        }
+        // The exclusive owner serializes this operation with all store writes.
+        let path = destination.to_str().ok_or(Error::Invalid)?;
+        self.db.execute("VACUUM INTO ?1", [path])?;
+        Ok(())
+    }
+
     pub fn project(&self, id: Id, name: &str) -> Result<(), Error> {
         if !text_valid(name) || name.len() > 128 {
             return Err(Error::Invalid);
