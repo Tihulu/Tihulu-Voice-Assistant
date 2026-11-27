@@ -103,7 +103,7 @@ def worker(name,port,mode="normal"):
     return 0
 
 def child(host_net,host_port,scenario):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke"):
         raise RuntimeError("fixture_scenario")
     sys.path.insert(0,"/work/code")
     import resource
@@ -134,6 +134,9 @@ def child(host_net,host_port,scenario):
     for kind,value in ((resource.RLIMIT_CORE,0),(resource.RLIMIT_FSIZE,4194304),
                        (resource.RLIMIT_CPU,60),(resource.RLIMIT_NOFILE,256)):
         resource.setrlimit(kind,(value,value))
+    if scenario in ("mixed-data","mixed-revoke"):
+        from heterogeneous_model_native_evidence import run_mixed
+        return run_mixed(scenario,record)
     ctx=Context("agent-model-fixture","session","profile",1,"local","LOCAL_ONLY")
     # Synthetic grant mapping only. No shell effects, all roles are text inference.
     gate=FixtureGateway(ctx,(profiles.Rule("host_shell",(),"allow"),),clock=profiles.PolicyClock())
@@ -420,7 +423,7 @@ def child(host_net,host_port,scenario):
     return 0
 
 def main(binary,model,scenario="normal"):
-    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold"):
+    if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke"):
         raise RuntimeError("fixture_scenario")
     from llama_engine_acceptance import MODEL_SHA
     import shutil
@@ -434,7 +437,12 @@ def main(binary,model,scenario="normal"):
         code=root/"code"
         for name in ("gateway.py","inference.py","local_agent_planner.py","local_agent_wave_run.py",
                      "local_agent_resources.py","local_agent_owned_drain.py","local_agent_replan.py","local_agent_launch.py",
-                     "local_agent_model_fixture_contract.py","local_agent_model_token_ledger.py","local_agent_model_stream_contract.py","local_agent_model_budget_admission.py","llama_engine_acceptance.py"):
+                     "local_agent_model_fixture_contract.py","local_agent_model_token_ledger.py","local_agent_model_stream_contract.py","local_agent_model_budget_admission.py","llama_engine_acceptance.py",
+                     "heterogeneous_model_native_evidence.py","heterogeneous_model_review.py",
+                     "heterogeneous_agents.py","agent_custom_profiles.py","agent_model_capability.py",
+                     "heterogeneous_team.py","heterogeneous_team_admission.py","heterogeneous_data_tools.py",
+                     "heterogeneous_data_team.py","vision_image_input.py","document_result.py",
+                     "capabilities.py","adapter_protocol.py"):
             dst=code/name
             dst.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(repo/"experiments"/name,dst)

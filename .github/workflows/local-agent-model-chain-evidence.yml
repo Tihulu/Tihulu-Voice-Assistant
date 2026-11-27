@@ -4,6 +4,8 @@ on:
     branches: ['**']
     paths:
       - 'experiments/local_agent_model_chain_acceptance.py'
+      - 'experiments/heterogeneous_model_native_evidence.py'
+      - 'experiments/heterogeneous_model_review.py'
       - 'experiments/local_agent_model_fixture_contract.py'
       - 'experiments/local_agent_model_token_ledger.py'
       - 'experiments/local_agent_model_budget_admission.py'
@@ -59,3 +61,7 @@ jobs:
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" economy
       - name: Actual isolated pre-launch whole-plan refusal (no inference)
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" plan-hold
+      - name: Actual fixed public mixed data to local model
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" mixed-data
+      - name: Actual fixed mixed data source revocation before model publication
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" mixed-revoke
