@@ -31,8 +31,10 @@ impl Amount {
         })
     }
     fn fits(self, b: Self) -> bool {
-        self.ram <= b.ram && self.vram <= b.vram
-            && self.generated <= b.generated && self.prompt <= b.prompt
+        self.ram <= b.ram
+            && self.vram <= b.vram
+            && self.generated <= b.generated
+            && self.prompt <= b.prompt
     }
 }
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -47,7 +49,10 @@ pub struct Lease {
     worker: String,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum Phase { Prepared, Dispatched }
+enum Phase {
+    Prepared,
+    Dispatched,
+}
 struct Entry {
     identity: Arc<()>,
     amount: Amount,
@@ -56,7 +61,13 @@ struct Entry {
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
-    Invalid, Exhausted, Duplicate, Limit, Closed, Foreign, WrongPhase,
+    Invalid,
+    Exhausted,
+    Duplicate,
+    Limit,
+    Closed,
+    Foreign,
+    WrongPhase,
 }
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Snapshot {
@@ -72,67 +83,126 @@ pub struct Ledger {
     closed: bool,
 }
 fn valid_id(s: &str) -> bool {
-    !s.is_empty() && s.len() <= 128
-        && s.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+    !s.is_empty()
+        && s.len() <= 128
+        && s.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
 }
 impl Ledger {
     pub fn new(capacity: Amount) -> Result<Self, Error> {
-        if !capacity.valid() { return Err(Error::Invalid); }
-        Ok(Self { capacity, spent: Amount::default(), entries: BTreeMap::new(),
-            seen: BTreeSet::new(), closed: false })
+        if !capacity.valid() {
+            return Err(Error::Invalid);
+        }
+        Ok(Self {
+            capacity,
+            spent: Amount::default(),
+            entries: BTreeMap::new(),
+            seen: BTreeSet::new(),
+            closed: false,
+        })
     }
     pub fn snapshot(&self) -> Snapshot {
         // Entries are bounded to MAX_ACTIVE, each dimension <= MAX_DIM.
-        let reserved = self.entries.values().fold(Amount::default(), |a, e|
-            a.add(e.amount).expect("bounded reservation sum"));
-        Snapshot { capacity: self.capacity, reserved, spent: self.spent }
+        let reserved = self.entries.values().fold(Amount::default(), |a, e| {
+            a.add(e.amount).expect("bounded reservation sum")
+        });
+        Snapshot {
+            capacity: self.capacity,
+            reserved,
+            spent: self.spent,
+        }
     }
     pub fn reserve_wave(&mut self, attempt: &str, demands: &[Demand]) -> Result<Vec<Lease>, Error> {
-        if self.closed { return Err(Error::Closed); }
+        if self.closed {
+            return Err(Error::Closed);
+        }
         if !valid_id(attempt) || demands.is_empty() || demands.len() > MAX_WAVE {
             return Err(Error::Invalid);
         }
         if self.entries.len() + demands.len() > MAX_ACTIVE
-            || self.seen.len() + demands.len() > MAX_SEEN { return Err(Error::Limit); }
+            || self.seen.len() + demands.len() > MAX_SEEN
+        {
+            return Err(Error::Limit);
+        }
         let mut keys = BTreeSet::new();
-        let mut total = self.snapshot().reserved.add(self.spent).ok_or(Error::Exhausted)?;
+        let mut total = self
+            .snapshot()
+            .reserved
+            .add(self.spent)
+            .ok_or(Error::Exhausted)?;
         for demand in demands {
-            if !valid_id(&demand.worker) || !demand.amount.valid()
-                || demand.amount.ram == 0 || demand.amount.generated == 0
-                || demand.amount.prompt == 0 { return Err(Error::Invalid); }
+            if !valid_id(&demand.worker)
+                || !demand.amount.valid()
+                || demand.amount.ram == 0
+                || demand.amount.generated == 0
+                || demand.amount.prompt == 0
+            {
+                return Err(Error::Invalid);
+            }
             let key = (attempt.to_owned(), demand.worker.clone());
-            if self.seen.contains(&key) || !keys.insert(key)
-                || self.entries.keys().any(|(_, worker)| worker == &demand.worker) {
+            if self.seen.contains(&key)
+                || !keys.insert(key)
+                || self
+                    .entries
+                    .keys()
+                    .any(|(_, worker)| worker == &demand.worker)
+            {
                 return Err(Error::Duplicate);
             }
             total = total.add(demand.amount).ok_or(Error::Exhausted)?;
         }
-        if !total.fits(self.capacity) { return Err(Error::Exhausted); }
+        if !total.fits(self.capacity) {
+            return Err(Error::Exhausted);
+        }
         let mut leases = Vec::with_capacity(demands.len());
         for demand in demands {
             let key = (attempt.to_owned(), demand.worker.clone());
             let identity = Arc::new(());
             self.seen.insert(key.clone());
-            self.entries.insert(key.clone(), Entry { identity: identity.clone(), amount: demand.amount,
-                phase: Phase::Prepared, cancelled: false });
-            leases.push(Lease { identity, attempt: key.0, worker: key.1 });
+            self.entries.insert(
+                key.clone(),
+                Entry {
+                    identity: identity.clone(),
+                    amount: demand.amount,
+                    phase: Phase::Prepared,
+                    cancelled: false,
+                },
+            );
+            leases.push(Lease {
+                identity,
+                attempt: key.0,
+                worker: key.1,
+            });
         }
         Ok(leases)
     }
     fn entry(&mut self, lease: &Lease) -> Result<&mut Entry, Error> {
-        let entry = self.entries.get_mut(&(lease.attempt.clone(), lease.worker.clone()))
+        let entry = self
+            .entries
+            .get_mut(&(lease.attempt.clone(), lease.worker.clone()))
             .ok_or(Error::Foreign)?;
-        if !Arc::ptr_eq(&entry.identity, &lease.identity) { return Err(Error::Foreign); }
+        if !Arc::ptr_eq(&entry.identity, &lease.identity) {
+            return Err(Error::Foreign);
+        }
         Ok(entry)
     }
     pub fn dispatch(&mut self, lease: &Lease) -> Result<(), Error> {
-        if self.closed { return Err(Error::Closed); }
+        if self.closed {
+            return Err(Error::Closed);
+        }
         let e = self.entry(lease)?;
-        if e.cancelled || e.phase != Phase::Prepared { return Err(Error::WrongPhase); }
+        if e.cancelled || e.phase != Phase::Prepared {
+            return Err(Error::WrongPhase);
+        }
         // Capacity can shrink between reservation and dispatch. Do not launch
         // new work while overcommitted; existing reservations remain owned.
         let snapshot = self.snapshot();
-        if !snapshot.reserved.add(snapshot.spent).ok_or(Error::Exhausted)?.fits(snapshot.capacity) {
+        if !snapshot
+            .reserved
+            .add(snapshot.spent)
+            .ok_or(Error::Exhausted)?
+            .fits(snapshot.capacity)
+        {
             return Err(Error::Exhausted);
         }
         self.entry(lease)?.phase = Phase::Dispatched;
@@ -144,31 +214,53 @@ impl Ledger {
     }
     pub fn close(&mut self) {
         self.closed = true;
-        for e in self.entries.values_mut() { e.cancelled = true; }
+        for e in self.entries.values_mut() {
+            e.cancelled = true;
+        }
     }
     pub fn resize_memory(&mut self, ram: u64, vram: u64) -> Result<(), Error> {
-        if self.closed { return Err(Error::Closed); }
-        if ram > MAX_DIM || vram > MAX_DIM { return Err(Error::Invalid); }
+        if self.closed {
+            return Err(Error::Closed);
+        }
+        if ram > MAX_DIM || vram > MAX_DIM {
+            return Err(Error::Invalid);
+        }
         self.capacity.ram = ram;
         self.capacity.vram = vram;
         Ok(())
     }
     pub fn void_unstarted(&mut self, lease: &Lease) -> Result<(), Error> {
         let e = self.entry(lease)?;
-        if !e.cancelled || e.phase != Phase::Prepared { return Err(Error::WrongPhase); }
-        self.entries.remove(&(lease.attempt.clone(), lease.worker.clone()));
+        if !e.cancelled || e.phase != Phase::Prepared {
+            return Err(Error::WrongPhase);
+        }
+        self.entries
+            .remove(&(lease.attempt.clone(), lease.worker.clone()));
         Ok(())
     }
     /// Trusted terminal observation: unknown usage charges both full ceilings.
     /// Cancellation alone is never a terminal observation.
-    pub fn settle_reaped(&mut self, lease: &Lease, measured: Option<(u64, u64)>) -> Result<(), Error> {
+    pub fn settle_reaped(
+        &mut self,
+        lease: &Lease,
+        measured: Option<(u64, u64)>,
+    ) -> Result<(), Error> {
         let e = self.entry(lease)?;
-        if e.phase != Phase::Dispatched { return Err(Error::WrongPhase); }
+        if e.phase != Phase::Dispatched {
+            return Err(Error::WrongPhase);
+        }
         let (generated, prompt) = measured.unwrap_or((e.amount.generated, e.amount.prompt));
-        if generated > e.amount.generated || prompt > e.amount.prompt { return Err(Error::Invalid); }
-        let charge = Amount { generated, prompt, ..Amount::default() };
+        if generated > e.amount.generated || prompt > e.amount.prompt {
+            return Err(Error::Invalid);
+        }
+        let charge = Amount {
+            generated,
+            prompt,
+            ..Amount::default()
+        };
         let spent = self.spent.add(charge).ok_or(Error::Exhausted)?;
-        self.entries.remove(&(lease.attempt.clone(), lease.worker.clone()));
+        self.entries
+            .remove(&(lease.attempt.clone(), lease.worker.clone()));
         self.spent = spent;
         Ok(())
     }
