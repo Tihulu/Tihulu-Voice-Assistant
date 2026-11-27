@@ -62,6 +62,13 @@ pub struct Message {
     pub body: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
+pub struct Recovery {
+    pub client: Id,
+    pub key: String,
+    pub state: State,
+}
+
 struct Previous {
     seq: i64,
     body: String,
@@ -94,7 +101,7 @@ fn version(db: &Connection) -> Result<i64, Error> {
 fn schema_rows(db: &Connection) -> Result<Vec<SchemaRow>, Error> {
     let mut stmt = db.prepare(
         "SELECT type,name,tbl_name,sql FROM sqlite_schema
-         WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name LIMIT 100",
+         WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name LIMIT 100",
     )?;
     let rows = stmt.query_map([], |r| {
         Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
@@ -219,23 +226,88 @@ impl Store {
         Ok(())
     }
 
+    /// One SELECT gives a consistent history and revision even with another
+    /// connection committing a new turn concurrently.
     pub fn history(&self, session: Id) -> Result<(i64, Vec<Message>), Error> {
-        let (rev, _) = session_row(&self.db, session)?;
         let mut stmt = self.db.prepare(
-            "SELECT seq,role,body FROM messages WHERE session_id=?1 ORDER BY seq LIMIT 1025",
+            "SELECT s.revision,m.seq,m.role,m.body FROM sessions s
+             LEFT JOIN messages m ON m.session_id=s.id
+             WHERE s.id=?1 ORDER BY m.seq LIMIT 1025",
         )?;
-        let rows = stmt.query_map([session.as_slice()], |r| {
-            Ok(Message {
-                sequence: r.get(0)?,
-                role: r.get(1)?,
-                body: r.get(2)?,
-            })
-        })?;
-        let messages = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        let mut rows = stmt.query([session.as_slice()])?;
+        let mut revision = None;
+        let mut messages = Vec::new();
+        while let Some(row) = rows.next()? {
+            let rev: i64 = row.get(0)?;
+            if !(0..i64::MAX).contains(&rev) || revision.is_some_and(|old| old != rev) {
+                return Err(Error::Schema);
+            }
+            revision = Some(rev);
+            if let Some(seq) = row.get::<_, Option<i64>>(1)? {
+                messages.push(Message {
+                    sequence: seq,
+                    role: row.get(2)?,
+                    body: row.get(3)?,
+                });
+            }
+        }
         if messages.len() > 1024 {
             return Err(Error::Limit);
         }
-        Ok((rev, messages))
+        Ok((revision.ok_or(Error::Unknown)?, messages))
+    }
+
+    /// Owner-only recovery inspection. A live row is evidence to hold, not
+    /// permission to launch, replay, publish output or assume process exit.
+    pub fn recovery(&self, session: Id) -> Result<Option<Recovery>, Error> {
+        session_row(&self.db, session)?;
+        let row: Option<(Vec<u8>, String, String)> = self
+            .db
+            .query_row(
+                "SELECT client_id,request_key,state FROM turns WHERE session_id=?1
+                 AND state IN ('pending','cancelled')",
+                [session.as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        row.map(|(client, key, state)| {
+            Ok(Recovery {
+                client: client.try_into().map_err(|_| Error::Schema)?,
+                key,
+                state: State::parse(&state)?,
+            })
+        })
+        .transpose()
+    }
+
+    pub fn archive(&mut self, session: Id, expected: i64) -> Result<i64, Error> {
+        let tx = self
+            .db
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let (revision, archived) = session_row(&tx, session)?;
+        if expected != revision {
+            return Err(Error::Conflict);
+        }
+        if archived {
+            tx.commit()?;
+            return Ok(revision);
+        }
+        let live: bool = tx.query_row(
+            "SELECT EXISTS(SELECT 1 FROM turns WHERE session_id=?1
+             AND state IN ('pending','cancelled'))",
+            [session.as_slice()],
+            |r| r.get(0),
+        )?;
+        if live {
+            return Err(Error::Busy);
+        }
+        tx.execute(
+            "UPDATE sessions SET archived=1 WHERE id=?1",
+            [session.as_slice()],
+        )?;
+        let next = advance(&tx, session, revision)?;
+        tx.commit()?;
+        Ok(next)
     }
 
     pub fn submit(
