@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 use jarvis_core::budget::{Amount, Demand};
 use jarvis_core::harness::{self, Capability, Event, Kind, Manifest, Protocol, Route};
-use jarvis_core::harness_wave::{Current, Error, HarnessWave, ResultState, Worker};
+use jarvis_core::harness_wave::{Current, Error, HarnessWave, PolicyStamp, ResultState, Worker};
 use jarvis_core::session::{self, Session};
 use std::collections::BTreeSet;
 
@@ -32,21 +32,29 @@ fn cloud() -> Manifest {
     manifest(Kind::Codex, Protocol::CodexV1, Route::CloudPlan)
 }
 
-fn current(m: &Manifest) -> Current<'_> {
-    Current {
-        manifest: m,
-        allowed: &m.supported,
+fn policy() -> PolicyStamp {
+    PolicyStamp {
+        generation: 1,
         local_only: false,
     }
 }
 
-fn worker(name: &str, m: &Manifest) -> Worker {
+fn current(m: &Manifest) -> Current<'_> {
+    Current {
+        manifest: m,
+        allowed: &m.supported,
+        policy: policy(),
+    }
+}
+
+fn worker<'a>(name: &str, m: &'a Manifest) -> Worker<'a> {
     Worker {
         demand: Demand {
             worker: name.into(),
             amount: amount(16, 8, 16, 112),
         },
         plan: harness::negotiate(m, m, &m.supported, &m.supported, false).unwrap(),
+        current: current(m),
     }
 }
 
@@ -127,7 +135,10 @@ fn policy_revocation_after_report_denies_success() {
     let revoked = Current {
         manifest: &a,
         allowed: &BTreeSet::new(),
-        local_only: true,
+        policy: PolicyStamp {
+            generation: 2,
+            local_only: true,
+        },
     };
     assert_eq!(
         w.settle(key, &revoked, 103, Some((1, 2))),
@@ -238,11 +249,14 @@ fn local_only_change_blocks_cloud_and_duplicate_event_stops_wave() {
     let strict = Current {
         manifest: &b,
         allowed: &b.supported,
-        local_only: true,
+        policy: PolicyStamp {
+            generation: 2,
+            local_only: true,
+        },
     };
     assert_eq!(
         w.dispatch(&keys[0], &strict, 100),
-        Err(Error::Harness(harness::Error::Denied))
+        Err(Error::PolicyDrift)
     );
     w.void_unstarted(&keys[0]).unwrap();
     let a = local();
@@ -365,9 +379,9 @@ fn heartbeat_expires_silent_worker_and_preserves_pending_peer() {
         .reserve("one", vec![worker("a", &a), worker("b", &a)], 100)
         .unwrap();
     w.dispatch(&keys[0], &current(&a), 100).unwrap();
-    w.tick(119).unwrap();
+    w.tick(119, policy()).unwrap();
     assert_eq!(
-        w.tick(120),
+        w.tick(120, policy()),
         Err(Error::Session(session::Error::Deadline(
             jarvis_core::deadline::Error::Expired
         )))
@@ -388,9 +402,9 @@ fn heartbeat_expires_undispatched_wave_at_total_deadline() {
     let a = local();
     let mut w = wave();
     let keys = w.reserve("one", vec![worker("a", &a)], 100).unwrap();
-    w.tick(199).unwrap();
+    w.tick(199, policy()).unwrap();
     assert_eq!(
-        w.tick(200),
+        w.tick(200, policy()),
         Err(Error::Session(session::Error::Deadline(
             jarvis_core::deadline::Error::Expired
         )))
@@ -398,5 +412,91 @@ fn heartbeat_expires_undispatched_wave_at_total_deadline() {
     assert_eq!(w.snapshot().reserved, amount(16, 8, 16, 112));
     w.void_unstarted(&keys[0]).unwrap();
     assert_eq!(w.snapshot().spent, Amount::default());
+    assert!(w.drained());
+}
+
+#[test]
+fn mixed_policy_generations_are_rejected_before_reservation() {
+    let a = local();
+    let mut w = wave();
+    let mut b = worker("b", &a);
+    b.current.policy.generation = 2;
+    assert!(matches!(
+        w.reserve("one", vec![worker("a", &a), b], 100),
+        Err(Error::PolicyDrift)
+    ));
+    assert_eq!(w.snapshot().reserved, Amount::default());
+    assert!(w.drained());
+}
+
+#[test]
+fn peer_manifest_drift_rejects_entire_preflight() {
+    let a = local();
+    let drift = Manifest {
+        pin: [2; 32],
+        ..a.clone()
+    };
+    let mut w = wave();
+    let mut b = worker("b", &a);
+    b.current.manifest = &drift;
+    assert!(matches!(
+        w.reserve("one", vec![worker("a", &a), b], 100),
+        Err(Error::Harness(harness::Error::Drift))
+    ));
+    assert_eq!(w.snapshot().reserved, Amount::default());
+    assert!(w.drained());
+}
+
+#[test]
+fn local_only_policy_rejects_cloud_peer_at_preflight() {
+    let a = local();
+    let b = cloud();
+    let mut first = worker("a", &a);
+    let mut second = worker("b", &b);
+    first.current.policy.local_only = true;
+    second.current.policy.local_only = true;
+    let mut w = wave();
+    assert!(matches!(
+        w.reserve("one", vec![first, second], 100),
+        Err(Error::Harness(harness::Error::Denied))
+    ));
+    assert_eq!(w.snapshot().reserved, Amount::default());
+    assert!(w.drained());
+}
+
+#[test]
+fn heartbeat_detects_policy_change_without_adapter_events() {
+    let a = local();
+    let mut w = wave();
+    let keys = w.reserve("one", vec![worker("a", &a)], 100).unwrap();
+    let key = &keys[0];
+    w.dispatch(key, &current(&a), 100).unwrap();
+    let next = PolicyStamp {
+        generation: 2,
+        local_only: false,
+    };
+    assert_eq!(w.tick(101, next), Err(Error::PolicyDrift));
+    assert_eq!(w.snapshot().reserved, amount(16, 8, 16, 112));
+    assert_eq!(
+        w.settle(key, &current(&a), 102, Some((2, 3))),
+        Ok(ResultState::NoPublication)
+    );
+    assert!(w.drained());
+}
+
+#[test]
+fn idle_policy_observation_cannot_be_rolled_back_at_admission() {
+    let a = local();
+    let mut w = wave();
+    let next = PolicyStamp {
+        generation: 2,
+        local_only: false,
+    };
+    w.tick(100, next).unwrap();
+    assert!(matches!(
+        w.reserve("one", vec![worker("a", &a)], 101),
+        Err(Error::PolicyDrift)
+    ));
+    assert_eq!(w.snapshot().reserved, Amount::default());
     assert!(w.drained());
 }
