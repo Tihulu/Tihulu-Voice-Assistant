@@ -71,6 +71,12 @@ class PrivateFrames:
             raise Refused("vision_stale_frame")
         return frame
 
+    def window_current(self,frame):
+        self.current(frame)
+        if self._source!="window":
+            raise Refused("vision_window_required")
+        return frame
+
     def request(self,frame,agent,model):
         self.current(frame)
         # Distinct target for this exact private frame, role and model.
