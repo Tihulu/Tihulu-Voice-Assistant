@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 //! Non-shipping, deterministic core fixtures. No OS, network or model effects.
 
+pub mod acp_v1;
 pub mod approval;
 pub mod approval_broker;
 pub mod budget;
