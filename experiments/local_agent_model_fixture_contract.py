@@ -14,6 +14,10 @@ PREFIX={"plan":"Once upon a time, there was a little bird named",
 MAX_WIRE=4096
 MAX_PARENT_BYTES=512
 
+
+def _digest(value):
+    return type(value) is str and len(value)==64 and all(x in "0123456789abcdef" for x in value)
+
 def wire_for(worker,rows):
     if type(worker) is not str or worker not in PARENTS or type(rows) is not tuple or len(rows)!=len(PARENTS[worker]):
         raise Refused("model_fixture_inputs")
@@ -23,9 +27,9 @@ def wire_for(worker,rows):
             raise Refused("model_fixture_inputs")
         receipt,data=row
         if (type(receipt) is not AgentResult or receipt.worker!=parent or type(data) is not bytes
-                or not 0<len(data)<=MAX_PARENT_BYTES or receipt.size!=len(data)
-                or receipt.payload_digest!=sha256(data).hexdigest()
-                or type(receipt.input_digest) is not str or len(receipt.input_digest)!=64):
+                or not 0<len(data)<=MAX_PARENT_BYTES or type(receipt.size) is not int or receipt.size!=len(data)
+                or not _digest(receipt.payload_digest) or receipt.payload_digest!=sha256(data).hexdigest()
+                or not _digest(receipt.input_digest)):
             raise Refused("model_fixture_receipt")
         try:
             value=data.decode("utf-8")
@@ -55,11 +59,15 @@ def validate_wire(worker,wire):
     if type(obj) is not dict or type(obj.get("prompt")) is not str:
         raise Refused("model_fixture_wire")
     prompt=obj["prompt"]
+    try:
+        prompt_size=len(prompt.encode("utf-8"))
+    except UnicodeError as exc:
+        raise Refused("model_fixture_wire") from exc
     expected={"prompt":prompt,"n_predict":16,"temperature":0,"seed":42,
               "stream":False,"return_tokens":True,"cache_prompt":False,
               "response_fields":["content","tokens","stop","stop_type","model","truncated"]}
-    if (not prompt.startswith(PREFIX[worker]) or len(prompt.encode("utf-8"))>2048
-            or any(ord(x)<32 and x not in "\\n\\t" or 127<=ord(x)<=159 for x in prompt)
+    if (not prompt.startswith(PREFIX[worker]) or prompt_size>2048
+            or any(ord(x)<32 and x not in "\n\t" or 127<=ord(x)<=159 for x in prompt)
             or (worker=="plan" and prompt!=PREFIX[worker])
             or (worker!="plan" and not prompt[len(PREFIX[worker]):].strip())
             or wire!=json.dumps(expected,separators=(",",":"),ensure_ascii=True).encode("ascii")):
