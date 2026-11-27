@@ -6,11 +6,12 @@ use crate::{Error, Id, Message, Recovery, Store};
 use rusqlite::{Connection, OpenFlags};
 use std::fs::{self, File, OpenOptions, TryLockError};
 use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub struct ExclusiveStore {
     // Drop the SQLite owner before releasing the lock.
     owner: OwnedStore,
+    directory: PathBuf,
     _lock: File,
 }
 
@@ -85,8 +86,57 @@ impl ExclusiveStore {
         };
         Ok(Self {
             owner: OwnedStore::new(store),
+            directory: directory.to_path_buf(),
             _lock: lock,
         })
+    }
+
+    /// Create a validated, durable snapshot under the same private directory.
+    /// Existing backups are never overwritten. No live job is copied.
+    /// This is a local fixture backup, not a disaster-recovery system.
+    pub fn backup_idle(&self) -> Result<(), Error> {
+        let destination = self.directory.join("backup.sqlite");
+        let staged = self.directory.join("backup.staging");
+        if fs::symlink_metadata(&destination).is_ok() {
+            return Err(Error::Conflict);
+        }
+        let staging = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&staged)
+            .map_err(|_| Error::Database)?;
+        drop(staging);
+        let result = (|| {
+            self.owner.backup_idle(&staged)?;
+            private_file(&staged)?;
+            let db = Connection::open_with_flags(&staged, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+            let snapshot = Store::reopen(db)?;
+            drop(snapshot);
+            File::open(&staged)
+                .and_then(|f| f.sync_all())
+                .map_err(|_| Error::Database)?;
+            // Hard-link publication fails if a destination already exists.
+            // The private directory is trusted; no other writer may replace it.
+            fs::hard_link(&staged, &destination).map_err(|_| Error::Database)?;
+            Ok(())
+        })();
+        let cleanup = fs::remove_file(&staged).map_err(|_| Error::Database);
+        let sync = File::open(&self.directory)
+            .and_then(|f| f.sync_all())
+            .map_err(|_| Error::Database);
+        result?;
+        cleanup?;
+        sync?;
+        Ok(())
+    }
+
+    /// Inspect a trusted snapshot without exposing a runnable Store or grants.
+    pub fn backup_history(&self, session: Id) -> Result<(i64, Vec<Message>), Error> {
+        let path = self.directory.join("backup.sqlite");
+        private_file(&path)?;
+        let db = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+        Store::reopen(db)?.history(session)
     }
 
     pub fn project(&self, id: Id, name: &str) -> Result<(), Error> {
