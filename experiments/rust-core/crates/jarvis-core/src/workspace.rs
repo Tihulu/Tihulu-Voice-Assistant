@@ -47,6 +47,7 @@ pub enum Error {
 struct View {
     session: SessionId,
     window: WindowId,
+    pinned: bool,
 }
 
 struct SessionRow {
@@ -113,7 +114,14 @@ impl Workspace {
             .get_mut(&window)
             .ok_or(Error::Unknown)?
             .push(id);
-        self.tabs.insert(id, View { session, window });
+        self.tabs.insert(
+            id,
+            View {
+                session,
+                window,
+                pinned: false,
+            },
+        );
         Ok(id)
     }
 
@@ -172,7 +180,9 @@ impl Workspace {
         if view.window == target {
             destination.remove(old);
         }
-        if self.splits_group(&destination, index) {
+        if self.splits_group(&destination, index)
+            || !self.pin_position(&destination, index, view.pinned)
+        {
             return Err(Error::Conflict);
         }
         let source = self.windows.get_mut(&view.window).ok_or(Error::Unknown)?;
@@ -224,6 +234,93 @@ impl Workspace {
         Ok(())
     }
 
+    fn pinned_prefix(&self, list: &[TabId]) -> usize {
+        list.iter().take_while(|id| self.tabs[id].pinned).count()
+    }
+
+    fn pin_position(&self, list: &[TabId], index: usize, pinned: bool) -> bool {
+        let prefix = self.pinned_prefix(list);
+        if pinned {
+            index <= prefix
+        } else {
+            index >= prefix
+        }
+    }
+
+    pub fn pinned(&self, tab: TabId) -> Result<bool, Error> {
+        Ok(self.tabs.get(&tab).ok_or(Error::Unknown)?.pinned)
+    }
+
+    /// Pinned tabs are an ungrouped prefix. Pinning/unpinning moves the view
+    /// to the boundary without changing session identity.
+    pub fn set_pinned(&mut self, tab: TabId, pinned: bool) -> Result<(), Error> {
+        let view = *self.tabs.get(&tab).ok_or(Error::Unknown)?;
+        if view.pinned == pinned {
+            return Ok(());
+        }
+        if self.group_of(tab).is_some() {
+            return Err(Error::Conflict);
+        }
+        let mut list = self.tabs(view.window)?.to_vec();
+        let index = list.iter().position(|id| *id == tab).ok_or(Error::Conflict)?;
+        list.remove(index);
+        let boundary = self.pinned_prefix(&list);
+        list.insert(boundary, tab);
+        self.windows.insert(view.window, list);
+        self.tabs.get_mut(&tab).ok_or(Error::Unknown)?.pinned = pinned;
+        Ok(())
+    }
+
+    /// Reorder inside a group using the final member index.
+    pub fn reorder_member(
+        &mut self,
+        group: GroupId,
+        tab: TabId,
+        index: usize,
+    ) -> Result<(), Error> {
+        let row = self.group(group)?;
+        let window = row.window;
+        let mut members = row.tabs.clone();
+        if index >= members.len() {
+            return Err(Error::Conflict);
+        }
+        let old = members.iter().position(|id| *id == tab).ok_or(Error::Conflict)?;
+        let mut list = self.tabs(window)?.to_vec();
+        let start = list
+            .windows(members.len())
+            .position(|slice| slice == members.as_slice())
+            .ok_or(Error::Conflict)?;
+        members.remove(old);
+        members.insert(index, tab);
+        list[start..start + members.len()].copy_from_slice(&members);
+        self.windows.insert(window, list);
+        self.groups.get_mut(&group).ok_or(Error::Unknown)?.tabs = members;
+        Ok(())
+    }
+
+    /// Explicitly remove a member and place it after the remaining group.
+    pub fn remove_member(&mut self, group: GroupId, tab: TabId) -> Result<(), Error> {
+        let row = self.group(group)?;
+        let window = row.window;
+        let mut members = row.tabs.clone();
+        let old = members.iter().position(|id| *id == tab).ok_or(Error::Conflict)?;
+        let mut list = self.tabs(window)?.to_vec();
+        let start = list
+            .windows(members.len())
+            .position(|slice| slice == members.as_slice())
+            .ok_or(Error::Conflict)?;
+        members.remove(old);
+        list.remove(start + old);
+        list.insert(start + members.len(), tab);
+        self.windows.insert(window, list);
+        if members.is_empty() {
+            self.groups.remove(&group);
+        } else {
+            self.groups.get_mut(&group).ok_or(Error::Unknown)?.tabs = members;
+        }
+        Ok(())
+    }
+
     fn group_of(&self, tab: TabId) -> Option<GroupId> {
         self.groups
             .iter()
@@ -256,6 +353,7 @@ impl Workspace {
         if tabs.len() > list.len()
             || !list.windows(tabs.len()).any(|slice| slice == tabs)
             || tabs.iter().any(|tab| self.group_of(*tab).is_some())
+            || tabs.iter().any(|tab| self.tabs[tab].pinned)
         {
             return Err(Error::Conflict);
         }
@@ -315,7 +413,10 @@ impl Workspace {
         } else {
             self.tabs(target)?.to_vec()
         };
-        if index > destination.len() || self.splits_group(&destination, index) {
+        if index > destination.len()
+            || self.splits_group(&destination, index)
+            || !self.pin_position(&destination, index, false)
+        {
             return Err(Error::Conflict);
         }
         destination.splice(index..index, members.iter().copied());
