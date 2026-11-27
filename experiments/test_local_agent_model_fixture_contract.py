@@ -62,3 +62,23 @@ class ModelFixtureContractTests(unittest.TestCase):
                 bound_reply("a",w,pack(dict(obj,**{key:value})))
         with self.assertRaises(Refused):
             bound_reply("a",w,pack(obj)+b" ")
+
+    def test_valid_multiline_and_tab_model_result_roundtrip(self):
+        from local_agent_model_fixture_contract import validate_wire
+        data="bird\n\tfriend".encode("utf-8")
+        wire=wire_for("a",(row("plan",data),))
+        self.assertTrue(json.loads(wire)["prompt"].endswith("bird\n\tfriend "))
+        self.assertEqual(validate_wire("a",wire),sha256(wire).hexdigest())
+    def test_invalid_unicode_surrogate_is_refused(self):
+        from local_agent_model_fixture_contract import validate_wire
+        wire=wire_for("a",(row("plan"),))
+        obj=json.loads(wire)
+        obj["prompt"]+="\ud800"
+        bad=json.dumps(obj,separators=(",",":")).encode("ascii")
+        with self.assertRaises(Refused):
+            validate_wire("a",bad)
+    def test_nonhex_dependency_digest_and_boolean_size_refused(self):
+        receipt,data=row("plan",b"x")
+        for bad in (replace(receipt,input_digest="z"*64),replace(receipt,size=True)):
+            with self.assertRaises(Refused):
+                wire_for("a",((bad,data),))
