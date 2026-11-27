@@ -65,6 +65,8 @@ fn mixed_harnesses_share_one_ledger() {
     assert_eq!(w.snapshot().reserved, amount(32, 16, 32, 224));
     for (key, m) in [(&keys[0], &a), (&keys[1], &b)] {
         w.dispatch(key, &current(m), 100).unwrap();
+    }
+    for (key, m) in [(&keys[0], &a), (&keys[1], &b)] {
         w.record(key, &current(m), 101, 1, Event::Started).unwrap();
         w.record(key, &current(m), 101, 2, Event::ReportedDone)
             .unwrap();
@@ -249,4 +251,29 @@ fn local_only_change_blocks_cloud_and_duplicate_event_stops_wave() {
         w.settle(key, &current(&a), 103, Some((1, 1))),
         Ok(ResultState::NoPublication)
     );
+}
+
+#[test]
+fn clock_regression_keeps_peer_reservations_until_cleanup() {
+    let a = local();
+    let mut w = wave();
+    let keys = w
+        .reserve("one", vec![worker("a", &a), worker("b", &a)], 100)
+        .unwrap();
+    w.dispatch(&keys[0], &current(&a), 100).unwrap();
+    w.record(&keys[0], &current(&a), 101, 1, Event::Started)
+        .unwrap();
+    assert_eq!(
+        w.dispatch(&keys[1], &current(&a), 100),
+        Err(Error::Session(session::Error::Deadline(
+            jarvis_core::deadline::Error::ClockRegression
+        )))
+    );
+    assert_eq!(w.snapshot().reserved, amount(32, 16, 32, 224));
+    w.void_unstarted(&keys[1]).unwrap();
+    assert_eq!(
+        w.settle(&keys[0], &current(&a), 102, Some((1, 1))),
+        Ok(ResultState::NoPublication)
+    );
+    assert!(w.drained());
 }
