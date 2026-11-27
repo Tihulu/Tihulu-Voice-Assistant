@@ -107,6 +107,43 @@ fn schema_rows(db: &Connection) -> Result<Vec<SchemaRow>, Error> {
     Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
 }
 
+// The owner can only reopen data that is consistent with this adapter's
+// version-1 transaction history. This is not an untrusted import parser.
+fn validate_records(db: &Connection) -> Result<(), Error> {
+    let invalid: bool = db.query_row(
+        "SELECT EXISTS(
+            SELECT 1 FROM messages m WHERE NOT EXISTS(
+                SELECT 1 FROM turns t WHERE t.session_id=m.session_id
+                AND ((m.role='user' AND t.user_seq=m.seq)
+                  OR (m.role='assistant' AND t.assistant_seq=m.seq))
+            )
+            UNION ALL
+            SELECT 1 FROM sessions s WHERE
+                (SELECT COALESCE(MAX(seq),0) FROM messages WHERE session_id=s.id)
+                    <> (SELECT COUNT(*) FROM messages WHERE session_id=s.id)
+                OR s.revision <> s.archived + (
+                    SELECT COALESCE(SUM(CASE state
+                        WHEN 'pending' THEN 1 WHEN 'cancelled' THEN 2
+                        WHEN 'drained' THEN 3 WHEN 'completed' THEN 2 END),0)
+                    FROM turns WHERE session_id=s.id
+                )
+                OR EXISTS(
+                    SELECT 1 FROM turns t WHERE t.session_id=s.id
+                    AND t.state IN ('pending','cancelled')
+                    AND (s.archived=1 OR t.user_seq <> (
+                        SELECT MAX(seq) FROM messages WHERE session_id=s.id
+                    ))
+                )
+        )",
+        [],
+        |r| r.get(0),
+    )?;
+    if invalid {
+        return Err(Error::Schema);
+    }
+    Ok(())
+}
+
 fn text_valid(text: &str) -> bool {
     !text.trim().is_empty() && text.len() <= 16_384 && !text.contains('\0')
 }
@@ -187,21 +224,25 @@ impl Store {
 
     /// Reopen an already trusted fixture. Never treats a restart as drain.
     /// Schema equality and consistency checks are not a sandbox for imports.
-    pub fn reopen(db: Connection) -> Result<Self, Error> {
+    pub fn reopen(mut db: Connection) -> Result<Self, Error> {
         configure(&db)?;
         let reference = Self::initialize(Connection::open_in_memory()?)?;
-        if version(&db)? != 1 || schema_rows(&db)? != schema_rows(&reference.db)? {
+        let tx = db.transaction_with_behavior(TransactionBehavior::Deferred)?;
+        if version(&tx)? != 1 || schema_rows(&tx)? != schema_rows(&reference.db)? {
             return Err(Error::Schema);
         }
-        let check: String = db.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
+        let check: String = tx.query_row("PRAGMA quick_check(1)", [], |r| r.get(0))?;
         if check != "ok" {
             return Err(Error::Schema);
         }
-        let mut stmt = db.prepare("PRAGMA foreign_key_check")?;
-        if stmt.exists([])? {
-            return Err(Error::Schema);
+        {
+            let mut stmt = tx.prepare("PRAGMA foreign_key_check")?;
+            if stmt.exists([])? {
+                return Err(Error::Schema);
+            }
         }
-        drop(stmt);
+        validate_records(&tx)?;
+        tx.commit()?;
         Ok(Self { db })
     }
 
