@@ -11,4 +11,5 @@ pub mod deadline;
 pub mod harness;
 pub mod harness_wave;
 pub mod session;
+pub mod synthetic_transport;
 pub mod workspace;

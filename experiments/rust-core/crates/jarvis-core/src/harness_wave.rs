@@ -4,6 +4,7 @@
 use crate::budget::{Amount, Demand, Snapshot};
 use crate::harness::{self, Capability, Event, EventKey, EventTrack, Manifest, Negotiated, Phase};
 use crate::session::{self, Handle, Session, Terminal};
+use crate::synthetic_transport::{self, Identity};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 
@@ -39,6 +40,7 @@ struct Row {
     track: EventTrack,
     event_key: EventKey,
     dispatched: bool,
+    transport: Option<Identity>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,6 +50,7 @@ pub enum Error {
     Foreign,
     Phase,
     PolicyDrift,
+    Transport(synthetic_transport::Error),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +63,7 @@ pub struct HarnessWave {
     session: Session,
     rows: BTreeMap<String, Row>,
     policy: Option<PolicyStamp>,
+    connections: BTreeSet<[u8; 32]>,
 }
 
 impl HarnessWave {
@@ -71,6 +75,7 @@ impl HarnessWave {
             session,
             rows: BTreeMap::new(),
             policy: None,
+            connections: BTreeSet::new(),
         })
     }
 
@@ -134,6 +139,7 @@ impl HarnessWave {
                     track,
                     event_key,
                     dispatched: false,
+                    transport: None,
                 },
             );
             keys.push(WorkerKey {
@@ -218,6 +224,78 @@ impl HarnessWave {
         Ok(())
     }
 
+    /// Trusted owner binds a reviewed internal transport before dispatch.
+    /// A connection identity is never reused during this wave owner's life.
+    pub fn bind_transport(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        identity: Identity,
+        now: u64,
+    ) -> Result<(), Error> {
+        let row = self.row(key)?;
+        if row.dispatched || row.transport.is_some() {
+            return Err(Error::Phase);
+        }
+        self.check(key, current)?;
+        self.tick(now, current.policy)?;
+        if !identity.valid()
+            || !matches!(
+                current.manifest.protocol,
+                harness::Protocol::AcpV1 | harness::Protocol::AcpV2
+            )
+            || self.connections.contains(&identity.connection)
+        {
+            self.stop();
+            return Err(Error::Transport(synthetic_transport::Error::Identity));
+        }
+        self.connections.insert(identity.connection);
+        self.rows.get_mut(&key.worker).ok_or(Error::Foreign)?.transport = Some(identity);
+        Ok(())
+    }
+
+    /// Bound adapters cannot bypass the fixed envelope with raw events.
+    pub fn record_frame(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        now: u64,
+        bytes: &[u8],
+    ) -> Result<(), Error> {
+        let row = self.row(key)?;
+        if !row.dispatched {
+            return Err(Error::Phase);
+        }
+        let identity = row.transport.ok_or(Error::Phase)?;
+        self.check(key, current)?;
+        self.tick(now, current.policy)?;
+        let frame = match synthetic_transport::decode(bytes) {
+            Ok(frame) => frame,
+            Err(error) => {
+                self.stop();
+                return Err(Error::Transport(error));
+            }
+        };
+        if frame.identity != identity || frame.protocol != current.manifest.protocol {
+            self.stop();
+            return Err(Error::Transport(synthetic_transport::Error::Identity));
+        }
+        self.record_event(key, current, now, frame.sequence, frame.event)
+    }
+
+    /// Connection loss is an uncertain outcome, not trusted process exit.
+    pub fn disconnect_transport(
+        &mut self,
+        key: &WorkerKey,
+        identity: Identity,
+    ) -> Result<(), Error> {
+        if self.row(key)?.transport != Some(identity) {
+            return Err(Error::Foreign);
+        }
+        self.stop();
+        Ok(())
+    }
+
     pub fn dispatch(
         &mut self,
         key: &WorkerKey,
@@ -238,6 +316,20 @@ impl HarnessWave {
     }
 
     pub fn record(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        now: u64,
+        sequence: u64,
+        event: Event,
+    ) -> Result<(), Error> {
+        if self.row(key)?.transport.is_some() {
+            return Err(Error::Phase);
+        }
+        self.record_event(key, current, now, sequence, event)
+    }
+
+    fn record_event(
         &mut self,
         key: &WorkerKey,
         current: &Current<'_>,
