@@ -118,6 +118,11 @@ impl HarnessWave {
         self.session.stopped()
     }
 
+    /// No prepared or dispatched rows remain; unlike drained, idle need not be stopped.
+    pub fn idle(&self) -> bool {
+        self.rows.is_empty() && self.session.snapshot().reserved == Amount::default()
+    }
+
     pub fn drained(&self) -> bool {
         self.session.drained() && self.rows.is_empty()
     }

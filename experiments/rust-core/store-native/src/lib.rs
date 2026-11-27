@@ -3,6 +3,7 @@
 //! Disposable native SQLite fixture. Only a trusted owner supplies connections
 //! and IDs. No path-opening API, authentication, process control or migration.
 
+pub mod admission;
 pub mod replay;
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};

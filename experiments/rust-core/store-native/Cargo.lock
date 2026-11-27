@@ -37,9 +37,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e44f110d1777dc6559a51e7d45083945ded4f1bf3305494350f693b6d20b9c8"
 
 [[package]]
+name = "jarvis-core"
+version = "0.1.0"
+
+[[package]]
 name = "jarvis-store-fixture"
 version = "0.1.0"
 dependencies = [
+ "jarvis-core",
  "libsqlite3-sys",
  "rusqlite",
 ]
