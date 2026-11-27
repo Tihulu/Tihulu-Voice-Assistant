@@ -88,8 +88,7 @@ fn compatible(m: &Manifest) -> bool {
                 Capability::HostShell | Capability::IsolatedWork | Capability::ObserveTerminal
             ),
             _ => {
-                *c != Capability::HostShell
-                    || (m.kind == NativeJanQwen && m.route == Route::Local)
+                *c != Capability::HostShell || (m.kind == NativeJanQwen && m.route == Route::Local)
             }
         })
         && (m.route == Route::Local

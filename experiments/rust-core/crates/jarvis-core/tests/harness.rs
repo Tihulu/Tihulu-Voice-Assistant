@@ -48,7 +48,10 @@ fn exact_reviewed_protocol_and_pin_required() {
             negotiate(&m, &observed, &m.supported, &requested, false).unwrap_err(),
             Error::Drift
         );
-        assert_eq!(plan.recheck(&observed, &m.supported, false), Err(Error::Drift));
+        assert_eq!(
+            plan.recheck(&observed, &m.supported, false),
+            Err(Error::Drift)
+        );
     }
     assert_eq!(plan.recheck(&m, &caps(&[]), false), Err(Error::Denied));
 }
@@ -123,32 +126,58 @@ fn host_shell_only_native_local_jan_qwen() {
         Route::CloudPlan,
         &[Capability::Chat],
     );
-    assert_eq!(accepted(&m, &[Capability::Chat]).unwrap_err(), Error::InvalidManifest);
+    assert_eq!(
+        accepted(&m, &[Capability::Chat]).unwrap_err(),
+        Error::InvalidManifest
+    );
 }
 
 #[test]
 fn terminal_observer_and_deepseek_text_cannot_expand_scope() {
     for (kind, protocol, allowed) in [
-        (Kind::TerminalObserver, Protocol::PtyObserverV1, Capability::ObserveTerminal),
+        (
+            Kind::TerminalObserver,
+            Protocol::PtyObserverV1,
+            Capability::ObserveTerminal,
+        ),
         (Kind::DeepSeek, Protocol::DeepSeekTextV1, Capability::Chat),
     ] {
         let m = manifest(kind, protocol, Route::Local, &[allowed]);
         assert!(accepted(&m, &[allowed]).is_ok());
-        let expanded = manifest(kind, protocol, Route::Local, &[allowed, Capability::IsolatedWork]);
-        assert_eq!(accepted(&expanded, &[allowed]).unwrap_err(), Error::InvalidManifest);
+        let expanded = manifest(
+            kind,
+            protocol,
+            Route::Local,
+            &[allowed, Capability::IsolatedWork],
+        );
+        assert_eq!(
+            accepted(&expanded, &[allowed]).unwrap_err(),
+            Error::InvalidManifest
+        );
     }
 }
 
 #[test]
 fn incompatible_protocol_and_zero_pin_refused() {
-    let m = manifest(Kind::Pi, Protocol::CodexV1, Route::Local, &[Capability::Chat]);
-    assert_eq!(accepted(&m, &[Capability::Chat]).unwrap_err(), Error::InvalidManifest);
+    let m = manifest(
+        Kind::Pi,
+        Protocol::CodexV1,
+        Route::Local,
+        &[Capability::Chat],
+    );
+    assert_eq!(
+        accepted(&m, &[Capability::Chat]).unwrap_err(),
+        Error::InvalidManifest
+    );
     let m = Manifest {
         protocol: Protocol::PiRpcV1,
         pin: [0; 32],
         ..m
     };
-    assert_eq!(accepted(&m, &[Capability::Chat]).unwrap_err(), Error::InvalidManifest);
+    assert_eq!(
+        accepted(&m, &[Capability::Chat]).unwrap_err(),
+        Error::InvalidManifest
+    );
 }
 
 #[test]
@@ -159,7 +188,10 @@ fn completion_report_is_not_drain() {
     track.record(&key, 2, Event::Progress).unwrap();
     track.record(&key, 3, Event::ReportedDone).unwrap();
     assert_eq!(track.phase(), Phase::Draining);
-    assert_eq!(track.observe_drained(&key), Ok(Outcome::ReportedSuccessAndDrained));
+    assert_eq!(
+        track.observe_drained(&key),
+        Ok(Outcome::ReportedSuccessAndDrained)
+    );
     assert_eq!(track.observe_drained(&key), Err(Error::State));
 }
 
@@ -180,9 +212,15 @@ fn gaps_and_duplicates_fail_closed() {
     for sequence in [1, 3, u64::MAX] {
         let (mut track, key) = EventTrack::new();
         track.record(&key, 1, Event::Started).unwrap();
-        assert_eq!(track.record(&key, sequence, Event::Progress), Err(Error::Sequence));
+        assert_eq!(
+            track.record(&key, sequence, Event::Progress),
+            Err(Error::Sequence)
+        );
         assert_eq!(track.phase(), Phase::Draining);
-        assert_eq!(track.record(&key, 2, Event::ReportedDone), Err(Error::State));
+        assert_eq!(
+            track.record(&key, 2, Event::ReportedDone),
+            Err(Error::State)
+        );
         assert_eq!(track.observe_drained(&key), Ok(Outcome::NoPublication));
     }
 }
@@ -193,7 +231,10 @@ fn approval_request_does_not_auto_resume() {
     track.record(&key, 1, Event::Started).unwrap();
     track.record(&key, 2, Event::ApprovalNeeded).unwrap();
     assert_eq!(track.phase(), Phase::Held);
-    assert_eq!(track.record(&key, 3, Event::ReportedDone), Err(Error::State));
+    assert_eq!(
+        track.record(&key, 3, Event::ReportedDone),
+        Err(Error::State)
+    );
     assert_eq!(track.observe_drained(&key), Ok(Outcome::NoPublication));
 }
 
@@ -209,7 +250,10 @@ fn cancellation_after_report_and_before_drain_suppresses_success() {
 #[test]
 fn failure_and_start_order_violation_require_drain() {
     let (mut track, key) = EventTrack::new();
-    assert_eq!(track.record(&key, 1, Event::ReportedDone), Err(Error::State));
+    assert_eq!(
+        track.record(&key, 1, Event::ReportedDone),
+        Err(Error::State)
+    );
     assert_eq!(track.observe_drained(&key), Ok(Outcome::NoPublication));
     let (mut track, key) = EventTrack::new();
     track.record(&key, 1, Event::Started).unwrap();
