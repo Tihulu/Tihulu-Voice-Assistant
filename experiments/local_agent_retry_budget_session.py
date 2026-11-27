@@ -10,6 +10,7 @@ from hashlib import sha256
 from threading import current_thread
 from time import monotonic_ns
 from local_agent_retry_deadline import RetryDeadlines
+from local_agent_vector_admission import VectorAdmission
 from local_agent_model_stream_contract import stream_wire,verify_cancel
 
 from gateway import Refused
@@ -28,10 +29,11 @@ class RetryOffer:
     prompt_remaining: int | None = None
     prompt_policy: str = "whole-plan"
     prompt_required_at_admission: int = 0
+    vector_digest: str | None = None
 
 
 class RetryBudgetSession:
-    def __init__(self, coordinator, total, *, prompt_total=None, total_ns=None, worker_ns=None, clock=monotonic_ns):
+    def __init__(self, coordinator, total, *, prompt_total=None, total_ns=None, worker_ns=None, clock=monotonic_ns, vector_owner=None, vector_memory=None):
         if (type(coordinator) is not AttemptCoordinator or not coordinator._owned_drain
                 or not coordinator._strict_results or coordinator._issued
                 or type(total) is not int or not 16 <= total <= 655360):
@@ -40,7 +42,18 @@ class RetryBudgetSession:
             raise Refused("retry_budget_prompt_limit")
         if (total_ns is None)!=(worker_ns is None):
             raise Refused("retry_deadline_limit")
+        if (vector_owner is None)!=(vector_memory is None) or (vector_owner is not None and
+                (type(vector_owner) is not VectorAdmission or type(vector_memory) is not tuple
+                 or vector_owner._issued or vector_owner._closed)):
+            raise Refused("retry_vector_config")
         coordinator._thread()
+        if vector_owner is not None:
+            vector_owner._thread()
+        self._vector=vector_owner
+        self._vector_memory=vector_memory
+        self._vector_pending=None
+        self._vector_offer=None
+        self._vector_rows={}
         self._deadlines=None if total_ns is None else RetryDeadlines(total_ns,worker_ns,clock=clock)
         self._timed={}
         self._streaming=set()
@@ -101,7 +114,10 @@ class RetryBudgetSession:
     def prepare(self, context, candidates, profile, *, prompt_policy="whole-plan"):
         self._open()
         self._pending = None
+        self._vector_pending=None
         self.poll_deadline()
+        if self._vector_rows:
+            raise Refused("retry_vector_undrained")
         if self._active is not None:
             _, run = self._active
             if not self._stopped or self._leases or not run.drained():
@@ -124,8 +140,22 @@ class RetryBudgetSession:
         preview = self._coordinator.prepare(context,candidates)
         if tuple(tuple(a.worker for a in w) for w in preview.plan.waves) != (("plan",),("a","b"),("review",)):
             raise Refused("retry_budget_plan_shape")
+        vector_offer=None
+        if self._vector is not None:
+            try:
+                vector_offer=self._vector.prepare(context,candidates,self._vector_memory)
+                legacy=tuple(tuple((a.worker,a.model,a.provider,a.memory_mib) for a in w) for w in preview.plan.waves)
+                vector=tuple(tuple((a.worker,a.model,a.provider,a.capacity.ram_mib+a.capacity.vram_mib)
+                                   for a in w) for w in vector_offer.plan.waves)
+                if legacy!=vector:
+                    raise Refused("retry_vector_plan_mismatch")
+            except Refused:
+                self.stop()
+                raise
+        self._vector_pending=vector_offer
         offer = RetryOffer(preview.attempt,preview.plan.digest,profile,ceilings,remaining,
-                           None if prompt is None else prompt[3],prompt_policy,required)
+                           None if prompt is None else prompt[3],prompt_policy,required,
+                           None if vector_offer is None else vector_offer.plan.digest)
         self._pending = (offer,preview)
         return offer
 
@@ -141,14 +171,23 @@ class RetryBudgetSession:
         prompt = self.prompt_snapshot()
         if (None if prompt is None else prompt[3]) != offer.prompt_remaining or (prompt is not None and prompt[2]):
             raise Refused("retry_budget_changed")
-        run = self._coordinator.confirm(preview,context,candidates)
+        vector_offer=self._vector_pending
+        self._vector_pending=None
+        try:
+            if self._vector is not None:
+                self._vector.confirm(vector_offer,context,candidates,self._vector_memory)
+            run = self._coordinator.confirm(preview,context,candidates)
+        except Refused:
+            self.stop()
+            raise
+        self._vector_offer=vector_offer
         self._active = (offer,run)
         self._stopped = False
         return run
 
     def reserve_wave(self, offer, names, context, candidates, *, streaming=False):
         self._open()
-        if self._active is None or offer is not self._active[0] or self._stopped or self._leases:
+        if self._active is None or offer is not self._active[0] or self._stopped or self._leases or self._vector_rows:
             raise Refused("retry_budget_wave")
         self.poll_deadline()
         run = self._active[1]
@@ -174,13 +213,21 @@ class RetryBudgetSession:
         wires = tuple(wire_for(n,tuple(run._run._outputs[p] for p in PARENTS[n]),ceiling=limits[n]) for n in wave)
         attempts = tuple(Attempt(sha256((offer.attempt+":"+offer.plan_digest+":"+n).encode("ascii")).hexdigest(),
                                   n,sha256(stream_wire(n,w) if streaming else w).hexdigest(),limits[n],MAX_PROMPT_TOKENS if offer.prompt_remaining is not None else 0) for n,w in zip(wave,wires))
+        vector_rows=()
         try:
+            if self._vector is not None:
+                vector_rows=self._vector.reserve_next(self._vector_offer,context,candidates,self._vector_memory)
+                if tuple(r.demand.worker for r in vector_rows)!=wave:
+                    raise Refused("retry_vector_wave_mismatch")
             leases = self._budget.reserve_wave(self._scope,attempts)
         except Refused:
-            # A capacity refusal at a later wave ends this attempt. Retain
-            # actual prior charges and revoke unpublished intermediate output.
+            # No worker has been claimed in this wave. Compensate only the
+            # exact unstarted vector reservations, never an in-flight worker.
             self.stop()
+            for row in vector_rows:
+                self._vector.void_unstarted(row)
             raise
+        self._vector_rows={l.attempt.worker:(l,r) for l,r in zip(leases,vector_rows)}
         self._leases = {l.attempt.worker:(l,w,"PREPARED") for l,w in zip(leases,wires)}
         if streaming:
             self._streaming.update(l.attempt.identity for l in leases)
@@ -272,9 +319,37 @@ class RetryBudgetSession:
         self._streaming.discard(l.attempt.identity)
         del self._leases[l.attempt.worker]
 
+    def release_vector_after_exit(self,lease):
+        """Trusted owner has settled token usage and observed managed exit.
+
+        A root with pending family members cannot release vector capacity.
+        For never-claimed work, only a stopped, voided reservation is eligible.
+        """
+        self._thread()
+        if not any(l is lease for l,r in self._vector_rows.values()):
+            raise Refused("retry_vector_lease")
+        l,row=self._vector_rows[lease.attempt.worker]
+        run=self._active[1]
+        worker=l.attempt.worker
+        if worker in self._leases or any(h.worker==worker for h in run.pending()):
+            raise Refused("retry_vector_undrained")
+        if worker in run._run._claims:
+            success=not self._stopped and worker in run._run._done
+            self._vector.observe_reaped(row,success=success)
+            if not success:
+                self.stop()
+        else:
+            if not self._stopped:
+                raise Refused("retry_vector_unstarted")
+            self._vector.void_unstarted(row)
+        del self._vector_rows[worker]
+
     def stop(self):
         self._thread()
         self._pending = None
+        self._vector_pending=None
+        if self._vector is not None:
+            self._vector.stop()
         self._stopped = True
         for lease,_,_ in self._leases.values():
             self._budget.cancel(lease)
@@ -287,3 +362,5 @@ class RetryBudgetSession:
         self._closed = True
         self._budget.close()
         self._coordinator.close()
+        if self._vector is not None:
+            self._vector.close()
