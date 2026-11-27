@@ -52,3 +52,5 @@ jobs:
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" revoke
       - name: Actual fixed model stream cancellation after first event
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" stream-cancel
+      - name: Actual fixed model whole-wave budget refusal
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" budget-hold
