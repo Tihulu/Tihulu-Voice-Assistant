@@ -6,6 +6,7 @@ on:
       - 'experiments/local_agent_model_chain_acceptance.py'
       - 'experiments/local_agent_model_fixture_contract.py'
       - 'experiments/local_agent_model_token_ledger.py'
+      - 'experiments/local_agent_model_budget_admission.py'
       - 'experiments/local_agent_model_stream_contract.py'
       - 'experiments/local_agent_wave_run.py'
       - 'experiments/local_agent_owned_drain.py'
@@ -56,3 +57,5 @@ jobs:
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" budget-hold
       - name: Actual fixed model economy role ceilings
         run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" economy
+      - name: Actual isolated pre-launch whole-plan refusal (no inference)
+        run: /usr/bin/python3 experiments/local_agent_model_chain_acceptance.py "$RUNNER_TEMP/llama-fixture/build/bin/llama-server" "$RUNNER_TEMP/llama-fixture/model.gguf" plan-hold
