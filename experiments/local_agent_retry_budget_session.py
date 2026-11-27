@@ -23,6 +23,8 @@ class RetryOffer:
     ceilings: tuple
     remaining: int
     prompt_remaining: int | None = None
+    prompt_policy: str = "whole-plan"
+    prompt_required_at_admission: int = 0
 
 
 class RetryBudgetSession:
@@ -63,7 +65,7 @@ class RetryBudgetSession:
         if self._closed:
             raise Refused("retry_budget_closed")
 
-    def prepare(self, context, candidates, profile):
+    def prepare(self, context, candidates, profile, *, prompt_policy="whole-plan"):
         self._open()
         self._pending = None
         if self._active is not None:
@@ -78,12 +80,18 @@ class RetryBudgetSession:
         if reserved or sum(ceilings) > remaining:
             raise Refused("retry_budget_unaffordable")
         prompt = self.prompt_snapshot()
-        if prompt is not None and (prompt[2] or prompt[3] < len(PARENTS)*MAX_PROMPT_TOKENS):
+        if type(prompt_policy) is not str or prompt_policy not in ("whole-plan","wave") or (prompt is None and prompt_policy != "whole-plan"):
+            raise Refused("retry_budget_prompt_policy")
+        # Wave admission is an explicit alternative: it does not promise that
+        # all later waves fit. Each wave still reserves the full context cap.
+        required = 0 if prompt is None else MAX_PROMPT_TOKENS*(len(PARENTS) if prompt_policy == "whole-plan" else 1)
+        if prompt is not None and (prompt[2] or prompt[3] < required):
             raise Refused("retry_budget_prompt_unaffordable")
         preview = self._coordinator.prepare(context,candidates)
         if tuple(tuple(a.worker for a in w) for w in preview.plan.waves) != (("plan",),("a","b"),("review",)):
             raise Refused("retry_budget_plan_shape")
-        offer = RetryOffer(preview.attempt,preview.plan.digest,profile,ceilings,remaining,None if prompt is None else prompt[3])
+        offer = RetryOffer(preview.attempt,preview.plan.digest,profile,ceilings,remaining,
+                           None if prompt is None else prompt[3],prompt_policy,required)
         self._pending = (offer,preview)
         return offer
 
@@ -108,19 +116,33 @@ class RetryBudgetSession:
         if self._active is None or offer is not self._active[0] or self._stopped or self._leases:
             raise Refused("retry_budget_wave")
         run = self._active[1]
-        run._run.validate_plan(context,candidates)
+        try:
+            run._run.validate_plan(context,candidates)
+        except Refused:
+            self.stop()
+            raise
         if run.pending():
             raise Refused("retry_budget_pending")
         wave = tuple(a.worker for a in run._run._wave())
         if type(names) is not tuple or not wave or names != wave:
             raise Refused("retry_budget_wave")
         if run._run._claims:
-            run._run._gateway.checkpoint_claimed_group(tuple(run._run._claims.values()))
+            try:
+                run._run._gateway.checkpoint_claimed_group(tuple(run._run._claims.values()))
+            except Refused:
+                self.stop()
+                raise
         limits = dict(zip(PARENTS,offer.ceilings))
         wires = tuple(wire_for(n,tuple(run._run._outputs[p] for p in PARENTS[n]),ceiling=limits[n]) for n in wave)
         attempts = tuple(Attempt(sha256((offer.attempt+":"+offer.plan_digest+":"+n).encode("ascii")).hexdigest(),
                                   n,sha256(w).hexdigest(),limits[n],MAX_PROMPT_TOKENS if offer.prompt_remaining is not None else 0) for n,w in zip(wave,wires))
-        leases = self._budget.reserve_wave(self._scope,attempts)
+        try:
+            leases = self._budget.reserve_wave(self._scope,attempts)
+        except Refused:
+            # A capacity refusal at a later wave ends this attempt. Retain
+            # actual prior charges and revoke unpublished intermediate output.
+            self.stop()
+            raise
         self._leases = {l.attempt.worker:(l,w,"PREPARED") for l,w in zip(leases,wires)}
         return tuple(zip(leases,wires))
 
