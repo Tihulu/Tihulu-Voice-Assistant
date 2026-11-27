@@ -152,7 +152,7 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
             vector_offer=new_vector_offer()
         used=wave(first,first_run,("plan",))
         session.stop()
-        if vector:
+        if vector and not unified:
             vector_owner.stop()
         record("retry-first-drained",used==16 and first_run.drained() and session.snapshot()==(generated_total,16,0,generated_total-16))
         try:
@@ -279,7 +279,8 @@ def run_retry(record,host_pid_namespace,scenario="retry-cumulative"):
     finally:
         session.close()
         if vector:
-            vector_owner.close()
+            if not unified:
+                vector_owner.close()
             vector_ledger.close()
         for proc in owned:
             if proc.poll() is None:
