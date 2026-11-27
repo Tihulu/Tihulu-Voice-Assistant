@@ -118,7 +118,8 @@ impl GuardedReplayStore {
     ) -> Result<(), Error> {
         // The SQL trigger inserts the unresolved barrier in the very same
         // writer transaction as the wave and all of its peer identities.
-        self.store.claim_wave(project, session, label, attempt, peers)
+        self.store
+            .claim_wave(project, session, label, attempt, peers)
     }
 
     pub fn burn_approval(
