@@ -102,7 +102,7 @@ def worker(name,port,mode="normal"):
                                  "reply":raw.decode("utf-8"),"server_reaped":True,"prompt_tokens":count},separators=(",",":")))
     return 0
 
-def child(host_net,host_port,scenario):
+def child(host_net,host_port,scenario,host_pid_namespace):
     if scenario not in ("normal","revoke","stream-cancel","budget-hold","economy","plan-hold","mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold"):
         raise RuntimeError("fixture_scenario")
     sys.path.insert(0,"/work/code")
@@ -136,7 +136,7 @@ def child(host_net,host_port,scenario):
         resource.setrlimit(kind,(value,value))
     if scenario in ("mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold"):
         from heterogeneous_model_native_evidence import run_mixed
-        return run_mixed(scenario,record)
+        return run_mixed(scenario,record,host_pid_namespace)
     ctx=Context("agent-model-fixture","session","profile",1,"local","LOCAL_ONLY")
     # Synthetic grant mapping only. No shell effects, all roles are text inference.
     gate=FixtureGateway(ctx,(profiles.Rule("host_shell",(),"allow"),),clock=profiles.PolicyClock())
@@ -439,7 +439,7 @@ def main(binary,model,scenario="normal"):
                      "local_agent_resources.py","local_agent_owned_drain.py","local_agent_replan.py","local_agent_launch.py",
                      "local_agent_model_fixture_contract.py","local_agent_model_token_ledger.py","local_agent_model_stream_contract.py","local_agent_model_budget_admission.py","llama_engine_acceptance.py",
                      "heterogeneous_model_native_evidence.py","heterogeneous_model_review.py","heterogeneous_model_owned_review.py",
-                     "heterogeneous_team_token_budget.py","heterogeneous_team_review_token_adapter.py",
+                     "heterogeneous_team_token_budget.py","heterogeneous_team_review_token_adapter.py","native_fixture_pid_observation.py",
                      "heterogeneous_agents.py","agent_custom_profiles.py","agent_model_capability.py",
                      "heterogeneous_team.py","heterogeneous_team_admission.py","heterogeneous_data_tools.py",
                      "heterogeneous_data_team.py","vision_image_input.py","document_result.py",
@@ -472,7 +472,7 @@ def main(binary,model,scenario="normal"):
             port=str(listener.getsockname()[1])
             if port in ("8080","8081"):
                 raise RuntimeError("fixture_port_collision")
-            p=subprocess.Popen(prefix+["--","/usr/bin/python3","-I","/work/runner.py","--child",os.readlink("/proc/self/ns/net"),port,scenario],
+            p=subprocess.Popen(prefix+["--","/usr/bin/python3","-I","/work/runner.py","--child",os.readlink("/proc/self/ns/net"),port,scenario,os.readlink("/proc/self/ns/pid")],
                                stdin=subprocess.DEVNULL,start_new_session=True,env={"PATH":"/usr/bin:/bin","LC_ALL":"C.UTF-8"})
             try:
                 status=p.wait(timeout=140)
@@ -495,6 +495,6 @@ def main(binary,model,scenario="normal"):
 if __name__=="__main__":
     if len(sys.argv)==5 and sys.argv[1]=="--worker":
         raise SystemExit(worker(*sys.argv[2:]))
-    if len(sys.argv)==5 and sys.argv[1]=="--child":
+    if len(sys.argv)==6 and sys.argv[1]=="--child":
         raise SystemExit(child(*sys.argv[2:]))
     raise SystemExit(main(*sys.argv[1:]))
