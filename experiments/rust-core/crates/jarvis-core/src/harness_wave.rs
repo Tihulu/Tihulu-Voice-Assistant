@@ -131,7 +131,26 @@ impl HarnessWave {
     pub fn resize_memory(&mut self, ram: u64, vram: u64) -> Result<(), Error> {
         self.session
             .resize_memory(ram, vram)
-            .map_err(Error::Session)
+            .map_err(Error::Session)?;
+        let snapshot = self.session.snapshot();
+        if snapshot.reserved.ram > snapshot.capacity.ram
+            || snapshot.reserved.vram > snapshot.capacity.vram
+        {
+            // A valid capacity reduction is not an exit observation.
+            // Retain all reservations until exact terminal cleanup.
+            self.stop();
+        }
+        Ok(())
+    }
+
+    /// Trusted owner heartbeat, including when no adapter events arrive.
+    /// Cooperative only: stopping never establishes process exit.
+    pub fn tick(&mut self, now: u64) -> Result<(), Error> {
+        if let Err(error) = self.session.checkpoint(now) {
+            self.stop();
+            return Err(Error::Session(error));
+        }
+        Ok(())
     }
 
     fn check(&mut self, key: &WorkerKey, current: &Current<'_>) -> Result<(), Error> {
