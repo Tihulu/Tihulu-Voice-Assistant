@@ -145,3 +145,37 @@ fn failed_completion_preserves_ticket() {
     assert_eq!(owner.complete_reaped(&first, ""), Err(Error::Conflict));
     assert_eq!(owner.complete_reaped(&first, "Done"), Ok(2));
 }
+
+#[test]
+fn cancelled_recovery_can_be_reopened_without_second_revision() {
+    let f = Fixture::new();
+    let mut first = setup(f.db());
+    let ticket = ticket(first.submit(S, C, 0, "one", "Hello").unwrap());
+    first.cancel(&ticket, 1).unwrap();
+    drop(first);
+    let mut owner = OwnedStore::new(Store::reopen(f.db()).unwrap());
+    assert_eq!(owner.recover_cancel(S, 1).unwrap_err(), Error::Conflict);
+    let recovery = owner.recover_cancel(S, 2).unwrap();
+    assert_eq!(owner.history(S).unwrap().0, 2);
+    assert_eq!(owner.recover_cancel(S, 2).unwrap_err(), Error::Busy);
+    assert_eq!(owner.complete_reaped(&recovery, "late"), Err(Error::Conflict));
+    assert_eq!(owner.observe_drained(&recovery), Ok(3));
+    assert_eq!(owner.recover_cancel(S, 3).unwrap_err(), Error::Unknown);
+}
+
+#[test]
+fn recovery_does_not_cancel_newer_turn_at_stale_revision() {
+    let f = Fixture::new();
+    let mut first = setup(f.db());
+    let one = ticket(first.submit(S, C, 0, "one", "Hello").unwrap());
+    first.complete_reaped(&one, "Done").unwrap();
+    first.submit(S, D, 2, "two", "Next").unwrap();
+    drop(first);
+    let mut owner = OwnedStore::new(Store::reopen(f.db()).unwrap());
+    assert_eq!(owner.recover_cancel(S, 1).unwrap_err(), Error::Conflict);
+    let pending = owner.recovery(S).unwrap().unwrap();
+    assert_eq!(pending.key, "two");
+    assert_eq!(pending.state, State::Pending);
+    let recovery = owner.recover_cancel(S, 3).unwrap();
+    assert_eq!(owner.observe_drained(&recovery), Ok(5));
+}
