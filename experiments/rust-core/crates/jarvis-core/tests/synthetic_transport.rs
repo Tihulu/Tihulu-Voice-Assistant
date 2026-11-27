@@ -230,7 +230,9 @@ fn approval_frame_stops_wave_without_implicit_resume() {
         .unwrap();
     assert!(w.stopped());
     assert_eq!(w.snapshot().reserved, amount());
-    assert!(w.record_frame(key, &current(&m), 103, &frame(id, 3, 4)).is_err());
+    assert!(w
+        .record_frame(key, &current(&m), 103, &frame(id, 3, 4))
+        .is_err());
 }
 
 #[test]

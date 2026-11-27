@@ -250,7 +250,10 @@ impl HarnessWave {
             return Err(Error::Transport(synthetic_transport::Error::Identity));
         }
         self.connections.insert(identity.connection);
-        self.rows.get_mut(&key.worker).ok_or(Error::Foreign)?.transport = Some(identity);
+        self.rows
+            .get_mut(&key.worker)
+            .ok_or(Error::Foreign)?
+            .transport = Some(identity);
         Ok(())
     }
 
