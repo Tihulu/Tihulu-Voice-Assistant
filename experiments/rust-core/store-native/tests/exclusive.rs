@@ -55,11 +55,9 @@ fn competing_owner_cannot_open_and_restart_preserves_hold() {
 }
 
 #[test]
+#[ignore = "invoked by the parent process fixture"]
 fn child_lock_probe() {
-    // Normal test matrix has no probe environment and performs no I/O.
-    let Some(path) = std::env::var_os("JARVIS_FIXTURE_LOCK_PROBE") else {
-        return;
-    };
+    let path = std::env::var_os("JARVIS_FIXTURE_LOCK_PROBE").expect("fixture path required");
     assert!(matches!(
         ExclusiveStore::open(&PathBuf::from(path), false),
         Err(Error::Busy)
@@ -71,7 +69,7 @@ fn operating_system_lock_excludes_a_second_process() {
     let f = Fixture::new();
     let owner = ExclusiveStore::open(&f.0, true).unwrap();
     let status = Command::new(std::env::current_exe().unwrap())
-        .args(["--exact", "child_lock_probe"])
+        .args(["--ignored", "--exact", "child_lock_probe"])
         .env("JARVIS_FIXTURE_LOCK_PROBE", &f.0)
         .status()
         .unwrap();
@@ -179,4 +177,52 @@ fn backup_never_replaces_stale_stage_or_symlink() {
     assert_eq!(owner.backup_idle(), Err(Error::Conflict));
     assert_eq!(owner.backup_history(S), Err(Error::Invalid));
     assert_eq!(fs::read(target).unwrap(), b"unchanged");
+}
+
+#[test]
+#[ignore = "invoked by the parent process fixture"]
+fn child_abrupt_exit() {
+    let path = std::env::var_os("JARVIS_FIXTURE_ABRUPT_EXIT").expect("fixture path required");
+    let mut owner = ExclusiveStore::open(&PathBuf::from(path), true).unwrap();
+    owner.session(S, None).unwrap();
+    assert!(matches!(
+        owner.submit(S, C, 0, "one", "Hello"),
+        Ok(Admission::New(_, _))
+    ));
+    // Skip destructors deliberately. The OS closes the lock descriptor.
+    std::process::exit(0);
+}
+
+#[test]
+fn abrupt_process_exit_releases_lock_but_not_durable_turn() {
+    let f = Fixture::new();
+    let status = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "child_abrupt_exit"])
+        .env("JARVIS_FIXTURE_ABRUPT_EXIT", &f.0)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let mut owner = ExclusiveStore::open(&f.0, false).unwrap();
+    assert_eq!(owner.recovery(S).unwrap().unwrap().state, State::Pending);
+    assert_eq!(owner.backup_idle(), Err(Error::Busy));
+    assert!(matches!(
+        owner.submit(S, C, 0, "one", "Hello"),
+        Ok(Admission::Replay(_))
+    ));
+    let recovery = owner.recover_cancel(S, 1).unwrap();
+    assert_eq!(owner.observe_drained(&recovery), Ok(3));
+}
+
+#[test]
+fn hardlinked_database_cannot_be_reopened_as_a_separate_owner() {
+    let f = Fixture::new();
+    drop(ExclusiveStore::open(&f.0, true).unwrap());
+    let alias = f.0.join("alias.sqlite");
+    fs::hard_link(f.0.join("fixture.sqlite"), &alias).unwrap();
+    assert!(matches!(
+        ExclusiveStore::open(&f.0, false),
+        Err(Error::Invalid)
+    ));
+    fs::remove_file(alias).unwrap();
+    assert!(ExclusiveStore::open(&f.0, false).is_ok());
 }
