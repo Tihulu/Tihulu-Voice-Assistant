@@ -259,8 +259,7 @@ impl HarnessWave {
             || self
                 .transport_attempt
                 .is_some_and(|old| old != identity.attempt)
-            || (self.transport_attempt.is_none()
-                && self.seen_attempts.contains(&identity.attempt))
+            || (self.transport_attempt.is_none() && self.seen_attempts.contains(&identity.attempt))
             || self.rows.values().any(|row| {
                 row.transport
                     .is_some_and(|old| old.worker == identity.worker)
