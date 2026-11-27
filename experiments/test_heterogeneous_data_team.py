@@ -29,11 +29,11 @@ class DataTeamRunTests(unittest.TestCase):
         self.calls=(DataCall("text","read_text",b"public fixture"),DataCall("csv","csv_stats",b"value\n7\n-2\n10\n"),
                     DataCall("image","png_stats",png()),DataCall("review","report",b""))
         self.ledger=ResourceLedger(4096)
-    def make(self,calls=None,identity="team"):
+    def make(self,calls=None,identity="team",document_sources=()):
         a=TeamAdmission(self.g,identity)
         args=(self.ctx,self.tasks,self.available,self.models,4096,512)
         p=a.confirm(a.prepare(*args),*args)
-        return DataTeamRun(a,p,self.calls if calls is None else calls,self.ledger,memory_budget=4096,token_budget=512)
+        return DataTeamRun(a,p,self.calls if calls is None else calls,self.ledger,memory_budget=4096,token_budget=512,document_sources=document_sources)
     def start(self):
         self.run=self.make()
         self.grants={t.identity:self.g.fixture_grant("grant-"+t.identity,self.run.request(t.identity),60)
@@ -120,3 +120,50 @@ class DataTeamRunTests(unittest.TestCase):
         g=self.g.fixture_grant("old",a.request("csv"),60)
         with self.assertRaises(Refused):
             b.execute("csv",g,self.ctx,self.available,self.models)
+
+    def document(self,identity="ocr",text="public fixture"):
+        from capabilities import CapabilityCall
+        from document_result import DocumentFixture,DocumentResult,TextBlock
+        call=CapabilityCall("tesseract","5.0","ocr_image",(("artifact","image"),("digest","a"*64),("language","en")))
+        req=call.request(self.ctx)
+        grant=self.g.fixture_grant(identity,req,60)
+        job=DocumentFixture(self.g,grant,self.ctx,call)
+        job.complete(DocumentResult(req.target,"a"*64,1,(TextBlock(text,(0,0,100,100),99),)))
+        return job
+    def test_document_bound_exact_bytes_and_parent_revoke(self):
+        job=self.document()
+        self.run=self.make(document_sources=(("text",job),))
+        self.grants={t.identity:self.g.fixture_grant("grant-"+t.identity,self.run.request(t.identity),60)
+                     for t in self.tasks}
+        for t in ("csv","text","image","review"):
+            self.execute(t)
+        self.output("review")
+        job.cancel()
+        with self.assertRaises(Refused):
+            self.output("review")
+        self.assertEqual(self.run._results,{})
+    def test_document_mismatch_rejected(self):
+        job=self.document(text="different")
+        with self.assertRaises(Refused):
+            self.make(document_sources=(("text",job),))
+    def test_document_revoke_stops_unrelated_next_task(self):
+        job=self.document()
+        self.run=self.make(document_sources=(("text",job),))
+        self.grants={t.identity:self.g.fixture_grant("grant-"+t.identity,self.run.request(t.identity),60)
+                     for t in self.tasks}
+        job.cancel()
+        with self.assertRaises(Refused):
+            self.execute("csv")
+        self.assertEqual(self.ledger.snapshot(),(4096,0,4096))
+    def test_prior_peer_revocation_stops_before_unrelated_computation(self):
+        self.start()
+        self.execute("csv")
+        self.g.revoke("grant-csv")
+        with self.assertRaises(Refused):
+            self.execute("text")
+        self.assertEqual(self.run._results,{})
+    def test_team_stop_does_not_revoke_external_document_owner(self):
+        job=self.document()
+        self.run=self.make(document_sources=(("text",job),))
+        self.run.stop()
+        self.assertEqual(job.result()[3].blocks[0].text,"public fixture")
