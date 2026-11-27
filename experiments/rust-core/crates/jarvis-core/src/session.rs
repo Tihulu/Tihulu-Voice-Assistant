@@ -143,7 +143,10 @@ impl Session {
                 return Err(Error::Deadline(error));
             }
         };
-        let entry = self.entries.get_mut(&handle.sequence).ok_or(Error::Foreign)?;
+        let entry = self
+            .entries
+            .get_mut(&handle.sequence)
+            .ok_or(Error::Foreign)?;
         if let Err(error) = self.ledger.dispatch(&entry.lease) {
             self.deadlines.finish(&ticket).map_err(Error::Deadline)?;
             self.stop();
