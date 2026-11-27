@@ -70,7 +70,7 @@ class HarnessReplayTests(unittest.TestCase):
         burn_approval(self.db, S, A, W, R, X)
         self.db.execute("PRAGMA recursive_triggers=OFF")
         for table, values in (
-            ("wave", (S, P, "one", A)),
+            ("wave", (S, P, "one", A, 1)),
             ("connection", (S, A, W, C)),
             ("approval", (S, A, W, R, X)),
         ):
@@ -140,6 +140,53 @@ class HarnessReplayTests(unittest.TestCase):
         self.assertEqual(self.count("approval"), 1024)
         with self.assertRaises(sqlite3.IntegrityError):
             burn_approval(self.db, S, A, W, (1).to_bytes(32, "big"), X)
+
+
+    def test_completed_wave_cannot_gain_additional_peer(self):
+        self.claim()
+        with self.assertRaises(sqlite3.IntegrityError), self.db:
+            self.db.execute("INSERT INTO harness_connection_replay VALUES (?,?,?,?)",
+                            (S, A, X, R))
+        self.assertEqual(self.count("connection"), 1)
+        burn_approval(self.db, S, A, W, R, X)
+
+    def test_incomplete_direct_plan_never_admits_approval_history(self):
+        # Direct fixture SQL can commit an incomplete plan, but cannot
+        # admit any approval for it. The supported claim API is atomic.
+        with self.db:
+            self.db.execute("INSERT INTO harness_wave_replay VALUES (?,?,?,?,?)",
+                            (S, P, "one", A, 2))
+            self.db.execute("INSERT INTO harness_connection_replay VALUES (?,?,?,?)",
+                            (S, A, W, C))
+        second = connect(self.path)
+        self.addCleanup(second.close)
+        with self.assertRaises(sqlite3.IntegrityError):
+            burn_approval(second, S, A, W, R, X)
+        self.assertEqual(self.count("approval"), 0)
+        with self.assertRaises(sqlite3.IntegrityError):
+            self.claim(second)
+
+    def test_parent_replace_cannot_reparent_history(self):
+        self.claim()
+        self.db.execute("PRAGMA recursive_triggers=OFF")
+        with self.assertRaises(sqlite3.IntegrityError), self.db:
+            self.db.execute("INSERT OR REPLACE INTO sessions (id,project_id) VALUES (?,NULL)",
+                            (S,))
+        self.assertEqual(self.db.execute("SELECT project_id FROM sessions WHERE id=?", (S,))
+                         .fetchone(), (P,))
+        self.assertEqual(self.count("wave"), 1)
+
+    def test_two_peer_plan_remains_closed_across_reopen(self):
+        claim_wave(self.db, P, S, "one", A, [(W, C), (X, R)])
+        second = connect(self.path)
+        self.addCleanup(second.close)
+        fresh = bytes([9]) * 32
+        with self.assertRaises(sqlite3.IntegrityError), second:
+            second.execute("INSERT INTO harness_connection_replay VALUES (?,?,?,?)",
+                           (S, A, fresh, fresh))
+        burn_approval(second, S, A, X, R, W)
+        self.assertEqual(self.count("connection"), 2)
+        self.assertEqual(self.count("approval"), 1)
 
 
 if __name__ == "__main__":
