@@ -58,6 +58,21 @@ pub enum Update {
     Unsupported,
 }
 
+/// Already-decoded prompt observations for the trusted local adapter bridge.
+/// These are not raw wire messages or authorization.
+pub enum Observation<'a> {
+    PromptSent,
+    Update { session_id: &'a str, update: Update },
+    Permission { session_id: &'a str },
+    Result { rpc_id: u64, reason: StopReason },
+    Fault,
+}
+
+pub struct Ingress<'a> {
+    pub source: Identity,
+    pub observation: Observation<'a>,
+}
+
 /// Already-decoded, bounded fixture observations. No raw content retained.
 pub struct Adapter {
     identity: Identity,
@@ -113,6 +128,40 @@ impl Adapter {
             session: None,
             sequence: 0,
         })
+    }
+
+    pub(crate) fn source_matches(&self, source: Identity) -> bool {
+        self.identity == source
+    }
+
+    pub(crate) fn plan_matches(&self, plan: &Negotiated) -> bool {
+        self.plan == *plan
+    }
+
+    pub(crate) fn accept(
+        &mut self,
+        source: Identity,
+        current: &Current<'_>,
+        observation: Observation<'_>,
+    ) -> Result<Frame, Error> {
+        match observation {
+            Observation::PromptSent => self.begin_prompt(source, current),
+            Observation::Update { session_id, update } => {
+                self.update(source, current, session_id, update)
+            }
+            Observation::Permission { session_id } => {
+                self.permission_requested(source, current, session_id)
+            }
+            Observation::Result { rpc_id, reason } => {
+                self.prompt_result(source, current, rpc_id, reason)
+            }
+            Observation::Fault => {
+                if source != self.identity {
+                    return Err(Error::Foreign);
+                }
+                self.fail(Error::Unsupported)
+            }
+        }
     }
 
     pub fn phase(&self) -> Phase {
@@ -252,9 +301,12 @@ impl Adapter {
     ) -> Result<Frame, Error> {
         self.prompt_scope(source, current, session_id)?;
         match update {
-            Update::Text { bytes } if bytes <= MAX_UPDATE_BYTES => self.frame(Event::Progress),
-            Update::Plan => self.frame(Event::Progress),
-            Update::Text { .. } => self.fail(Error::Limit),
+            Update::Text { bytes } if bytes > MAX_UPDATE_BYTES => self.fail(Error::Limit),
+            Update::Text { .. } if self.plan.requests(Capability::Stream) => {
+                self.frame(Event::Progress)
+            }
+            Update::Plan if self.plan.requests(Capability::Propose) => self.frame(Event::Progress),
+            Update::Text { .. } | Update::Plan => self.fail(Error::Unsupported),
             // No tool execution is supported in this restricted pilot.
             Update::ToolCall | Update::ToolCallUpdate | Update::Unsupported => {
                 self.fail(Error::Unsupported)

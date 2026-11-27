@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! One shared synthetic Session owns the harness wave. No launch, transport,
 //! process observation or permission issuance. All observations are trusted.
+use crate::acp_v1::{self, Adapter, Ingress};
 use crate::budget::{Amount, Demand, Snapshot};
 use crate::harness::{
     self, Capability, Event, EventKey, EventTrack, Manifest, Negotiated, Phase, Protocol,
@@ -55,6 +56,7 @@ struct Row {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Error {
     Harness(harness::Error),
+    Acp(acp_v1::Error),
     Session(session::Error),
     Foreign,
     Phase,
@@ -552,6 +554,61 @@ impl HarnessWave {
         // stop the wave rather than silently allowing the requested effect.
         if matches!(event, Event::ApprovalNeeded | Event::ReportedFailure) {
             self.stop();
+        }
+        Ok(())
+    }
+
+    /// Trusted typed ACP v1 prompt ingress over the existing wave ledger.
+    /// Fixture raw frame APIs remain available for synthetic testing only.
+    /// Every local adapter fault stops the wave, without claiming OS drain.
+    pub fn record_acp_v1(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        now: u64,
+        adapter: &mut Adapter,
+        ingress: Ingress<'_>,
+    ) -> Result<(), Error> {
+        let row = self.row(key)?;
+        if row.transport != Some(ingress.source) || !adapter.source_matches(ingress.source) {
+            return Err(Error::Foreign);
+        }
+        if !row.dispatched
+            || row.plan.protocol() != Protocol::AcpV1
+            || !adapter.plan_matches(&row.plan)
+        {
+            adapter.close();
+            self.stop();
+            return Err(Error::Phase);
+        }
+        if let Err(error) = self
+            .check(key, current)
+            .and_then(|()| self.tick(now, current.policy))
+        {
+            adapter.close();
+            self.stop();
+            return Err(error);
+        }
+        let frame = match adapter.accept(ingress.source, current, ingress.observation) {
+            Ok(frame) => frame,
+            Err(error) => {
+                adapter.close();
+                self.stop();
+                return Err(Error::Acp(error));
+            }
+        };
+        let bytes = match frame.encode() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                adapter.close();
+                self.stop();
+                return Err(Error::Transport(error));
+            }
+        };
+        if let Err(error) = self.record_frame(key, current, now, ingress.source, &bytes) {
+            adapter.close();
+            self.stop();
+            return Err(error);
         }
         Ok(())
     }
