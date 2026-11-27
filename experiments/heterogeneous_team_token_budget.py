@@ -3,7 +3,7 @@
 
 A trusted coordinator supplies the confirmed plan digest, budget and attempt
 identities. Only trusted transport/exit observations may settle or void leases.
-No inference, grants, provider billing, prompt-token accounting or OS access.
+Optional independent prompt budget; no inference, grants, provider billing or OS access.
 """
 from dataclasses import dataclass
 from hashlib import sha256
@@ -30,6 +30,7 @@ class Attempt:
     worker: str
     wire_digest: str
     ceiling: int
+    prompt_ceiling: int = 0
 
     def checked(self):
         if type(self.identity) is not str or type(self.worker) is not str:
@@ -39,6 +40,8 @@ class Attempt:
         _digest(self.wire_digest)
         if type(self.ceiling) is not int or not 1 <= self.ceiling <= MAX_BUDGET:
             raise Refused("team_budget_ceiling")
+        if type(self.prompt_ceiling) is not int or not 0 <= self.prompt_ceiling <= MAX_BUDGET:
+            raise Refused("team_budget_prompt_ceiling")
         return self
 
 
@@ -49,11 +52,15 @@ class Lease:
 
 
 class TeamTokenBudget:
-    def __init__(self, plan_digest, budget):
+    def __init__(self, plan_digest, budget, *, prompt_budget=None):
         self._plan = _digest(plan_digest)
         if type(budget) is not int or not 1 <= budget <= MAX_BUDGET:
             raise Refused("team_budget_limit")
+        if prompt_budget is not None and (type(prompt_budget) is not int or not 1 <= prompt_budget <= MAX_BUDGET):
+            raise Refused("team_budget_prompt_limit")
         self._budget = budget
+        self._prompt_budget = prompt_budget
+        self._prompt_spent = 0
         self._spent = 0
         self._active = {}
         self._seen = set()
@@ -62,6 +69,16 @@ class TeamTokenBudget:
 
     def _reserved(self):
         return sum(lease.attempt.ceiling for lease, _ in self._active.values())
+
+    def _prompt_reserved(self):
+        return sum(lease.attempt.prompt_ceiling for lease, _ in self._active.values())
+
+    def prompt_snapshot(self):
+        with self._lock:
+            if self._prompt_budget is None:
+                return None
+            reserved = self._prompt_reserved()
+            return self._prompt_budget, self._prompt_spent, reserved, self._prompt_budget - self._prompt_spent - reserved
 
     def snapshot(self):
         with self._lock:
@@ -78,6 +95,8 @@ class TeamTokenBudget:
             if type(attempt) is not Attempt:
                 raise Refused("team_budget_attempt")
             attempt.checked()
+            if (self._prompt_budget is None) != (attempt.prompt_ceiling == 0):
+                raise Refused("team_budget_prompt_mode")
         identities = {a.identity for a in attempts}
         workers = {a.worker for a in attempts}
         if len(identities) != len(attempts) or len(workers) != len(attempts):
@@ -90,6 +109,8 @@ class TeamTokenBudget:
                 raise Refused("team_budget_worker_active")
             if sum(a.ceiling for a in attempts) > self._budget - self._spent - self._reserved():
                 raise Refused("team_budget_exhausted")
+            if self._prompt_budget is not None and sum(a.prompt_ceiling for a in attempts) > self._prompt_budget - self._prompt_spent - self._prompt_reserved():
+                raise Refused("team_budget_prompt_exhausted")
             leases = tuple(Lease(self._plan, a) for a in attempts)
             for lease in leases:
                 self._active[lease.attempt.identity] = (lease, "PREPARED")
@@ -132,13 +153,20 @@ class TeamTokenBudget:
                 raise Refused("team_budget_void")
             del self._active[lease.attempt.identity]
 
-    def settle_reaped(self, lease, generated):
+    def settle_reaped(self, lease, generated, *, prompt=None):
         """Trusted terminal observation with measured generated-token count."""
         with self._lock:
             if self._owned(lease) not in ("DISPATCHED", "CANCELLED_DISPATCHED"):
                 raise Refused("team_budget_settle")
             if type(generated) is not int or not 0 <= generated <= lease.attempt.ceiling:
                 raise Refused("team_budget_usage")
+            if self._prompt_budget is None:
+                if prompt is not None:
+                    raise Refused("team_budget_prompt_mode")
+            elif type(prompt) is not int or not 0 <= prompt <= lease.attempt.prompt_ceiling:
+                raise Refused("team_budget_prompt_usage")
+            if self._prompt_budget is not None:
+                self._prompt_spent += prompt
             self._spent += generated
             del self._active[lease.attempt.identity]
 
@@ -148,6 +176,7 @@ class TeamTokenBudget:
             if self._owned(lease) not in ("DISPATCHED", "CANCELLED_DISPATCHED"):
                 raise Refused("team_budget_settle")
             self._spent += lease.attempt.ceiling
+            self._prompt_spent += lease.attempt.prompt_ceiling
             del self._active[lease.attempt.identity]
 
     def close(self):
