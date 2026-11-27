@@ -81,6 +81,7 @@ def child(host_net,host_port):
     from local_agent_resources import ResourceLedger
     from local_agent_launch import LaunchBoundary
     from local_agent_model_fixture_contract import wire_for,bound_reply
+    from local_agent_model_token_ledger import TokenLedger
     from llama_engine_acceptance import MODEL,MODEL_SHA,ENGINE_REV
     from tihulu_jarvis import profiles
     from concurrent.futures import ThreadPoolExecutor
@@ -106,6 +107,10 @@ def child(host_net,host_port):
     workers=(Worker("plan",(),0,"plan"),Worker("a",("plan",),0,"review"),
              Worker("b",("plan",),0,"review"),Worker("review",("a","b"),0,"review"))
     ledger=ResourceLedger(32)
+    token_ledger=TokenLedger(64)
+    leases={}
+    elapsed={}
+    started_ns=time.monotonic_ns()
     coordinator=AttemptCoordinator(gate,ledger,"native-chain",workers,32,2,owned_drain=True,strict_results=True)
     preview=coordinator.prepare(ctx,models)
     run=coordinator.confirm(preview,ctx,models)
@@ -132,16 +137,24 @@ def child(host_net,host_port):
         rows=boundary.inputs(t,ctx,models)
         if tuple(data for _,data in rows)!=tuple(results[parent] for parent in next(w.depends for w in workers if w.identity==name)):
             raise RuntimeError("fixture_dependency_bytes")
-        return t,wire_for(name,rows)
+        wire=wire_for(name,rows)
+        leases[t]=token_ledger.reserve(name,wire)
+        return t,wire
     def invoke(t,wire):
-        return owned[t].communicate(input=wire,timeout=35)[0]
-    def finish(t,wire,out):
+        begin=time.monotonic_ns()
+        out=owned[t].communicate(input=wire,timeout=35)[0]
+        return out,max(0,time.monotonic_ns()-begin)
+    def finish(t,wire,response):
+        out,duration_ns=response
         p=owned[t]
         if p.returncode!=0 or not 0<len(out)<=65536:
             raise RuntimeError("fixture_worker_failed")
         data,tokens=bound_reply(t.worker,wire,out)
+        token_ledger.settle(leases.pop(t),wire,tokens)
+        elapsed[t.worker]=duration_ns
         record("agent-model-"+t.worker+"-real-output",bool(data) and 1<=len(tokens)<=16,
-               input_digest=digest(wire),output_digest=digest(data),tokens=len(tokens))
+               input_digest=digest(wire),output_digest=digest(data),tokens=len(tokens),
+               elapsed_ms=round(duration_ns/1000000,3))
         # Exact wrapper exited 0 after its owned server was reaped.
         outcome=boundary.observe_reaped(t,p.returncode,ctx,models,payload=data)
         del owned[t]
@@ -153,6 +166,7 @@ def child(host_net,host_port):
         a,wa=launch("a","8080")
         b,wb=launch("b","8081")
         record("agent-model-parallel-reservations",ledger.snapshot()==(32,32,0) and all(p.poll() is None for p in owned.values()))
+        record("agent-model-parallel-token-ceiling",token_ledger.snapshot()==(64,16,32,16))
         # Recheck both exact scoped inputs immediately before dispatch;
         # worker threads never access the gateway or choose requests.
         for ticket,wire in ((a,wa),(b,wb)):
@@ -168,6 +182,11 @@ def child(host_net,host_port):
         t,wire=launch("review","8080")
         finish(t,wire,invoke(t,wire))
         receipt,data=run.output("review",ctx,models)
+        budget,spent,reserved,remaining=token_ledger.snapshot()
+        record("agent-model-token-accounting",budget==64 and spent==64 and reserved==0 and remaining==0 and not leases,
+               generated_tokens=spent,reserved_tokens=reserved,remaining_tokens=remaining,
+               wall_ms=round((time.monotonic_ns()-started_ns)/1000000,3),
+               sum_worker_ms=round(sum(elapsed.values())/1000000,3))
         record("agent-model-final-receipt",data==results["review"] and receipt.payload_digest==digest(data)
                and len(receipt.input_digest)==64)
         record("agent-model-clean-ownership",ledger.snapshot()==(32,0,32) and not boundary.observations() and not owned)
@@ -180,6 +199,7 @@ def child(host_net,host_port):
             rejected=False
         record("agent-model-transitive-revoke",rejected)
     finally:
+        token_ledger.close()
         boundary.stop()
         # On failure, never assert descendants are reaped or release uncertain
         # reservations. Outer disposable PID namespace teardown is containment.
@@ -202,7 +222,7 @@ def main(binary,model):
         code=root/"code"
         for name in ("gateway.py","inference.py","local_agent_planner.py","local_agent_wave_run.py",
                      "local_agent_resources.py","local_agent_owned_drain.py","local_agent_replan.py","local_agent_launch.py",
-                     "local_agent_model_fixture_contract.py","llama_engine_acceptance.py"):
+                     "local_agent_model_fixture_contract.py","local_agent_model_token_ledger.py","llama_engine_acceptance.py"):
             dst=code/name
             dst.parent.mkdir(parents=True,exist_ok=True)
             shutil.copyfile(repo/"experiments"/name,dst)
