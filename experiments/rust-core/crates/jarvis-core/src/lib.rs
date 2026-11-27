@@ -3,3 +3,5 @@
 //! Non-shipping, deterministic core fixtures. No OS, network or model effects.
 
 pub mod budget;
+
+pub mod deadline;
