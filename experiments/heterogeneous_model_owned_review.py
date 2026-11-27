@@ -15,13 +15,18 @@ class ReviewTicket:
     wire_digest: str
 
 class OwnedMixedReview:
-    def __init__(self,review,*,generated_budget=16):
-        if type(review) is not MixedModelReview or type(generated_budget) is not int or generated_budget!=16:
+    def __init__(self,review,*,generated_budget=16,use_team_budget=False):
+        if type(review) is not MixedModelReview or type(generated_budget) is not int or generated_budget!=16 or type(use_team_budget) is not bool:
             raise Refused("mixed_owned_budget")
         self._review=review
         self._owner=current_thread()
         self._ledger=review._team._ledger
-        self._tokens=TokenLedger(generated_budget,strict_dispatch=True)
+        self._shared=use_team_budget
+        if self._shared:
+            from heterogeneous_team_review_token_adapter import SharedReviewTokenLedger
+            self._tokens=SharedReviewTokenLedger(review._team.generated_budget(),review._team._plan.digest,review.request().target)
+        else:
+            self._tokens=TokenLedger(generated_budget,strict_dispatch=True)
         review._g.register_agent_attempt("mixed-owned:"+review.request().target)
         self._state="READY"
         self._ticket=None
@@ -52,10 +57,15 @@ class OwnedMixedReview:
         if self._state!="READY" or self._stopping:
             raise Refused("mixed_owned_state")
         r=self._ledger.reserve(self._review.request().target,"model-review",16)
+        lease=None
         try:
-            wire=self._review.begin(grant,context,available,models)
+            wire=self._review._wire
             lease=self._tokens.reserve("a",wire)
+            if self._review.begin(grant,context,available,models)!=wire:
+                raise Refused("mixed_owned_wire_changed")
         except BaseException:
+            if lease is not None:
+                self._tokens.void(lease)
             self._review.stop()
             self._ledger.release(r)
             self._state="CLOSED"
@@ -84,6 +94,8 @@ class OwnedMixedReview:
     def stop(self):
         self._thread()
         self._stopping=True
+        if self._shared:
+            self._tokens.cancel()
         self._review.stop()
         # Neither cancellation nor timeout is a terminal observation.
 
