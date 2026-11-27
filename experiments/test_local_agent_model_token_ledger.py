@@ -150,3 +150,35 @@ class TokenLedgerTests(unittest.TestCase):
         l.reserve("a",wire_for("a",(row("plan"),)))
         with self.assertRaises(Refused):
             l.reserve("plan",wire_for("plan",()))
+
+    def test_economy_profile_whole_wave_and_exact_lease_ceiling(self):
+        from local_agent_model_fixture_contract import ECONOMY_CEILINGS
+        l=TokenLedger(48,strict_dispatch=True,ceilings=ECONOMY_CEILINGS)
+        p=wire_for("plan",())
+        x=l.reserve("plan",p)
+        l.dispatch(x,p,p)
+        l.settle(x,p,(1,)*16)
+        l.preflight(("a","b","review"))
+        with self.assertRaises(Refused):
+            l.reserve("a",wire_for("a",(row("plan"),)))
+        a=wire_for("a",(row("plan"),),ceiling=8)
+        x=l.reserve("a",a)
+        l.dispatch(x,a,a)
+        with self.assertRaises(Refused):
+            l.settle(x,a,(1,)*9)
+        l.settle(x,a,(1,)*8)
+        self.assertEqual(l.snapshot(),(48,24,0,24))
+    def test_economy_uncertain_charges_only_approved_ceiling(self):
+        from local_agent_model_fixture_contract import ECONOMY_CEILINGS
+        l=TokenLedger(48,strict_dispatch=True,ceilings=ECONOMY_CEILINGS)
+        w=wire_for("a",(row("plan"),),ceiling=8)
+        x=l.reserve("a",w)
+        l.dispatch(x,w,w)
+        l.close()
+        self.assertEqual(l.snapshot(),(48,8,0,40))
+    def test_invalid_ceiling_profiles(self):
+        for profile in ((8,8,8,16),(16,True,8,16),(16,8,8),[16,8,8,16]):
+            with self.assertRaises(Refused):
+                TokenLedger(48,strict_dispatch=True,ceilings=profile)
+        with self.assertRaises(Refused):
+            TokenLedger(48,ceilings=(16,8,8,16))
