@@ -514,7 +514,6 @@ fn zero_generation_is_rejected_before_reservation() {
 
 #[test]
 fn same_generation_cannot_change_mode() {
-    let a = local();
     let mut w = wave();
     w.tick(100, policy()).unwrap();
     let changed = PolicyStamp {
