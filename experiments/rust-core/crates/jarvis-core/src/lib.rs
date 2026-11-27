@@ -7,5 +7,6 @@ pub mod chat;
 
 pub mod deadline;
 pub mod harness;
+pub mod harness_wave;
 pub mod session;
 pub mod workspace;
