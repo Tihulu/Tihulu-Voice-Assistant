@@ -28,7 +28,7 @@ def png():
         return struct.pack(">I",len(data))+kind+data+struct.pack(">I",zlib.crc32(kind+data))
     return SIGNATURE+chunk(b"IHDR",struct.pack(">IIBBBBB",2,1,8,2,0,0,0))+chunk(b"IDAT",zlib.compress(b"\0\1\2\3\4\5\6"))+chunk(b"IEND",b"")
 
-def run_mixed(scenario,record):
+def run_mixed(scenario,record,host_pid_namespace):
     if scenario not in ("mixed-data","mixed-revoke","mixed-shared","mixed-shared-revoke","mixed-shared-hold"):
         raise RuntimeError("mixed_fixture_scenario")
     ctx=Context("mixed-model","session","profile",1,"local","LOCAL_ONLY")
@@ -64,6 +64,9 @@ def run_mixed(scenario,record):
     cumulative=run.generated_budget() if shared else None
     prior=0
     if shared:
+        from native_fixture_pid_observation import private_process_snapshot,namespace_drained
+        baseline=private_process_snapshot(host_pid_namespace)
+        record("mixed-shared-private-pid-baseline",bool(baseline),process_count=len(baseline))
         from heterogeneous_team_token_budget import Attempt
         from local_agent_model_fixture_contract import wire_for,bound_reply
         previous_wire=(b"synthetic prior accounting fixture" if scenario=="mixed-shared-hold"
@@ -104,6 +107,7 @@ def run_mixed(scenario,record):
                 raise RuntimeError("mixed_shared_prior_exit")
             _,previous_tokens,previous_prompt=bound_reply("plan",previous_wire,out)
             prior=len(previous_tokens)
+            record("mixed-shared-prior-pid-drained",namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
             cumulative.settle_reaped(previous,prior)
             ledger.release(memory)
             gate.checkpoint_claimed_group(((prior_grant,request),))
@@ -120,6 +124,7 @@ def run_mixed(scenario,record):
             denied=False
         record("mixed-shared-hold-before-claim",denied and review._grant is None and owned.pending() is None)
         children=Path("/proc/self/task/"+str(os.getpid())+"/children").read_text().strip()
+        record("mixed-shared-hold-pid-unchanged",namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
         record("mixed-shared-hold-no-spawn",not children and not tuple(Path("/tmp").glob("server-*.log"))
                and ledger.snapshot()==(64,0,64) and cumulative.snapshot()==(64,49,0,15))
         return 0
@@ -158,6 +163,8 @@ def run_mixed(scenario,record):
         raise
     record("mixed-model-actual-native-output",bool(data) and 1<=len(tokens)<=16 and p.poll() is not None,
            generated_tokens=len(tokens),prompt_tokens=count,wire_digest=sha256(wire).hexdigest())
+    if shared:
+        record("mixed-shared-review-pid-drained",namespace_drained(baseline,private_process_snapshot(host_pid_namespace)))
     if scenario in ("mixed-revoke","mixed-shared-revoke"):
         gate.revoke("data-csv")
         record("mixed-model-revoke-retains-reservation",ledger.snapshot()==(64,16,48)
