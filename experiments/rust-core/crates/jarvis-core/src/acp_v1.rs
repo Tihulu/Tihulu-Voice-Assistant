@@ -88,7 +88,10 @@ impl Adapter {
             || requested.iter().any(|c| {
                 !matches!(
                     c,
-                    Capability::Chat | Capability::Stream | Capability::Cancel | Capability::Propose
+                    Capability::Chat
+                        | Capability::Stream
+                        | Capability::Cancel
+                        | Capability::Propose
                 )
             })
         {
@@ -137,11 +140,10 @@ impl Adapter {
         if self.policy != current.policy {
             return self.fail(Error::Policy);
         }
-        if let Err(error) = self.plan.recheck(
-            current.manifest,
-            current.allowed,
-            current.policy.local_only,
-        ) {
+        if let Err(error) =
+            self.plan
+                .recheck(current.manifest, current.allowed, current.policy.local_only)
+        {
             return self.fail(Error::Harness(error));
         }
         Ok(())
@@ -173,11 +175,7 @@ impl Adapter {
 
     /// Owner has separately reviewed the working directory. No path or MCP
     /// descriptor is accepted here and no session/new message is transmitted.
-    pub fn begin_session(
-        &mut self,
-        source: Identity,
-        current: &Current<'_>,
-    ) -> Result<(), Error> {
+    pub fn begin_session(&mut self, source: Identity, current: &Current<'_>) -> Result<(), Error> {
         self.check(source, current, Phase::Initialized)?;
         self.phase = Phase::Creating;
         Ok(())

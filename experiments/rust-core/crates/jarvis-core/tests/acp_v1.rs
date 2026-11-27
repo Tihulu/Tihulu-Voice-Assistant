@@ -79,7 +79,10 @@ fn wrong_version_id_auth_and_out_of_order_fail_closed() {
         (0, 1, true, Error::Authentication),
     ] {
         let mut a = adapter(&m);
-        assert_eq!(a.initialized(id(), &current(&m), rpc, version, auth), Err(error));
+        assert_eq!(
+            a.initialized(id(), &current(&m), rpc, version, auth),
+            Err(error)
+        );
         assert_eq!(a.phase(), Phase::Closed);
         assert!(a.initialized(id(), &current(&m), 0, 1, false).is_err());
     }
@@ -91,10 +94,16 @@ fn wrong_version_id_auth_and_out_of_order_fail_closed() {
 fn v2_and_unsupported_capabilities_not_admitted() {
     let mut m = manifest();
     m.protocol = Protocol::AcpV2;
-    assert!(matches!(Adapter::new(id(), &m, &current(&m), &m.supported), Err(Error::Version)));
+    assert!(matches!(
+        Adapter::new(id(), &m, &current(&m), &m.supported),
+        Err(Error::Version)
+    ));
     m.protocol = Protocol::AcpV1;
     m.supported.insert(Capability::History);
-    assert!(matches!(Adapter::new(id(), &m, &current(&m), &m.supported), Err(Error::Unsupported)));
+    assert!(matches!(
+        Adapter::new(id(), &m, &current(&m), &m.supported),
+        Err(Error::Unsupported)
+    ));
 }
 
 #[test]
@@ -104,11 +113,17 @@ fn session_id_limits_and_scope_drift() {
         let mut a = adapter(&m);
         a.initialized(id(), &current(&m), 0, 1, false).unwrap();
         a.begin_session(id(), &current(&m)).unwrap();
-        assert_eq!(a.session_created(id(), &current(&m), 1, bad), Err(Error::Session));
+        assert_eq!(
+            a.session_created(id(), &current(&m), 1, bad),
+            Err(Error::Session)
+        );
     }
     let mut a = ready(&m);
     a.begin_prompt(id(), &current(&m)).unwrap();
-    assert_eq!(a.update(id(), &current(&m), "other", Update::Plan), Err(Error::Session));
+    assert_eq!(
+        a.update(id(), &current(&m), "other", Update::Plan),
+        Err(Error::Session)
+    );
 }
 
 #[test]
@@ -121,7 +136,10 @@ fn policy_or_manifest_drift_closes_before_event() {
     let mut a = ready(&m);
     let mut other = m.clone();
     other.pin = [9; 32];
-    assert!(matches!(a.begin_prompt(id(), &current(&other)), Err(Error::Harness(_))));
+    assert!(matches!(
+        a.begin_prompt(id(), &current(&other)),
+        Err(Error::Harness(_))
+    ));
 }
 
 #[test]
@@ -129,10 +147,14 @@ fn permission_holds_and_never_reports_success() {
     let m = manifest();
     let mut a = ready(&m);
     a.begin_prompt(id(), &current(&m)).unwrap();
-    let frame = a.permission_requested(id(), &current(&m), "sess_1").unwrap();
+    let frame = a
+        .permission_requested(id(), &current(&m), "sess_1")
+        .unwrap();
     assert_eq!(frame.event, Event::ApprovalNeeded);
     assert_eq!(a.phase(), Phase::Held);
-    assert!(a.prompt_result(id(), &current(&m), 2, StopReason::EndTurn).is_err());
+    assert!(a
+        .prompt_result(id(), &current(&m), 2, StopReason::EndTurn)
+        .is_err());
 }
 
 #[test]
@@ -165,7 +187,14 @@ fn only_end_turn_reports_success_and_no_duplicate_terminal() {
         let mut a = ready(&m);
         a.begin_prompt(id(), &current(&m)).unwrap();
         let frame = a.prompt_result(id(), &current(&m), 2, reason).unwrap();
-        assert_eq!(frame.event, if reason == StopReason::EndTurn { Event::ReportedDone } else { Event::ReportedFailure });
+        assert_eq!(
+            frame.event,
+            if reason == StopReason::EndTurn {
+                Event::ReportedDone
+            } else {
+                Event::ReportedFailure
+            }
+        );
         assert!(a.prompt_result(id(), &current(&m), 2, reason).is_err());
     }
 }
@@ -180,7 +209,10 @@ fn typed_events_flow_through_existing_wave_and_trusted_settle() {
         prompt: 112,
     };
     let worker = Worker {
-        demand: Demand { worker: "a".into(), amount: capacity },
+        demand: Demand {
+            worker: "a".into(),
+            amount: capacity,
+        },
         plan: harness::negotiate(&m, &m, &m.supported, &m.supported, true).unwrap(),
         current: current(&m),
     };
@@ -188,22 +220,36 @@ fn typed_events_flow_through_existing_wave_and_trusted_settle() {
         Session::new(capacity, 100, 100, 20).unwrap(),
         id().project,
         id().session,
-    ).unwrap();
-    let keys = w.reserve_with_transport("one", vec![worker], BTreeMap::from([("a".into(), id())]), 100).unwrap();
+    )
+    .unwrap();
+    let keys = w
+        .reserve_with_transport(
+            "one",
+            vec![worker],
+            BTreeMap::from([("a".into(), id())]),
+            100,
+        )
+        .unwrap();
     let mut a = ready(&m);
     w.bind_transport(&keys[0], &current(&m), id(), 100).unwrap();
     w.dispatch(&keys[0], &current(&m), 100).unwrap();
     let frames = [
         a.begin_prompt(id(), &current(&m)).unwrap(),
-        a.update(id(), &current(&m), "sess_1", Update::Text { bytes: 5 }).unwrap(),
-        a.prompt_result(id(), &current(&m), 2, StopReason::EndTurn).unwrap(),
+        a.update(id(), &current(&m), "sess_1", Update::Text { bytes: 5 })
+            .unwrap(),
+        a.prompt_result(id(), &current(&m), 2, StopReason::EndTurn)
+            .unwrap(),
     ];
     for (i, frame) in frames.into_iter().enumerate() {
         let bytes = frame.encode().unwrap();
         assert_eq!(decode(&bytes), Ok(frame));
-        w.record_frame(&keys[0], &current(&m), 101 + i as u64, id(), &bytes).unwrap();
+        w.record_frame(&keys[0], &current(&m), 101 + i as u64, id(), &bytes)
+            .unwrap();
     }
     assert_eq!(w.snapshot().reserved, capacity);
-    assert_eq!(w.settle_transport(&keys[0], &current(&m), 104, id(), Some((0, 0))), Ok(ResultState::MeasuredReport));
+    assert_eq!(
+        w.settle_transport(&keys[0], &current(&m), 104, id(), Some((0, 0))),
+        Ok(ResultState::MeasuredReport)
+    );
     assert!(w.idle());
 }
