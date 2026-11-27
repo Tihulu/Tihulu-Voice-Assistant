@@ -209,10 +209,10 @@ impl Session {
     }
 
     pub fn void_unstarted(&mut self, handle: &Handle) -> Result<(), Error> {
-        let entry = self.entry(handle)?;
-        if !self.stopped || entry.ticket.is_some() {
+        if !self.stopped || self.entry(handle)?.ticket.is_some() {
             return Err(Error::WrongPhase);
         }
+        let entry = self.entries.get(&handle.sequence).ok_or(Error::Foreign)?;
         self.ledger
             .void_unstarted(&entry.lease)
             .map_err(Error::Budget)?;
