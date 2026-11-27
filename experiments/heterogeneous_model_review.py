@@ -21,7 +21,9 @@ def review_wire(payload):
     if type(payload) is not bytes or not 1<=len(payload)<=16384:
         raise Refused("mixed_review_payload")
     try:
-        obj=json.loads(payload)
+        obj=json.loads(payload,parse_constant=lambda _: (_ for _ in ()).throw(ValueError("nonfinite")))
+        if encode(obj)!=payload:
+            raise Refused("mixed_review_canonical")
     except (ValueError,UnicodeError,RecursionError) as exc:
         raise Refused("mixed_review_payload") from exc
     if type(obj) is not dict or set(obj)!={"kind","results"} or obj["kind"]!="fixture_report" or type(obj["results"]) is not list or len(obj["results"])!=3:
@@ -31,7 +33,7 @@ def review_wire(payload):
         if type(row) is not dict or set(row)!={"task","digest","result"} or type(row["task"]) is not str or row["task"] not in ("csv","text","image") or row["task"] in rows or type(row["result"]) is not dict or digest(encode(row["result"]))!=row["digest"]:
             raise Refused("mixed_review_row")
         rows[row["task"]]=row["result"]
-    if set(rows)!={"csv","text","image"} or encode(obj)!=payload:
+    if set(rows)!={"csv","text","image"}:
         raise Refused("mixed_review_shape")
     a,b,c=rows["csv"],rows["text"],rows["image"]
     if (a.get("kind"),b.get("kind"),c.get("kind"))!=("integer_csv_stats","text_stats","png_stats"):
