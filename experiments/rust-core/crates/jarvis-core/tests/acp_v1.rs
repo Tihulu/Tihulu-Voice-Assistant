@@ -292,8 +292,7 @@ fn bound_wave(m: &Manifest, a: &Adapter) -> (HarnessWave, WorkerKey, Amount) {
 
 fn prepared_wave(m: &Manifest, a: &Adapter) -> (HarnessWave, WorkerKey, Amount) {
     let (mut w, key, amount) = bound_wave(m, a);
-    w.dispatch_acp_v1(&key, &current(m), id(), a, 100)
-        .unwrap();
+    w.dispatch_acp_v1(&key, &current(m), id(), a, 100).unwrap();
     (w, key, amount)
 }
 
