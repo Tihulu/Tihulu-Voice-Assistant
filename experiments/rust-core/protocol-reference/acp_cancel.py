@@ -5,6 +5,8 @@ from dataclasses import dataclass
 
 from acp_json import Refused, decode, refuse, token
 
+MAX_PERMISSION_REPLIES = 32
+
 
 @dataclass(frozen=True)
 class Decision:
@@ -27,6 +29,7 @@ class Conversation:
         self._source = source
         self._phase = "initializing"
         self._session = None
+        self._replied = set()
 
     @property
     def phase(self):
@@ -81,14 +84,16 @@ class Conversation:
                     refuse()
                 if msg.kind == "text":
                     return Decision("progress" if self._phase == "prompting" else "discard")
-                # At most one permission reply per connection. The first request
-                # terminates the text-only pilot. Do not echo option IDs or labels.
-                if self._phase != "prompting":
+                # Each distinct pending request gets one cancelled response.
+                # A duplicate or overflow closes without replaying a reply.
+                if msg.rpc_id in self._replied or len(self._replied) >= MAX_PERMISSION_REPLIES:
                     refuse()
+                self._replied.add(msg.rpc_id)
+                first = self._phase == "prompting"
                 self._phase = "cancelling"
                 reply = line({"jsonrpc": "2.0", "id": msg.rpc_id,
                               "result": {"outcome": {"outcome": "cancelled"}}})
-                return Decision("hold", (self._cancel_message(), reply))
+                return Decision("hold", (self._cancel_message(), reply) if first else (reply,))
             if self._phase in ("prompting", "cancelling") and msg.kind == "result":
                 if self._phase == "cancelling" and msg.reason != "cancelled":
                     refuse()
