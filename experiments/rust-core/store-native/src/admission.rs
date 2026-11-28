@@ -307,6 +307,22 @@ impl GuardedWave {
             .map_err(AdmissionError::Wave)
     }
 
+    pub fn dispatch_acp_v1(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        source: Identity,
+        adapter: &Adapter,
+        now: u64,
+    ) -> Result<(), AdmissionError> {
+        if self.active.is_none() {
+            return Err(AdmissionError::Invalid);
+        }
+        self.wave
+            .dispatch_acp_v1(key, current, source, adapter, now)
+            .map_err(AdmissionError::Wave)
+    }
+
     pub fn record_chunk(
         &mut self,
         key: &WorkerKey,

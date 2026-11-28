@@ -133,6 +133,19 @@ impl Adapter {
         })
     }
 
+    /// Pure readiness recheck at the trusted owner dispatch boundary.
+    pub(crate) fn ready_for(&self, current: &Current<'_>) -> Result<(), Error> {
+        if self.phase != Phase::Ready {
+            return Err(Error::Phase);
+        }
+        if self.policy != current.policy {
+            return Err(Error::Policy);
+        }
+        self.plan
+            .recheck(current.manifest, current.allowed, current.policy.local_only)
+            .map_err(Error::Harness)
+    }
+
     pub(crate) fn instance(&self) -> Arc<()> {
         self.instance.clone()
     }
