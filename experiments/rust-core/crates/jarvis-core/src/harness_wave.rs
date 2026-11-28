@@ -384,6 +384,10 @@ impl HarnessWave {
             self.stop();
             return Err(Error::Phase);
         }
+        if let Err(error) = adapter.ready_for(current) {
+            self.stop();
+            return Err(Error::Acp(error));
+        }
         self.bind_transport(key, current, source, now)?;
         self.rows
             .get_mut(&key.worker)
@@ -525,6 +529,49 @@ impl HarnessWave {
     }
 
     pub fn dispatch(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        now: u64,
+    ) -> Result<(), Error> {
+        if self.row(key)?.acp_instance.is_some() {
+            return Err(Error::Phase);
+        }
+        self.dispatch_exact(key, current, now)
+    }
+
+    /// Typed rows cannot enter the ordinary raw-fixture dispatch route.
+    /// Require the same ready adapter and current policy immediately before
+    /// the existing Session issues its synthetic dispatch transition.
+    pub fn dispatch_acp_v1(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        source: Identity,
+        adapter: &Adapter,
+        now: u64,
+    ) -> Result<(), Error> {
+        let row = self.row(key)?;
+        if row.transport != Some(source) || !adapter.source_matches(source) {
+            return Err(Error::Foreign);
+        }
+        if !row
+            .acp_instance
+            .as_ref()
+            .is_some_and(|instance| Arc::ptr_eq(instance, &adapter.instance()))
+            || !adapter.plan_matches(&row.plan)
+        {
+            self.stop();
+            return Err(Error::Phase);
+        }
+        if let Err(error) = adapter.ready_for(current) {
+            self.stop();
+            return Err(Error::Acp(error));
+        }
+        self.dispatch_exact(key, current, now)
+    }
+
+    fn dispatch_exact(
         &mut self,
         key: &WorkerKey,
         current: &Current<'_>,

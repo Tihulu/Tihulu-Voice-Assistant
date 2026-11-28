@@ -380,7 +380,8 @@ fn typed_acp_durable_admission_requires_exact_terminal_cleanup() {
     wave.bind_acp_v1(&keys[0], &current(&m), id, &a, 100)
         .unwrap();
     assert!(f.store().unresolved(S).unwrap().is_some());
-    wave.dispatch(&keys[0], &current(&m), 100).unwrap();
+    wave.dispatch_acp_v1(&keys[0], &current(&m), id, &a, 100)
+        .unwrap();
     wave.record_acp_v1(
         &keys[0],
         &current(&m),
@@ -426,7 +427,8 @@ fn typed_acp_permission_persists_denial_without_releasing_barrier() {
         .unwrap();
     wave.bind_acp_v1(&keys[0], &current(&m), id, &a, 100)
         .unwrap();
-    wave.dispatch(&keys[0], &current(&m), 100).unwrap();
+    wave.dispatch_acp_v1(&keys[0], &current(&m), id, &a, 100)
+        .unwrap();
     wave.record_acp_v1(
         &keys[0],
         &current(&m),
@@ -477,7 +479,8 @@ fn raw_frame_cannot_bypass_typed_durable_admission() {
         .unwrap();
     wave.bind_acp_v1(&keys[0], &current(&m), id, &a, 100)
         .unwrap();
-    wave.dispatch(&keys[0], &current(&m), 100).unwrap();
+    wave.dispatch_acp_v1(&keys[0], &current(&m), id, &a, 100)
+        .unwrap();
     assert!(wave
         .record_chunk(&keys[0], &current(&m), 101, id, &frame(id, 1, 1))
         .is_err());
@@ -485,4 +488,30 @@ fn raw_frame_cannot_bypass_typed_durable_admission() {
     assert_eq!(wave.snapshot().reserved, capacity());
     assert_eq!(wave.finish(), Err(AdmissionError::Busy));
     assert!(f.store().unresolved(S).unwrap().is_some());
+}
+
+#[test]
+fn closed_bound_adapter_preserves_durable_barrier_until_exact_void() {
+    let f = Fixture::new();
+    let m = manifest();
+    let id = identity();
+    let mut a = ready_adapter(&m, id);
+    let mut wave = GuardedWave::new(f.store(), session(), P, S).unwrap();
+    let keys = wave
+        .prepare("one", vec![worker(&m)], planned(id), 100)
+        .unwrap();
+    wave.bind_acp_v1(&keys[0], &current(&m), id, &a, 100)
+        .unwrap();
+    assert!(wave.dispatch(&keys[0], &current(&m), 100).is_err());
+    a.close();
+    assert!(wave
+        .dispatch_acp_v1(&keys[0], &current(&m), id, &a, 101)
+        .is_err());
+    assert!(wave.stopped());
+    assert_eq!(wave.snapshot().reserved, capacity());
+    assert_eq!(wave.finish(), Err(AdmissionError::Busy));
+    assert!(f.store().unresolved(S).unwrap().is_some());
+    wave.void_unstarted(&keys[0], id).unwrap();
+    wave.finish().unwrap();
+    assert!(f.store().unresolved(S).unwrap().is_none());
 }

@@ -256,7 +256,7 @@ fn typed_events_flow_through_existing_wave_and_trusted_settle() {
     assert!(w.idle());
 }
 
-fn prepared_wave(m: &Manifest, a: &Adapter) -> (HarnessWave, WorkerKey, Amount) {
+fn bound_wave(m: &Manifest, a: &Adapter) -> (HarnessWave, WorkerKey, Amount) {
     let amount = Amount {
         ram: 16,
         vram: 8,
@@ -287,7 +287,13 @@ fn prepared_wave(m: &Manifest, a: &Adapter) -> (HarnessWave, WorkerKey, Amount) 
         .unwrap();
     let key = keys.pop().unwrap();
     w.bind_acp_v1(&key, &current(m), id(), a, 100).unwrap();
-    w.dispatch(&key, &current(m), 100).unwrap();
+    (w, key, amount)
+}
+
+fn prepared_wave(m: &Manifest, a: &Adapter) -> (HarnessWave, WorkerKey, Amount) {
+    let (mut w, key, amount) = bound_wave(m, a);
+    w.dispatch_acp_v1(&key, &current(m), id(), a, 100)
+        .unwrap();
     (w, key, amount)
 }
 
@@ -516,4 +522,69 @@ fn equal_plan_and_identity_cannot_substitute_adapter_instance() {
     );
     assert!(w.stopped());
     assert_eq!(w.snapshot().reserved, amount);
+}
+
+#[test]
+fn typed_dispatch_cannot_bypass_ready_adapter_check() {
+    let m = manifest();
+    let a = ready(&m);
+    let (mut w, key, amount) = bound_wave(&m, &a);
+    assert_eq!(
+        w.dispatch(&key, &current(&m), 100),
+        Err(harness_wave::Error::Phase)
+    );
+    assert!(!w.stopped());
+    assert_eq!(w.snapshot().reserved, amount);
+    w.dispatch_acp_v1(&key, &current(&m), id(), &a, 100)
+        .unwrap();
+}
+
+#[test]
+fn adapter_closed_after_bind_cannot_dispatch() {
+    let m = manifest();
+    let mut a = ready(&m);
+    let (mut w, key, amount) = bound_wave(&m, &a);
+    a.close();
+    assert_eq!(
+        w.dispatch_acp_v1(&key, &current(&m), id(), &a, 101),
+        Err(harness_wave::Error::Acp(Error::Phase))
+    );
+    assert!(w.stopped());
+    assert_eq!(w.snapshot().reserved, amount);
+    w.void_transport_unstarted(&key, id()).unwrap();
+    assert!(w.idle());
+}
+
+#[test]
+fn policy_change_between_bind_and_dispatch_is_denied() {
+    let m = manifest();
+    let a = ready(&m);
+    let (mut w, key, amount) = bound_wave(&m, &a);
+    let mut changed = current(&m);
+    changed.policy.generation = 2;
+    assert_eq!(
+        w.dispatch_acp_v1(&key, &changed, id(), &a, 101),
+        Err(harness_wave::Error::Acp(Error::Policy))
+    );
+    assert!(w.stopped());
+    assert_eq!(w.snapshot().reserved, amount);
+    w.void_transport_unstarted(&key, id()).unwrap();
+}
+
+#[test]
+fn foreign_source_dispatch_does_not_mutate_owner_state() {
+    let m = manifest();
+    let a = ready(&m);
+    let (mut w, key, _) = bound_wave(&m, &a);
+    let wrong = Identity {
+        connection: [9; 32],
+        ..id()
+    };
+    assert_eq!(
+        w.dispatch_acp_v1(&key, &current(&m), wrong, &a, 999),
+        Err(harness_wave::Error::Foreign)
+    );
+    assert!(!w.stopped());
+    w.dispatch_acp_v1(&key, &current(&m), id(), &a, 100)
+        .unwrap();
 }
