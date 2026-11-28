@@ -8,6 +8,9 @@ MAX_LINE = 65536
 MAX_DEPTH = 24
 MAX_NODES = 4096
 MAX_TEXT = 16384
+MAX_OPTIONS = 16
+MAX_LABEL = 1024
+OPTION_KINDS = {"allow_once", "allow_always", "reject_once", "reject_always"}
 TOKEN = re.compile(r"[A-Za-z0-9_.-]{1,256}", re.ASCII)
 STOP_REASONS = {"end_turn", "max_tokens", "max_turn_requests", "refusal", "cancelled"}
 
@@ -25,6 +28,7 @@ class Message:
     auth_offered: bool = False
     text_bytes: int = 0
     reason: str | None = None
+    tool_call: str | None = None
 
 
 def refuse(_=None):
@@ -143,6 +147,40 @@ def response(data):
     refuse()
 
 
+def permission(data):
+    """Recognize a narrow permission schema; never interpret option labels as grants."""
+    obj(data, ("jsonrpc", "id", "method", "params"))
+    ident = rpc_id(data["id"])
+    if data["method"] != "session/request_permission":
+        refuse()
+    params = obj(data["params"], ("sessionId", "toolCall", "options"))
+    session = token(params["sessionId"])
+    # The restricted text-only client has no tool-call execution interface.
+    # Recognize bare toolCallId or display-only metadata; hold richer payloads.
+    call = obj(params["toolCall"], ("toolCallId",), ("title", "kind", "status", "name"))
+    call_id = token(call["toolCallId"])
+    for field in ("title", "kind", "status", "name"):
+        if field in call and (type(call[field]) is not str
+                              or len(call[field].encode("utf-8")) > MAX_LABEL):
+            refuse()
+    options = params["options"]
+    if type(options) is not list or not 1 <= len(options) <= MAX_OPTIONS:
+        refuse()
+    seen = set()
+    for option in options:
+        obj(option, ("optionId", "name", "kind"))
+        option_id = token(option["optionId"])
+        name = option["name"]
+        kind = option["kind"]
+        if (option_id in seen or type(name) is not str or not name
+                or len(name.encode("utf-8")) > MAX_LABEL
+                or type(kind) is not str or kind not in OPTION_KINDS):
+            refuse()
+        seen.add(option_id)
+    # Drop option IDs, labels and all operation descriptions. No selection.
+    return Message("permission", ident, session=session, tool_call=call_id)
+
+
 def notification(data):
     obj(data, ("jsonrpc", "method", "params"))
     if data["method"] != "session/update":
@@ -167,8 +205,8 @@ def decode(line):
     """Classify a complete line into metadata only, never content or effects.
 
     Deliberately narrow profile: response 0/1/2 and agent text update only.
-    All inbound requests (including permission) and other updates are held
-    by refusal until separately reviewed schemas exist. No lifecycle state.
+    Permission requests yield metadata for a cancellation-only hold.
+    Other inbound requests and unsupported updates are refused. No lifecycle state.
     """
     if type(line) is not bytes or not 0 < len(line) <= MAX_LINE:
         refuse()
@@ -183,6 +221,8 @@ def decode(line):
         if type(data) is not dict or data.get("jsonrpc") != "2.0":
             refuse()
         if "method" in data:
+            if "id" in data:
+                return permission(data)
             return notification(data)
         return response(data)
     except (ValueError, UnicodeError, RecursionError):
