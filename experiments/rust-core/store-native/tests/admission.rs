@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: AGPL-3.0-only
+use jarvis_core::acp_v1::{Adapter, Ingress, Observation, Phase, StopReason};
 use jarvis_core::approval::Binding;
 use jarvis_core::approval_broker::{Action, Request, Scope};
 use jarvis_core::budget::{Amount, Demand};
@@ -349,4 +350,139 @@ fn storage_denial_does_not_reopen_review_or_release_reservation() {
         .is_err());
     assert!(wave.stopped());
     assert_eq!(wave.snapshot().reserved, capacity());
+}
+
+fn ready_adapter(m: &Manifest, id: Identity) -> Adapter {
+    let mut a = Adapter::new(id, m, &current(m), &m.supported).unwrap();
+    a.initialized(id, &current(m), 0, 1, false).unwrap();
+    a.begin_session(id, &current(m)).unwrap();
+    a.session_created(id, &current(m), 1, "sess_1").unwrap();
+    a
+}
+
+fn ingress(id: Identity, observation: Observation<'_>) -> Ingress<'_> {
+    Ingress {
+        source: id,
+        observation,
+    }
+}
+
+#[test]
+fn typed_acp_durable_admission_requires_exact_terminal_cleanup() {
+    let f = Fixture::new();
+    let m = manifest();
+    let id = identity();
+    let mut a = ready_adapter(&m, id);
+    let mut wave = GuardedWave::new(f.store(), session(), P, S).unwrap();
+    let keys = wave
+        .prepare("one", vec![worker(&m)], planned(id), 100)
+        .unwrap();
+    wave.bind_acp_v1(&keys[0], &current(&m), id, &a, 100)
+        .unwrap();
+    assert!(f.store().unresolved(S).unwrap().is_some());
+    wave.dispatch(&keys[0], &current(&m), 100).unwrap();
+    wave.record_acp_v1(
+        &keys[0],
+        &current(&m),
+        101,
+        &mut a,
+        ingress(id, Observation::PromptSent),
+    )
+    .unwrap();
+    wave.record_acp_v1(
+        &keys[0],
+        &current(&m),
+        102,
+        &mut a,
+        ingress(
+            id,
+            Observation::Result {
+                rpc_id: 2,
+                reason: StopReason::EndTurn,
+            },
+        ),
+    )
+    .unwrap();
+    assert_eq!(wave.finish(), Err(AdmissionError::Busy));
+    assert_eq!(wave.snapshot().reserved, capacity());
+    assert_eq!(
+        wave.settle(&keys[0], &current(&m), 103, id, Some((0, 0))),
+        Ok(ResultState::MeasuredReport)
+    );
+    wave.finish().unwrap();
+    assert!(f.store().unresolved(S).unwrap().is_none());
+}
+
+#[test]
+fn typed_acp_permission_persists_denial_without_releasing_barrier() {
+    let f = Fixture::new();
+    let m = review_manifest();
+    let id = identity();
+    let request = review_request(&m, id);
+    let mut a = ready_adapter(&m, id);
+    let mut wave = GuardedWave::new(f.store(), session(), P, S).unwrap();
+    let keys = wave
+        .prepare_for_turn("one", [6; 32], vec![worker(&m)], planned(id), 100)
+        .unwrap();
+    wave.bind_acp_v1(&keys[0], &current(&m), id, &a, 100)
+        .unwrap();
+    wave.dispatch(&keys[0], &current(&m), 100).unwrap();
+    wave.record_acp_v1(
+        &keys[0],
+        &current(&m),
+        101,
+        &mut a,
+        ingress(id, Observation::PromptSent),
+    )
+    .unwrap();
+    wave.record_acp_v1(
+        &keys[0],
+        &current(&m),
+        102,
+        &mut a,
+        ingress(
+            id,
+            Observation::Permission {
+                session_id: "sess_1",
+            },
+        ),
+    )
+    .unwrap();
+    wave.record_denied_approval(&keys[0], &current(&m), id, [11; 32], &request, 103)
+        .unwrap();
+    assert!(wave.stopped());
+    assert_eq!(a.phase(), Phase::Held);
+    assert_eq!(wave.finish(), Err(AdmissionError::Busy));
+    assert_eq!(wave.snapshot().reserved, capacity());
+    drop(wave);
+    assert!(f.store().unresolved(S).unwrap().is_some());
+    let count: i64 = f
+        .db()
+        .query_row("SELECT count(*) FROM harness_approval_replay", [], |r| {
+            r.get(0)
+        })
+        .unwrap();
+    assert_eq!(count, 1);
+}
+
+#[test]
+fn raw_frame_cannot_bypass_typed_durable_admission() {
+    let f = Fixture::new();
+    let m = manifest();
+    let id = identity();
+    let a = ready_adapter(&m, id);
+    let mut wave = GuardedWave::new(f.store(), session(), P, S).unwrap();
+    let keys = wave
+        .prepare("one", vec![worker(&m)], planned(id), 100)
+        .unwrap();
+    wave.bind_acp_v1(&keys[0], &current(&m), id, &a, 100)
+        .unwrap();
+    wave.dispatch(&keys[0], &current(&m), 100).unwrap();
+    assert!(wave
+        .record_chunk(&keys[0], &current(&m), 101, id, &frame(id, 1, 1))
+        .is_err());
+    assert!(wave.stopped());
+    assert_eq!(wave.snapshot().reserved, capacity());
+    assert_eq!(wave.finish(), Err(AdmissionError::Busy));
+    assert!(f.store().unresolved(S).unwrap().is_some());
 }

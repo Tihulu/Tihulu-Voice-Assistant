@@ -4,6 +4,7 @@
 use crate::replay::guarded::{GuardedReplayStore, Peer};
 use crate::replay::Digest;
 use crate::{Error, Id};
+use jarvis_core::acp_v1::{Adapter, Ingress};
 use jarvis_core::approval_broker::{self, Broker, Observation, Request};
 use jarvis_core::budget::Snapshot;
 use jarvis_core::harness_wave::{
@@ -256,6 +257,39 @@ impl GuardedWave {
     ) -> Result<(), AdmissionError> {
         self.wave
             .bind_transport(key, current, source, now)
+            .map_err(AdmissionError::Wave)
+    }
+
+    /// Typed handshake must be ready before binding a durably admitted row.
+    pub fn bind_acp_v1(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        source: Identity,
+        adapter: &Adapter,
+        now: u64,
+    ) -> Result<(), AdmissionError> {
+        if self.active.is_none() {
+            return Err(AdmissionError::Invalid);
+        }
+        self.wave
+            .bind_acp_v1(key, current, source, adapter, now)
+            .map_err(AdmissionError::Wave)
+    }
+
+    pub fn record_acp_v1(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        now: u64,
+        adapter: &mut Adapter,
+        ingress: Ingress<'_>,
+    ) -> Result<(), AdmissionError> {
+        if self.active.is_none() {
+            return Err(AdmissionError::Invalid);
+        }
+        self.wave
+            .record_acp_v1(key, current, now, adapter, ingress)
             .map_err(AdmissionError::Wave)
     }
 
