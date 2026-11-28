@@ -77,6 +77,13 @@ pub struct Ingress<'a> {
     pub observation: Observation<'a>,
 }
 
+/// Diagnostics only, never evidence of reaped processes or permission to publish.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CancelObservation {
+    DiscardedProgress,
+    ReportedCancelled,
+}
+
 /// Outbound cancellation metadata only, no I/O or grant. The exact session
 /// is already validated as a restricted ASCII token by session_created.
 #[derive(Debug, Eq, PartialEq)]
@@ -441,6 +448,40 @@ impl Adapter {
             send_cancel: false,
             permission_id: Some(rpc_id),
         })
+    }
+
+    pub(crate) fn observe_cancellation(
+        &mut self,
+        observation: Observation<'_>,
+    ) -> Result<CancelObservation, Error> {
+        if self.phase != Phase::Cancelling {
+            return Err(Error::Phase);
+        }
+        match observation {
+            Observation::Update {
+                session_id,
+                update: Update::Text { bytes },
+            } => {
+                if self.session.as_deref() != Some(session_id) {
+                    return self.fail(Error::Session);
+                }
+                if bytes > MAX_UPDATE_BYTES {
+                    return self.fail(Error::Limit);
+                }
+                Ok(CancelObservation::DiscardedProgress)
+            }
+            Observation::Result { rpc_id, reason } => {
+                if rpc_id != PROMPT_ID {
+                    return self.fail(Error::RpcId);
+                }
+                if reason != StopReason::Cancelled {
+                    return self.fail(Error::Phase);
+                }
+                self.phase = Phase::Terminal;
+                Ok(CancelObservation::ReportedCancelled)
+            }
+            _ => self.fail(Error::Unsupported),
+        }
     }
 
     pub fn close(&mut self) {
