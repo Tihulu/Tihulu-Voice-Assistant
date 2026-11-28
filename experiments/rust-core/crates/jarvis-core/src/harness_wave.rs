@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! One shared synthetic Session owns the harness wave. No launch, transport,
 //! process observation or permission issuance. All observations are trusted.
-use crate::acp_v1::{self, Adapter, CancelPlan, Ingress};
+use crate::acp_v1::{self, Adapter, CancelObservation, CancelPlan, Ingress};
 use crate::budget::{Amount, Demand, Snapshot};
 use crate::harness::{
     self, Capability, Event, EventKey, EventTrack, Manifest, Negotiated, Phase, Protocol,
@@ -754,6 +754,24 @@ impl HarnessWave {
         }
         adapter
             .pending_cancellation(session_id, rpc_id)
+            .map_err(Error::Acp)
+    }
+
+    /// Accept a restricted cancellation diagnostic on the exact stopped row.
+    /// Late text is discarded; only a cancelled prompt result is accepted.
+    /// This path never calls settle or changes the resource ledger.
+    pub fn observe_acp_cancellation(
+        &mut self,
+        key: &WorkerKey,
+        adapter: &mut Adapter,
+        ingress: Ingress<'_>,
+    ) -> Result<CancelObservation, Error> {
+        self.exact_acp_cancellation(key, ingress.source, adapter)?;
+        if !self.stopped() {
+            return Err(Error::Phase);
+        }
+        adapter
+            .observe_cancellation(ingress.observation)
             .map_err(Error::Acp)
     }
 

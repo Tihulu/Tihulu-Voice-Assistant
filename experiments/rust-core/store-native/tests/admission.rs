@@ -544,6 +544,20 @@ fn typed_cancellation_plan_does_not_clear_durable_recovery() {
         .cancel_pending_acp_permission(&keys[0], id, &mut a, "sess_1", 9)
         .unwrap();
     assert_eq!(reply.cancelled_permission(), Some(9));
+    assert_eq!(
+        wave.observe_acp_cancellation(
+            &keys[0],
+            &mut a,
+            ingress(
+                id,
+                Observation::Result {
+                    rpc_id: 2,
+                    reason: StopReason::Cancelled,
+                },
+            ),
+        ),
+        Ok(jarvis_core::acp_v1::CancelObservation::ReportedCancelled)
+    );
     assert_eq!(wave.finish(), Err(AdmissionError::Busy));
     assert_eq!(wave.snapshot().reserved, capacity());
     assert!(f.store().unresolved(S).unwrap().is_some());

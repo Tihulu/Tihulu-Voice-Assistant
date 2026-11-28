@@ -4,7 +4,7 @@
 use crate::replay::guarded::{GuardedReplayStore, Peer};
 use crate::replay::Digest;
 use crate::{Error, Id};
-use jarvis_core::acp_v1::{Adapter, CancelPlan, Ingress};
+use jarvis_core::acp_v1::{Adapter, CancelObservation, CancelPlan, Ingress};
 use jarvis_core::approval_broker::{self, Broker, Observation, Request};
 use jarvis_core::budget::Snapshot;
 use jarvis_core::harness_wave::{
@@ -320,6 +320,20 @@ impl GuardedWave {
         }
         self.wave
             .cancel_pending_acp_permission(key, source, adapter, session_id, rpc_id)
+            .map_err(AdmissionError::Wave)
+    }
+
+    pub fn observe_acp_cancellation(
+        &mut self,
+        key: &WorkerKey,
+        adapter: &mut Adapter,
+        ingress: Ingress<'_>,
+    ) -> Result<CancelObservation, AdmissionError> {
+        if self.active.is_none() {
+            return Err(AdmissionError::Invalid);
+        }
+        self.wave
+            .observe_acp_cancellation(key, adapter, ingress)
             .map_err(AdmissionError::Wave)
     }
 

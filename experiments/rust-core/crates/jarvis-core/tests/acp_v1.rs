@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
-use jarvis_core::acp_v1::{Adapter, Error, Ingress, Observation, Phase, StopReason, Update};
+use jarvis_core::acp_v1::{
+    Adapter, CancelObservation, Error, Ingress, Observation, Phase, StopReason, Update,
+};
 use jarvis_core::budget::{Amount, Demand};
 use jarvis_core::harness::{self, Capability, Event, Kind, Manifest, Protocol, Route};
 use jarvis_core::harness_wave::{
@@ -688,4 +690,109 @@ fn cancellation_reply_limit_never_evicts_history() {
         .cancel_pending_acp_permission(&key, id(), &mut a, "sess_1", 100)
         .is_err());
     assert_eq!(w.snapshot().reserved, amount);
+}
+
+#[test]
+fn cancelled_ack_is_diagnostic_only_and_late_text_is_discarded() {
+    let m = manifest();
+    let mut a = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &a);
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        101,
+        &mut a,
+        ingress(Observation::PromptSent),
+    )
+    .unwrap();
+    w.cancel_acp_v1(&key, id(), &mut a).unwrap();
+    assert_eq!(
+        w.observe_acp_cancellation(
+            &key,
+            &mut a,
+            ingress(Observation::Update {
+                session_id: "sess_1",
+                update: Update::Text { bytes: 5 },
+            }),
+        ),
+        Ok(CancelObservation::DiscardedProgress)
+    );
+    assert_eq!(
+        w.observe_acp_cancellation(
+            &key,
+            &mut a,
+            ingress(Observation::Result {
+                rpc_id: 2,
+                reason: StopReason::Cancelled,
+            }),
+        ),
+        Ok(CancelObservation::ReportedCancelled)
+    );
+    assert_eq!(a.phase(), Phase::Terminal);
+    assert!(w
+        .cancel_pending_acp_permission(&key, id(), &mut a, "sess_1", 7)
+        .is_err());
+    assert_eq!(w.snapshot().reserved, amount);
+    assert_eq!(
+        w.settle_transport(&key, &current(&m), 103, id(), None),
+        Ok(ResultState::NoPublication)
+    );
+}
+
+#[test]
+fn success_or_wrong_rpc_after_cancel_closes_without_release() {
+    let m = manifest();
+    for (rpc_id, reason) in [(2, StopReason::EndTurn), (3, StopReason::Cancelled)] {
+        let mut a = ready(&m);
+        let (mut w, key, amount) = prepared_wave(&m, &a);
+        w.record_acp_v1(
+            &key,
+            &current(&m),
+            101,
+            &mut a,
+            ingress(Observation::PromptSent),
+        )
+        .unwrap();
+        w.cancel_acp_v1(&key, id(), &mut a).unwrap();
+        assert!(w
+            .observe_acp_cancellation(
+                &key,
+                &mut a,
+                ingress(Observation::Result { rpc_id, reason }),
+            )
+            .is_err());
+        assert_eq!(a.phase(), Phase::Closed);
+        assert_eq!(w.snapshot().reserved, amount);
+    }
+}
+
+#[test]
+fn foreign_cancellation_diagnostic_cannot_mutate_exact_adapter() {
+    let m = manifest();
+    let mut a = ready(&m);
+    let (mut w, key, _) = prepared_wave(&m, &a);
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        101,
+        &mut a,
+        ingress(Observation::PromptSent),
+    )
+    .unwrap();
+    w.cancel_acp_v1(&key, id(), &mut a).unwrap();
+    let wrong = Ingress {
+        source: Identity {
+            connection: [9; 32],
+            ..id()
+        },
+        observation: Observation::Result {
+            rpc_id: 2,
+            reason: StopReason::Cancelled,
+        },
+    };
+    assert_eq!(
+        w.observe_acp_cancellation(&key, &mut a, wrong),
+        Err(harness_wave::Error::Foreign)
+    );
+    assert_eq!(a.phase(), Phase::Cancelling);
 }
