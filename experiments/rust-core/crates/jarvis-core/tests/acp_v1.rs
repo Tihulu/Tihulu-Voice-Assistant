@@ -256,7 +256,7 @@ fn typed_events_flow_through_existing_wave_and_trusted_settle() {
     assert!(w.idle());
 }
 
-fn prepared_wave(m: &Manifest) -> (HarnessWave, WorkerKey, Amount) {
+fn prepared_wave(m: &Manifest, a: &Adapter) -> (HarnessWave, WorkerKey, Amount) {
     let amount = Amount {
         ram: 16,
         vram: 8,
@@ -286,7 +286,7 @@ fn prepared_wave(m: &Manifest) -> (HarnessWave, WorkerKey, Amount) {
         )
         .unwrap();
     let key = keys.pop().unwrap();
-    w.bind_transport(&key, &current(m), id(), 100).unwrap();
+    w.bind_acp_v1(&key, &current(m), id(), a, 100).unwrap();
     w.dispatch(&key, &current(m), 100).unwrap();
     (w, key, amount)
 }
@@ -301,8 +301,8 @@ fn ingress(observation: Observation<'_>) -> Ingress<'_> {
 #[test]
 fn typed_ingress_success_requires_existing_trusted_settle() {
     let m = manifest();
-    let (mut w, key, amount) = prepared_wave(&m);
     let mut a = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &a);
     w.record_acp_v1(
         &key,
         &current(&m),
@@ -332,8 +332,8 @@ fn typed_ingress_success_requires_existing_trusted_settle() {
 #[test]
 fn typed_ingress_fault_stops_wave_and_retains_reservation() {
     let m = manifest();
-    let (mut w, key, amount) = prepared_wave(&m);
     let mut a = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &a);
     w.record_acp_v1(
         &key,
         &current(&m),
@@ -367,8 +367,8 @@ fn typed_ingress_fault_stops_wave_and_retains_reservation() {
 #[test]
 fn typed_ingress_foreign_source_cannot_poison_wave_or_adapter() {
     let m = manifest();
-    let (mut w, key, _) = prepared_wave(&m);
     let mut a = ready(&m);
+    let (mut w, key, _) = prepared_wave(&m, &a);
     let foreign = Ingress {
         source: Identity {
             connection: [9; 32],
@@ -395,7 +395,8 @@ fn typed_ingress_foreign_source_cannot_poison_wave_or_adapter() {
 #[test]
 fn typed_ingress_mismatched_requested_plan_cannot_start() {
     let m = manifest();
-    let (mut w, key, amount) = prepared_wave(&m);
+    let original = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &original);
     let mut a = Adapter::new(id(), &m, &current(&m), &BTreeSet::from([Capability::Chat])).unwrap();
     a.initialized(id(), &current(&m), 0, 1, false).unwrap();
     a.begin_session(id(), &current(&m)).unwrap();
@@ -417,8 +418,8 @@ fn typed_ingress_mismatched_requested_plan_cannot_start() {
 #[test]
 fn typed_ingress_permission_stops_and_late_result_cannot_resume() {
     let m = manifest();
-    let (mut w, key, amount) = prepared_wave(&m);
     let mut a = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &a);
     w.record_acp_v1(
         &key,
         &current(&m),
@@ -464,4 +465,55 @@ fn unsupported_plan_update_does_not_infer_propose_capability() {
         Err(Error::Unsupported)
     );
     assert_eq!(a.phase(), Phase::Closed);
+}
+
+#[test]
+fn typed_row_rejects_raw_frame_even_with_exact_source() {
+    let m = manifest();
+    let mut a = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &a);
+    let forged = a
+        .begin_prompt(id(), &current(&m))
+        .unwrap()
+        .encode()
+        .unwrap();
+    assert_eq!(
+        w.record_frame(&key, &current(&m), 101, id(), &forged),
+        Err(harness_wave::Error::Phase)
+    );
+    assert!(w.stopped());
+    assert_eq!(w.snapshot().reserved, amount);
+}
+
+#[test]
+fn typed_row_rejects_raw_chunk_even_with_exact_source() {
+    let m = manifest();
+    let a = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &a);
+    assert_eq!(
+        w.record_chunk(&key, &current(&m), 101, id(), b"JHF1"),
+        Err(harness_wave::Error::Phase)
+    );
+    assert!(w.stopped());
+    assert_eq!(w.snapshot().reserved, amount);
+}
+
+#[test]
+fn equal_plan_and_identity_cannot_substitute_adapter_instance() {
+    let m = manifest();
+    let a = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &a);
+    let mut replacement = ready(&m);
+    assert_eq!(
+        w.record_acp_v1(
+            &key,
+            &current(&m),
+            101,
+            &mut replacement,
+            ingress(Observation::PromptSent),
+        ),
+        Err(harness_wave::Error::Phase)
+    );
+    assert!(w.stopped());
+    assert_eq!(w.snapshot().reserved, amount);
 }

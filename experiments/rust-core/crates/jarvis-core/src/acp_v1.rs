@@ -6,6 +6,7 @@ use crate::harness::{self, Capability, Event, Manifest, Negotiated, Protocol};
 use crate::harness_wave::{Current, PolicyStamp};
 use crate::synthetic_transport::{Frame, Identity};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 
 pub const INITIALIZE_ID: u64 = 0;
 pub const SESSION_NEW_ID: u64 = 1;
@@ -76,6 +77,7 @@ pub struct Ingress<'a> {
 /// Already-decoded, bounded fixture observations. No raw content retained.
 pub struct Adapter {
     identity: Identity,
+    instance: Arc<()>,
     plan: Negotiated,
     policy: PolicyStamp,
     phase: Phase,
@@ -122,12 +124,17 @@ impl Adapter {
         .map_err(Error::Harness)?;
         Ok(Self {
             identity,
+            instance: Arc::new(()),
             plan,
             policy: current.policy,
             phase: Phase::Initializing,
             session: None,
             sequence: 0,
         })
+    }
+
+    pub(crate) fn instance(&self) -> Arc<()> {
+        self.instance.clone()
     }
 
     pub(crate) fn source_matches(&self, source: Identity) -> bool {
