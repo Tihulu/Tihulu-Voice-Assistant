@@ -60,6 +60,10 @@ class Conversation:
 
     def cancel(self, source):
         self._check_source(source)
+        # A repeated owner stop must not break pending cancellation replies.
+        # Never emit a second notification or resume the prompt.
+        if self._phase == "cancelling":
+            return Decision("hold")
         self._require("prompting")
         self._phase = "cancelling"
         return Decision("hold", (self._cancel_message(),))
