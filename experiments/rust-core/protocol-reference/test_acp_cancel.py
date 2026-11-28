@@ -2,7 +2,7 @@
 import json
 import unittest
 
-from acp_cancel import Conversation, Decision
+from acp_cancel import MAX_PERMISSION_REPLIES, Conversation, Decision
 from acp_json import Refused
 from test_acp_permission import request, wire
 from test_acp_json import result, update
@@ -46,6 +46,37 @@ class CancellationReference(unittest.TestCase):
         c.receive(s, wire(request()))
         with self.assertRaises(Refused):
             c.receive(s, wire(request()))
+        self.assertEqual(c.phase, "closed")
+
+    def test_distinct_pending_requests_after_cancel_get_one_cancelled_reply(self):
+        c, s = ready()
+        first = c.receive(s, wire(request()))
+        self.assertEqual(len(first.outbound), 2)
+        second = request()
+        second["id"] = 6
+        decision = c.receive(s, wire(second))
+        self.assertEqual(tuple(map(json.loads, decision.outbound)), (
+            {"jsonrpc": "2.0", "id": 6, "result": {"outcome": {"outcome": "cancelled"}}},
+        ))
+        self.assertEqual(c.phase, "cancelling")
+
+    def test_permission_after_owner_cancel_does_not_repeat_cancel_notification(self):
+        c, s = ready()
+        self.assertEqual(len(c.cancel(s).outbound), 1)
+        decision = c.receive(s, wire(request()))
+        self.assertEqual(len(decision.outbound), 1)
+        self.assertEqual(json.loads(decision.outbound[0])["id"], 5)
+
+    def test_permission_reply_budget_never_evicts_tombstones(self):
+        c, s = ready()
+        for ident in range(MAX_PERMISSION_REPLIES):
+            data = request()
+            data["id"] = ident
+            c.receive(s, wire(data))
+        data = request()
+        data["id"] = MAX_PERMISSION_REPLIES
+        with self.assertRaises(Refused):
+            c.receive(s, wire(data))
         self.assertEqual(c.phase, "closed")
 
     def test_foreign_source_does_not_mutate_state(self):
