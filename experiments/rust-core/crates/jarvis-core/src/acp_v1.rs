@@ -13,6 +13,7 @@ pub const SESSION_NEW_ID: u64 = 1;
 pub const PROMPT_ID: u64 = 2;
 pub const MAX_SESSION_ID: usize = 256;
 pub const MAX_UPDATE_BYTES: usize = 16_384;
+pub const MAX_PERMISSION_REPLIES: usize = 32;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Phase {
@@ -22,6 +23,7 @@ pub enum Phase {
     Ready,
     Prompting,
     Held,
+    Cancelling,
     Terminal,
     Closed,
 }
@@ -65,6 +67,7 @@ pub enum Observation<'a> {
     PromptSent,
     Update { session_id: &'a str, update: Update },
     Permission { session_id: &'a str },
+    PermissionRequest { session_id: &'a str, rpc_id: u64 },
     Result { rpc_id: u64, reason: StopReason },
     Fault,
 }
@@ -72,6 +75,29 @@ pub enum Observation<'a> {
 pub struct Ingress<'a> {
     pub source: Identity,
     pub observation: Observation<'a>,
+}
+
+/// Outbound cancellation metadata only, no I/O or grant. The exact session
+/// is already validated as a restricted ASCII token by session_created.
+#[derive(Debug, Eq, PartialEq)]
+pub struct CancelPlan {
+    session_id: String,
+    send_cancel: bool,
+    permission_id: Option<u64>,
+}
+
+impl CancelPlan {
+    pub fn session_id(&self) -> &str {
+        &self.session_id
+    }
+
+    pub fn sends_cancel(&self) -> bool {
+        self.send_cancel
+    }
+
+    pub fn cancelled_permission(&self) -> Option<u64> {
+        self.permission_id
+    }
 }
 
 /// Already-decoded, bounded fixture observations. No raw content retained.
@@ -83,6 +109,8 @@ pub struct Adapter {
     phase: Phase,
     session: Option<String>,
     sequence: u64,
+    pending_permission: Option<u64>,
+    replied: BTreeSet<u64>,
 }
 
 impl Adapter {
@@ -130,6 +158,8 @@ impl Adapter {
             phase: Phase::Initializing,
             session: None,
             sequence: 0,
+            pending_permission: None,
+            replied: BTreeSet::new(),
         })
     }
 
@@ -171,6 +201,11 @@ impl Adapter {
             }
             Observation::Permission { session_id } => {
                 self.permission_requested(source, current, session_id)
+            }
+            Observation::PermissionRequest { session_id, rpc_id } => {
+                let frame = self.permission_requested(source, current, session_id)?;
+                self.pending_permission = Some(rpc_id);
+                Ok(frame)
             }
             Observation::Result { rpc_id, reason } => {
                 self.prompt_result(source, current, rpc_id, reason)
@@ -364,6 +399,47 @@ impl Adapter {
             Event::ReportedDone
         } else {
             Event::ReportedFailure
+        })
+    }
+
+    // These methods are reachable through the exact bound wave only.
+    // Stopping must remain possible even after policy revocation.
+    pub(crate) fn cancellation(&mut self) -> Result<CancelPlan, Error> {
+        if !matches!(self.phase, Phase::Prompting | Phase::Held) {
+            return Err(Error::Phase);
+        }
+        let session_id = self.session.clone().ok_or(Error::Session)?;
+        let permission_id = self.pending_permission.take();
+        if let Some(id) = permission_id {
+            self.replied.insert(id);
+        }
+        self.phase = Phase::Cancelling;
+        Ok(CancelPlan {
+            session_id,
+            send_cancel: true,
+            permission_id,
+        })
+    }
+
+    pub(crate) fn pending_cancellation(
+        &mut self,
+        session_id: &str,
+        rpc_id: u64,
+    ) -> Result<CancelPlan, Error> {
+        if self.phase != Phase::Cancelling {
+            return Err(Error::Phase);
+        }
+        if self.session.as_deref() != Some(session_id) {
+            return self.fail(Error::Session);
+        }
+        if self.replied.contains(&rpc_id) || self.replied.len() >= MAX_PERMISSION_REPLIES {
+            return self.fail(Error::Limit);
+        }
+        self.replied.insert(rpc_id);
+        Ok(CancelPlan {
+            session_id: session_id.to_owned(),
+            send_cancel: false,
+            permission_id: Some(rpc_id),
         })
     }
 

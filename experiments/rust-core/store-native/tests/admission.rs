@@ -515,3 +515,42 @@ fn closed_bound_adapter_preserves_durable_barrier_until_exact_void() {
     wave.finish().unwrap();
     assert!(f.store().unresolved(S).unwrap().is_none());
 }
+
+#[test]
+fn typed_cancellation_plan_does_not_clear_durable_recovery() {
+    let f = Fixture::new();
+    let m = manifest();
+    let id = identity();
+    let mut a = ready_adapter(&m, id);
+    let mut wave = GuardedWave::new(f.store(), session(), P, S).unwrap();
+    let keys = wave
+        .prepare("one", vec![worker(&m)], planned(id), 100)
+        .unwrap();
+    wave.bind_acp_v1(&keys[0], &current(&m), id, &a, 100)
+        .unwrap();
+    wave.dispatch_acp_v1(&keys[0], &current(&m), id, &a, 100)
+        .unwrap();
+    wave.record_acp_v1(
+        &keys[0],
+        &current(&m),
+        101,
+        &mut a,
+        ingress(id, Observation::PromptSent),
+    )
+    .unwrap();
+    let cancel = wave.cancel_acp_v1(&keys[0], id, &mut a).unwrap();
+    assert!(cancel.sends_cancel());
+    let reply = wave
+        .cancel_pending_acp_permission(&keys[0], id, &mut a, "sess_1", 9)
+        .unwrap();
+    assert_eq!(reply.cancelled_permission(), Some(9));
+    assert_eq!(wave.finish(), Err(AdmissionError::Busy));
+    assert_eq!(wave.snapshot().reserved, capacity());
+    assert!(f.store().unresolved(S).unwrap().is_some());
+    assert_eq!(
+        wave.settle(&keys[0], &current(&m), 103, id, None),
+        Ok(ResultState::NoPublication)
+    );
+    wave.finish().unwrap();
+    assert!(f.store().unresolved(S).unwrap().is_none());
+}

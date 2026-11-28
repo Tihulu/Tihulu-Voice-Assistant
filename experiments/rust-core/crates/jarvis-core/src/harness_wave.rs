@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: AGPL-3.0-only
 //! One shared synthetic Session owns the harness wave. No launch, transport,
 //! process observation or permission issuance. All observations are trusted.
-use crate::acp_v1::{self, Adapter, Ingress};
+use crate::acp_v1::{self, Adapter, CancelPlan, Ingress};
 use crate::budget::{Amount, Demand, Snapshot};
 use crate::harness::{
     self, Capability, Event, EventKey, EventTrack, Manifest, Negotiated, Phase, Protocol,
@@ -701,6 +701,60 @@ impl HarnessWave {
             return Err(error);
         }
         Ok(())
+    }
+
+    fn exact_acp_cancellation(
+        &self,
+        key: &WorkerKey,
+        source: Identity,
+        adapter: &Adapter,
+    ) -> Result<(), Error> {
+        let row = self.row(key)?;
+        if row.transport != Some(source)
+            || !adapter.source_matches(source)
+            || !row
+                .acp_instance
+                .as_ref()
+                .is_some_and(|instance| Arc::ptr_eq(instance, &adapter.instance()))
+        {
+            return Err(Error::Foreign);
+        }
+        if !row.dispatched || !adapter.plan_matches(&row.plan) {
+            return Err(Error::Phase);
+        }
+        Ok(())
+    }
+
+    /// Stop the shared wave and emit at most one cancellation plan.
+    /// This does not release resources, send bytes or prove process exit.
+    pub fn cancel_acp_v1(
+        &mut self,
+        key: &WorkerKey,
+        source: Identity,
+        adapter: &mut Adapter,
+    ) -> Result<CancelPlan, Error> {
+        self.exact_acp_cancellation(key, source, adapter)?;
+        self.stop();
+        adapter.cancellation().map_err(Error::Acp)
+    }
+
+    /// Additional distinct permission requests while cancellation is pending
+    /// can only produce a cancelled response, never an affirmative selection.
+    pub fn cancel_pending_acp_permission(
+        &mut self,
+        key: &WorkerKey,
+        source: Identity,
+        adapter: &mut Adapter,
+        session_id: &str,
+        rpc_id: u64,
+    ) -> Result<CancelPlan, Error> {
+        self.exact_acp_cancellation(key, source, adapter)?;
+        if !self.stopped() {
+            return Err(Error::Phase);
+        }
+        adapter
+            .pending_cancellation(session_id, rpc_id)
+            .map_err(Error::Acp)
     }
 
     /// A stopped wave may record a denied approval for its exact live row.
