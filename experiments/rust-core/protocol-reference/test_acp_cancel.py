@@ -34,6 +34,44 @@ class CancellationReference(unittest.TestCase):
                          Decision("reported_failure"))
         self.assertEqual(c.eof(s), Decision("transport_closed"))
 
+    def test_repeated_owner_stop_is_idempotent_with_pending_permissions(self):
+        c, s = ready()
+        self.assertEqual(len(c.cancel(s).outbound), 1)
+        self.assertEqual(c.cancel(s), Decision("hold"))
+        first = c.receive(s, wire(request()))
+        self.assertEqual(len(first.outbound), 1)
+        self.assertEqual(c.cancel(s), Decision("hold"))
+        second = request()
+        second["id"] = 6
+        self.assertEqual(json.loads(c.receive(s, wire(second)).outbound[0])["id"], 6)
+        self.assertEqual(c.phase, "cancelling")
+        self.assertEqual(c.receive(s, result(2, {"stopReason": "cancelled"})),
+                         Decision("reported_failure"))
+
+    def test_repeated_stop_after_permission_hold_and_foreign_stop(self):
+        c, s = ready()
+        self.assertEqual(len(c.receive(s, wire(request())).outbound), 2)
+        with self.assertRaises(Refused):
+            c.cancel(object())
+        self.assertEqual(c.phase, "cancelling")
+        self.assertEqual(c.cancel(s), Decision("hold"))
+        with self.assertRaises(Refused):
+            c.receive(s, wire(request()))
+        self.assertEqual(c.phase, "closed")
+
+    def test_repeat_stop_does_not_reopen_closed_or_terminal(self):
+        c, s = ready()
+        c.cancel(s)
+        c.eof(s)
+        with self.assertRaises(Refused):
+            c.cancel(s)
+        self.assertEqual(c.phase, "closed")
+        c, s = ready()
+        c.receive(s, result(2, {"stopReason": "end_turn"}))
+        with self.assertRaises(Refused):
+            c.cancel(s)
+        self.assertEqual(c.phase, "closed")
+
     def test_success_after_cancel_never_publishes(self):
         c, s = ready()
         c.cancel(s)
