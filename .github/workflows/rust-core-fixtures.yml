@@ -42,3 +42,7 @@ jobs:
         env:
           PYTHONDONTWRITEBYTECODE: '1'
         run: python3 -m unittest discover -s experiments/rust-core/store -v
+      - name: Exercise restricted ACP JSON reference
+        env:
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: python3 -m unittest discover -s experiments/rust-core/protocol-reference -v
