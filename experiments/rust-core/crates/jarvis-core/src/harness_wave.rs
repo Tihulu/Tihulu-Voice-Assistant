@@ -49,6 +49,7 @@ struct Row {
     approval_requested: bool,
     planned: Option<Identity>,
     transport: Option<Identity>,
+    acp_instance: Option<Arc<()>>,
     pending: [u8; FRAME_LEN],
     pending_len: usize,
 }
@@ -214,6 +215,7 @@ impl HarnessWave {
                     approval_requested: false,
                     planned: planned.get(&name).copied(),
                     transport: None,
+                    acp_instance: None,
                     pending: [0; FRAME_LEN],
                     pending_len: 0,
                 },
@@ -361,6 +363,35 @@ impl HarnessWave {
         Ok(())
     }
 
+    /// Opt into typed ingress before any dispatch. The adapter must have
+    /// completed its restricted handshake and match the exact reviewed plan.
+    pub fn bind_acp_v1(
+        &mut self,
+        key: &WorkerKey,
+        current: &Current<'_>,
+        source: Identity,
+        adapter: &Adapter,
+        now: u64,
+    ) -> Result<(), Error> {
+        let row = self.row(key)?;
+        if row.planned != Some(source) || !adapter.source_matches(source) {
+            return Err(Error::Foreign);
+        }
+        if row.plan.protocol() != Protocol::AcpV1
+            || !adapter.plan_matches(&row.plan)
+            || adapter.phase() != acp_v1::Phase::Ready
+        {
+            self.stop();
+            return Err(Error::Phase);
+        }
+        self.bind_transport(key, current, source, now)?;
+        self.rows
+            .get_mut(&key.worker)
+            .ok_or(Error::Foreign)?
+            .acp_instance = Some(adapter.instance());
+        Ok(())
+    }
+
     /// Bound adapters cannot bypass the fixed envelope with raw events.
     pub fn record_frame(
         &mut self,
@@ -373,6 +404,10 @@ impl HarnessWave {
         let row = self.row(key)?;
         if row.transport != Some(source) {
             return Err(Error::Foreign);
+        }
+        if row.acp_instance.is_some() {
+            self.stop();
+            return Err(Error::Phase);
         }
         if row.pending_len != 0 {
             self.stop();
@@ -399,6 +434,10 @@ impl HarnessWave {
         // touching the buffer, owner clock or shared policy.
         if row.transport != Some(source) {
             return Err(Error::Foreign);
+        }
+        if row.acp_instance.is_some() {
+            self.stop();
+            return Err(Error::Phase);
         }
         self.check(key, current)?;
         self.tick(now, current.policy)?;
@@ -576,6 +615,10 @@ impl HarnessWave {
         if !row.dispatched
             || row.plan.protocol() != Protocol::AcpV1
             || !adapter.plan_matches(&row.plan)
+            || !row
+                .acp_instance
+                .as_ref()
+                .is_some_and(|instance| Arc::ptr_eq(instance, &adapter.instance()))
         {
             adapter.close();
             self.stop();
@@ -605,7 +648,7 @@ impl HarnessWave {
                 return Err(Error::Transport(error));
             }
         };
-        if let Err(error) = self.record_frame(key, current, now, ingress.source, &bytes) {
+        if let Err(error) = self.accept_frame(key, current, now, &bytes) {
             adapter.close();
             self.stop();
             return Err(error);
