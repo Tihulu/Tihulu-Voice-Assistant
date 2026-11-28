@@ -3,6 +3,10 @@ on:
   pull_request:
     branches: ['**']
     paths:
+      # Native store depends on jarvis-core and checks its formatting too.
+      - 'experiments/rust-core/crates/jarvis-core/**'
+      - 'experiments/rust-core/Cargo.toml'
+      - 'experiments/rust-core/Cargo.lock'
       - 'experiments/rust-core/store-native/**'
       - 'experiments/rust-core/store/**'
       - '.github/workflows/rust-store-lock-fixture.yml'
