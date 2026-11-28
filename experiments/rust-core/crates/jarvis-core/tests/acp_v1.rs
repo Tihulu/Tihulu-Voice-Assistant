@@ -587,3 +587,105 @@ fn foreign_source_dispatch_does_not_mutate_owner_state() {
     w.dispatch_acp_v1(&key, &current(&m), id(), &a, 100)
         .unwrap();
 }
+
+#[test]
+fn typed_permission_cancellation_preserves_exact_request_and_reservation() {
+    let m = manifest();
+    let mut a = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &a);
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        101,
+        &mut a,
+        ingress(Observation::PromptSent),
+    )
+    .unwrap();
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        102,
+        &mut a,
+        ingress(Observation::PermissionRequest {
+            session_id: "sess_1",
+            rpc_id: 5,
+        }),
+    )
+    .unwrap();
+    let plan = w.cancel_acp_v1(&key, id(), &mut a).unwrap();
+    assert_eq!(plan.session_id(), "sess_1");
+    assert!(plan.sends_cancel());
+    assert_eq!(plan.cancelled_permission(), Some(5));
+    assert_eq!(a.phase(), Phase::Cancelling);
+    assert!(w.cancel_acp_v1(&key, id(), &mut a).is_err());
+    let later = w
+        .cancel_pending_acp_permission(&key, id(), &mut a, "sess_1", 6)
+        .unwrap();
+    assert!(!later.sends_cancel());
+    assert_eq!(later.cancelled_permission(), Some(6));
+    assert!(w
+        .cancel_pending_acp_permission(&key, id(), &mut a, "sess_1", 5)
+        .is_err());
+    assert_eq!(a.phase(), Phase::Closed);
+    assert_eq!(w.snapshot().reserved, amount);
+}
+
+#[test]
+fn foreign_cancel_and_replacement_adapter_cannot_stop_wave() {
+    let m = manifest();
+    let mut a = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &a);
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        101,
+        &mut a,
+        ingress(Observation::PromptSent),
+    )
+    .unwrap();
+    let wrong = Identity {
+        connection: [9; 32],
+        ..id()
+    };
+    assert_eq!(
+        w.cancel_acp_v1(&key, wrong, &mut a),
+        Err(harness_wave::Error::Foreign)
+    );
+    let mut replacement = ready(&m);
+    assert_eq!(
+        w.cancel_acp_v1(&key, id(), &mut replacement),
+        Err(harness_wave::Error::Foreign)
+    );
+    assert!(!w.stopped());
+    let plan = w.cancel_acp_v1(&key, id(), &mut a).unwrap();
+    assert!(plan.sends_cancel());
+    assert_eq!(plan.cancelled_permission(), None);
+    assert!(w.stopped());
+    assert_eq!(w.snapshot().reserved, amount);
+}
+
+#[test]
+fn cancellation_reply_limit_never_evicts_history() {
+    let m = manifest();
+    let mut a = ready(&m);
+    let (mut w, key, amount) = prepared_wave(&m, &a);
+    w.record_acp_v1(
+        &key,
+        &current(&m),
+        101,
+        &mut a,
+        ingress(Observation::PromptSent),
+    )
+    .unwrap();
+    w.cancel_acp_v1(&key, id(), &mut a).unwrap();
+    for i in 0..jarvis_core::acp_v1::MAX_PERMISSION_REPLIES as u64 {
+        let reply = w
+            .cancel_pending_acp_permission(&key, id(), &mut a, "sess_1", i)
+            .unwrap();
+        assert_eq!(reply.cancelled_permission(), Some(i));
+    }
+    assert!(w
+        .cancel_pending_acp_permission(&key, id(), &mut a, "sess_1", 100)
+        .is_err());
+    assert_eq!(w.snapshot().reserved, amount);
+}
